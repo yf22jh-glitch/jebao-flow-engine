@@ -1,5 +1,6 @@
+from jebao_flow.protocol.codec import GizwitsCommand, GizwitsFrame
 from jebao_flow.protocol.connection import ProtocolConnection
-from jebao_flow.protocol.discovery import DiscoveryProvider
+from jebao_flow.protocol.discovery import DiscoveryProvider, GizwitsDiscovery
 from jebao_flow.protocol.models import (
     Capability,
     DeviceCapabilities,
@@ -7,6 +8,7 @@ from jebao_flow.protocol.models import (
     DeviceTarget,
     DiscoveredDevice,
 )
+from jebao_flow.protocol.session import GizwitsSession
 
 __all__ = [
     "Capability",
@@ -15,6 +17,9 @@ __all__ = [
     "DeviceTarget",
     "DiscoveredDevice",
     "DiscoveryProvider",
+    "GizwitsCommand",
+    "GizwitsDiscovery",
+    "GizwitsFrame",
+    "GizwitsSession",
     "ProtocolConnection",
 ]
-

@@ -6,6 +6,15 @@
 재사용 여부를 다시 결정하고, 코드를 가져오면 원 저작권 고지와 MIT 라이선스 조건을 함께
 유지합니다.
 
+## 공식 Gizwits GAgent 자료
+
+- 저장소: <https://github.com/gizwits/Gizwits-GAgent>
+- 확인 커밋: `72d2db0c386c76224754f350422624255551a737`
+- 확인 내용: 프로토콜 버전 magic `0x00000003`, discovery/login/transmit/control 명령 상수와
+  LAN 헤더 길이
+- 라이선스: 저장소에서 명시적인 라이선스 파일을 찾지 못함
+- 적용: 소스 코드를 가져오지 않고 프로토콜의 사실과 wire 상수만 교차 확인했습니다.
+
 ## 1. `jrigling/homeassistant-jebao`와 `python-jebao`
 
 - 저장소: <https://github.com/jrigling/homeassistant-jebao>,
@@ -55,3 +64,14 @@
 5. 드라이버를 직접 구현할지 기존 MIT 구현을 가져올지는 보유 모델의 호환성 실험 후
    결정합니다.
 6. 어떤 선택이든 외부 구현의 라이선스와 출처를 `THIRD_PARTY_NOTICES.md`에 기록합니다.
+
+## 현재 독립 구현 범위
+
+- 최대 크기가 제한된 1~4바이트 LEB128 프레임 길이 파서
+- magic, 최소 본문, 선언 길이, trailing bytes를 엄격히 검사하는 codec
+- TCP 스트림의 조기 종료와 timeout을 구분하는 raw session
+- passcode/login, heartbeat, raw state read와 unsolicited frame 건너뛰기
+- UDP 12414 broadcast/unicast discovery와 응답 필드 파싱
+- 여러 VLAN broadcast 주소를 반복 지정할 수 있는 읽기 전용 `jebao-flowctl discover`
+
+제품별 schema와 안전 계층이 완성되기 전까지 raw write는 진단 CLI에 노출하지 않습니다.

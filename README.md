@@ -24,14 +24,15 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 
 - Pydantic 기반 YAML 설정 모델과 교차 검증
 - 프로토콜 계층과 장비 계층 사이의 추상 인터페이스
+- Gizwits GAgent 프레임 코덱, 인증 세션과 UDP 장비 검색
 - 비동기 가상 장비 시뮬레이터
 - Constant, Sync, Anti Phase 패턴 계산기
 - 그룹 및 장비 출력 제한
 - Docker/Compose 실행 뼈대
 - 단위 테스트와 GitHub Actions CI
 
-실제 Gizwits/Jebao LAN 드라이버, MQTT 및 Home Assistant Discovery는 다음 개발 단계에서
-구현합니다.
+제품별 데이터 포인트 스키마를 적용하는 실제 장비 어댑터, MQTT 및 Home Assistant
+Discovery는 다음 개발 단계에서 구현합니다.
 
 ## 로컬 개발
 
@@ -49,6 +50,14 @@ ruff check .
 
 ```bash
 jebao-flowd --config config.example.yaml --check-config
+```
+
+현재 LAN에서 장비를 읽기 전용으로 검색하려면 다음 명령을 사용합니다. IoT VLAN의
+브로드캐스트 주소를 여러 번 지정할 수도 있습니다.
+
+```bash
+jebao-flowctl discover --timeout 5
+jebao-flowctl discover --target 192.168.20.255 --json
 ```
 
 ## Docker
@@ -76,7 +85,8 @@ UDP 브로드캐스트 검색을 사용할 수 있도록 host network를 기본�
 - 비상 정지는 자동으로 해제하지 않습니다.
 
 전체 범위와 개발 기준은 [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md), 공개 구현 조사 결과는
-[docs/protocol-research.md](docs/protocol-research.md)를 참고하세요.
+[docs/protocol-research.md](docs/protocol-research.md)를 참고하세요. 실제 장비 조사 결과는
+[Capability 템플릿](docs/device-capability-template.yaml)을 복사해 모델별로 기록합니다.
 
 ## 라이선스
 
