@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jebao-flow-engine"
+version = "0.1.0.dev0"
+description = "Local-first flow orchestration for Jebao aquarium pumps"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "Jebao Flow Engine contributors" }]
+keywords = ["aquarium", "home-assistant", "jebao", "mqtt"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Home Automation",
+]
+dependencies = [
+  "pydantic>=2.9,<3",
+  "PyYAML>=6.0.2,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<1",
+  "ruff>=0.8,<1",
+]
+
+[project.scripts]
+jebao-flowd = "jebao_flow.app:main"
+
+[project.urls]
+Homepage = "https://github.com/yf22jh-glitch/jebao-flow-engine"
+Issues = "https://github.com/yf22jh-glitch/jebao-flow-engine/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jebao_flow"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+

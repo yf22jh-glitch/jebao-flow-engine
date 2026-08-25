@@ -1,0 +1,17 @@
+services:
+  jebao-flowd:
+    build: .
+    container_name: jebao-flowd
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?set MQTT_PASSWORD before starting}
+    volumes:
+      - ${JEBAO_FLOW_CONFIG:-./config.example.yaml}:/config/config.yaml:ro
+      - jebao-flow-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  jebao-flow-data:

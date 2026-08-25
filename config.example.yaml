@@ -1,0 +1,73 @@
+instance:
+  id: main
+  name: Main Aquarium
+  timezone: Asia/Seoul
+
+mqtt:
+  host: 192.168.0.10
+  port: 1883
+  username: jebao_flow
+  password_env: MQTT_PASSWORD
+  discovery_prefix: homeassistant
+  topic_prefix: jebao-flow/main
+
+runtime:
+  state_path: /data/state.json
+  log_level: INFO
+  dry_run: true
+
+devices:
+  - id: wavemaker_left
+    name: 왼쪽 수류모터
+    type: wavemaker
+    discovery: auto
+    limits:
+      min_power: 30
+      max_power: 80
+    control:
+      minimum_command_interval_ms: 1000
+      restore_on_reconnect: true
+
+  - id: wavemaker_right
+    name: 오른쪽 수류모터
+    type: wavemaker
+    discovery: auto
+    limits:
+      min_power: 30
+      max_power: 75
+    control:
+      minimum_command_interval_ms: 1000
+      restore_on_reconnect: true
+
+groups:
+  - id: main_flow
+    name: 메인 수류
+    enabled: true
+    members:
+      - device: wavemaker_left
+        gain: 1.0
+        phase: 0
+      - device: wavemaker_right
+        gain: 0.85
+        phase: 180
+    default:
+      pattern: anti_phase
+      power: 65
+      min_power: 35
+      max_power: 75
+      period_seconds: 8
+    failure_policy:
+      on_member_offline: continue_limited
+      remaining_member_max_power: 50
+
+modes:
+  feed:
+    duration_seconds: 600
+    wavemaker_power: 0
+    return_pump_power: 30
+    restore_previous_state: true
+    restore_transition_seconds: 30
+  night:
+    max_power: 50
+    pattern: constant
+
