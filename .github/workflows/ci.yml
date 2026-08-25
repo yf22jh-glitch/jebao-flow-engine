@@ -21,4 +21,5 @@ jobs:
       - run: ruff check .
       - run: pytest
       - run: node --check custom_components/jebao_flow/frontend/jebao-flow-card.js
+      - run: docker run --rm -v "$PWD:/github/workspace:ro" ghcr.io/home-assistant/hassfest:latest
       - run: docker build -t jebao-flow-engine:test .

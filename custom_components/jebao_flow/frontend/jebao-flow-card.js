@@ -43,12 +43,38 @@ function numericState(entity, fallback = 0) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function formatTimestamp(value) {
+  if (!value) return "—";
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return "—";
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(timestamp);
+}
+
+function normalizeCardConfig(config, fields) {
+  const normalized = { ...config };
+  fields.forEach((field) => {
+    if (config[field] === undefined) return;
+    if (typeof config[field] !== "string" || !config[field].trim()) {
+      throw new Error(`${field} must be a non-empty string`);
+    }
+    normalized[field] = config[field].trim();
+  });
+  if (normalized.topic_prefix) {
+    normalized.topic_prefix = normalized.topic_prefix.replace(/^\/+|\/+$/g, "");
+    if (!normalized.topic_prefix) throw new Error("topic_prefix must be a non-empty string");
+  }
+  return normalized;
+}
+
 class JebaoFlowCard extends HTMLElement {
   setConfig(config) {
-    if (config.group !== undefined && typeof config.group !== "string") {
-      throw new Error("group must be a string");
-    }
-    this._config = { ...config };
+    this._config = normalizeCardConfig(config, ["group", "instance", "topic_prefix", "entry"]);
     this._render();
   }
 
@@ -69,13 +95,28 @@ class JebaoFlowCard extends HTMLElement {
     if (!this._hass) return {};
     const candidates = Object.entries(this._hass.states).filter(([, state]) => {
       const groupId = state.attributes?.jebao_flow_group_id;
-      return groupId && (!this._config?.group || groupId === this._config.group);
+      const instanceId = state.attributes?.jebao_flow_instance_id;
+      const entryId = state.attributes?.jebao_flow_entry_id;
+      const topicPrefix = state.attributes?.jebao_flow_topic_prefix;
+      return groupId
+        && instanceId
+        && entryId
+        && (!this._config?.group || groupId === this._config.group)
+        && (!this._config?.instance || instanceId === this._config.instance)
+        && (!this._config?.topic_prefix || topicPrefix === this._config.topic_prefix)
+        && (!this._config?.entry || entryId === this._config.entry);
     });
     if (!candidates.length) return {};
+    const entryIds = new Set(
+      candidates.map(([, state]) => state.attributes.jebao_flow_entry_id),
+    );
+    if (entryIds.size !== 1) return { _ambiguous: true };
+    const selectedEntry = [...entryIds][0];
     const selectedGroup = this._config?.group || candidates[0][1].attributes.jebao_flow_group_id;
     return Object.fromEntries(
       candidates
-        .filter(([, state]) => state.attributes.jebao_flow_group_id === selectedGroup)
+        .filter(([, state]) => state.attributes.jebao_flow_group_id === selectedGroup
+          && state.attributes.jebao_flow_entry_id === selectedEntry)
         .map(([entityId, state]) => [
           state.attributes.jebao_flow_control,
           { entityId, state },
@@ -83,13 +124,13 @@ class JebaoFlowCard extends HTMLElement {
     );
   }
 
-  _deviceEntities() {
+  _deviceEntities(entryId) {
     if (!this._hass) return {};
     const devices = {};
     Object.entries(this._hass.states).forEach(([entityId, state]) => {
       const deviceId = state.attributes?.jebao_flow_device_id;
       const control = state.attributes?.jebao_flow_control;
-      if (!deviceId || !control) return;
+      if (!deviceId || !control || state.attributes?.jebao_flow_entry_id !== entryId) return;
       devices[deviceId] = devices[deviceId] || {};
       devices[deviceId][control] = { entityId, state };
     });
@@ -101,7 +142,14 @@ class JebaoFlowCard extends HTMLElement {
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
 
     const entities = this._entities();
-    const deviceEntities = this._deviceEntities();
+    if (entities._ambiguous) {
+      this.shadowRoot.innerHTML = `${this._styles()}<ha-card><div class="empty">
+        <ha-icon icon="mdi:alert-circle-outline"></ha-icon><strong>인스턴스 선택 필요</strong>
+        <span>같은 ID를 쓰는 데몬이 여러 개입니다.</span>
+        <small>카드 설정에 topic_prefix를 지정하세요.</small>
+      </div></ha-card>`;
+      return;
+    }
     const statusEntity = entities.status?.state;
     if (!statusEntity) {
       this.shadowRoot.innerHTML = `
@@ -117,11 +165,17 @@ class JebaoFlowCard extends HTMLElement {
       return;
     }
 
+    const entryId = statusEntity.attributes.jebao_flow_entry_id;
+    const deviceEntities = this._deviceEntities(entryId);
+
     const status = statusEntity.state;
     const members = statusEntity.attributes.members || {};
     const locked = Boolean(statusEntity.attributes.hardware_writes_locked);
+    const observerMode = statusEntity.attributes.jebao_flow_runtime_mode === "observer";
     const available = entities.availability?.state?.state === "on";
-    const enabled = entities.enabled?.state?.state === "on";
+    const desiredEnabled = entities.enabled?.state?.state === "on";
+    const actualEnabled = statusEntity.attributes.actual_enabled;
+    const enabled = observerMode ? actualEnabled === true : desiredEnabled;
     const power = numericState(entities.power?.state, 0);
     const minPower = numericState(entities.min_power?.state, 0);
     const maxPower = numericState(entities.max_power?.state, 100);
@@ -140,33 +194,37 @@ class JebaoFlowCard extends HTMLElement {
             <h2>${escapeHtml(title)}</h2>
             <div class="status-line">
               <span class="status-dot ${available ? "online" : "offline"}"></span>
-              <span>${available ? (STATUS_LABELS[status] || status) : "서버 연결 끊김"}</span>
+              <span>${escapeHtml(available ? (STATUS_LABELS[status] || status) : "서버 연결 끊김")}</span>
               <span class="divider">·</span>
-              <span>${escapeHtml(PATTERNS[selectedPattern]?.[0] || selectedPattern)}</span>
+              <span>${escapeHtml(observerMode ? "외부 또는 장비 스케줄" : (PATTERNS[selectedPattern]?.[0] || selectedPattern))}</span>
             </div>
           </div>
-          <button class="power-button ${enabled ? "on" : ""}" data-toggle-power
+          ${observerMode ? `<span class="observer-chip"><ha-icon icon="mdi:eye-outline"></ha-icon>LAN 관찰</span>` : `<button class="power-button ${enabled ? "on" : ""}" data-toggle-power
             aria-label="그룹 운전 전환" ${entities.enabled ? "" : "disabled"}>
             <ha-icon icon="mdi:power"></ha-icon>
-          </button>
+          </button>`}
         </div>
 
         ${locked ? `
           <div class="safety-banner">
             <ha-icon icon="mdi:shield-lock-outline"></ha-icon>
-            <div><strong>하드웨어 쓰기 잠금</strong><span>화면과 패턴 계산만 동작하며 실제 펌프에는 명령을 보내지 않습니다.</span></div>
+            <div><strong>${observerMode ? "읽기 전용 관찰 모드" : "하드웨어 쓰기 잠금"}</strong><span>${observerMode ? "기존 앱·장비 스케줄의 결과만 읽으며 제어 명령은 모두 거부합니다." : "화면과 패턴 계산만 동작하며 실제 펌프에는 명령을 보내지 않습니다."}</span></div>
           </div>` : ""}
 
-        <section class="hero-power">
+        ${observerMode ? `<section class="observer-summary">
+          <div><span>연결된 펌프</span><strong>${Number(statusEntity.attributes.online_member_count || 0)} / ${Number(statusEntity.attributes.member_count || 0)}</strong></div>
+          <div><span>마지막 실제 변화</span><strong>${escapeHtml(formatTimestamp(statusEntity.attributes.last_changed_at))}</strong></div>
+          <div><span>마지막 설정 단서 변화</span><strong>${escapeHtml(formatTimestamp(statusEntity.attributes.last_configuration_changed_at))}</strong></div>
+        </section>` : `<section class="hero-power">
           <div class="power-readout">
             <span>기준 출력</span>
             <strong data-power-readout>${Math.round(power)}<small>%</small></strong>
           </div>
           ${this._slider("power", power, minPower, maxPower, 1, "%", true)}
           <div class="range-labels"><span>MIN ${Math.round(minPower)}%</span><span>MAX ${Math.round(maxPower)}%</span></div>
-        </section>
+        </section>`}
 
-        <section>
+        ${observerMode ? "" : `<section>
           <div class="section-title"><span>FLOW MODE</span><small>빠른 파형은 펌프 내장 모드, 긴 흐름은 서버 패턴으로 제어합니다.</small></div>
           <div class="mode-grid">
             ${patternOptions.map((pattern) => {
@@ -176,14 +234,14 @@ class JebaoFlowCard extends HTMLElement {
               </button>`;
             }).join("")}
           </div>
-        </section>
+        </section>`}
 
         <section>
-          <div class="section-title"><span>THREE-PUMP FLOW</span><small>두 메인 펌프와 바형 크로스플로우의 현재 계산값입니다.</small></div>
-          <div class="pump-grid">${this._memberCards(members, deviceEntities)}</div>
+          <div class="section-title"><span>THREE-PUMP FLOW</span><small>${observerMode ? "두 메인 펌프와 바형 크로스플로우의 실제 LAN 관찰값입니다." : "두 메인 펌프와 바형 크로스플로우의 현재 계산값입니다."}</small></div>
+          <div class="pump-grid">${this._memberCards(members, deviceEntities, observerMode)}</div>
         </section>
 
-        <section class="tuning">
+        ${observerMode ? "" : `<section class="tuning">
           <div class="section-title"><span>FINE TUNING</span></div>
           <div class="tuning-grid">
             ${this._compactSlider("min_power", "최소 출력", minPower, 0, 100, 1, "%")}
@@ -191,22 +249,22 @@ class JebaoFlowCard extends HTMLElement {
             ${this._compactSlider("period", "패턴 주기", period, 1, 3600, 1, "초")}
             ${this._compactSlider("transition", "전환 시간", transition, 0, 600, 1, "초")}
           </div>
-        </section>
+        </section>`}
 
-        <div class="actions">
+        ${observerMode ? "" : `<div class="actions">
           <button class="action feed" data-button-control="start_feed"><ha-icon icon="mdi:fishbowl-outline"></ha-icon>급여 시작</button>
           <button class="action" data-button-control="stop_feed"><ha-icon icon="mdi:play-circle-outline"></ha-icon>급여 종료</button>
           <button class="action" data-button-control="resume_all_members"><ha-icon icon="mdi:source-merge"></ha-icon>전체 그룹 복귀</button>
           ${status === "emergency_stop"
             ? `<button class="action warning" data-button-control="clear_emergency"><ha-icon icon="mdi:lock-open-check-outline"></ha-icon>잠금 해제</button>`
             : `<button class="action danger" data-button-control="emergency_stop"><ha-icon icon="mdi:alert-octagon"></ha-icon>비상 정지</button>`}
-        </div>
+        </div>`}
       </ha-card>`;
 
     this._attachHandlers(entities, deviceEntities);
   }
 
-  _memberCards(members, deviceEntities) {
+  _memberCards(members, deviceEntities, observerMode) {
     const entries = Object.entries(members).sort(([, a], [, b]) => {
       const order = { left: 0, right: 1, crossflow: 2, support: 3 };
       return (order[a.role] ?? 9) - (order[b.role] ?? 9);
@@ -214,8 +272,15 @@ class JebaoFlowCard extends HTMLElement {
     if (!entries.length) return `<div class="no-members">펌프 계산 상태를 기다리는 중입니다.</div>`;
     return entries.map(([deviceId, member]) => {
       const target = Number(member.target_power ?? 0);
-      const actual = member.actual_power;
-      const online = member.online;
+      const statusAttributes = deviceEntities[deviceId]?.device_status?.state?.attributes || {};
+      const actual = statusAttributes.actual_power ?? member.actual_power;
+      const online = statusAttributes.online ?? member.online;
+      const actualEnabled = statusAttributes.actual_enabled ?? member.actual_enabled;
+      const actualMode = statusAttributes.actual_mode ?? member.actual_mode;
+      const lastSeen = statusAttributes.last_seen_at ?? member.last_seen_at;
+      const observedAttributes = statusAttributes.observed_attributes || member.observed_attributes || {};
+      const error = statusAttributes.error ?? member.error;
+      const displayPower = observerMode ? Number(actual ?? 0) : target;
       const manual = member.control_mode === "manual_override";
       const devicePower = deviceEntities[deviceId]?.device_power?.state;
       const deviceEnabled = deviceEntities[deviceId]?.device_enabled?.state;
@@ -225,12 +290,12 @@ class JebaoFlowCard extends HTMLElement {
         <div class="pump-head">
           <ha-icon icon="${member.role === "crossflow" ? "mdi:arrow-expand-horizontal" : "mdi:fan"}"></ha-icon>
           <div><strong>${escapeHtml(member.name || deviceId)}</strong><span>${escapeHtml(ROLE_LABELS[member.role] || member.role)}</span></div>
-          ${deviceEnabled ? `<button class="member-power ${deviceEnabled.state === "on" ? "on" : ""}" data-device-toggle="${escapeHtml(deviceId)}" aria-label="${escapeHtml(member.name || deviceId)} 개별 전원"><ha-icon icon="mdi:power"></ha-icon></button>`
+          ${!observerMode && deviceEnabled ? `<button class="member-power ${deviceEnabled.state === "on" ? "on" : ""}" data-device-toggle="${escapeHtml(deviceId)}" aria-label="${escapeHtml(member.name || deviceId)} 개별 전원"><ha-icon icon="mdi:power"></ha-icon></button>`
             : `<span class="member-dot ${online === false ? "offline" : online === true ? "online" : "unknown"}"></span>`}
         </div>
-        <div class="pump-output"><strong>${Math.round(target)}%</strong><span>목표 출력</span></div>
-        <div class="meter"><i style="width:${Math.max(0, Math.min(100, target))}%"></i></div>
-        ${devicePower ? `<div class="individual-control">
+        <div class="pump-output"><strong>${actual == null && observerMode ? "—" : `${Math.round(displayPower)}%`}</strong><span>${observerMode ? "실제 출력" : "목표 출력"}</span></div>
+        <div class="meter"><i style="width:${Math.max(0, Math.min(100, displayPower))}%"></i></div>
+        ${!observerMode && devicePower ? `<div class="individual-control">
           <span>${manual ? "개별 제어 중" : "개별 출력 조정"}</span>
           <input type="range" min="${minimum}" max="${maximum}" step="1" value="${numericState(devicePower, target)}" data-device-power="${escapeHtml(deviceId)}">
           ${manual && deviceEntities[deviceId]?.resume_group
@@ -242,8 +307,33 @@ class JebaoFlowCard extends HTMLElement {
           <span>PHASE ${Math.round(Number(member.phase ?? 0))}°</span>
           <span>ACTUAL ${actual == null ? "—" : `${Math.round(Number(actual))}%`}</span>
         </div>
+        ${observerMode ? `<div class="observation-meta">
+          <span>${online === true ? (actualEnabled === true ? "운전 중" : "정지") : online === false ? "연결 끊김" : "매핑 대기"}</span>
+          <span>MODE ${escapeHtml(actualMode || "—")}</span>
+          <span>TIMER ${observedAttributes.TimerON === true ? "ON" : observedAttributes.TimerON === false ? "OFF" : "—"}</span>
+          <div class="observed-settings">${this._observedSettings(observedAttributes)}</div>
+          <small>확인 ${escapeHtml(formatTimestamp(lastSeen))}</small>
+          ${error ? `<small class="error">${escapeHtml(error)}</small>` : ""}
+        </div>` : ""}
       </article>`;
     }).join("");
+  }
+
+  _observedSettings(attributes) {
+    const labels = {
+      AutoMode: "AUTO MODE",
+      AutoFlow: "AUTO FLOW",
+      AutoFreq: "AUTO FREQ",
+      FeedSwitch: "FEED",
+      Linkage: "LINK",
+      PulseTide: "PULSE/TIDE",
+      AutoGears: "AUTO GEAR",
+    };
+    const values = Object.entries(labels)
+      .filter(([key]) => Object.hasOwn(attributes, key))
+      .slice(0, 5)
+      .map(([key, label]) => `<span>${label} ${escapeHtml(attributes[key])}</span>`);
+    return values.join("") || "<span>추가 설정 단서 —</span>";
   }
 
   _slider(control, value, min, max, step, unit, hero = false) {
@@ -355,12 +445,18 @@ class JebaoFlowCard extends HTMLElement {
       .power-button { width:52px; height:52px; display:grid; place-items:center; border-radius:50%; border:1px solid #385267; color:#8299a8; background:#0a1824; cursor:pointer; }
       .power-button.on { color:#e9feff; border-color:var(--flow-cyan); background:linear-gradient(145deg,#14758a,#235bd0); box-shadow:0 0 24px rgba(85,217,232,.25); }
       .power-button ha-icon { width:27px; height:27px; }
+      .observer-chip { display:flex; align-items:center; gap:6px; padding:8px 11px; color:#c9fbff; background:rgba(20,117,138,.25); border:1px solid rgba(85,217,232,.45); border-radius:999px; font-size:10px; }
+      .observer-chip ha-icon { width:17px; }
       .safety-banner { display:flex; gap:11px; align-items:center; margin:18px 0 0; padding:11px 13px; color:#ffd989; background:rgba(255,169,44,.1); border:1px solid rgba(255,183,72,.35); border-radius:11px; }
       .safety-banner ha-icon { flex:0 0 auto; }
       .safety-banner div { display:flex; flex-direction:column; gap:2px; }
       .safety-banner strong { font-size:12px; }
       .safety-banner span { color:#d4b978; font-size:11px; }
       section { margin-top:22px; }
+      .observer-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+      .observer-summary div { display:flex; flex-direction:column; gap:5px; min-width:0; padding:13px; border-radius:11px; background:rgba(7,18,28,.62); border:1px solid rgba(148,199,220,.13); }
+      .observer-summary span { color:#7892a3; font-size:9px; }
+      .observer-summary strong { overflow:hidden; color:#e7f8ff; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
       .hero-power { padding:19px; border-radius:15px; background:rgba(7,18,28,.62); border:1px solid rgba(148,199,220,.13); }
       .power-readout { display:flex; justify-content:space-between; align-items:end; margin-bottom:9px; color:#a9bbc8; font-size:12px; }
       .power-readout strong { color:#f7fdff; font:700 36px/1 sans-serif; }
@@ -397,6 +493,11 @@ class JebaoFlowCard extends HTMLElement {
       .individual-control input { width:100%; accent-color:#8a7dff; }
       .individual-control button { width:100%; margin-top:5px; padding:5px; color:#dcd8ff; background:#302d62; border:1px solid #6660aa; border-radius:7px; font-size:8px; cursor:pointer; }
       .pump-meta { display:flex; justify-content:space-between; gap:4px; margin-top:9px; color:#698091; font:600 7px/1 sans-serif; }
+      .observation-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; margin-top:10px; padding-top:9px; border-top:1px solid rgba(120,168,194,.12); color:#91a9b7; font-size:8px; }
+      .observation-meta small { grid-column:1/-1; color:#637d8d; }
+      .observation-meta .error { color:#ff8795; }
+      .observed-settings { grid-column:1/-1; display:flex; flex-wrap:wrap; gap:4px; }
+      .observed-settings span { padding:3px 5px; color:#9fb9c7; background:rgba(67,107,130,.18); border-radius:5px; }
       .no-members { grid-column:1/-1; padding:24px; color:#708798; text-align:center; }
       .tuning-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 17px; }
       .compact-control { display:block; padding:10px 12px; border-radius:10px; background:rgba(12,29,42,.62); }
@@ -417,6 +518,7 @@ class JebaoFlowCard extends HTMLElement {
         ha-card { padding:16px; }
         .mode-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
         .pump-grid { grid-template-columns:1fr; }
+        .observer-summary { grid-template-columns:1fr; }
         .tuning-grid { grid-template-columns:1fr; }
         .actions { grid-template-columns:repeat(2,minmax(0,1fr)); }
         .section-title small { display:none; }
@@ -427,7 +529,7 @@ class JebaoFlowCard extends HTMLElement {
 
 class JebaoEquipmentCard extends HTMLElement {
   setConfig(config) {
-    this._config = { ...config };
+    this._config = normalizeCardConfig(config, ["instance", "topic_prefix", "entry"]);
     this._render();
   }
 
@@ -439,21 +541,41 @@ class JebaoEquipmentCard extends HTMLElement {
   getCardSize() { return 3; }
 
   _devices() {
-    if (Array.isArray(this._config.devices) && this._config.devices.length) return this._config.devices;
     const discovered = {};
-    Object.entries(this._hass.states).forEach(([entityId, state]) => {
+    const candidates = Object.entries(this._hass.states).filter(([, state]) => {
+      const attributes = state.attributes || {};
+      return attributes.jebao_flow_device_id
+        && ["return_pump", "dosing_pump"].includes(attributes.jebao_flow_device_type)
+        && attributes.jebao_flow_control
+        && (!this._config.instance
+          || attributes.jebao_flow_instance_id === this._config.instance)
+        && (!this._config.topic_prefix
+          || attributes.jebao_flow_topic_prefix === this._config.topic_prefix)
+        && (!this._config.entry
+          || attributes.jebao_flow_entry_id === this._config.entry);
+    });
+    const entryIds = new Set(
+      candidates.map(([, state]) => state.attributes.jebao_flow_entry_id),
+    );
+    this._ambiguous = entryIds.size > 1;
+    const selectedEntry = entryIds.size === 1 ? [...entryIds][0] : null;
+    candidates.forEach(([entityId, state]) => {
       const attributes = state.attributes || {};
       const deviceId = attributes.jebao_flow_device_id;
       const type = attributes.jebao_flow_device_type;
       const control = attributes.jebao_flow_control;
-      if (!deviceId || !["return_pump", "dosing_pump"].includes(type) || !control) return;
+      if (attributes.jebao_flow_entry_id !== selectedEntry) return;
       discovered[deviceId] = discovered[deviceId] || {
         name: attributes.friendly_name?.replace(/ (개별 운전|개별 출력|개별 상태|개별 연결)$/, "") || deviceId,
         type: type === "dosing_pump" ? "dosing" : "return",
+        observerMode: false,
       };
+      discovered[deviceId].observerMode ||= attributes.jebao_flow_runtime_mode === "observer";
       if (control === "device_enabled") discovered[deviceId].enabled = entityId;
       if (control === "device_power") discovered[deviceId].power = entityId;
       if (control === "device_status") discovered[deviceId].status = entityId;
+      if (control === "actual_power") discovered[deviceId].actualPower = entityId;
+      if (control === "device_availability") discovered[deviceId].availability = entityId;
     });
     return Object.values(discovered);
   }
@@ -462,22 +584,35 @@ class JebaoEquipmentCard extends HTMLElement {
     if (!this._config || !this._hass) return;
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
     const devices = this._devices();
+    if (this._ambiguous) {
+      this.shadowRoot.innerHTML = `<style>*{box-sizing:border-box}ha-card{padding:18px}</style>
+        <ha-card><strong>인스턴스 선택 필요</strong><p>카드 설정에 topic_prefix를 지정하세요.</p></ha-card>`;
+      return;
+    }
     const rows = devices.map((device, index) => {
       const powerState = device.power ? this._hass.states[device.power] : null;
       const enabledState = device.enabled ? this._hass.states[device.enabled] : null;
       const statusState = device.status ? this._hass.states[device.status] : null;
+      const actualPowerState = device.actualPower ? this._hass.states[device.actualPower] : null;
+      const attributes = statusState?.attributes || {};
+      const observerMode = attributes.jebao_flow_runtime_mode === "observer" || device.observerMode;
+      const online = attributes.online === true;
+      const actualEnabled = attributes.actual_enabled;
+      const actualPower = attributes.actual_power ?? numericState(actualPowerState, null);
       const isDosing = device.type === "dosing";
       return `<article class="equipment-row">
         <ha-icon icon="${isDosing ? "mdi:test-tube" : "mdi:pump"}"></ha-icon>
-        <div class="equipment-main"><strong>${escapeHtml(device.name || (isDosing ? "도징펌프" : "리턴펌프"))}</strong><span>${escapeHtml(statusState?.state || (enabledState?.state === "on" ? "운전 중" : "정지"))}</span></div>
-        ${powerState ? `<label><input type="range" min="0" max="100" step="1" value="${numericState(powerState)}" data-equipment-power="${index}"><b>${Math.round(numericState(powerState))}%</b></label>` : ""}
-        ${enabledState ? `<button class="toggle ${enabledState.state === "on" ? "on" : ""}" data-equipment-toggle="${index}"><ha-icon icon="mdi:power"></ha-icon></button>` : ""}
+        <div class="equipment-main"><strong>${escapeHtml(device.name || (isDosing ? "도징펌프" : "리턴펌프"))}</strong><span>${escapeHtml(observerMode ? (online ? (attributes.error ? "오류" : actualEnabled === true ? "운전 중" : "정지") : "연결 끊김") : (statusState?.state || (enabledState?.state === "on" ? "운전 중" : "정지")))}</span>${observerMode ? `<small>확인 ${escapeHtml(formatTimestamp(attributes.last_seen_at))}</small>` : ""}</div>
+        ${observerMode && actualPower != null ? `<div class="actual-output"><b>${Math.round(Number(actualPower))}%</b><span>실제 출력</span></div>` : ""}
+        ${!observerMode && powerState ? `<label><input type="range" min="0" max="100" step="1" value="${numericState(powerState)}" data-equipment-power="${index}"><b>${Math.round(numericState(powerState))}%</b></label>` : ""}
+        ${!observerMode && enabledState ? `<button class="toggle ${enabledState.state === "on" ? "on" : ""}" data-equipment-toggle="${index}"><ha-icon icon="mdi:power"></ha-icon></button>` : `<span class="member-dot ${online ? "online" : "offline"}"></span>`}
       </article>`;
     }).join("") || `<div class="empty-equipment">리턴·도징 장비 상태를 기다리는 중입니다.</div>`;
     this.shadowRoot.innerHTML = `<style>
       *{box-sizing:border-box} ha-card{padding:18px;background:linear-gradient(145deg,#0b1b28,#102c3c);color:#e9f7fc}
       h3{margin:0 0 13px;font-size:16px}.equipment-row{display:grid;grid-template-columns:auto minmax(100px,1fr) minmax(100px,1.2fr) auto;align-items:center;gap:12px;padding:12px 0;border-top:1px solid rgba(130,180,205,.15)}
-      .equipment-row>ha-icon{color:#55d9e8}.equipment-main{display:flex;flex-direction:column}.equipment-main strong{font-size:12px}.equipment-main span{color:#7892a3;font-size:10px}
+      .equipment-row>ha-icon{color:#55d9e8}.equipment-main{display:flex;flex-direction:column}.equipment-main strong{font-size:12px}.equipment-main span{color:#7892a3;font-size:10px}.equipment-main small{margin-top:3px;color:#60798a;font-size:8px}
+      .actual-output{display:flex;align-items:baseline;justify-content:flex-end;gap:5px}.actual-output b{font-size:17px}.actual-output span{color:#7892a3;font-size:8px}.member-dot{width:8px;height:8px;border-radius:50%;background:#ff6477}.member-dot.online{background:#4be3aa;box-shadow:0 0 10px rgba(75,227,170,.7)}
       label{display:flex;align-items:center;gap:7px}input{min-width:0;width:100%;accent-color:#55d9e8}b{font-size:10px}.toggle{width:35px;height:35px;border-radius:50%;border:1px solid #345064;background:#102433;color:#718a9a}.toggle.on{color:white;border-color:#55d9e8;background:#1b7185}
       @media(max-width:600px){.equipment-row{grid-template-columns:auto 1fr auto}.equipment-row label{grid-column:2/4}}
     </style><ha-card><h3>${escapeHtml(this._config.title || "펌프 장비")}</h3>${rows}</ha-card>`;
@@ -498,7 +633,7 @@ if (!customElements.get("jebao-flow-card")) customElements.define("jebao-flow-ca
 if (!customElements.get("jebao-equipment-card")) customElements.define("jebao-equipment-card", JebaoEquipmentCard);
 
 window.customCards = window.customCards || [];
-window.customCards.push(
+[
   {
     type: "jebao-flow-card",
     name: "Jebao Flow Group",
@@ -511,6 +646,10 @@ window.customCards.push(
     description: "Simple return and dosing pump controls backed by Home Assistant entities",
     preview: true,
   },
-);
+].forEach((metadata) => {
+  if (!window.customCards.some((card) => card.type === metadata.type)) {
+    window.customCards.push(metadata);
+  }
+});
 
 console.info(`%c JEBAO-FLOW-CARD %c ${FLOW_CARD_VERSION} `, "color:white;background:#14758a;font-weight:bold", "color:#55d9e8;background:#07131f");

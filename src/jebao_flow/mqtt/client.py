@@ -73,14 +73,20 @@ class MqttAdapter:
                 )
 
             consumer = asyncio.create_task(self._consume(client), name="mqtt-command-consumer")
+            publisher = asyncio.create_task(
+                self._publish_observer_updates(client),
+                name="mqtt-observer-publisher",
+            )
             stop_waiter = asyncio.create_task(stop_event.wait(), name="mqtt-stop-waiter")
             try:
                 done, _ = await asyncio.wait(
-                    {consumer, stop_waiter},
+                    {consumer, publisher, stop_waiter},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if consumer in done:
                     await consumer
+                elif publisher in done:
+                    await publisher
                 else:
                     await client.publish(
                         self.topics.availability,
@@ -90,8 +96,34 @@ class MqttAdapter:
                     )
             finally:
                 consumer.cancel()
+                publisher.cancel()
                 stop_waiter.cancel()
-                await asyncio.gather(consumer, stop_waiter, return_exceptions=True)
+                await asyncio.gather(
+                    consumer,
+                    publisher,
+                    stop_waiter,
+                    return_exceptions=True,
+                )
+
+    async def _publish_observer_updates(self, client: aiomqtt.Client) -> None:
+        while True:
+            update = await self._service.wait_for_updates()
+            for device_id in update.device_ids:
+                snapshot = self._service.device_snapshot(device_id)
+                await client.publish(
+                    self.topics.device_state(device_id),
+                    snapshot.model_dump_json(),
+                    qos=1,
+                    retain=True,
+                )
+            for group_id in update.group_ids:
+                snapshot = self._service.snapshot(group_id)
+                await client.publish(
+                    self.topics.group_state(group_id),
+                    snapshot.model_dump_json(),
+                    qos=1,
+                    retain=True,
+                )
 
     async def _consume(self, client: aiomqtt.Client) -> None:
         async for message in client.messages:

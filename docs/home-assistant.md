@@ -43,6 +43,8 @@ MQTT 통합이 먼저 구성되어 있어야 합니다.
 
 ```yaml
 type: custom:jebao-flow-card
+instance: main
+topic_prefix: jebao-flow/main
 group: main_flow
 title: 메인 수류
 ```
@@ -60,6 +62,8 @@ title: 메인 수류
 
 ```yaml
 type: custom:jebao-equipment-card
+instance: main
+topic_prefix: jebao-flow/main
 title: 리턴 및 도징
 ```
 
@@ -72,3 +76,12 @@ title: 리턴 및 도징
 `runtime.dry_run: true`이거나 장비의 `allow_hardware_writes: false`이면 카드 상단에 하드웨어
 쓰기 잠금 배너가 표시됩니다. 이때 Home Assistant 명령과 서버의 패턴 계산은 확인할 수 있지만
 실제 장비 write는 허용되지 않습니다.
+
+`runtime.mode: observer`에서는 잠금 배너만 표시하는 것이 아니라 그룹·장비의 모든 제어
+엔티티를 생성하지 않습니다. 카드는 목표값 대신 실제 LAN 관찰값, 마지막 확인 시각,
+`TimerON`과 Auto 설정 단서를 표시합니다. 장비별 실제 출력 sensor는 Home Assistant Recorder의
+이력 그래프에서 기존 스케줄의 출력 변화를 확인하는 데 사용할 수 있습니다.
+
+여러 데몬 인스턴스에서 같은 논리 ID를 사용하는 경우 `topic_prefix`가 Home Assistant config
+entry까지 구분해 같은 데몬의 그룹·장비 엔티티만 묶습니다. 같은 `instance`가 둘 이상인데
+`topic_prefix`를 생략하면 카드는 임의 선택하지 않고 명시적인 선택을 요청합니다.

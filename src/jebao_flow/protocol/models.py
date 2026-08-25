@@ -38,6 +38,9 @@ class DeviceState(BaseModel):
     mode: str = "constant"
     frequency: int | None = Field(default=None, ge=0, le=100)
     error: str | None = None
+    observed_attributes: dict[str, bool | int | float | str | None] = Field(
+        default_factory=dict
+    )
     observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

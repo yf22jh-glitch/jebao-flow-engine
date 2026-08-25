@@ -26,7 +26,9 @@ async def async_setup_entry(
         entry.runtime_data,
         entry,
         async_add_entities,
-        lambda runtime, group: [JebaoFlowGroupSwitch(runtime, group)],
+        lambda runtime, group: (
+            [] if runtime.observer_mode else [JebaoFlowGroupSwitch(runtime, group)]
+        ),
     )
     async_setup_device_entities(
         entry.runtime_data,
@@ -34,7 +36,7 @@ async def async_setup_entry(
         async_add_entities,
         lambda runtime, device: (
             [JebaoFlowDeviceSwitch(runtime, device)]
-            if "enabled" in device.get("controls", ())
+            if not runtime.observer_mode and "enabled" in device.get("controls", ())
             else []
         ),
     )
@@ -46,6 +48,10 @@ class JebaoFlowGroupSwitch(JebaoFlowGroupEntity, SwitchEntity):
 
     def __init__(self, runtime, group: dict[str, Any]) -> None:
         super().__init__(runtime, group, "enabled")
+
+    @property
+    def available(self) -> bool:
+        return super().available and not self.runtime.observer_mode
 
     @property
     def is_on(self) -> bool | None:
@@ -66,6 +72,10 @@ class JebaoFlowDeviceSwitch(JebaoFlowDeviceEntity, SwitchEntity):
 
     def __init__(self, runtime, device: dict[str, Any]) -> None:
         super().__init__(runtime, device, "device_enabled")
+
+    @property
+    def available(self) -> bool:
+        return super().available and not self.runtime.observer_mode
 
     @property
     def is_on(self) -> bool | None:

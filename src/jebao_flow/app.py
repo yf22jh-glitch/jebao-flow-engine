@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from jebao_flow.config import AppConfig, load_config
+from jebao_flow.devices.observer import ReadOnlyObserver
 from jebao_flow.logging import configure_logging
 from jebao_flow.mqtt import GroupControlService, MqttAdapter
 
@@ -35,7 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
 async def serve(config: AppConfig) -> None:
     """Run the daemon MQTT control plane until a termination signal is received.
 
-    Physical LAN reconciliation remains write-locked until the hardware test gate is completed.
+    Observer mode opens persistent read sessions only. Hardware reconciliation remains
+    write-locked until the hardware test gate is completed.
     """
 
     stop_event = asyncio.Event()
@@ -51,6 +53,7 @@ async def serve(config: AppConfig) -> None:
         "daemon_started",
         extra={
             "instance_id": config.instance.id,
+            "runtime_mode": config.runtime.mode,
             "dry_run": config.runtime.dry_run,
             "device_count": len(config.devices),
             "group_count": len(config.groups),
@@ -58,9 +61,21 @@ async def serve(config: AppConfig) -> None:
     )
     group_service = GroupControlService(config)
     mqtt_adapter = MqttAdapter(config.mqtt, group_service)
+    observer = ReadOnlyObserver(config, group_service.record_observer_event)
     mqtt_task = asyncio.create_task(mqtt_adapter.run(stop_event), name="mqtt-adapter")
-    await stop_event.wait()
-    await mqtt_task
+    observer_task = asyncio.create_task(observer.run(stop_event), name="device-observer")
+    stop_waiter = asyncio.create_task(stop_event.wait(), name="daemon-stop-waiter")
+    tasks = {mqtt_task, observer_task, stop_waiter}
+    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    if not stop_event.is_set():
+        stop_event.set()
+    results = await asyncio.gather(mqtt_task, observer_task, return_exceptions=True)
+    if not stop_waiter.done():
+        stop_waiter.cancel()
+    await asyncio.gather(stop_waiter, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
     _LOGGER.info("daemon_stopped", extra={"instance_id": config.instance.id})
 
 

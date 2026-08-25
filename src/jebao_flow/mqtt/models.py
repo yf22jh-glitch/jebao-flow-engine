@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from jebao_flow.config import DeviceType
+from jebao_flow.config import DeviceType, RuntimeMode
 from jebao_flow.groups.models import GroupMemberRole, GroupState, PatternKind
 
 
@@ -27,6 +28,18 @@ class DeviceControlMode(StrEnum):
     GROUP = "group"
     MANUAL_OVERRIDE = "manual_override"
     STANDALONE = "standalone"
+
+
+class ObservationSource(StrEnum):
+    LAN_POLL = "lan_poll"
+    SIMULATOR = "simulator"
+
+
+class ChangeSource(StrEnum):
+    EXTERNAL_OR_NATIVE = "external_or_native"
+    HOME_ASSISTANT = "home_assistant"
+    FLOWD_SCHEDULER = "flowd_scheduler"
+    UNKNOWN = "unknown"
 
 
 class GroupCommand(BaseModel):
@@ -67,7 +80,16 @@ class GroupMemberState(BaseModel):
     target_power: int = Field(ge=0, le=100)
     actual_enabled: bool | None = None
     actual_power: int | None = Field(default=None, ge=0, le=100)
+    actual_mode: str | None = None
+    actual_frequency: int | None = Field(default=None, ge=0, le=100)
     online: bool | None = None
+    error: str | None = None
+    last_seen_at: datetime | None = None
+    last_changed_at: datetime | None = None
+    last_configuration_changed_at: datetime | None = None
+    observed_attributes: dict[str, bool | int | float | str | None] = Field(
+        default_factory=dict
+    )
 
 
 class GroupStatePayload(BaseModel):
@@ -87,6 +109,12 @@ class GroupStatePayload(BaseModel):
     transition_seconds: float = Field(ge=0, le=3600)
     hardware_writes_locked: bool
     members: dict[str, GroupMemberState]
+    actual_enabled: bool | None = None
+    online_member_count: int = Field(default=0, ge=0)
+    member_count: int = Field(default=0, ge=0)
+    last_seen_at: datetime | None = None
+    last_changed_at: datetime | None = None
+    last_configuration_changed_at: datetime | None = None
     last_request_id: str | None = None
 
 
@@ -129,7 +157,18 @@ class DeviceStatePayload(BaseModel):
     power: int = Field(ge=0, le=100)
     actual_enabled: bool | None = None
     actual_power: int | None = Field(default=None, ge=0, le=100)
+    actual_mode: str | None = None
+    actual_frequency: int | None = Field(default=None, ge=0, le=100)
     online: bool | None = None
+    error: str | None = None
+    last_seen_at: datetime | None = None
+    last_changed_at: datetime | None = None
+    last_configuration_changed_at: datetime | None = None
+    observed_attributes: dict[str, bool | int | float | str | None] = Field(
+        default_factory=dict
+    )
+    observation_source: ObservationSource | None = None
+    change_source: ChangeSource = ChangeSource.UNKNOWN
     status: str
     control_mode: DeviceControlMode
     group_ids: tuple[str, ...]
@@ -164,6 +203,7 @@ class DeviceDescriptor(BaseModel):
     grouped: bool
     ui: str
     controls: tuple[str, ...]
+    observables: tuple[str, ...] = ()
     min_power: int = Field(ge=0, le=100)
     max_power: int = Field(ge=0, le=100)
 
@@ -174,6 +214,7 @@ class SystemConfigPayload(BaseModel):
     schema_version: int = 1
     instance_id: str
     name: str
+    runtime_mode: RuntimeMode
     groups: tuple[GroupDescriptor, ...]
     devices: tuple[DeviceDescriptor, ...]
     patterns: tuple[PatternKind, ...]

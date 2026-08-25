@@ -44,6 +44,14 @@ class JebaoFlowRuntime:
         return str(self.system_config.get("name", "Jebao Flow Engine"))
 
     @property
+    def runtime_mode(self) -> str:
+        return str(self.system_config.get("runtime_mode", "observer"))
+
+    @property
+    def observer_mode(self) -> bool:
+        return self.runtime_mode == "observer"
+
+    @property
     def groups(self) -> tuple[dict[str, Any], ...]:
         groups = self.system_config.get("groups", ())
         return tuple(group for group in groups if isinstance(group, dict))
@@ -92,6 +100,8 @@ class JebaoFlowRuntime:
         return remove_listener
 
     async def async_group_command(self, group_id: str, **changes: Any) -> str:
+        if self.observer_mode:
+            raise HomeAssistantError("jebao-flowd is in read-only observer mode")
         if not self.online:
             raise HomeAssistantError("jebao-flowd is offline; command was not sent")
         request_id = uuid4().hex
@@ -110,6 +120,8 @@ class JebaoFlowRuntime:
         return request_id
 
     async def async_device_command(self, device_id: str, **changes: Any) -> str:
+        if self.observer_mode:
+            raise HomeAssistantError("jebao-flowd is in read-only observer mode")
         if not self.online:
             raise HomeAssistantError("jebao-flowd is offline; command was not sent")
         request_id = uuid4().hex
@@ -139,6 +151,15 @@ class JebaoFlowRuntime:
             return
         if not isinstance(payload.get("groups"), list):
             _LOGGER.warning("Ignoring daemon config without a groups list")
+            return
+        if not isinstance(payload.get("devices"), list):
+            _LOGGER.warning("Ignoring daemon config without a devices list")
+            return
+        if not isinstance(payload.get("patterns"), list):
+            _LOGGER.warning("Ignoring daemon config without a patterns list")
+            return
+        if payload.get("runtime_mode", "observer") not in {"observer", "control"}:
+            _LOGGER.warning("Ignoring daemon config with an invalid runtime mode")
             return
         self.system_config = payload
         self._notify()

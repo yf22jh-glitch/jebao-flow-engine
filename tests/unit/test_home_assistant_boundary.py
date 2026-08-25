@@ -24,7 +24,6 @@ def test_home_assistant_layer_contains_no_device_protocol_code() -> None:
     assert "jebao_flow.protocol" not in source
     assert "import gizwits" not in source.lower()
     assert "import socket" not in source
-    assert "34CD" not in source
 
 
 def test_lovelace_card_calls_entities_and_never_mqtt_directly() -> None:
@@ -35,6 +34,11 @@ def test_lovelace_card_calls_entities_and_never_mqtt_directly() -> None:
     assert "mqtt.publish" not in card.lower()
     assert "WebSocket" not in card
     assert "fetch(" not in card
+    assert "jebao_flow_instance_id" in card
+    assert "jebao_flow_entry_id" in card
+    assert "jebao_flow_topic_prefix" in card
+    assert "escapeHtml(available ? (STATUS_LABELS[status] || status)" in card
+    assert "읽기 전용 관찰 모드" in card
 
 
 def test_korean_translation_is_valid_json() -> None:

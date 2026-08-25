@@ -21,7 +21,9 @@ async def async_setup_entry(
         entry.runtime_data,
         entry,
         async_add_entities,
-        lambda runtime, group: [JebaoFlowPatternSelect(runtime, group)],
+        lambda runtime, group: (
+            [] if runtime.observer_mode else [JebaoFlowPatternSelect(runtime, group)]
+        ),
     )
 
 
@@ -31,6 +33,10 @@ class JebaoFlowPatternSelect(JebaoFlowGroupEntity, SelectEntity):
 
     def __init__(self, runtime, group: dict[str, Any]) -> None:
         super().__init__(runtime, group, "pattern")
+
+    @property
+    def available(self) -> bool:
+        return super().available and not self.runtime.observer_mode
 
     @property
     def options(self) -> list[str]:

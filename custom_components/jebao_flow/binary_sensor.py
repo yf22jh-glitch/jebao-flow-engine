@@ -39,7 +39,11 @@ async def async_setup_entry(
         entry.runtime_data,
         entry,
         async_add_entities,
-        lambda runtime, device: [JebaoFlowDeviceAvailabilitySensor(runtime, device)],
+        lambda runtime, device: [
+            JebaoFlowDeviceAvailabilitySensor(runtime, device),
+            JebaoFlowDeviceRunningSensor(runtime, device),
+            JebaoFlowDeviceProblemSensor(runtime, device),
+        ],
     )
 
 
@@ -95,3 +99,48 @@ class JebaoFlowDeviceAvailabilitySensor(JebaoFlowDeviceEntity, BinarySensorEntit
             and self.state_payload is not None
             and self.state_payload.get("online") is True
         )
+
+
+class JebaoFlowDeviceRunningSensor(JebaoFlowDeviceEntity, BinarySensorEntity):
+    _attr_name = "실제 운전"
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+
+    def __init__(self, runtime, device: dict[str, Any]) -> None:
+        super().__init__(runtime, device, "actual_running")
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.state_payload is not None
+            and self.state_payload.get("online") is True
+            and self.state_payload.get("actual_enabled") is not None
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        if not self.available or self.state_payload is None:
+            return None
+        return self.state_payload.get("actual_enabled") is True
+
+
+class JebaoFlowDeviceProblemSensor(JebaoFlowDeviceEntity, BinarySensorEntity):
+    _attr_name = "장비 오류"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, runtime, device: dict[str, Any]) -> None:
+        super().__init__(runtime, device, "device_problem")
+
+    @property
+    def is_on(self) -> bool | None:
+        if self.state_payload is None:
+            return None
+        return bool(self.state_payload.get("error"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attributes = super().extra_state_attributes
+        if self.state_payload is not None:
+            attributes["error"] = self.state_payload.get("error")
+        return attributes

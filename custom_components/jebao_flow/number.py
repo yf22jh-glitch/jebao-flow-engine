@@ -87,10 +87,14 @@ async def async_setup_entry(
         entry.runtime_data,
         entry,
         async_add_entities,
-        lambda runtime, group: [
-            JebaoFlowNumber(runtime, group, description)
-            for description in DESCRIPTIONS
-        ],
+        lambda runtime, group: (
+            []
+            if runtime.observer_mode
+            else [
+                JebaoFlowNumber(runtime, group, description)
+                for description in DESCRIPTIONS
+            ]
+        ),
     )
     async_setup_device_entities(
         entry.runtime_data,
@@ -98,7 +102,7 @@ async def async_setup_entry(
         async_add_entities,
         lambda runtime, device: (
             [JebaoFlowDevicePowerNumber(runtime, device)]
-            if "power" in device.get("controls", ())
+            if not runtime.observer_mode and "power" in device.get("controls", ())
             else []
         ),
     )
@@ -115,6 +119,10 @@ class JebaoFlowNumber(JebaoFlowGroupEntity, NumberEntity):
     ) -> None:
         super().__init__(runtime, group, description.key)
         self.entity_description = description
+
+    @property
+    def available(self) -> bool:
+        return super().available and not self.runtime.observer_mode
 
     @property
     def native_value(self) -> float | None:
@@ -144,6 +152,10 @@ class JebaoFlowDevicePowerNumber(JebaoFlowDeviceEntity, NumberEntity):
         super().__init__(runtime, device, "device_power")
         self._attr_native_min_value = float(device.get("min_power", 0))
         self._attr_native_max_value = float(device.get("max_power", 100))
+
+    @property
+    def available(self) -> bool:
+        return super().available and not self.runtime.observer_mode
 
     @property
     def native_value(self) -> float | None:

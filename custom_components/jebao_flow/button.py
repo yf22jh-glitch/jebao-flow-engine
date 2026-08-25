@@ -66,10 +66,14 @@ async def async_setup_entry(
         entry.runtime_data,
         entry,
         async_add_entities,
-        lambda runtime, group: [
-            JebaoFlowActionButton(runtime, group, description)
-            for description in DESCRIPTIONS
-        ],
+        lambda runtime, group: (
+            []
+            if runtime.observer_mode
+            else [
+                JebaoFlowActionButton(runtime, group, description)
+                for description in DESCRIPTIONS
+            ]
+        ),
     )
     async_setup_device_entities(
         entry.runtime_data,
@@ -77,7 +81,7 @@ async def async_setup_entry(
         async_add_entities,
         lambda runtime, device: (
             [JebaoFlowResumeGroupButton(runtime, device)]
-            if "resume_group" in device.get("controls", ())
+            if not runtime.observer_mode and "resume_group" in device.get("controls", ())
             else []
         ),
     )
@@ -94,6 +98,10 @@ class JebaoFlowActionButton(JebaoFlowGroupEntity, ButtonEntity):
     ) -> None:
         super().__init__(runtime, group, description.key)
         self.entity_description = description
+
+    @property
+    def available(self) -> bool:
+        return super().available and not self.runtime.observer_mode
 
     async def async_press(self) -> None:
         await self.runtime.async_group_command(
@@ -113,6 +121,7 @@ class JebaoFlowResumeGroupButton(JebaoFlowDeviceEntity, ButtonEntity):
     def available(self) -> bool:
         return (
             super().available
+            and not self.runtime.observer_mode
             and self.state_payload is not None
             and self.state_payload.get("control_mode") == "manual_override"
         )
