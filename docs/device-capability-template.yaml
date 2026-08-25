@@ -1,0 +1,54 @@
+# Copy to docs/devices/<model-or-device-id>.yaml after a real-device probe.
+identity:
+  name: unknown
+  model: unknown
+  device_type: wavemaker # wavemaker | return_pump
+  product_key: unknown
+  firmware_version: unknown
+  gizwits_version: unknown
+
+network:
+  discovery_transport: udp
+  discovery_port: 12414
+  control_transport: tcp
+  control_port: 12416
+  discovery_responded: false
+  status_push_observed: false
+  multiple_local_clients_supported: unknown
+
+power:
+  minimum: unknown
+  maximum: unknown
+  step: unknown
+  zero_equals_off: unknown
+  remembers_state_after_reboot: unknown
+
+capabilities:
+  readable: []
+  writable: []
+  unsupported: []
+
+attributes:
+  # - name: Flow
+  #   type: uint8
+  #   readable: true
+  #   writable: true
+  #   observed_range: [30, 100]
+  []
+
+timing:
+  command_to_actual_latency_ms: unknown
+  minimum_reliable_command_interval_ms: unknown
+  keepalive_interval_seconds: unknown
+
+native_modes:
+  values: []
+  frequency_range: unknown
+  master_slave_behavior: unknown
+  asyc_behavior: unknown
+
+evidence:
+  captured_at: null
+  capture_environment: null
+  packet_fixture_paths: []
+  notes: []

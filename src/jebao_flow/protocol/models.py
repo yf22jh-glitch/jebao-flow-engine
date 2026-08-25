@@ -55,7 +55,11 @@ class DiscoveredDevice(BaseModel):
 
     address: str
     device_id: str
+    mac_address: str | None = None
     product_key: str | None = None
     model: str = "unknown"
-    firmware_version: str | None = None
-
+    wifi_firmware_version: str | None = None
+    api_server: str | None = None
+    gizwits_version: str | None = None
+    mcu_attributes_hex: str = ""
+    extra_hex: str = ""

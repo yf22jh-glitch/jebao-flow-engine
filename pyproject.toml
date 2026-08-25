@@ -32,6 +32,7 @@ dev = [
 
 [project.scripts]
 jebao-flowd = "jebao_flow.app:main"
+jebao-flowctl = "jebao_flow.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/yf22jh-glitch/jebao-flow-engine"
@@ -51,4 +52,3 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
-
