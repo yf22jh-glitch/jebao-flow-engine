@@ -19,6 +19,7 @@ def test_dc_pump_status_decodes_operational_fields_and_faults() -> None:
 
     assert values["SwitchON"] is True
     assert values["TimerON"] is True
+    assert values["Mode"] == "constant"
     assert values["Flow"] == 81
     assert values["Frequency"] == 5
     assert DC_PUMP_PRO.active_problems(values) == ("Fault_Lockedrotor",)
@@ -48,6 +49,7 @@ def test_known_live_profile_shapes_decode_without_copying_schedule_fields() -> N
     assert AQUARIUM_PUMP.decode_status(bytes(aquarium))["Motor_Speed"] == 60
     pro_values = LOCAL_WAVEMAKER_PRO.decode_status(bytes(pro))
     assert pro_values["Linkage"] == "independent"
+    assert pro_values["Mode"] == "constant"
     assert pro_values["Flow"] == 30
     assert DOSING_PUMP.decode_status(bytes(dosing))["switch"] is False
 

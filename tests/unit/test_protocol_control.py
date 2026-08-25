@@ -19,10 +19,11 @@ def test_control_payload_reverses_flags_and_places_multibyte_bit_group() -> None
 
 
 def test_control_payload_uses_complete_vendor_buffer_sizes() -> None:
-    payload = build_control_payload(LOCAL_WAVEMAKER_PRO, {"Flow": 30})
+    payload = build_control_payload(LOCAL_WAVEMAKER_PRO, {"Mode": "tidal", "Flow": 30})
 
     assert len(payload) == 1 + 8 + 451
-    assert payload[1:9] == bytes.fromhex("0000000000000010")
+    assert payload[1:9] == bytes.fromhex("0000000000000018")
+    assert payload[9 + 1] == 4
     assert payload[9 + 2] == 30
 
 

@@ -2,11 +2,12 @@ from typing import ClassVar
 
 import pytest
 
+from jebao_flow.config import DeviceConfig, DeviceControlConfig, DeviceType, RuntimeConfig
 from jebao_flow.devices import (
     HardwareWritesDisabledError,
     LanJebaoDevice,
     StateVerificationError,
-    UnsupportedCapabilityError,
+    create_lan_device,
 )
 from jebao_flow.protocol.models import DeviceTarget
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
@@ -78,7 +79,7 @@ async def test_adapter_reads_protocol_neutral_state_and_faults() -> None:
     assert state.online is True
     assert state.enabled is True
     assert state.power == 55
-    assert state.mode == "raw_2"
+    assert state.mode == "constant"
     assert state.frequency == 32
     assert state.error == "Fault_UART"
 
@@ -140,11 +141,12 @@ async def test_verified_duplicate_write_is_suppressed() -> None:
     assert len(_FakeSession.instances[0].sent) == 1
 
 
-async def test_unmapped_numeric_mode_cannot_be_written() -> None:
+async def test_numeric_mode_with_audited_labels_can_be_previewed() -> None:
     device = _device()
 
-    with pytest.raises(UnsupportedCapabilityError, match="have not been mapped safely"):
-        device.preview_target(DeviceTarget(enabled=True, power=50, mode="constant"))
+    plan = device.preview_target(DeviceTarget(enabled=True, power=50, mode="tidal"))
+
+    assert plan.changes["Mode"] == "tidal"
 
 
 async def test_named_mode_profile_can_preview_mode_safely() -> None:
@@ -165,3 +167,24 @@ async def test_named_mode_profile_can_preview_mode_safely() -> None:
         "Mode": "constant",
         "Frequency": 20,
     }
+
+
+async def test_runtime_dry_run_overrides_per_device_write_opt_in() -> None:
+    config = DeviceConfig(
+        id="right",
+        name="Right",
+        type=DeviceType.WAVEMAKER,
+        address="pump.local",
+        product_key=LOCAL_WAVEMAKER_PRO.product_key,
+        limits=PowerLimits(min_power=30, max_power=75),
+        control=DeviceControlConfig(allow_hardware_writes=True),
+    )
+    device = create_lan_device(
+        config,
+        RuntimeConfig(dry_run=True),
+        session_factory=_FakeSession,
+    )
+    await device.connect()
+
+    with pytest.raises(HardwareWritesDisabledError):
+        await device.set_power(50)

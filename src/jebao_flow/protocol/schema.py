@@ -196,6 +196,8 @@ class ProductSchema:
         if numeric is None:  # guarded by Datapoint validation
             raise AssertionError("numeric datapoint is missing its specification")
         raw_value = int.from_bytes(chunk, "big")
+        if attribute.enum_values and raw_value < len(attribute.enum_values):
+            return attribute.enum_values[raw_value]
         return raw_value * numeric.ratio + numeric.addition
 
     def _read_bits(self, raw: bytes, position: Position) -> int:

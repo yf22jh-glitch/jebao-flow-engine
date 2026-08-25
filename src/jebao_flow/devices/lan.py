@@ -121,7 +121,9 @@ class LanJebaoDevice(JebaoDevice):
         if self.schema.mode_attribute:
             readable.add(Capability.MODE)
             mode = self.schema.by_name(self.schema.mode_attribute)
-            if self.schema.control_supported and mode.data_type is DataType.ENUM:
+            if self.schema.control_supported and (
+                mode.data_type is DataType.ENUM or mode.enum_values
+            ):
                 writable.add(Capability.MODE)
         if self.schema.frequency_attribute:
             readable.add(Capability.FREQUENCY)
@@ -166,7 +168,7 @@ class LanJebaoDevice(JebaoDevice):
     async def set_mode(self, mode: str) -> None:
         attribute_name = self._require_logical_attribute(Capability.MODE)
         attribute = self.schema.by_name(attribute_name)
-        if attribute.data_type is not DataType.ENUM:
+        if attribute.data_type is not DataType.ENUM and not attribute.enum_values:
             raise UnsupportedCapabilityError(
                 f"{self.schema.name} mode numbers have not been mapped safely"
             )
@@ -201,7 +203,7 @@ class LanJebaoDevice(JebaoDevice):
         if target.mode is not None:
             mode_attribute = self._require_logical_attribute(Capability.MODE)
             mode_datapoint = self.schema.by_name(mode_attribute)
-            if mode_datapoint.data_type is not DataType.ENUM:
+            if mode_datapoint.data_type is not DataType.ENUM and not mode_datapoint.enum_values:
                 raise UnsupportedCapabilityError(
                     f"{self.schema.name} mode numbers have not been mapped safely"
                 )

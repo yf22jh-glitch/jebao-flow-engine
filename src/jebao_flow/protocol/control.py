@@ -71,7 +71,14 @@ def _place_value(
     numeric = attribute.numeric
     if numeric is None:
         raise AssertionError("numeric datapoint is missing its specification")
-    numeric_requested = float(requested)
+    if isinstance(requested, str) and attribute.enum_values:
+        try:
+            numeric_requested = float(attribute.enum_values.index(requested))
+        except ValueError as error:
+            choices = ", ".join(attribute.enum_values)
+            raise ValueError(f"{attribute.name}: expected one of {choices}") from error
+    else:
+        numeric_requested = float(requested)
     unrounded = (numeric_requested - numeric.addition) / numeric.ratio
     raw_value = round(unrounded)
     if abs(unrounded - raw_value) > 1e-9:
