@@ -19,6 +19,14 @@ class UnsupportedCapabilityError(DeviceError):
     pass
 
 
+class HardwareWritesDisabledError(DeviceError):
+    pass
+
+
+class StateVerificationError(DeviceError):
+    pass
+
+
 class JebaoDevice(ABC):
     @property
     @abstractmethod
@@ -52,4 +60,3 @@ class JebaoDevice(ABC):
 
     @abstractmethod
     async def set_frequency(self, value: int) -> None: ...
-
