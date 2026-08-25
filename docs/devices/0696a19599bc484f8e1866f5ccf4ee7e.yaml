@@ -36,6 +36,7 @@ capabilities:
   observed_readable: [SwitchON, TimerON, Mode, Flow, Frequency, FeedTime]
   schema_declared_writable: [SwitchON, TimerON, Mode, Flow, Frequency, FeedTime]
   write_validated: []
+  native_mode_values: [constant, pulse, sine, random, feed]
   faults_present: [overcurrent, overvoltage, overtemperature, undervoltage, locked_rotor, no_live_load, UART]
 
 evidence:

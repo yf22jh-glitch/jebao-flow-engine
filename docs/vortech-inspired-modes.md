@@ -17,6 +17,12 @@ EcoTech Marine의 공식 VorTech 제품 설명에 있는 모드를 Jebao Flow En
 | Short Pulse | `native` 예정 | 0.2~2초 펄스는 Jebao 내장 Mode/Frequency로만 실행 |
 | Feed / Night | 특수 운전 모드 | 이전 상태 저장·복원 및 출력 상한 적용 |
 
+보유한 Local Wavemaker Pro의 제품 스키마에는 `pulse`, `sine`, `constant`, `random`,
+`tidal`, `nutrient_transport`, `circulation`, `feed`, `custom` 모드가 정의되어 있습니다.
+따라서 Pro 모델에서는 짧은 파동을 장비 내부에서 만들고 그룹 엔진이 장기 envelope와 펌프
+간 위상을 조정할 수 있습니다. 모드 번호와 payload 생성까지 오프라인 검증됐지만 실제
+장비가 각 write를 적용하는지는 아직 검증하지 않았습니다.
+
 ## 안전 경계
 
 - `lagoon`, `reef_crest`의 `period_seconds`는 외부 출력 목표가 바뀌는 시간 단위입니다.
