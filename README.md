@@ -67,6 +67,7 @@ jebao-flowctl discover --target 192.168.20.255 --json
 
 ```bash
 jebao-flowctl probe 192.168.20.41 192.168.20.42 --json
+jebao-flowctl probe 192.168.20.41 --decode --json
 ```
 
 ## Docker
