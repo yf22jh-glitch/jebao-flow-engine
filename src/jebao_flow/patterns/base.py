@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 
 from jebao_flow.groups.models import GroupConfig, GroupMember, GroupRuntime
 from jebao_flow.protocol.models import DeviceTarget
-from jebao_flow.safety.limits import PowerLimits, clamp_enabled_power
+from jebao_flow.safety.limits import PowerLimits, clamp, clamp_enabled_power
 
 
 class Pattern(ABC):
@@ -42,6 +42,10 @@ def effective_period(group: GroupConfig, runtime: GroupRuntime) -> float:
 
 def effective_power(group: GroupConfig, runtime: GroupRuntime) -> int:
     return group.default.power if runtime.power is None else runtime.power
+
+
+def effective_ceiling(group: GroupConfig, runtime: GroupRuntime, limits: PowerLimits) -> float:
+    return clamp(effective_power(group, runtime), limits.min_power, limits.max_power)
 
 
 def cycle_fraction(
