@@ -14,13 +14,34 @@ mqtt:
 runtime:
   state_path: /data/state.json
   log_level: INFO
+  # Observer mode rejects every MQTT control command and forces the LAN write gate closed.
+  mode: observer
   dry_run: true
+
+observer:
+  enabled: true
+  journal_path: /data/observations.jsonl
+  # Use the directed broadcast address of the isolated IoT VLAN when needed.
+  targets:
+    - 255.255.255.255
+  bind_address: 0.0.0.0
+  discovery_timeout_seconds: 3
+  rediscovery_interval_seconds: 30
+  poll_interval_seconds: 5
+  # Unchanged observations stay in memory; MQTT/HA freshness is limited to avoid Recorder growth.
+  publish_heartbeat_seconds: 300
+  reconnect_initial_seconds: 2
+  reconnect_max_seconds: 60
 
 devices:
   - id: wavemaker_left
     name: 왼쪽 메인 수류모터
     type: wavemaker
     discovery: auto
+    # Put the real values only in the private home-server config. Repeat for every device.
+    # identity:
+    #   device_id: replace_with_gizwits_device_id
+    #   mac_address: replace_with_12_hex_mac
     limits:
       min_power: 30
       max_power: 80

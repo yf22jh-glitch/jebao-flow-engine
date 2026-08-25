@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Annotated, Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from jebao_flow.groups.models import GroupConfig, Identifier, PatternKind
 from jebao_flow.safety.limits import PowerLimits
@@ -21,6 +28,13 @@ class DeviceType(StrEnum):
     WAVEMAKER = "wavemaker"
     RETURN_PUMP = "return_pump"
     DOSING_PUMP = "dosing_pump"
+
+
+class RuntimeMode(StrEnum):
+    """Top-level safety mode for the daemon."""
+
+    OBSERVER = "observer"
+    CONTROL = "control"
 
 
 class InstanceConfig(BaseModel):
@@ -52,7 +66,62 @@ class RuntimeConfig(BaseModel):
 
     state_path: Path = Path("/data/state.json")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    dry_run: bool = False
+    mode: RuntimeMode = RuntimeMode.OBSERVER
+    dry_run: bool = True
+
+
+class ObserverConfig(BaseModel):
+    """Conservative LAN polling settings used by the read-only observer."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = True
+    journal_path: Path = Path("/data/observations.jsonl")
+    targets: tuple[NonEmptyString, ...] = ("255.255.255.255",)
+    bind_address: NonEmptyString = "0.0.0.0"
+    discovery_timeout_seconds: float = Field(default=3, gt=0, le=30)
+    rediscovery_interval_seconds: float = Field(default=30, ge=5, le=3600)
+    poll_interval_seconds: float = Field(default=5, ge=1, le=3600)
+    publish_heartbeat_seconds: float = Field(default=300, ge=30, le=86400)
+    reconnect_initial_seconds: float = Field(default=2, ge=0.1, le=300)
+    reconnect_max_seconds: float = Field(default=60, ge=1, le=3600)
+
+    @model_validator(mode="after")
+    def validate_backoff(self) -> Self:
+        if self.reconnect_initial_seconds > self.reconnect_max_seconds:
+            raise ValueError("observer reconnect initial delay must not exceed maximum delay")
+        if not self.targets:
+            raise ValueError("observer requires at least one discovery target")
+        return self
+
+
+class DeviceIdentityConfig(BaseModel):
+    """Stable vendor identity used to bind a logical device after discovery.
+
+    Values belong in the private deployment config. They must not be inferred from product type,
+    discovery order, or product key because multiple physical pumps can share those values.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    device_id: NonEmptyString | None = None
+    mac_address: NonEmptyString | None = None
+
+    @field_validator("mac_address")
+    @classmethod
+    def normalize_mac_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        compact = value.replace(":", "").replace("-", "").lower()
+        if len(compact) != 12 or any(character not in "0123456789abcdef" for character in compact):
+            raise ValueError("mac_address must contain exactly 12 hexadecimal characters")
+        return compact
+
+    @model_validator(mode="after")
+    def validate_selector(self) -> Self:
+        if self.device_id is None and self.mac_address is None:
+            raise ValueError("device identity requires device_id or mac_address")
+        return self
 
 
 class DeviceControlConfig(BaseModel):
@@ -75,6 +144,7 @@ class DeviceConfig(BaseModel):
     product_key: ProductKey | None = None
     address: str | None = None
     discovery: Literal["auto"] | None = "auto"
+    identity: DeviceIdentityConfig | None = None
     enabled: bool = True
     limits: PowerLimits = Field(default_factory=PowerLimits)
     control: DeviceControlConfig = Field(default_factory=DeviceControlConfig)
@@ -116,6 +186,7 @@ class AppConfig(BaseModel):
     instance: InstanceConfig
     mqtt: MqttConfig
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+    observer: ObserverConfig = Field(default_factory=ObserverConfig)
     devices: tuple[DeviceConfig, ...] = Field(min_length=1)
     groups: tuple[GroupConfig, ...] = Field(default=())
     modes: ModesConfig = Field(default_factory=ModesConfig)
@@ -136,6 +207,38 @@ class AppConfig(BaseModel):
             if missing:
                 missing_list = ", ".join(sorted(missing))
                 raise ValueError(f"group {group.id!r} references unknown devices: {missing_list}")
+
+        vendor_ids = [
+            device.identity.device_id
+            for device in self.devices
+            if device.identity is not None and device.identity.device_id is not None
+        ]
+        if len(vendor_ids) != len(set(vendor_ids)):
+            raise ValueError("device identity device_ids must be unique")
+        mac_addresses = [
+            device.identity.mac_address
+            for device in self.devices
+            if device.identity is not None and device.identity.mac_address is not None
+        ]
+        if len(mac_addresses) != len(set(mac_addresses)):
+            raise ValueError("device identity mac_addresses must be unique")
+
+        if self.runtime.mode is RuntimeMode.CONTROL:
+            # Future pattern names remain part of the public model, but a control-mode
+            # deployment must never start with a calculator that does not exist yet.
+            from jebao_flow.groups.calculator import PatternCalculator
+
+            supported_patterns = PatternCalculator.supported_patterns()
+            unsupported = [
+                f"{group.id}:{group.default.pattern.value}"
+                for group in self.groups
+                if group.default.pattern not in supported_patterns
+            ]
+            if unsupported:
+                raise ValueError(
+                    "control mode group defaults use unimplemented patterns: "
+                    + ", ".join(unsupported)
+                )
         return self
 
 

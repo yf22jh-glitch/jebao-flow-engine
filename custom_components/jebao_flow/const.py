@@ -12,6 +12,8 @@ ATTR_CONTROL = "jebao_flow_control"
 ATTR_DEVICE_ID = "jebao_flow_device_id"
 ATTR_DEVICE_TYPE = "jebao_flow_device_type"
 ATTR_INSTANCE_ID = "jebao_flow_instance_id"
+ATTR_ENTRY_ID = "jebao_flow_entry_id"
+ATTR_TOPIC_PREFIX = "jebao_flow_topic_prefix"
 
 CARD_URL = "/jebao-flow/jebao-flow-card.js"
 

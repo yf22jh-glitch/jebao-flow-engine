@@ -98,7 +98,7 @@ def parse_discovery_response(address: str, data: bytes) -> DiscoveredDevice:
 
 class _DiscoveryProtocol(asyncio.DatagramProtocol):
     def __init__(self) -> None:
-        self.devices: dict[str, DiscoveredDevice] = {}
+        self.devices: dict[tuple[str, str], DiscoveredDevice] = {}
 
     def datagram_received(self, data: bytes, address: tuple[str, int]) -> None:
         try:
@@ -109,7 +109,8 @@ class _DiscoveryProtocol(asyncio.DatagramProtocol):
                 extra={"source_address": address[0], "error": str(error)},
             )
             return
-        self.devices[device.device_id] = device
+        # Keep conflicting addresses visible so the binding resolver can reject ambiguity.
+        self.devices[(device.device_id, device.address)] = device
 
     def error_received(self, exc: Exception) -> None:
         _LOGGER.debug("discovery_socket_error", extra={"error": str(exc)})

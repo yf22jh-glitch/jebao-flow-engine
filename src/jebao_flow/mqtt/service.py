@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 
-from jebao_flow.config import AppConfig
+from jebao_flow.config import AppConfig, RuntimeMode
+from jebao_flow.devices.observer import ObserverEvent, ObserverStatus
 from jebao_flow.groups.calculator import PatternCalculator
-from jebao_flow.groups.models import GroupRuntime, GroupState
+from jebao_flow.groups.models import GroupRuntime, GroupState, PatternKind
 from jebao_flow.mqtt.models import (
+    ChangeSource,
     DeviceAction,
     DeviceCommand,
     DeviceCommandResult,
@@ -21,10 +26,18 @@ from jebao_flow.mqtt.models import (
     GroupDescriptor,
     GroupMemberState,
     GroupStatePayload,
+    ObservationSource,
     SystemConfigPayload,
 )
 
 _MAX_DEDUPLICATION_ENTRIES = 512
+_LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class StateUpdate:
+    device_ids: tuple[str, ...]
+    group_ids: tuple[str, ...]
 
 
 class GroupControlService:
@@ -42,6 +55,10 @@ class GroupControlService:
             for device in config.devices
         }
         self._device_results: OrderedDict[str, DeviceCommandResult] = OrderedDict()
+        self._dirty_devices: set[str] = set()
+        self._dirty_groups: set[str] = set()
+        self._last_published_seen_at = {device.id: None for device in config.devices}
+        self._update_event = asyncio.Event()
         for group_id in self._groups:
             self._refresh_group_members(group_id, increment_revision=False)
 
@@ -50,6 +67,7 @@ class GroupControlService:
         return SystemConfigPayload(
             instance_id=self._config.instance.id,
             name=self._config.instance.name,
+            runtime_mode=self._config.runtime.mode,
             groups=tuple(
                 GroupDescriptor(id=group.id, name=group.name)
                 for group in self._config.groups
@@ -70,12 +88,23 @@ class GroupControlService:
                         else "simple_equipment"
                     ),
                     controls=self._device_controls(device.id),
+                    observables=self._device_observables(device.id),
                     min_power=device.limits.min_power,
                     max_power=device.limits.max_power,
                 )
                 for device in self._config.devices
             ),
             patterns=tuple(sorted(self._calculator.supported_patterns(), key=str)),
+            features=(
+                ("observer", "hardware_write_lock")
+                if self._config.runtime.mode is RuntimeMode.OBSERVER
+                else (
+                    "feed",
+                    "emergency_stop",
+                    "hardware_write_lock",
+                    "individual_override",
+                )
+            ),
         )
 
     def snapshots(self) -> tuple[GroupStatePayload, ...]:
@@ -96,6 +125,163 @@ class GroupControlService:
         except KeyError as error:
             raise KeyError(f"unknown device {device_id!r}") from error
 
+    async def wait_for_updates(self) -> StateUpdate:
+        """Wait for observer-produced state and coalesce it to the latest snapshots."""
+
+        await self._update_event.wait()
+        self._update_event.clear()
+        update = StateUpdate(
+            device_ids=tuple(sorted(self._dirty_devices)),
+            group_ids=tuple(sorted(self._dirty_groups)),
+        )
+        self._dirty_devices.clear()
+        self._dirty_groups.clear()
+        return update
+
+    def record_observer_event(self, event: ObserverEvent) -> None:
+        """Merge LAN actual state without changing any desired target."""
+
+        current = self._device_states.get(event.device_id)
+        if current is None:
+            _LOGGER.warning(
+                "ignored_observation_for_unknown_device",
+                extra={"device_id": event.device_id},
+            )
+            return
+
+        operational_changed = False
+        configuration_changed = False
+        semantic_changed = False
+        successful_observation = event.state is not None
+        updates: dict[str, object] = {}
+        if event.state is not None:
+            state = event.state
+            if current.last_seen_at is not None and state.observed_at <= current.last_seen_at:
+                return
+            has_baseline = current.last_seen_at is not None
+            operational_changed = has_baseline and (
+                current.actual_enabled,
+                current.actual_power,
+                current.actual_mode,
+                current.actual_frequency,
+            ) != (state.enabled, state.power, state.mode, state.frequency)
+            configuration_changed = (
+                has_baseline and current.observed_attributes != state.observed_attributes
+            )
+            status = "error" if state.error else ("running" if state.enabled else "stopped")
+            semantic_changed = (
+                not has_baseline
+                or operational_changed
+                or configuration_changed
+                or (
+                    current.online,
+                    current.error,
+                    current.status,
+                )
+                != (True, state.error, status)
+            )
+            updates.update(
+                actual_enabled=state.enabled,
+                actual_power=state.power,
+                actual_mode=state.mode,
+                actual_frequency=state.frequency,
+                online=True,
+                error=state.error,
+                last_seen_at=state.observed_at,
+                observed_attributes=state.observed_attributes,
+                observation_source=ObservationSource.LAN_POLL,
+                status=status,
+            )
+            if operational_changed:
+                updates.update(
+                    last_changed_at=state.observed_at,
+                    change_source=ChangeSource.EXTERNAL_OR_NATIVE,
+                )
+                _LOGGER.info(
+                    "observed_device_state_changed",
+                    extra={
+                        "device_id": event.device_id,
+                        "previous_enabled": current.actual_enabled,
+                        "previous_power": current.actual_power,
+                        "previous_mode": current.actual_mode,
+                        "enabled": state.enabled,
+                        "power": state.power,
+                        "mode": state.mode,
+                        "frequency": state.frequency,
+                        "observed_at": state.observed_at.isoformat(),
+                        "change_source": ChangeSource.EXTERNAL_OR_NATIVE,
+                    },
+                )
+            if configuration_changed:
+                updates.update(
+                    last_configuration_changed_at=state.observed_at,
+                    change_source=ChangeSource.EXTERNAL_OR_NATIVE,
+                )
+                _LOGGER.info(
+                    "observed_device_configuration_changed",
+                    extra={
+                        "device_id": event.device_id,
+                        "previous_attributes": current.observed_attributes,
+                        "attributes": state.observed_attributes,
+                        "observed_at": state.observed_at.isoformat(),
+                        "change_source": ChangeSource.EXTERNAL_OR_NATIVE,
+                    },
+                )
+        else:
+            if event.status is ObserverStatus.UNMAPPED:
+                online: bool | None = None
+                status = ObserverStatus.UNMAPPED
+            elif event.status is ObserverStatus.CONNECTING:
+                online = False if current.online is False else current.online
+                status = ObserverStatus.CONNECTING
+            else:
+                online = False
+                status = ObserverStatus.OFFLINE
+            semantic_changed = (
+                current.online,
+                current.error,
+                current.status,
+            ) != (online, event.error, status)
+            updates.update(online=online, error=event.error, status=status)
+
+        if semantic_changed:
+            updates["revision"] = current.revision + 1
+        updated = current.model_copy(update=updates)
+        self._device_states[event.device_id] = updated
+        group_ids = tuple(updated.group_ids)
+        publish_heartbeat = False
+        if successful_observation and event.state is not None:
+            last_published = self._last_published_seen_at[event.device_id]
+            publish_heartbeat = (
+                last_published is None
+                or (event.state.observed_at - last_published).total_seconds()
+                >= self._config.observer.publish_heartbeat_seconds
+            )
+            if semantic_changed or publish_heartbeat:
+                self._last_published_seen_at[event.device_id] = event.state.observed_at
+
+        if semantic_changed or publish_heartbeat:
+            self._mark_dirty(device_ids=(event.device_id,))
+
+        if successful_observation or semantic_changed:
+            for group_id in group_ids:
+                self._refresh_group_observation(
+                    group_id,
+                    increment_revision=semantic_changed,
+                )
+        if semantic_changed or publish_heartbeat:
+            self._mark_dirty(group_ids=group_ids)
+
+    def _mark_dirty(
+        self,
+        *,
+        device_ids: tuple[str, ...] = (),
+        group_ids: tuple[str, ...] = (),
+    ) -> None:
+        self._dirty_devices.update(device_ids)
+        self._dirty_groups.update(group_ids)
+        self._update_event.set()
+
     def apply(self, group_id: str, command: GroupCommand) -> GroupCommandResult:
         previous_result = self._results.get(command.request_id)
         if previous_result is not None:
@@ -112,7 +298,23 @@ class GroupControlService:
                 )
             )
 
+        if self._config.runtime.mode is RuntimeMode.OBSERVER:
+            return self._remember(
+                GroupCommandResult(
+                    request_id=command.request_id,
+                    group_id=group_id,
+                    accepted=False,
+                    revision=self._states[group_id].revision,
+                    reason="observer_mode_read_only",
+                )
+            )
+
         current = self._states[group_id]
+        if (
+            command.pattern is not None
+            and command.pattern not in self._calculator.supported_patterns()
+        ):
+            return self._reject(current, command, "unsupported_pattern")
         if (
             current.status is GroupState.EMERGENCY_STOP
             and command.action is not GroupAction.CLEAR_EMERGENCY
@@ -210,6 +412,9 @@ class GroupControlService:
                 )
             )
 
+        if self._config.runtime.mode is RuntimeMode.OBSERVER:
+            return self._reject_device(current, command, "observer_mode_read_only")
+
         if any(
             self._states[group_id].status is GroupState.EMERGENCY_STOP
             for group_id in current.group_ids
@@ -278,15 +483,23 @@ class GroupControlService:
 
     def _initial_state(self, group_id: str) -> GroupStatePayload:
         group = self._groups[group_id]
-        hardware_writes_locked = self._config.runtime.dry_run or any(
-            not self._device_config(member.device).control.allow_hardware_writes
-            for member in group.members
+        hardware_writes_locked = (
+            self._config.runtime.mode is RuntimeMode.OBSERVER
+            or self._config.runtime.dry_run
+            or any(
+                not self._device_config(member.device).control.allow_hardware_writes
+                for member in group.members
+            )
         )
         state = GroupStatePayload(
             revision=0,
             group_id=group.id,
             name=group.name,
-            status=GroupState.RUNNING if group.enabled else GroupState.STOPPED,
+            status=(
+                GroupState.STARTING
+                if self._config.runtime.mode is RuntimeMode.OBSERVER
+                else GroupState.RUNNING if group.enabled else GroupState.STOPPED
+            ),
             enabled=group.enabled,
             pattern=group.default.pattern,
             power=group.default.power,
@@ -296,6 +509,7 @@ class GroupControlService:
             transition_seconds=group.default.transition_seconds,
             hardware_writes_locked=hardware_writes_locked,
             members={},
+            member_count=len(group.members),
         )
         return state.model_copy(update={"members": self._calculate_members(state)})
 
@@ -326,16 +540,41 @@ class GroupControlService:
                     device_state.actual_enabled if device_state is not None else None
                 ),
                 actual_power=(device_state.actual_power if device_state is not None else None),
+                actual_mode=(device_state.actual_mode if device_state is not None else None),
+                actual_frequency=(
+                    device_state.actual_frequency if device_state is not None else None
+                ),
                 online=(device_state.online if device_state is not None else None),
+                error=(device_state.error if device_state is not None else None),
+                last_seen_at=(device_state.last_seen_at if device_state is not None else None),
+                last_changed_at=(
+                    device_state.last_changed_at if device_state is not None else None
+                ),
+                last_configuration_changed_at=(
+                    device_state.last_configuration_changed_at
+                    if device_state is not None
+                    else None
+                ),
+                observed_attributes=(
+                    device_state.observed_attributes if device_state is not None else {}
+                ),
             )
         return calculated
 
     def _calculate_targets(self, state: GroupStatePayload):
         group = self._groups[state.group_id]
+        pattern = state.pattern
+        if (
+            self._config.runtime.mode is RuntimeMode.OBSERVER
+            and pattern not in self._calculator.supported_patterns()
+        ):
+            # Targets are informational in observer mode. This fallback keeps a future/native
+            # desired value observable without trying to execute unimplemented control code.
+            pattern = PatternKind.CONSTANT
         runtime = GroupRuntime(
             state=state.status,
             enabled=state.enabled,
-            pattern=state.pattern,
+            pattern=pattern,
             power=state.power,
             min_power=state.min_power,
             max_power=state.max_power,
@@ -364,18 +603,22 @@ class GroupControlService:
             type=device.type,
             enabled=enabled,
             power=target_power,
-            status="group_control" if group_ids else "stopped",
+            status="unobserved",
             control_mode=(
                 DeviceControlMode.GROUP if group_ids else DeviceControlMode.STANDALONE
             ),
             group_ids=group_ids,
             hardware_writes_locked=(
-                self._config.runtime.dry_run or not device.control.allow_hardware_writes
+                self._config.runtime.mode is RuntimeMode.OBSERVER
+                or self._config.runtime.dry_run
+                or not device.control.allow_hardware_writes
             ),
         )
 
     def _device_controls(self, device_id: str) -> tuple[str, ...]:
         device = self._device_config(device_id)
+        if self._config.runtime.mode is RuntimeMode.OBSERVER:
+            return ()
         if device.type.value == "dosing_pump":
             return ("status",)
         grouped = any(
@@ -387,6 +630,12 @@ class GroupControlService:
         if grouped:
             controls.append("resume_group")
         return tuple(controls)
+
+    def _device_observables(self, device_id: str) -> tuple[str, ...]:
+        device = self._device_config(device_id)
+        if device.type.value == "dosing_pump":
+            return ("enabled", "error", "schedule")
+        return ("enabled", "power", "mode", "frequency", "error", "schedule")
 
     def _sync_group_devices(self, group_id: str, *, force_group_control: bool) -> None:
         group_state = self._states[group_id]
@@ -417,6 +666,60 @@ class GroupControlService:
         revision = state.revision + 1 if increment_revision else state.revision
         self._states[group_id] = state.model_copy(
             update={"revision": revision, "members": self._calculate_members(state)}
+        )
+
+    def _refresh_group_observation(self, group_id: str, *, increment_revision: bool) -> None:
+        state = self._states[group_id]
+        members = self._calculate_members(state)
+        observed = [member for member in members.values() if member.online is not None]
+        online = [member for member in members.values() if member.online is True]
+        errors = [member for member in members.values() if member.error]
+        if errors and len(errors) == len(members):
+            status = GroupState.ERROR
+        elif errors:
+            status = GroupState.DEGRADED
+        elif len(online) == len(members) and members:
+            status = (
+                GroupState.RUNNING
+                if any(member.actual_enabled is True for member in online)
+                else GroupState.STOPPED
+            )
+        elif online:
+            status = GroupState.DEGRADED
+        elif observed:
+            status = GroupState.ERROR
+        else:
+            status = GroupState.STARTING
+
+        seen_values = [member.last_seen_at for member in members.values() if member.last_seen_at]
+        changed_values = [
+            member.last_changed_at for member in members.values() if member.last_changed_at
+        ]
+        configuration_changed_values = [
+            member.last_configuration_changed_at
+            for member in members.values()
+            if member.last_configuration_changed_at
+        ]
+        self._states[group_id] = state.model_copy(
+            update={
+                "revision": state.revision + 1 if increment_revision else state.revision,
+                "members": members,
+                "status": status,
+                "actual_enabled": (
+                    any(member.actual_enabled is True for member in online)
+                    if online
+                    else None
+                ),
+                "online_member_count": len(online),
+                "member_count": len(members),
+                "last_seen_at": max(seen_values) if seen_values else None,
+                "last_changed_at": max(changed_values) if changed_values else None,
+                "last_configuration_changed_at": (
+                    max(configuration_changed_values)
+                    if configuration_changed_values
+                    else None
+                ),
+            }
         )
 
     def _device_config(self, device_id: str):

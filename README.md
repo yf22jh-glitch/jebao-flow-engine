@@ -4,9 +4,10 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 여러 펌프를 하나의 논리적인 수류 그룹으로 운전하기 위한 프로젝트입니다. 실행 데몬의
 이름은 `jebao-flowd`입니다.
 
-> 현재 상태: 실제 장비의 읽기 전용 검증, 오프라인 control 프레임 생성, MQTT 제어 계약과
-> Home Assistant 커스텀 통합 뼈대까지 완료했습니다. write 잠금은 기본값으로 유지되며 실제
-> 수조 장비 제어에는 아직 사용하면 안 됩니다.
+> 현재 상태: 실제 장비의 읽기 전용 검증과 지속 Observer, 오프라인 control 프레임 생성,
+> MQTT 상태 계약과 Home Assistant 커스텀 통합 뼈대까지 구현했습니다. 기본 실행 모드는
+> `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 실제 수조 제어에는 아직 사용하면
+> 안 됩니다.
 
 ## 구조
 
@@ -27,6 +28,8 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 - 프로토콜 계층과 장비 계층 사이의 추상 인터페이스
 - Gizwits GAgent 프레임 코덱, 인증 세션과 UDP 장비 검색
 - 여러 장비의 인증/raw 상태를 쓰기 없이 확인하는 `jebao-flowctl probe`
+- 안정적인 device ID/MAC 바인딩, 장비별 재접속과 5초 poll을 수행하는 읽기 전용 Observer
+- 실제 상태와 타이머·Auto 설정 단서의 변경 시각 및 안전한 JSONL 변경 기록
 - 보유 제품군 5종의 상태 디코더와 fault 판독
 - 전역·장비별 이중 잠금, 출력 제한, 명령 간격과 read-back 검증을 갖춘 LAN 어댑터
 - 비동기 가상 장비 시뮬레이터
@@ -45,6 +48,8 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 [VorTech 계열 패턴](docs/vortech-inspired-modes.md)을 참고하세요.
 Home Assistant 설치와 카드는
 [Home Assistant 연동 가이드](docs/home-assistant.md)를 참고하세요.
+기존 스케줄을 write 없이 관찰하는 방법과 한계는
+[Observer 모드](docs/observer-mode.md)를 참고하세요.
 
 ## 로컬 개발
 
@@ -89,11 +94,14 @@ MQTT_PASSWORD='replace-on-home-server' \
   docker compose up --build
 ```
 
-현재 Compose 파일은 기본적으로 예제 설정을 읽고 데몬 뼈대를 실행합니다. Linux 홈서버에서
+현재 Compose 파일은 기본적으로 예제 설정을 읽고 Observer 데몬을 실행합니다. Linux 홈서버에서
 UDP 브로드캐스트 검색을 사용할 수 있도록 host network를 기본값으로 둡니다. 실제 배포
 전에는 `config.example.yaml`을 `config.yaml`로 복사해 장비와 MQTT 주소를 수정하고,
 `JEBAO_FLOW_CONFIG`로 그 파일을 마운트합니다. 비밀번호는 저장소 파일이 아니라 홈서버의
 환경 변수나 비밀 저장소로 주입합니다.
+
+각 장비의 실제 `device_id`와 MAC은 공개 예제에 넣지 말고 홈서버의 `config.yaml`에서
+`devices[].identity`로 지정해야 합니다. 정확히 매핑되지 않은 장비는 관찰 연결을 열지 않습니다.
 
 ## 안전 원칙
 

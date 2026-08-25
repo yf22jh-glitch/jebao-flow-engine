@@ -30,3 +30,26 @@ def create_lan_device(
         allow_hardware_writes=control.allow_hardware_writes and not runtime.dry_run,
         session_factory=session_factory,
     )
+
+
+def create_read_only_lan_device(
+    config: DeviceConfig,
+    address: str,
+    product_key: str,
+    *,
+    session_factory: SessionFactory = GizwitsSession,
+) -> LanJebaoDevice:
+    """Build an observer adapter whose hardware-write gate cannot be opened by config."""
+
+    control = config.control
+    return LanJebaoDevice(
+        config.id,
+        address,
+        product_key,
+        power_limits=config.limits,
+        minimum_command_interval_ms=control.minimum_command_interval_ms,
+        readback_delay_ms=control.readback_delay_ms,
+        readback_attempts=control.readback_attempts,
+        allow_hardware_writes=False,
+        session_factory=session_factory,
+    )

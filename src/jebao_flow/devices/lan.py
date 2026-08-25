@@ -264,6 +264,21 @@ class LanJebaoDevice(JebaoDevice):
         mode_value = values.get(self.schema.mode_attribute, "unknown")
         frequency_value = values.get(self.schema.frequency_attribute)
         problems = self.schema.active_problems(values)
+        observed_attributes = {
+            name: value
+            for name, value in values.items()
+            if name.startswith(("Timer", "Auto", "Feed", "Interval"))
+            or name
+            in {
+                "PulseTide",
+                "Linkage",
+                "Cust_Wav_Freq",
+                "channe1",
+                "channe2",
+                "channe3",
+                "channe4",
+            }
+        }
         return DeviceState(
             online=True,
             enabled=enabled,
@@ -271,6 +286,7 @@ class LanJebaoDevice(JebaoDevice):
             mode=mode_value if isinstance(mode_value, str) else f"raw_{mode_value}",
             frequency=None if frequency_value is None else round(float(frequency_value)),
             error=", ".join(problems) if problems else None,
+            observed_attributes=observed_attributes,
             observed_at=datetime.now(UTC),
         )
 

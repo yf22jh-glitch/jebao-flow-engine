@@ -11,8 +11,10 @@ from .const import (
     ATTR_CONTROL,
     ATTR_DEVICE_ID,
     ATTR_DEVICE_TYPE,
+    ATTR_ENTRY_ID,
     ATTR_GROUP_ID,
     ATTR_INSTANCE_ID,
+    ATTR_TOPIC_PREFIX,
     DOMAIN,
 )
 from .runtime import JebaoFlowRuntime
@@ -57,8 +59,11 @@ class JebaoFlowGroupEntity(Entity):
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
             ATTR_INSTANCE_ID: self.runtime.instance_id,
+            ATTR_ENTRY_ID: self.runtime.entry_id,
+            ATTR_TOPIC_PREFIX: self.runtime.topic_prefix,
             ATTR_GROUP_ID: self.group_id,
             ATTR_CONTROL: self.control,
+            "jebao_flow_runtime_mode": self.runtime.runtime_mode,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -78,8 +83,11 @@ def async_setup_group_entities(runtime, entry, async_add_entities, factory) -> N
             group_id = str(group.get("id", ""))
             if not group_id or group_id in known:
                 continue
+            discovered = factory(runtime, group)
+            if not discovered:
+                continue
             known.add(group_id)
-            entities.extend(factory(runtime, group))
+            entities.extend(discovered)
         if entities:
             async_add_entities(entities)
 
@@ -133,9 +141,12 @@ class JebaoFlowDeviceEntity(Entity):
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
             ATTR_INSTANCE_ID: self.runtime.instance_id,
+            ATTR_ENTRY_ID: self.runtime.entry_id,
+            ATTR_TOPIC_PREFIX: self.runtime.topic_prefix,
             ATTR_DEVICE_ID: self.device_id,
             ATTR_DEVICE_TYPE: self.device_type,
             ATTR_CONTROL: self.control,
+            "jebao_flow_runtime_mode": self.runtime.runtime_mode,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -155,8 +166,11 @@ def async_setup_device_entities(runtime, entry, async_add_entities, factory) -> 
             device_id = str(device.get("id", ""))
             if not device_id or device_id in known:
                 continue
+            discovered = factory(runtime, device)
+            if not discovered:
+                continue
             known.add(device_id)
-            entities.extend(factory(runtime, device))
+            entities.extend(discovered)
         if entities:
             async_add_entities(entities)
 

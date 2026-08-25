@@ -48,6 +48,18 @@ Home Assistant 엔티티와 데몬의 MQTT 계약만 사용합니다.
 - 인증정보는 환경 변수나 secret으로 주입하고 로그/저장 상태에 남기지 않습니다.
 - 그룹 소속 펌프를 개별 조작하면 `manual_override`로 전환하고 명시적으로 그룹에 복귀시킵니다.
 
+## 현재 안전 단계: Observer
+
+실제 write 실험 전에는 `runtime.mode: observer`만 사용합니다. 이 모드에서는 MQTT 명령을
+거부하고, 장비 설정에 write 허용값이 잘못 들어 있어도 observer 전용 factory가 하드웨어
+write gate를 강제로 닫습니다. 장비는 공개 설정의 product key나 검색 순서가 아니라 비공개
+설정의 정확한 Gizwits device ID/MAC으로만 논리 장비에 매핑합니다.
+
+Observer는 5초 기본 주기로 실제 전원·출력·모드·주파수와 확인된 Timer/Auto 설정 단서를
+읽어 MQTT와 로컬 JSONL 변경 기록에 반영합니다. 이 값으로 기존 스케줄의 결과와 변경 시간은
+추적할 수 있지만, 명령 출처는 프로토콜에 없으므로 앱·클라우드·장비 자체 중 하나로 단정하지
+않고 `external_or_native`로 기록합니다.
+
 ## 상태 모델
 
 그룹 상태는 `STOPPED`, `STARTING`, `RUNNING`, `FEEDING`, `MAINTENANCE`, `DEGRADED`,
