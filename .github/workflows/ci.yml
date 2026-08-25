@@ -20,4 +20,5 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: ruff check .
       - run: pytest
+      - run: node --check custom_components/jebao_flow/frontend/jebao-flow-card.js
       - run: docker build -t jebao-flow-engine:test .

@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "jebao-flowd 연결",
+        "description": "이 통합은 데몬의 MQTT 토픽에만 연결하며 펌프에 직접 접속하지 않습니다.",
+        "data": {
+          "name": "이름",
+          "topic_prefix": "MQTT 토픽 접두사"
+        }
+      }
+    },
+    "error": {
+      "invalid_topic_prefix": "MQTT 와일드카드가 없는 토픽 접두사를 입력하세요"
+    },
+    "abort": {
+      "already_configured": "이 MQTT 토픽 접두사는 이미 구성되어 있습니다"
+    }
+  }
+}

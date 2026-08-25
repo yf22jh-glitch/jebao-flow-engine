@@ -18,7 +18,7 @@ runtime:
 
 devices:
   - id: wavemaker_left
-    name: 왼쪽 수류모터
+    name: 왼쪽 메인 수류모터
     type: wavemaker
     discovery: auto
     limits:
@@ -33,7 +33,7 @@ devices:
       readback_attempts: 3
 
   - id: wavemaker_right
-    name: 오른쪽 수류모터
+    name: 오른쪽 메인 수류모터
     type: wavemaker
     discovery: auto
     limits:
@@ -46,17 +46,64 @@ devices:
       readback_delay_ms: 500
       readback_attempts: 3
 
+  - id: wavemaker_bar
+    name: 바형 크로스플로우
+    type: wavemaker
+    discovery: auto
+    limits:
+      min_power: 30
+      max_power: 75
+    control:
+      minimum_command_interval_ms: 1000
+      restore_on_reconnect: true
+      allow_hardware_writes: false
+      readback_delay_ms: 500
+      readback_attempts: 3
+
+  - id: return_main
+    name: 메인 리턴펌프
+    type: return_pump
+    discovery: auto
+    limits:
+      min_power: 30
+      max_power: 80
+    control:
+      allow_hardware_writes: false
+
+  - id: return_aux
+    name: 보조 리턴펌프
+    type: return_pump
+    discovery: auto
+    limits:
+      min_power: 30
+      max_power: 80
+    control:
+      allow_hardware_writes: false
+
+  - id: dosing_main
+    name: 도징펌프
+    type: dosing_pump
+    discovery: auto
+    control:
+      allow_hardware_writes: false
+
 groups:
   - id: main_flow
     name: 메인 수류
     enabled: true
     members:
       - device: wavemaker_left
+        role: left
         gain: 1.0
         phase: 0
       - device: wavemaker_right
+        role: right
         gain: 0.85
         phase: 180
+      - device: wavemaker_bar
+        role: crossflow
+        gain: 0.75
+        phase: 90
     default:
       pattern: anti_phase
       power: 65

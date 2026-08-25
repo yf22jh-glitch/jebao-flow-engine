@@ -3,13 +3,13 @@
 ## 목표
 
 Jebao Flow Engine(`jebao-flowd`)은 제바오 수류모터와 리턴펌프를 로컬 네트워크에서 직접
-제어하고, Home Assistant에 MQTT Discovery로 물리 장비와 논리 그룹을 제공합니다.
+제어하고, Home Assistant 커스텀 통합에 MQTT로 물리 장비와 논리 그룹을 제공합니다.
 
-첫 MVP는 수류모터 두 대에 집중합니다.
+첫 MVP는 동일 모델 메인 수류모터 두 대와 바형 크로스플로우 한 대에 집중합니다.
 
 1. 장비 검색, 연결, 전원과 출력 읽기/쓰기
 2. MQTT 상태/명령 및 Home Assistant Discovery
-3. 두 펌프 그룹과 펌프별 `gain`/`phase`
+3. 세 펌프 그룹과 펌프별 `role`/`gain`/`phase`
 4. Constant, Sync, Anti Phase 패턴
 5. 장비/그룹별 출력 제한과 명령 속도 제한
 6. 급여 모드와 이전 상태 복원
@@ -32,6 +32,8 @@ Jebao devices
 
 Home Assistant가 짧은 주기로 펌프별 출력을 계산하지 않습니다. 실제 장비에 명령하는
 프로세스는 `jebao-flowd` 하나이며 기존 직접 제어 통합과 동시에 운용하지 않습니다.
+커스텀 통합과 Lovelace 카드는 장비 LAN 주소나 Jebao/Gizwits 프로토콜을 알지 못하며,
+Home Assistant 엔티티와 데몬의 MQTT 계약만 사용합니다.
 
 ## 설계 불변 조건
 
@@ -44,6 +46,7 @@ Home Assistant가 짧은 주기로 펌프별 출력을 계산하지 않습니다
 - MQTT 연결 중단만으로 운전을 멈추지 않습니다.
 - 설정과 외부 명령은 엄격하게 검증합니다.
 - 인증정보는 환경 변수나 secret으로 주입하고 로그/저장 상태에 남기지 않습니다.
+- 그룹 소속 펌프를 개별 조작하면 `manual_override`로 전환하고 명시적으로 그룹에 복귀시킵니다.
 
 ## 상태 모델
 
@@ -76,4 +79,3 @@ Home Assistant가 짧은 주기로 펌프별 출력을 계산하지 않습니다
 실제 LAN 드라이버를 구현하기 전 모델명, 펌웨어, product key, 속성 스키마, 출력 범위와
 단계, push 지원, 재부팅 동작, 동시 로컬 클라이언트 지원 여부를 장비별 Capability 문서로
 확정해야 합니다.
-

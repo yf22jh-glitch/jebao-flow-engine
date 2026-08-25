@@ -52,10 +52,20 @@ class OfflinePolicy(StrEnum):
     FALLBACK_CONSTANT = "fallback_constant"
 
 
+class GroupMemberRole(StrEnum):
+    """Installation role used for diagnostics and operator-facing UIs."""
+
+    LEFT = "left"
+    RIGHT = "right"
+    CROSSFLOW = "crossflow"
+    SUPPORT = "support"
+
+
 class GroupMember(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     device: Identifier
+    role: GroupMemberRole = GroupMemberRole.SUPPORT
     gain: float = Field(default=1.0, gt=0, le=10)
     phase: float = Field(default=0, ge=0, lt=360)
     invert: bool = False

@@ -1,0 +1,13 @@
+{
+  "domain": "jebao_flow",
+  "name": "Jebao Flow Engine",
+  "version": "0.1.0",
+  "codeowners": ["@yf22jh-glitch"],
+  "config_flow": true,
+  "dependencies": ["http", "mqtt"],
+  "documentation": "https://github.com/yf22jh-glitch/jebao-flow-engine",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/yf22jh-glitch/jebao-flow-engine/issues",
+  "requirements": []
+}

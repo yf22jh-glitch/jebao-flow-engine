@@ -13,8 +13,16 @@ def test_example_configuration_is_valid() -> None:
     config = load_config(ROOT / "config.example.yaml")
 
     assert config.instance.id == "main"
-    assert [device.id for device in config.devices] == ["wavemaker_left", "wavemaker_right"]
+    assert [device.id for device in config.devices] == [
+        "wavemaker_left",
+        "wavemaker_right",
+        "wavemaker_bar",
+        "return_main",
+        "return_aux",
+        "dosing_main",
+    ]
     assert config.groups[0].members[1].phase == 180
+    assert config.groups[0].members[2].role == "crossflow"
     assert config.runtime.dry_run is True
     assert all(not device.control.allow_hardware_writes for device in config.devices)
 
