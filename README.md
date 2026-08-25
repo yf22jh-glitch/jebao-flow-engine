@@ -60,6 +60,13 @@ jebao-flowctl discover --timeout 5
 jebao-flowctl discover --target 192.168.20.255 --json
 ```
 
+검색으로 확인한 주소에서 인증과 raw 상태 조회만 수행하려면 `probe`를 사용합니다. passcode는
+출력하지 않으며 장비에 control/write 프레임을 보내지 않습니다.
+
+```bash
+jebao-flowctl probe 192.168.20.41 192.168.20.42 --json
+```
+
 ## Docker
 
 ```bash
