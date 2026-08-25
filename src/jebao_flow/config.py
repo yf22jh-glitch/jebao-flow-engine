@@ -14,6 +14,7 @@ from jebao_flow.groups.models import GroupConfig, Identifier, PatternKind
 from jebao_flow.safety.limits import PowerLimits
 
 NonEmptyString = Annotated[str, StringConstraints(min_length=1)]
+ProductKey = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 
 
 class DeviceType(StrEnum):
@@ -58,6 +59,9 @@ class DeviceControlConfig(BaseModel):
 
     minimum_command_interval_ms: int = Field(default=1000, ge=100)
     restore_on_reconnect: bool = True
+    allow_hardware_writes: bool = False
+    readback_delay_ms: int = Field(default=500, ge=0)
+    readback_attempts: int = Field(default=3, ge=1, le=10)
 
 
 class DeviceConfig(BaseModel):
@@ -67,6 +71,7 @@ class DeviceConfig(BaseModel):
     name: NonEmptyString
     type: DeviceType
     model: str = "unknown"
+    product_key: ProductKey | None = None
     address: str | None = None
     discovery: Literal["auto"] | None = "auto"
     enabled: bool = True
@@ -140,4 +145,3 @@ def load_config(path: str | Path) -> AppConfig:
     if not isinstance(raw, dict):
         raise ValueError("configuration root must be a mapping")
     return AppConfig.model_validate(raw)
-

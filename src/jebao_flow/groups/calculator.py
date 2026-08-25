@@ -20,5 +20,15 @@ class PatternCalculator:
 
     @staticmethod
     def supported_patterns() -> frozenset[PatternKind]:
-        return frozenset({PatternKind.CONSTANT, PatternKind.SYNC, PatternKind.ANTI_PHASE})
-
+        return frozenset(
+            {
+                PatternKind.CONSTANT,
+                PatternKind.SYNC,
+                PatternKind.ANTI_PHASE,
+                PatternKind.LAGOON,
+                PatternKind.REEF_CREST,
+                PatternKind.GYRE,
+                PatternKind.TIDAL_SWELL,
+                PatternKind.NUTRIENT_TRANSPORT,
+            }
+        )

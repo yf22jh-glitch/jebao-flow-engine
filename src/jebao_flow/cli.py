@@ -13,6 +13,7 @@ from jebao_flow.logging import configure_logging
 from jebao_flow.protocol.discovery import DEFAULT_DISCOVERY_TARGET, GizwitsDiscovery
 from jebao_flow.protocol.errors import ProtocolError
 from jebao_flow.protocol.models import DiscoveredDevice
+from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.session import DEFAULT_CONTROL_PORT, GizwitsSession
 
 
@@ -22,6 +23,9 @@ class ProbeResult:
     success: bool
     state_size: int | None = None
     state_hex: str | None = None
+    product_key: str | None = None
+    schema_name: str | None = None
+    decoded_state: dict[str, object] | None = None
     error: str | None = None
 
 
@@ -44,7 +48,18 @@ def build_parser() -> argparse.ArgumentParser:
     probe = subparsers.add_parser("probe", help="authenticate and read raw state without writes")
     probe.add_argument("address", nargs="+", help="one or more device IPv4 addresses")
     probe.add_argument("--port", type=int, default=DEFAULT_CONTROL_PORT, help="device TCP port")
+    probe.add_argument(
+        "--discovery-port",
+        type=int,
+        default=12414,
+        help="device UDP discovery port used by --decode",
+    )
     probe.add_argument("--timeout", type=float, default=5.0, help="connect/response timeout")
+    probe.add_argument(
+        "--decode",
+        action="store_true",
+        help="discover the product key and decode known operational fields",
+    )
     probe.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     return parser
 
@@ -91,12 +106,24 @@ def _print_probe_results(results: list[ProbeResult], *, as_json: bool) -> None:
     for result in results:
         if result.success:
             print(f"{result.address}  state_size={result.state_size}")
+            if result.schema_name:
+                print(f"  product: {result.schema_name} ({result.product_key})")
+            if result.decoded_state is not None:
+                for name, value in result.decoded_state.items():
+                    print(f"  {name}: {value}")
             print(f"  state_hex: {result.state_hex}")
         else:
             print(f"{result.address}  probe failed: {result.error}")
 
 
-async def _probe_one(address: str, *, port: int, timeout_seconds: float) -> ProbeResult:
+async def _probe_one(
+    address: str,
+    *,
+    port: int,
+    discovery_port: int,
+    timeout_seconds: float,
+    decode: bool,
+) -> ProbeResult:
     session = GizwitsSession(
         address,
         port=port,
@@ -107,13 +134,30 @@ async def _probe_one(address: str, *, port: int, timeout_seconds: float) -> Prob
         await session.connect()
         await session.authenticate()
         state = await session.read_raw_state()
+        if decode:
+            discovery = GizwitsDiscovery(targets=(address,), port=discovery_port)
+            devices = await discovery.discover(timeout_seconds=timeout_seconds)
+            if not devices or not devices[0].product_key:
+                raise ProtocolError(f"could not discover a product key for {address}")
+            product_key = devices[0].product_key
+            schema = get_product_schema(product_key)
+            decoded = schema.decode_status(state)
+            return ProbeResult(
+                address=address,
+                success=True,
+                state_size=len(state),
+                state_hex=state.hex(),
+                product_key=product_key,
+                schema_name=schema.name,
+                decoded_state=decoded,
+            )
         return ProbeResult(
             address=address,
             success=True,
             state_size=len(state),
             state_hex=state.hex(),
         )
-    except ProtocolError as error:
+    except (KeyError, ProtocolError, ValueError) as error:
         return ProbeResult(address=address, success=False, error=str(error))
     finally:
         await session.disconnect()
@@ -123,7 +167,13 @@ async def _probe(args: argparse.Namespace) -> int:
     if args.timeout <= 0:
         raise ValueError("timeout must be positive")
     results = [
-        await _probe_one(address, port=args.port, timeout_seconds=args.timeout)
+        await _probe_one(
+            address,
+            port=args.port,
+            discovery_port=args.discovery_port,
+            timeout_seconds=args.timeout,
+            decode=args.decode,
+        )
         for address in args.address
     ]
     _print_probe_results(results, as_json=args.json)

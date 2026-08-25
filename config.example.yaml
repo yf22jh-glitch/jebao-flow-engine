@@ -27,6 +27,10 @@ devices:
     control:
       minimum_command_interval_ms: 1000
       restore_on_reconnect: true
+      # Keep false until a reviewed low-output hardware test.
+      allow_hardware_writes: false
+      readback_delay_ms: 500
+      readback_attempts: 3
 
   - id: wavemaker_right
     name: 오른쪽 수류모터
@@ -38,6 +42,9 @@ devices:
     control:
       minimum_command_interval_ms: 1000
       restore_on_reconnect: true
+      allow_hardware_writes: false
+      readback_delay_ms: 500
+      readback_attempts: 3
 
 groups:
   - id: main_flow
@@ -70,4 +77,3 @@ modes:
   night:
     max_power: 50
     pattern: constant
-

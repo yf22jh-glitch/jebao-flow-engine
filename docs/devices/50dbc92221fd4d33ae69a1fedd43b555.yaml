@@ -36,6 +36,7 @@ capabilities:
   observed_readable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime]
   schema_declared_writable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime]
   write_validated: []
+  native_mode_values: [pulse, sine, constant, random, tidal, nutrient_transport, circulation, feed, custom]
   linkage_values: [independent, master, synchronous_slave, asynchronous_slave]
   faults_present: [overcurrent, overvoltage, overtemperature, undervoltage, locked_rotor, no_live_load, UART]
 

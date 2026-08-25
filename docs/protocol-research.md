@@ -86,3 +86,20 @@ product key 모두 UDP discovery, TCP 연결, 로컬 인증과 raw 상태 읽기
 개별 MAC, device id, 사설 IP와 passcode는 공개 저장소에 기록하지 않습니다. 익명화한
 제품군별 결과는 [검증된 장비 카탈로그](devices/README.md)에 있습니다. 실제 장비에는
 control/write 프레임을 보내지 않았으므로 쓰기 경로는 아직 미검증입니다.
+
+## 실기 제어 전 오프라인 검증
+
+다섯 제품군 중 초기 제어 범위인 펌프 네 제품군에 대해 자체 스키마와 control payload
+생성기를 구현했습니다. schedule 전체를 노출하지 않고도 정확한 프레임 크기를 유지하도록
+제품별 전체 flags/value buffer 크기를 명시합니다.
+
+다음 변경 조합의 완성된 payload를 `markosharknz1/ha-jebao-pumps`의 캡처 기반 구현 결과와
+바이트 단위로 비교했으며 모두 일치했습니다.
+
+- DC Pump Pro: 전원, 출력, 주파수
+- Local Wavemaker: 전원, 네이티브 모드, 출력, 주파수
+- Aquarium Pump: 전원, 모터 속도
+- Local Wavemaker Pro: 전원, 출력, 주파수
+
+비교 과정에서도 프레임은 네트워크로 보내지 않았습니다. 실제 장비 검증 전에는 전역
+`runtime.dry_run: true`와 장비별 `allow_hardware_writes: false`를 유지합니다.

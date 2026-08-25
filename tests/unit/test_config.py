@@ -15,6 +15,8 @@ def test_example_configuration_is_valid() -> None:
     assert config.instance.id == "main"
     assert [device.id for device in config.devices] == ["wavemaker_left", "wavemaker_right"]
     assert config.groups[0].members[1].phase == 180
+    assert config.runtime.dry_run is True
+    assert all(not device.control.allow_hardware_writes for device in config.devices)
 
 
 def test_unknown_group_member_is_rejected() -> None:
@@ -32,3 +34,10 @@ def test_unknown_configuration_key_is_rejected() -> None:
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         AppConfig.model_validate(raw)
 
+
+def test_invalid_product_key_is_rejected() -> None:
+    raw = yaml.safe_load((ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+    raw["devices"][0]["product_key"] = "not-a-product-key"
+
+    with pytest.raises(ValidationError, match="string_pattern_mismatch"):
+        AppConfig.model_validate(raw)

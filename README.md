@@ -4,8 +4,8 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 여러 펌프를 하나의 논리적인 수류 그룹으로 운전하기 위한 프로젝트입니다. 실행 데몬의
 이름은 `jebao-flowd`입니다.
 
-> 현재 상태: 초기 설계와 시뮬레이터 단계입니다. 실제 수조 장비 제어에는 아직 사용하면
-> 안 됩니다.
+> 현재 상태: 실제 장비의 읽기 전용 검증과 오프라인 control 프레임 생성까지 완료했습니다.
+> write 잠금은 기본값으로 유지되며 실제 수조 장비 제어에는 아직 사용하면 안 됩니다.
 
 ## 구조
 
@@ -26,15 +26,19 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 - 프로토콜 계층과 장비 계층 사이의 추상 인터페이스
 - Gizwits GAgent 프레임 코덱, 인증 세션과 UDP 장비 검색
 - 여러 장비의 인증/raw 상태를 쓰기 없이 확인하는 `jebao-flowctl probe`
+- 보유 제품군 5종의 상태 디코더와 fault 판독
+- 전역·장비별 이중 잠금, 출력 제한, 명령 간격과 read-back 검증을 갖춘 LAN 어댑터
 - 비동기 가상 장비 시뮬레이터
-- Constant, Sync, Anti Phase 패턴 계산기
+- Constant, Sync, Anti Phase 및 VorTech 계열에서 영감을 얻은 그룹 패턴 계산기
 - 그룹 및 장비 출력 제한
 - Docker/Compose 실행 뼈대
 - 단위 테스트와 GitHub Actions CI
 
-제품별 데이터 포인트 스키마를 적용하는 실제 장비 어댑터, MQTT 및 Home Assistant
-Discovery는 다음 개발 단계에서 구현합니다. 실제 장비 6대의 읽기 전용 검증 결과와 제품군별
-Capability는 [검증된 장비 카탈로그](docs/devices/README.md)에 정리했습니다.
+MQTT 및 Home Assistant Discovery는 다음 개발 단계에서 구현합니다. 실제 장비 6대의 읽기
+전용 검증 결과와 제품군별 Capability는
+[검증된 장비 카탈로그](docs/devices/README.md)에 정리했습니다. 최초 write 전 절차는
+[실기 제어 전 체크리스트](docs/pre-hardware-test-checklist.md), VorTech 모드 대응은
+[VorTech 계열 패턴](docs/vortech-inspired-modes.md)을 참고하세요.
 
 ## 로컬 개발
 
@@ -67,6 +71,7 @@ jebao-flowctl discover --target 192.168.20.255 --json
 
 ```bash
 jebao-flowctl probe 192.168.20.41 192.168.20.42 --json
+jebao-flowctl probe 192.168.20.41 --decode --json
 ```
 
 ## Docker
