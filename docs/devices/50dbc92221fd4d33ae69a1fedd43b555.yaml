@@ -1,0 +1,47 @@
+identity:
+  catalog_name: Local Wavemaker Pro (WiFi+BLE)
+  physical_model: unknown
+  device_type: wavemaker
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  observed_instances: 2
+  observed_wifi_firmware: [04X3JB0S]
+  observed_gizwits_version: [4.1.4]
+
+protocol:
+  packet_version: "0x00000004"
+  schema_type: standard
+  raw_status_size_bytes: 452
+  discovery_transport: udp
+  discovery_port: 12414
+  control_transport: tcp
+  control_port: 12416
+
+validation:
+  discovery_responded: true
+  local_authentication_succeeded: true
+  raw_state_read_succeeded: true
+  decoded_state_cross_checked: true
+  status_push_observed: false
+  control_write_tested: false
+  control_frames_sent: false
+
+power:
+  attribute: Flow
+  schema_range: [0, 100]
+  safe_operating_minimum: unknown
+  observed_step: unknown
+  zero_equals_off: unknown
+
+capabilities:
+  observed_readable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime]
+  schema_declared_writable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime]
+  write_validated: []
+  linkage_values: [independent, master, synchronous_slave, asynchronous_slave]
+  faults_present: [overcurrent, overvoltage, overtemperature, undervoltage, locked_rotor, no_live_load, UART]
+
+evidence:
+  captured_at: 2026-08-25
+  capture_environment: isolated IoT VLAN through home server and router
+  notes:
+    - Two devices returned complete 452-byte status payloads.
+    - Both live reads decoded as powered on and independent linkage.

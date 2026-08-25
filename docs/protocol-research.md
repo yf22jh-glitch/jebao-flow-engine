@@ -75,3 +75,14 @@
 - 여러 VLAN broadcast 주소를 반복 지정할 수 있는 읽기 전용 `jebao-flowctl discover`
 
 제품별 schema와 안전 계층이 완성되기 전까지 raw write는 진단 CLI에 노출하지 않습니다.
+
+## 실제 장비 읽기 전용 검증
+
+2026-08-25 홈서버에서 라우터를 경유해 격리된 IoT VLAN의 장비 6대를 확인했습니다. 다섯
+product key 모두 UDP discovery, TCP 연결, 로컬 인증과 raw 상태 읽기에 성공했습니다.
+`markosharknz1/ha-jebao-pumps`의 MIT 라이선스 제품 스키마와 디코더를 실행 시점의 읽기 전용
+교차검증에 사용했으며, 해당 코드나 스키마 파일은 이 저장소로 복사하지 않았습니다.
+
+개별 MAC, device id, 사설 IP와 passcode는 공개 저장소에 기록하지 않습니다. 익명화한
+제품군별 결과는 [검증된 장비 카탈로그](devices/README.md)에 있습니다. 실제 장비에는
+control/write 프레임을 보내지 않았으므로 쓰기 경로는 아직 미검증입니다.

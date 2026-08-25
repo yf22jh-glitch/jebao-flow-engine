@@ -1,0 +1,46 @@
+identity:
+  catalog_name: Aquarium Pump (WiFi+BLE)
+  physical_model: unknown
+  device_type: return_pump
+  product_key: 6a5c47b3ea364ecb841b47f5997a1775
+  observed_instances: 1
+  observed_wifi_firmware: [04D30Q34]
+  observed_gizwits_version: [4.1.4]
+
+protocol:
+  packet_version: "0x00000004"
+  schema_type: standard
+  raw_status_size_bytes: 302
+  discovery_transport: udp
+  discovery_port: 12414
+  control_transport: tcp
+  control_port: 12416
+
+validation:
+  discovery_responded: true
+  local_authentication_succeeded: true
+  raw_state_read_succeeded: true
+  decoded_state_cross_checked: true
+  status_push_observed: false
+  control_write_tested: false
+  control_frames_sent: false
+
+power:
+  attribute: Motor_Speed
+  schema_range: [0, 100]
+  safe_operating_minimum: unknown
+  observed_step: unknown
+  zero_equals_off: unknown
+
+capabilities:
+  observed_readable: [SwitchON, Mode, FeedSwitch, TimerON, AutoMode, Motor_Speed, FeedTime]
+  schema_declared_writable: [SwitchON, Mode, FeedSwitch, TimerON, AutoMode, Motor_Speed, FeedTime]
+  write_validated: []
+  faults_present: [overcurrent, overvoltage, overtemperature, undervoltage, locked_rotor, no_live_load, UART]
+
+evidence:
+  captured_at: 2026-08-25
+  capture_environment: isolated IoT VLAN through home server and router
+  notes:
+    - One device returned a complete 302-byte status payload.
+    - Physical model label and safe minimum output still require an on-site check.

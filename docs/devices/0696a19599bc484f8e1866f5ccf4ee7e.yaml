@@ -1,0 +1,46 @@
+identity:
+  catalog_name: DC Pump Pro (WiFi+BLE)
+  physical_model: unknown
+  device_type: return_pump
+  product_key: 0696a19599bc484f8e1866f5ccf4ee7e
+  observed_instances: 1
+  observed_wifi_firmware: [04X3JB0S]
+  observed_gizwits_version: [4.1.4]
+
+protocol:
+  packet_version: "0x00000004"
+  schema_type: standard
+  raw_status_size_bytes: 402
+  discovery_transport: udp
+  discovery_port: 12414
+  control_transport: tcp
+  control_port: 12416
+
+validation:
+  discovery_responded: true
+  local_authentication_succeeded: true
+  raw_state_read_succeeded: true
+  decoded_state_cross_checked: true
+  status_push_observed: false
+  control_write_tested: false
+  control_frames_sent: false
+
+power:
+  attribute: Flow
+  schema_range: [0, 100]
+  safe_operating_minimum: unknown
+  observed_step: unknown
+  zero_equals_off: unknown
+
+capabilities:
+  observed_readable: [SwitchON, TimerON, Mode, Flow, Frequency, FeedTime]
+  schema_declared_writable: [SwitchON, TimerON, Mode, Flow, Frequency, FeedTime]
+  write_validated: []
+  faults_present: [overcurrent, overvoltage, overtemperature, undervoltage, locked_rotor, no_live_load, UART]
+
+evidence:
+  captured_at: 2026-08-25
+  capture_environment: isolated IoT VLAN through home server and router
+  notes:
+    - One device returned a complete 402-byte status payload.
+    - Physical model label and safe minimum output still require an on-site check.
