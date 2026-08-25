@@ -1,0 +1,42 @@
+identity:
+  catalog_name: Dosing Pump (no AP time-sync)
+  physical_model: unknown
+  device_type: dosing_pump
+  product_key: 5b3c136fd4b74f3fb2a366a254c76c9a
+  observed_instances: 1
+  observed_wifi_firmware: ["04020037"]
+  observed_gizwits_version: [4.1.2]
+
+protocol:
+  packet_version: "0x00000004"
+  schema_type: standard
+  raw_status_size_bytes: 394
+  discovery_transport: udp
+  discovery_port: 12414
+  control_transport: tcp
+  control_port: 12416
+
+validation:
+  discovery_responded: true
+  local_authentication_succeeded: true
+  raw_state_read_succeeded: true
+  decoded_state_cross_checked: true
+  status_push_observed: false
+  control_write_tested: false
+  control_frames_sent: false
+
+capabilities:
+  observed_readable: [switch, channe1, channe2, channe3, channe4]
+  schema_declared_writable: [switch, channe1, channe2, channe3, channe4, calibration, schedules]
+  write_validated: []
+  faults_present: [UART]
+
+scope:
+  mvp_included: false
+  reason: Dosing control is outside the initial wavemaker and return-pump MVP.
+
+evidence:
+  captured_at: 2026-08-25
+  capture_environment: isolated IoT VLAN through home server and router
+  notes:
+    - One device returned a complete 394-byte status payload.

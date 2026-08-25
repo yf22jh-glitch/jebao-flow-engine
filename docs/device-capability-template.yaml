@@ -2,7 +2,7 @@
 identity:
   name: unknown
   model: unknown
-  device_type: wavemaker # wavemaker | return_pump
+  device_type: wavemaker # wavemaker | return_pump | dosing_pump
   product_key: unknown
   firmware_version: unknown
   gizwits_version: unknown
@@ -25,7 +25,8 @@ power:
 
 capabilities:
   readable: []
-  writable: []
+  schema_declared_writable: []
+  write_validated: []
   unsupported: []
 
 attributes:
@@ -50,5 +51,7 @@ native_modes:
 evidence:
   captured_at: null
   capture_environment: null
+  read_only_probe_succeeded: false
+  control_frames_sent: false
   packet_fixture_paths: []
   notes: []

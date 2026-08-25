@@ -25,6 +25,7 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 - Pydantic 기반 YAML 설정 모델과 교차 검증
 - 프로토콜 계층과 장비 계층 사이의 추상 인터페이스
 - Gizwits GAgent 프레임 코덱, 인증 세션과 UDP 장비 검색
+- 여러 장비의 인증/raw 상태를 쓰기 없이 확인하는 `jebao-flowctl probe`
 - 비동기 가상 장비 시뮬레이터
 - Constant, Sync, Anti Phase 패턴 계산기
 - 그룹 및 장비 출력 제한
@@ -32,7 +33,8 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 - 단위 테스트와 GitHub Actions CI
 
 제품별 데이터 포인트 스키마를 적용하는 실제 장비 어댑터, MQTT 및 Home Assistant
-Discovery는 다음 개발 단계에서 구현합니다.
+Discovery는 다음 개발 단계에서 구현합니다. 실제 장비 6대의 읽기 전용 검증 결과와 제품군별
+Capability는 [검증된 장비 카탈로그](docs/devices/README.md)에 정리했습니다.
 
 ## 로컬 개발
 

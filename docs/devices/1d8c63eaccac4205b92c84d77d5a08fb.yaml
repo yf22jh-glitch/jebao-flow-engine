@@ -1,0 +1,48 @@
+identity:
+  catalog_name: Local Wavemaker (with AP time-sync)
+  physical_model: unknown
+  device_type: wavemaker
+  product_key: 1d8c63eaccac4205b92c84d77d5a08fb
+  observed_instances: 1
+  observed_wifi_firmware: ["04020B28"]
+  observed_gizwits_version: [4.1.2]
+
+protocol:
+  packet_version: "0x00000004"
+  schema_type: standard
+  raw_status_size_bytes: 401
+  discovery_transport: udp
+  discovery_port: 12414
+  control_transport: tcp
+  control_port: 12416
+
+validation:
+  discovery_responded: true
+  local_authentication_succeeded: true
+  raw_state_read_succeeded: true
+  decoded_state_cross_checked: true
+  status_push_observed: false
+  control_write_tested: false
+  control_frames_sent: false
+
+power:
+  attribute: Flow
+  schema_range: [0, 100]
+  safe_operating_minimum: unknown
+  observed_step: unknown
+  zero_equals_off: unknown
+
+capabilities:
+  observed_readable: [SwitchON, PulseTide, FeedSwitch, TimerON, Mode, Linkage, Flow, Frequency, FeedTime]
+  schema_declared_writable: [SwitchON, PulseTide, FeedSwitch, TimerON, Mode, Linkage, Flow, Frequency, FeedTime]
+  write_validated: []
+  native_mode_values: [classic, sine, random, constant]
+  linkage_values: [independent, master, slave]
+  faults_present: [overcurrent, overvoltage, overtemperature, undervoltage, locked_rotor, no_live_load, UART]
+
+evidence:
+  captured_at: 2026-08-25
+  capture_environment: isolated IoT VLAN through home server and router
+  notes:
+    - One device returned a complete 401-byte status payload.
+    - The live read decoded as powered on and independent linkage.
