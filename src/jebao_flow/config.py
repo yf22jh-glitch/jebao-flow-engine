@@ -20,6 +20,7 @@ ProductKey = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 class DeviceType(StrEnum):
     WAVEMAKER = "wavemaker"
     RETURN_PUMP = "return_pump"
+    DOSING_PUMP = "dosing_pump"
 
 
 class InstanceConfig(BaseModel):

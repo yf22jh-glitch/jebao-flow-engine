@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to jebao-flowd",
+        "description": "This integration connects only to the daemon's MQTT topics. It never connects directly to a pump.",
+        "data": {
+          "name": "Name",
+          "topic_prefix": "MQTT topic prefix"
+        }
+      }
+    },
+    "error": {
+      "invalid_topic_prefix": "Enter a topic prefix without MQTT wildcards"
+    },
+    "abort": {
+      "already_configured": "This MQTT topic prefix is already configured"
+    }
+  }
+}

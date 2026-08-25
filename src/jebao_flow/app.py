@@ -11,6 +11,7 @@ from pathlib import Path
 
 from jebao_flow.config import AppConfig, load_config
 from jebao_flow.logging import configure_logging
+from jebao_flow.mqtt import GroupControlService, MqttAdapter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,10 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def serve(config: AppConfig) -> None:
-    """Run the daemon shell until a termination signal is received.
+    """Run the daemon MQTT control plane until a termination signal is received.
 
-    Protocol and MQTT workers are intentionally not started in the initial scaffold. Keeping the
-    process lifecycle real makes the same container usable as those workers are added.
+    Physical LAN reconciliation remains write-locked until the hardware test gate is completed.
     """
 
     stop_event = asyncio.Event()
@@ -56,8 +56,11 @@ async def serve(config: AppConfig) -> None:
             "group_count": len(config.groups),
         },
     )
-    _LOGGER.warning("protocol_and_mqtt_workers_not_implemented")
+    group_service = GroupControlService(config)
+    mqtt_adapter = MqttAdapter(config.mqtt, group_service)
+    mqtt_task = asyncio.create_task(mqtt_adapter.run(stop_event), name="mqtt-adapter")
     await stop_event.wait()
+    await mqtt_task
     _LOGGER.info("daemon_stopped", extra={"instance_id": config.instance.id})
 
 
@@ -78,4 +81,3 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:  # pragma: no cover - terminal convenience
         pass
     return 0
-
