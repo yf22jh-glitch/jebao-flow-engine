@@ -154,13 +154,36 @@ class SimulatedJebaoDevice(JebaoDevice):
         await self._write(Capability.FREQUENCY, "frequency", value)
 
     async def set_linkage(self, role: LinkageRole) -> None:
+        await self.write_linkage(role)
+
+    async def write_linkage(
+        self,
+        role: LinkageRole,
+        *,
+        guard: WriteGuard | None = None,
+    ) -> None:
         if not isinstance(role, LinkageRole):
             raise TypeError("linkage role must be a LinkageRole")
         if role not in self._capabilities.linkage_roles:
             raise UnsupportedCapabilityError(
                 f"{self._device_id} does not support linkage {role.value}"
             )
-        await self._write(Capability.LINKAGE, "linkage", role)
+        async with self._lock:
+            self._require_connection()
+            if Capability.LINKAGE not in self._capabilities.writable:
+                raise UnsupportedCapabilityError(
+                    f"{self._device_id} does not support writing linkage"
+                )
+            await self._delay()
+            if guard is not None and guard() is not True:
+                raise SafetyInterlockError(
+                    "simulated device linkage write was blocked by the safety interlock"
+                )
+            now = datetime.now(UTC)
+            self._state = self._state.model_copy(
+                update={"linkage": role, "observed_at": now}
+            )
+            self.commands.append(SimulatedCommand("linkage", role, now))
 
     async def set_timer_enabled(self, enabled: bool) -> None:
         if not isinstance(enabled, bool):

@@ -13,6 +13,7 @@ from jebao_flow.devices import (
     create_lan_device,
     create_read_only_lan_device,
 )
+from jebao_flow.protocol.errors import ProtocolTimeoutError
 from jebao_flow.protocol.models import Capability, DeviceTarget, LinkageRole
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
 from jebao_flow.safety.limits import PowerLimits
@@ -39,6 +40,7 @@ def _pro_state(
 class _FakeSession:
     instances: ClassVar[list["_FakeSession"]] = []
     state = _pro_state()
+    read_failures_remaining = 0
 
     def __init__(self, address: str) -> None:
         self.address = address
@@ -56,6 +58,9 @@ class _FakeSession:
         return b"never-logged"
 
     async def read_raw_state(self) -> bytes:
+        if self.__class__.read_failures_remaining:
+            self.__class__.read_failures_remaining -= 1
+            raise ProtocolTimeoutError("simulated transient read timeout")
         return self.state
 
     async def send_raw_control(self, control_payload: bytes) -> bytes:
@@ -67,6 +72,7 @@ class _FakeSession:
 def _reset_fake_session() -> None:
     _FakeSession.instances.clear()
     _FakeSession.state = _pro_state()
+    _FakeSession.read_failures_remaining = 0
 
 
 def _device(*, allow_writes: bool = False) -> LanJebaoDevice:
@@ -196,6 +202,18 @@ def test_preview_restores_manual_fallback_and_timer_on_in_one_payload() -> None:
     }
 
 
+def test_preview_linkage_sets_only_the_linkage_datapoint_flag() -> None:
+    device = _device()
+
+    plan = device.preview_linkage(LinkageRole.ASYNC_SLAVE)
+
+    assert plan.changes == {"Linkage": LinkageRole.ASYNC_SLAVE}
+    assert plan.payload[0] == 0x01
+    assert plan.payload[1:9] == bytes(7) + bytes([0x04])
+    assert plan.payload[9] == 0x0C
+    assert plan.payload[10:] == bytes(len(plan.payload) - 10)
+
+
 async def test_hardware_write_lock_is_default() -> None:
     device = _device()
     await device.connect()
@@ -217,6 +235,37 @@ async def test_safety_guard_blocks_target_before_lan_send() -> None:
         )
 
     assert _FakeSession.instances[0].sent == []
+
+
+async def test_safety_guard_blocks_linkage_only_write_before_lan_send() -> None:
+    device = _device(allow_writes=True)
+    await device.connect()
+
+    with pytest.raises(SafetyInterlockError, match="safety interlock"):
+        await device.write_linkage(LinkageRole.ASYNC_SLAVE, guard=lambda: False)
+
+    assert _FakeSession.instances[0].sent == []
+
+
+async def test_linkage_only_write_preserves_timer_and_manual_control_fields() -> None:
+    _FakeSession.state = _pro_state(
+        timer_enabled=True,
+        linkage=LinkageRole.ASYNC_SLAVE,
+        power=55,
+    )
+    device = _device(allow_writes=True)
+    await device.connect()
+
+    await device.write_linkage(LinkageRole.ASYNC_SLAVE, guard=lambda: True)
+
+    expected_payload = device.preview_linkage(LinkageRole.ASYNC_SLAVE).payload
+    assert _FakeSession.instances[0].sent == [expected_payload]
+    state = await device.get_state()
+    assert state.timer_enabled is True
+    assert state.power == 55
+    assert state.mode == "constant"
+    assert state.frequency == 32
+    assert state.linkage is LinkageRole.ASYNC_SLAVE
 
 
 @pytest.mark.parametrize("power", [0, 29, 76, 100])
@@ -279,6 +328,31 @@ async def test_write_requires_readback_match() -> None:
     with pytest.raises(StateVerificationError, match="did not apply control"):
         await device.set_power(50)
 
+    assert len(_FakeSession.instances[0].sent) == 1
+
+
+async def test_write_retries_transient_readback_timeout_without_resending_control() -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.read_failures_remaining = 1
+    device = _device(allow_writes=True)
+    await device.connect()
+
+    await device.set_power(50)
+
+    assert _FakeSession.read_failures_remaining == 0
+    assert len(_FakeSession.instances[0].sent) == 1
+
+
+async def test_write_fails_after_bounded_transient_readback_timeouts() -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.read_failures_remaining = 3
+    device = _device(allow_writes=True)
+    await device.connect()
+
+    with pytest.raises(StateVerificationError, match="3 readback attempts") as captured:
+        await device.set_power(50)
+
+    assert isinstance(captured.value.__cause__, ProtocolTimeoutError)
     assert len(_FakeSession.instances[0].sent) == 1
 
 

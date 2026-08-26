@@ -1150,6 +1150,13 @@ class TemporaryLinkageController:
 
         record = await self._reconcile_exactly_restored_devices(record)
         exactly_restored = set(record.restored_device_ids)
+        # A transient write/read failure can leave a local diagnostic behind even though the
+        # final fresh read proves that the device is now exactly restored.  Durable reconciliation
+        # is authoritative: retaining that stale error would put the same device in both the
+        # restored and failed sets, violating the journal model and masking the primary operation
+        # error with a secondary rollback exception.
+        for device_id in exactly_restored:
+            errors.pop(device_id, None)
         for snapshot in record.snapshots:
             if snapshot.device_id not in exactly_restored:
                 errors.setdefault(snapshot.device_id, []).append("final_verification_failed")

@@ -86,6 +86,27 @@ class _FailOnceOnRelationshipDevice(_RecordingDevice):
             raise RuntimeError("simulated ACK loss after apply")
 
 
+class _FailRelationshipAndRestoreAckDevice(_RecordingDevice):
+    """Apply both writes but lose their ACKs once to exercise final reconciliation."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.relationship_ack_lost = False
+        self.restore_ack_lost = False
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        await super().write_target(target, guard=guard)
+        if (
+            target.linkage in {LinkageRole.SYNC_SLAVE, LinkageRole.ASYNC_SLAVE}
+            and not self.relationship_ack_lost
+        ):
+            self.relationship_ack_lost = True
+            raise RuntimeError("simulated relationship ACK loss after apply")
+        if target.timer_enabled is True and not self.restore_ack_lost:
+            self.restore_ack_lost = True
+            raise RuntimeError("simulated restore ACK loss after apply")
+
+
 class _FailOnceOnBootstrapStepDevice(_RecordingDevice):
     def __init__(self, device_id: str) -> None:
         super().__init__(device_id)
@@ -419,6 +440,29 @@ async def test_apply_failure_after_slave_write_restores_both_snapshots(tmp_path:
     assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
     assert (await master.get_state()).timer_enabled is True
     assert (await slave.get_state()).timer_enabled is True
+
+
+async def test_final_exact_reconciliation_clears_transient_restore_error(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=44, frequency=18)
+    slave = await _ready_device(
+        "slave",
+        device_class=_FailRelationshipAndRestoreAckDevice,
+        power=51,
+        frequency=24,
+    )
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+
+    with pytest.raises(LinkageApplyError, match="failed and was restored"):
+        await _controller(master, slave, store).run(_spec())
+
+    assert store.load() is None
+    slave_state = await slave.get_state()
+    assert slave_state.power == 51
+    assert slave_state.frequency == 24
+    assert slave_state.linkage is LinkageRole.INDEPENDENT
+    assert slave_state.timer_enabled is True
 
 
 async def test_task_cancellation_is_shielded_until_restore_completes(tmp_path: Path) -> None:

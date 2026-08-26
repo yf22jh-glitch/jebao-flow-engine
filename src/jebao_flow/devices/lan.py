@@ -18,6 +18,7 @@ from jebao_flow.devices.base import (
 )
 from jebao_flow.devices.identity import PhysicalDeviceBinding
 from jebao_flow.protocol.control import build_control_payload
+from jebao_flow.protocol.errors import ProtocolError
 from jebao_flow.protocol.models import (
     Capability,
     DeviceCapabilities,
@@ -221,6 +222,14 @@ class LanJebaoDevice(JebaoDevice):
         await self._apply_changes({attribute: value})
 
     async def set_linkage(self, role: LinkageRole) -> None:
+        await self.write_linkage(role)
+
+    async def write_linkage(
+        self,
+        role: LinkageRole,
+        *,
+        guard: WriteGuard | None = None,
+    ) -> None:
         if not isinstance(role, LinkageRole):
             raise TypeError("linkage role must be a LinkageRole")
         attribute_name = self._require_logical_attribute(Capability.LINKAGE)
@@ -229,7 +238,7 @@ class LanJebaoDevice(JebaoDevice):
             raise UnsupportedCapabilityError(
                 f"{self.schema.name} linkage {role.value!r} is unsupported; expected {choices}"
             )
-        await self._apply_changes({attribute_name: role})
+        await self._apply_changes({attribute_name: role}, guard=guard)
 
     async def set_timer_enabled(self, enabled: bool) -> None:
         if not isinstance(enabled, bool):
@@ -239,6 +248,22 @@ class LanJebaoDevice(JebaoDevice):
 
     def preview_target(self, target: DeviceTarget) -> ControlPlan:
         changes = self._target_changes(target)
+        return ControlPlan(
+            product_key=self.schema.product_key,
+            changes=changes,
+            payload=build_control_payload(self.schema, changes),
+        )
+
+    def preview_linkage(self, role: LinkageRole) -> ControlPlan:
+        if not isinstance(role, LinkageRole):
+            raise TypeError("linkage role must be a LinkageRole")
+        attribute_name = self._require_logical_attribute(Capability.LINKAGE)
+        if role not in self.capabilities.linkage_roles:
+            choices = ", ".join(sorted(value.value for value in self.capabilities.linkage_roles))
+            raise UnsupportedCapabilityError(
+                f"{self.schema.name} linkage {role.value!r} is unsupported; expected {choices}"
+            )
+        changes = {attribute_name: role}
         return ControlPlan(
             product_key=self.schema.product_key,
             changes=changes,
@@ -326,7 +351,15 @@ class LanJebaoDevice(JebaoDevice):
                 if self._readback_delay:
                     await asyncio.sleep(self._readback_delay)
                 self._require_write_guard(guard)
-                values = await self._read_values()
+                try:
+                    values = await self._read_values()
+                except (ProtocolError, ValueError) as error:
+                    if attempt + 1 == self._readback_attempts:
+                        raise StateVerificationError(
+                            f"device {self._device_id!r} could not verify control after "
+                            f"{self._readback_attempts} readback attempts"
+                        ) from error
+                    continue
                 if all(values.get(name) == expected for name, expected in changes.items()):
                     self._last_sent_values.update(changes)
                     return

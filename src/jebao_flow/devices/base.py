@@ -77,6 +77,17 @@ class JebaoDevice(ABC):
     @abstractmethod
     async def set_linkage(self, role: LinkageRole) -> None: ...
 
+    async def write_linkage(
+        self,
+        role: LinkageRole,
+        *,
+        guard: WriteGuard | None = None,
+    ) -> None:
+        """Write only the linkage datapoint under a last-moment safety guard."""
+
+        del role, guard
+        raise UnsupportedCapabilityError("guarded linkage-only writes are unsupported")
+
     @abstractmethod
     async def set_timer_enabled(self, enabled: bool) -> None: ...
 
