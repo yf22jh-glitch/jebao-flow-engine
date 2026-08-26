@@ -23,8 +23,10 @@ from jebao_flow.devices.observer import (
 )
 from jebao_flow.protocol.models import (
     DeviceCapabilities,
+    DeviceSchedule,
     DeviceState,
     DiscoveredDevice,
+    ScheduleEntry,
 )
 
 PRODUCT_KEY = "50dbc92221fd4d33ae69a1fedd43b555"
@@ -725,3 +727,51 @@ async def test_journal_records_only_safe_decoded_fields(tmp_path: Path) -> None:
     assert "state_hex" not in content
     assert "mac_address" not in content
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_schedule_signature_ignores_device_clock_but_detects_slot_changes() -> None:
+    observed_at = datetime(2026, 8, 26, 0, 51, tzinfo=UTC)
+    entry = ScheduleEntry(
+        slot=0,
+        start="00:00",
+        end="08:01",
+        mode="constant",
+        mode_code=0,
+        parameters={"flow": 60},
+    )
+    state = DeviceState(
+        online=True,
+        enabled=True,
+        power=81,
+        schedule=DeviceSchedule(
+            enabled=True,
+            device_local_time=datetime(2026, 8, 26, 9, 51),
+            entries=(entry,),
+        ),
+        observed_at=observed_at,
+    )
+    clock_only = state.model_copy(
+        update={
+            "schedule": state.schedule.model_copy(
+                update={"device_local_time": datetime(2026, 8, 26, 9, 51, 5)}
+            )
+        }
+    )
+    changed = state.model_copy(
+        update={
+            "schedule": state.schedule.model_copy(
+                update={
+                    "entries": (
+                        entry.model_copy(update={"end": "08:02"}),
+                    )
+                }
+            )
+        }
+    )
+
+    assert ReadOnlyObserver._state_signature(state) == ReadOnlyObserver._state_signature(
+        clock_only
+    )
+    assert ReadOnlyObserver._state_signature(state) != ReadOnlyObserver._state_signature(
+        changed
+    )

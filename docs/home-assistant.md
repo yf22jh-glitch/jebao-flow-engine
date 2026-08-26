@@ -82,6 +82,13 @@ title: 리턴 및 도징
 `TimerON`과 Auto 설정 단서를 표시합니다. 장비별 실제 출력 sensor는 Home Assistant Recorder의
 이력 그래프에서 기존 스케줄의 출력 변화를 확인하는 데 사용할 수 있습니다.
 
+장비가 로컬 시간표를 제공하면 별도 `장비 시간표` sensor가 만들어집니다. sensor 상태는
+해석에 성공한 시간 구간 수이며, `enabled`, `slot_capacity`, `entries`, `invalid_slots` 속성을
+제공합니다.
+초마다 바뀌는 `device_local_time`은 Recorder 이력 증가를 막기 위해 의도적으로 노출하지
+않습니다. 메인 수류 카드와 리턴·도징 카드 모두 제어·관찰 모드에서 시간표를 접이식으로
+표시하며, 해석하지 못한 슬롯은 경고만 보여 줍니다. 이 시간표는 현재 읽기 전용입니다.
+
 여러 데몬 인스턴스에서 같은 논리 ID를 사용하는 경우 `topic_prefix`가 Home Assistant config
 entry까지 구분해 같은 데몬의 그룹·장비 엔티티만 묶습니다. 같은 `instance`가 둘 이상인데
 `topic_prefix`를 생략하면 카드는 임의 선택하지 않고 명시적인 선택을 요청합니다.

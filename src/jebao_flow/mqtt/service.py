@@ -29,6 +29,7 @@ from jebao_flow.mqtt.models import (
     ObservationSource,
     SystemConfigPayload,
 )
+from jebao_flow.protocol.models import DeviceSchedule
 
 _MAX_DEDUPLICATION_ENTRIES = 512
 _LOGGER = logging.getLogger(__name__)
@@ -165,8 +166,10 @@ class GroupControlService:
                 current.actual_mode,
                 current.actual_frequency,
             ) != (state.enabled, state.power, state.mode, state.frequency)
-            configuration_changed = (
-                has_baseline and current.observed_attributes != state.observed_attributes
+            configuration_changed = has_baseline and (
+                current.observed_attributes != state.observed_attributes
+                or self._schedule_configuration(current.schedule)
+                != self._schedule_configuration(state.schedule)
             )
             status = "error" if state.error else ("running" if state.enabled else "stopped")
             semantic_changed = (
@@ -189,6 +192,7 @@ class GroupControlService:
                 error=state.error,
                 last_seen_at=state.observed_at,
                 observed_attributes=state.observed_attributes,
+                schedule=state.schedule,
                 observation_source=ObservationSource.LAN_POLL,
                 status=status,
             )
@@ -223,6 +227,12 @@ class GroupControlService:
                         "device_id": event.device_id,
                         "previous_attributes": current.observed_attributes,
                         "attributes": state.observed_attributes,
+                        "previous_schedule_entries": (
+                            len(current.schedule.entries) if current.schedule else 0
+                        ),
+                        "schedule_entries": (
+                            len(state.schedule.entries) if state.schedule else 0
+                        ),
                         "observed_at": state.observed_at.isoformat(),
                         "change_source": ChangeSource.EXTERNAL_OR_NATIVE,
                     },
@@ -271,6 +281,16 @@ class GroupControlService:
                 )
         if semantic_changed or publish_heartbeat:
             self._mark_dirty(group_ids=group_ids)
+
+    @staticmethod
+    def _schedule_configuration(
+        schedule: DeviceSchedule | None,
+    ) -> dict[str, object] | None:
+        """Return schedule data that excludes the continuously advancing device clock."""
+
+        if schedule is None:
+            return None
+        return schedule.model_dump(mode="json", exclude={"device_local_time"})
 
     def _mark_dirty(
         self,

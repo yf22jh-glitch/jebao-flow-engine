@@ -222,6 +222,11 @@ class JsonlObservationJournal:
             "frequency": state.frequency,
             "error": state.error,
             "observed_attributes": state.observed_attributes,
+            "schedule": (
+                state.schedule.model_dump(mode="json")
+                if state.schedule is not None
+                else None
+            ),
             "observed_at": state.observed_at.isoformat(),
         }
 
@@ -441,6 +446,14 @@ class ReadOnlyObserver:
             state.frequency,
             state.error,
             tuple(sorted(state.observed_attributes.items())),
+            (
+                None
+                if state.schedule is None
+                else state.schedule.model_dump(
+                    mode="json",
+                    exclude={"device_local_time"},
+                )
+            ),
         )
 
 

@@ -90,8 +90,8 @@ control/write 프레임을 보내지 않았으므로 쓰기 경로는 아직 미
 ## 실기 제어 전 오프라인 검증
 
 다섯 제품군 중 초기 제어 범위인 펌프 네 제품군에 대해 자체 스키마와 control payload
-생성기를 구현했습니다. schedule 전체를 노출하지 않고도 정확한 프레임 크기를 유지하도록
-제품별 전체 flags/value buffer 크기를 명시합니다.
+생성기를 구현했습니다. 제품별 전체 flags/value buffer 크기를 명시하고, 같은 status buffer의
+48개 장비 로컬 시간표 슬롯도 제품키별 배치로 읽기 전용 디코딩합니다.
 
 다음 변경 조합의 완성된 payload를 `markosharknz1/ha-jebao-pumps`의 캡처 기반 구현 결과와
 바이트 단위로 비교했으며 모두 일치했습니다.
@@ -103,3 +103,24 @@ control/write 프레임을 보내지 않았으므로 쓰기 경로는 아직 미
 
 비교 과정에서도 프레임은 네트워크로 보내지 않았습니다. 실제 장비 검증 전에는 전역
 `runtime.dry_run: true`와 장비별 `allow_hardware_writes: false`를 유지합니다.
+
+## 장비 시간표 A/B 실측
+
+2026-08-26 DC Pump Pro에서 Jebao 앱으로 Constant Flow 경계를 `08:00`에서 `08:01`로
+변경한 뒤 동일한 LAN read를 비교했습니다. 8바이트 슬롯에서 첫 구간 종료와 다음 Feed 구간
+시작이 모두 `08:01`로 이동했고 나머지 구간은 유지되어, 다음 배치를 실기 상태로 확인했습니다.
+
+```text
+[start hour, start minute, end hour, end minute, mode, flow, frequency, feed value]
+```
+
+Local Wavemaker는 8바이트, Pro는 9바이트, Aquarium Pump는 6바이트 슬롯이므로 길이만으로
+공통 해석하지 않고 product key별 모드·파라미터 의미를 적용합니다. 종료 `24:00`과
+Aquarium Pump의 `00:00–00:00` 전일 구간도 보존합니다. 비어 있지 않지만 검증 범위를 벗어난
+슬롯은 버리거나 추측하지 않고 인덱스를 `invalid_slots`로 게시합니다. 도징 펌프의 채널별
+96바이트 레코드는 배치가 확인될 때까지 지원 대상에서 제외합니다.
+
+DC Pump Pro는 공개 슬롯 설명과 같은 제품의 `AutoMode` 정의가 코드 0~2에서 서로 충돌합니다.
+이번 A/B로 코드 0=`constant`, 현재 슬롯으로 코드 4=`feed`는 확인했지만 코드 1·2의 의미는
+확정하지 않았습니다. 추가 A/B 전에는 각각 `unverified_1`, `unverified_2`로 표시해 펄스·사인
+중 하나라고 추측하지 않습니다.

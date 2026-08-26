@@ -84,6 +84,27 @@ async def test_adapter_reads_protocol_neutral_state_and_faults() -> None:
     assert state.error == "Fault_UART"
 
 
+async def test_adapter_attaches_read_only_schedule_to_device_state() -> None:
+    raw = bytearray(_pro_state(enabled=True, power=55))
+    raw[0] |= 0b10  # TimerON
+    raw[11:443] = bytes([0xEE]) * 432
+    raw[11:20] = bytes.fromhex("000002000128280000")
+    raw[443:451] = bytes((20, 26, 8, 26, 0, 10, 37, 30))
+    _FakeSession.state = bytes(raw)
+    device = _device()
+    await device.connect()
+
+    state = await device.get_state()
+
+    assert state.schedule is not None
+    assert state.schedule.enabled is True
+    assert state.schedule.entries[0].mode == "sine"
+    assert state.schedule.entries[0].parameters["flow"] == 40
+    assert state.model_dump(mode="json")["schedule"]["device_local_time"] == (
+        "2026-08-26T10:37:30"
+    )
+
+
 async def test_preview_builds_atomic_target_without_sending() -> None:
     device = _device()
 

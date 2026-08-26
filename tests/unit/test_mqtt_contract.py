@@ -19,7 +19,36 @@ from jebao_flow.mqtt.models import (
 )
 from jebao_flow.mqtt.service import GroupControlService
 from jebao_flow.mqtt.topics import MqttTopics
-from jebao_flow.protocol.models import DeviceState
+from jebao_flow.protocol.models import DeviceSchedule, DeviceState, ScheduleEntry
+
+
+def _device_schedule(
+    *,
+    boundary: str = "08:01",
+    clock: datetime | None = None,
+) -> DeviceSchedule:
+    return DeviceSchedule(
+        enabled=True,
+        device_local_time=clock,
+        entries=(
+            ScheduleEntry(
+                slot=0,
+                start="00:00",
+                end=boundary,
+                mode="constant",
+                mode_code=0,
+                parameters={"flow": 60, "frequency": 0, "feed_time": 0},
+            ),
+            ScheduleEntry(
+                slot=1,
+                start=boundary,
+                end="22:00",
+                mode="feed",
+                mode_code=4,
+                parameters={"flow": 0, "frequency": 0, "feed_time": 240},
+            ),
+        ),
+    )
 
 
 @pytest.fixture
@@ -405,6 +434,101 @@ def test_second_poll_records_actual_and_configuration_change_times(
     assert device.actual_power == 55
     assert device.last_changed_at == changed_at
     assert device.last_configuration_changed_at == changed_at
+
+
+def test_schedule_baseline_and_change_are_published_without_mutating_desired(
+    observer_service: GroupControlService,
+) -> None:
+    first_at = datetime(2026, 8, 26, 0, 51, tzinfo=UTC)
+    before = observer_service.device_snapshot("return_main")
+    baseline = DeviceState(
+        online=True,
+        enabled=True,
+        power=81,
+        schedule=_device_schedule(
+            boundary="08:00",
+            clock=datetime(2026, 8, 26, 9, 51),
+        ),
+        observed_at=first_at,
+    )
+    observer_service.record_observer_event(
+        ObserverEvent("return_main", ObserverStatus.ONLINE, first_at, state=baseline)
+    )
+    first = observer_service.device_snapshot("return_main")
+
+    assert first.schedule is not None
+    assert first.schedule.entries[0].end == "08:00"
+    assert first.last_configuration_changed_at is None
+    assert (first.enabled, first.power, first.control_mode) == (
+        before.enabled,
+        before.power,
+        before.control_mode,
+    )
+
+    changed_at = first_at + timedelta(minutes=1)
+    changed = baseline.model_copy(
+        update={
+            "schedule": _device_schedule(
+                boundary="08:01",
+                clock=datetime(2026, 8, 26, 9, 52),
+            ),
+            "observed_at": changed_at,
+        }
+    )
+    observer_service.record_observer_event(
+        ObserverEvent("return_main", ObserverStatus.ONLINE, changed_at, state=changed)
+    )
+    device = observer_service.device_snapshot("return_main")
+
+    assert device.schedule is not None
+    assert [entry.end for entry in device.schedule.entries] == ["08:01", "22:00"]
+    assert device.last_configuration_changed_at == changed_at
+    assert device.change_source == "external_or_native"
+    assert (device.enabled, device.power, device.control_mode) == (
+        before.enabled,
+        before.power,
+        before.control_mode,
+    )
+
+
+def test_device_clock_advance_does_not_create_a_schedule_change(
+    observer_service: GroupControlService,
+) -> None:
+    first_at = datetime(2026, 8, 26, 0, 51, tzinfo=UTC)
+    baseline = DeviceState(
+        online=True,
+        enabled=True,
+        power=81,
+        schedule=_device_schedule(clock=datetime(2026, 8, 26, 9, 51)),
+        observed_at=first_at,
+    )
+    observer_service.record_observer_event(
+        ObserverEvent("return_main", ObserverStatus.ONLINE, first_at, state=baseline)
+    )
+    first = observer_service.device_snapshot("return_main")
+
+    second_at = first_at + timedelta(seconds=5)
+    observer_service.record_observer_event(
+        ObserverEvent(
+            "return_main",
+            ObserverStatus.ONLINE,
+            second_at,
+            state=baseline.model_copy(
+                update={
+                    "schedule": _device_schedule(
+                        clock=datetime(2026, 8, 26, 9, 51, 5)
+                    ),
+                    "observed_at": second_at,
+                }
+            ),
+        )
+    )
+    second = observer_service.device_snapshot("return_main")
+
+    assert second.revision == first.revision
+    assert second.last_configuration_changed_at is None
+    assert second.schedule is not None
+    assert second.schedule.device_local_time == datetime(2026, 8, 26, 9, 51, 5)
 
 
 def test_offline_preserves_last_actual_and_recovery_clears_error(
