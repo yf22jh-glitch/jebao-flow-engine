@@ -151,6 +151,49 @@ docker compose exec jebao-flow-recovery \
 마스터와 슬레이브의 실제 유량이 독립적으로 유지되고 원래 TimerOFF 상태로 정확히 돌아온 것이
 확인된 뒤에만 `sine`, 그다음 `async_slave`를 각각 새 operation ID로 시험합니다.
 
+### 활성 스케줄을 잠시 멈추는 일회성 Bootstrap
+
+두 Pro가 아직 첫 write 자격 영수증이 없고 `TimerON=true`인 경우에는 명시적인
+`--bootstrap-active-schedule` 경로만 사용합니다. 이 경로는 스케줄 slot을 쓰거나 지우지 않고,
+현재 `enabled/power/mode/frequency/linkage/TimerON`과 스케줄 구조 해시를 PREPARED journal에 먼저
+fsync합니다. 그다음 두 snapshot을 다시 읽고 각 장비에서 `31% + Constant + Independent +
+TimerOFF → 30% → 31%`를 atomic frame과 fresh read-back으로 검증한 뒤 Async 관계를 적용합니다.
+종료 시 안전 저속·TimerOFF로 분리한 다음, 스케줄 구조가 그대로일 때만 원래 수동 fallback 값과
+TimerON을 하나의 guarded atomic frame으로 복원합니다. 따라서 TimerOFF 상태에서 저장된 고출력
+fallback이 별도 프레임으로 노출되지 않습니다.
+
+Async 슬레이브 출력 변경이 실제로 독립 유지되는지 확인하는 2분 예시는 다음과 같습니다. 전체
+bootstrap 실행은 최대 180초이고 임시 시험·qualification target은 45% 이하로 제한됩니다. 마지막
+atomic 원복 frame만 journal에 저장된 원래 수동 fallback 값을 그대로 사용합니다.
+
+```bash
+docker compose exec jebao-flow-recovery \
+  jebao-flow-hwtest --config /config/hardware-test.yaml preflight \
+  --operation-id scheduled_async_001 \
+  --master wavemaker_left \
+  --slave wavemaker_right \
+  --slave-role async_slave \
+  --mode constant \
+  --master-power 35 \
+  --slave-power 33 \
+  --frequency 20 \
+  --duration 150 \
+  --verification-interval 2 \
+  --bootstrap-active-schedule \
+  --slave-power-after 38 \
+  --power-change-after 60
+```
+
+출력된 `JFL-...` 토큰을 사용해 모든 인수를 동일하게 유지한
+`run-native-linkage`를 실행합니다. ACTIVE 60초 후 슬레이브만 33%에서 38%로 바꾸며, 남은 시간
+동안 master/slave의 fresh read-back을 계속 확인합니다. 요청한 power change가 실행되기 전에
+전체 deadline이 끝나면 성공으로 처리하지 않고 즉시 원복합니다.
+
+이 경로도 정전·컨테이너 강제 종료·VLAN 단절까지 포함한 절대 원복을 보장하지는 않습니다.
+특히 TimerON snapshot이 남은 비정상 종료는 supervisor가 자동으로 다시 켜지 않고
+`recover-linkage --confirm JFR-...` 확인을 요구합니다. 복구 journal이 없어지고 원래 TimerON,
+제어값과 스케줄 해시가 모두 fresh read-back으로 일치하기 전에는 완료로 판단하지 않습니다.
+
 ## 5. 중단·복구
 
 첫 신호는 정상 중지와 exact 원복을 요청합니다. 두 번째 신호는

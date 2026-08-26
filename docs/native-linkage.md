@@ -29,6 +29,11 @@ actuator, MQTT 명령, Home Assistant 버튼에는 아직 연결하지 않았습
   명시적인 latch 해제 전까지 정확한 복원을 보류
 - 두 장비 각각의 최근 단일 write 자격 영수증이 preflight와 첫 linkage frame 직전에 모두
   유효해야 시작
+- 아직 영수증이 없고 두 장비의 유효한 TimerON 스케줄을 잠시 멈춰야 하는 경우, 명시적인
+  schedule-bootstrap 트랜잭션이 journal 뒤 atomic `31% + constant + TimerOFF` frame으로
+  시작해 31→30→31 qualification을 수행하고 성공 시에만 24시간 영수증 발급
+- `async_slave` ACTIVE 중 한 번만 슬레이브 Flow를 변경하고 이후 fresh read-back으로 독립 출력
+  유지 여부를 검증하는 선택적 진단
 - 프로세스가 비정상 종료되면 시험을 재개하지 않고, 최근 TimerOFF 기록만 30초 유예 안에서
   supervisor가 복구하며 stale·TimerON·safety 기록은 현장 확인을 요구
 

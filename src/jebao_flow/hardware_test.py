@@ -61,6 +61,7 @@ from jebao_flow.hardware_safety import (
 )
 from jebao_flow.logging import configure_logging
 from jebao_flow.persistence import (
+    DeviceQualificationReceipt,
     JsonLinkageJournalStore,
     JsonQualificationStore,
     LinkageJournalError,
@@ -72,6 +73,7 @@ from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
 _TOKEN_VERSION = 1
 _MAX_ATTENDED_POWER = 45
 _MAX_ATTENDED_DURATION_SECONDS = 10
+_MAX_SCHEDULE_BOOTSTRAP_DURATION_SECONDS = 180
 _MAX_ATTENDED_COMMAND_INTERVAL_MS = 2000
 _MAX_ATTENDED_READBACK_DELAY_MS = 1000
 _MAX_ATTENDED_READBACK_ATTEMPTS = 3
@@ -396,6 +398,15 @@ class ConfirmingLinkageJournalStore:
         self._require_loaded_record_match = require_loaded_record_match
         self.created_record: LinkageTransactionRecord | None = None
 
+    def _assert_expected_record_unchanged(self) -> None:
+        if (
+            self._require_loaded_record_match
+            and self._delegate.load() != self._expected_loaded_record
+        ):
+            raise ConfirmationMismatchError(
+                "recovery journal changed after confirmation; no restore frame was sent"
+            )
+
     def load(self) -> LinkageTransactionRecord | None:
         self._before_load()
         record = self._delegate.load()
@@ -425,14 +436,33 @@ class ConfirmingLinkageJournalStore:
         self.created_record = record
 
     def save(self, record: LinkageTransactionRecord) -> None:
-        self._delegate.save(record)
+        # An attended recovery may need several bounded attempts. Accept only the exact
+        # successor durably written through this wrapper; a journal changed by any other
+        # writer still fails the next comparison against that successor.
+        self._before_load()
+        self._assert_expected_record_unchanged()
+        try:
+            self._delegate.save(record)
+        except BaseException:
+            # Atomic replace can complete before a later fsync/error is reported. Track the
+            # successor only when the durable file is already byte-semantically that record,
+            # then preserve the original failure for the bounded retry loop.
+            if self._require_loaded_record_match and self._delegate.load() == record:
+                self._expected_loaded_record = record
+            raise
+        if self._require_loaded_record_match:
+            self._expected_loaded_record = record
 
     def clear(self) -> None:
+        self._before_load()
+        self._assert_expected_record_unchanged()
         if self._before_clear is not None:
             # Persist terminal intent before removing the only proof that writes happened.  A
             # STARTED intent without a journal then unambiguously means a pre-first-write crash.
             self._before_clear()
         self._delegate.clear()
+        if self._require_loaded_record_match:
+            self._expected_loaded_record = None
 
 
 def canonical_journal_path(config: AppConfig) -> Path:
@@ -663,6 +693,21 @@ def _add_spec_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--frequency", required=True, type=int)
     parser.add_argument("--duration", type=float, default=10)
     parser.add_argument("--verification-interval", type=float, default=1)
+    parser.add_argument(
+        "--bootstrap-active-schedule",
+        action="store_true",
+        help="journal, pause, qualify and restore an already-active local schedule",
+    )
+    parser.add_argument(
+        "--slave-power-after",
+        type=int,
+        help="change only the active async slave to this power during monitoring",
+    )
+    parser.add_argument(
+        "--power-change-after",
+        type=float,
+        help="seconds after ACTIVE before applying --slave-power-after",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -708,12 +753,23 @@ def _spec_from_args(args: argparse.Namespace) -> LinkageTestSpec:
         frequency=args.frequency,
         duration_seconds=args.duration,
         verification_interval_seconds=args.verification_interval,
+        bootstrap_active_schedule=args.bootstrap_active_schedule,
+        slave_power_after=args.slave_power_after,
+        power_change_after_seconds=args.power_change_after,
     )
-    if max(spec.master_power, spec.slave_power) > _MAX_ATTENDED_POWER:
+    requested_powers = [spec.master_power, spec.slave_power]
+    if spec.slave_power_after is not None:
+        requested_powers.append(spec.slave_power_after)
+    if max(requested_powers) > _MAX_ATTENDED_POWER:
         raise HardwareTestError(f"attended linkage targets are capped at {_MAX_ATTENDED_POWER}%")
-    if spec.duration_seconds > _MAX_ATTENDED_DURATION_SECONDS:
+    duration_cap = (
+        _MAX_SCHEDULE_BOOTSTRAP_DURATION_SECONDS
+        if spec.bootstrap_active_schedule
+        else _MAX_ATTENDED_DURATION_SECONDS
+    )
+    if spec.duration_seconds > duration_cap:
         raise HardwareTestError(
-            f"attended linkage tests are capped at {_MAX_ATTENDED_DURATION_SECONDS} seconds"
+            f"attended linkage tests are capped at {duration_cap} seconds"
         )
     return spec
 
@@ -870,7 +926,11 @@ async def _capture_preview(
         state = await device.get_state()
         if not state.online or state.error:
             raise HardwareTestError("both selected devices must be online and error-free")
-        if state.timer_enabled is not False:
+        if spec.bootstrap_active_schedule and state.timer_enabled is not True:
+            raise HardwareTestError(
+                "schedule bootstrap requires TimerON with a decoded active schedule"
+            )
+        if not spec.bootstrap_active_schedule and state.timer_enabled is not False:
             raise HardwareTestError(
                 "disable TimerON in the vendor app before attended hardware testing"
             )
@@ -882,9 +942,9 @@ async def _capture_preview(
             state,
             physical_binding=physical_binding,
         )
-        if snapshot.mode not in _AUDITED_SNAPSHOT_MODES:
+        if not spec.bootstrap_active_schedule and snapshot.mode not in _AUDITED_SNAPSHOT_MODES:
             raise HardwareTestError("current mode is outside the audited exact-restore modes")
-        if snapshot.power > _MAX_ATTENDED_POWER:
+        if not spec.bootstrap_active_schedule and snapshot.power > _MAX_ATTENDED_POWER:
             raise HardwareTestError(
                 f"current outputs must be at or below {_MAX_ATTENDED_POWER}% before preflight"
             )
@@ -892,16 +952,32 @@ async def _capture_preview(
 
         preview_target = getattr(device, "preview_target", None)
         if callable(preview_target):
-            preview_target(
-                DeviceTarget(
+            if spec.bootstrap_active_schedule:
+                qualification, stepped = (
+                    TemporaryLinkageController._bootstrap_qualification_levels(device)
+                )
+                qualification_target = DeviceTarget(
                     enabled=True,
-                    power=_safe_power(device),
+                    power=qualification,
                     mode="constant",
                     frequency=spec.frequency,
                     linkage=LinkageRole.INDEPENDENT,
                     timer_enabled=False,
                 )
-            )
+                preview_target(qualification_target)
+                preview_target(qualification_target.model_copy(update={"power": stepped}))
+                preview_target(qualification_target)
+            else:
+                preview_target(
+                    DeviceTarget(
+                        enabled=True,
+                        power=_safe_power(device),
+                        mode="constant",
+                        frequency=spec.frequency,
+                        linkage=LinkageRole.INDEPENDENT,
+                        timer_enabled=False,
+                    )
+                )
             preview_target(
                 DeviceTarget(
                     enabled=True,
@@ -909,6 +985,27 @@ async def _capture_preview(
                     mode=spec.mode,
                     frequency=spec.frequency,
                     linkage=roles[device_id],
+                    timer_enabled=False,
+                )
+            )
+            if device_id == spec.slave_device_id and spec.slave_power_after is not None:
+                preview_target(
+                    DeviceTarget(
+                        enabled=True,
+                        power=spec.slave_power_after,
+                        mode=spec.mode,
+                        frequency=spec.frequency,
+                        linkage=spec.slave_role,
+                        timer_enabled=False,
+                    )
+                )
+            preview_target(
+                DeviceTarget(
+                    enabled=True,
+                    power=_safe_power(device),
+                    mode="constant",
+                    frequency=spec.frequency,
+                    linkage=LinkageRole.INDEPENDENT,
                     timer_enabled=False,
                 )
             )
@@ -946,6 +1043,14 @@ def _print_preview(
             f"test={spec.mode}/{target_power}%"
         )
     print(f"Duration: {spec.duration_seconds:g}s")
+    if spec.bootstrap_active_schedule:
+        print("Schedule bootstrap: active TimerON will be paused and exactly restored.")
+    if spec.slave_power_after is not None:
+        print(
+            "Async slave live power check: "
+            f"{spec.slave_power}% -> {spec.slave_power_after}% after "
+            f"{spec.power_change_after_seconds:g}s"
+        )
     print(f"Confirmation token: {token}")
     print(f"Journal directory: {canonical_journal_path(config).parent}")
 
@@ -1009,7 +1114,8 @@ async def _preflight(
         devices = await _build_devices(config, selected, writable=False)
         async with _connected(devices):
             snapshots = await _capture_preview(devices, spec)
-        _require_current_qualifications(qualification_store, snapshots)
+        if not spec.bootstrap_active_schedule:
+            _require_current_qualifications(qualification_store, snapshots)
         token = preview_confirmation_token(config.instance.id, spec, snapshots)
         now = datetime.now(UTC)
         intent_store.save(
@@ -1162,7 +1268,9 @@ async def _run_native_linkage(
             journal_store,
             instance_id=config.instance.id,
             expected_token=intent.confirmation_token,
-            qualification_store=qualification_store,
+            qualification_store=(
+                None if spec.bootstrap_active_schedule else qualification_store
+            ),
             before_clear=mark_terminal_before_clear,
         )
         controller = TemporaryLinkageController(
@@ -1233,6 +1341,40 @@ async def _run_native_linkage(
         if current_intent is None or current_intent.phase is not HardwareTestIntentPhase.TERMINAL:
             # This is normally already durable via the journal wrapper's before-clear hook.
             intent_store.save(_updated_intent(intent, HardwareTestIntentPhase.TERMINAL, "restored"))
+        if spec.bootstrap_active_schedule:
+            created = confirming_store.created_record
+            if created is None or created.snapshots != intent.snapshots:
+                raise HardwareTestError("schedule-bootstrap qualification snapshot is unavailable")
+            expected_qualified = {snapshot.device_id for snapshot in created.snapshots}
+            if set(result.bootstrap_qualified_device_ids) != expected_qualified:
+                raise HardwareTestError(
+                    "schedule-bootstrap qualification did not complete for both devices"
+                )
+            if (
+                spec.slave_power_after is not None
+                and result.slave_power_change_verified is not True
+            ):
+                raise HardwareTestError(
+                    "async slave live power change was not verified; "
+                    "no qualification receipts were issued"
+                )
+            for snapshot in created.snapshots:
+                qualification_power, stepped_power = (
+                    TemporaryLinkageController._bootstrap_qualification_levels(
+                        devices[snapshot.device_id]
+                    )
+                )
+                qualification_store.save(
+                    DeviceQualificationReceipt(
+                        operation_id=spec.operation_id,
+                        device_id=snapshot.device_id,
+                        physical_binding=snapshot.physical_binding,
+                        original_power=qualification_power,
+                        step_power=stepped_power,
+                        completed_at=result.completed_at,
+                        valid_until=result.completed_at + timedelta(hours=24),
+                    )
+                )
     print(
         "Native-linkage test completed and the saved state was restored "
         f"({result.stop_reason.value})."

@@ -214,6 +214,8 @@ def _install_fakes(
     monkeypatch: pytest.MonkeyPatch,
     config: AppConfig,
     devices: dict[str, SimulatedJebaoDevice],
+    *,
+    seed_qualifications: bool = True,
 ) -> None:
     monkeypatch.setattr(hardware_test, "load_config", lambda _: config)
     monkeypatch.setattr(hardware_test, "GizwitsDiscovery", _Discovery)
@@ -227,6 +229,8 @@ def _install_fakes(
         "create_lan_device",
         lambda device, runtime: devices[device.id],
     )
+    if not seed_qualifications:
+        return
     qualification_store = JsonQualificationStore(
         hardware_test.canonical_qualification_directory(config)
     )
@@ -284,6 +288,191 @@ def test_preflight_is_read_only_private_and_arms_exact_snapshot(
     assert hardware_test.canonical_journal_path(config).parent == (
         tmp_path / "shared-hardware-safety"
     )
+
+
+def test_schedule_bootstrap_skips_prior_receipts_steps_async_slave_and_restores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 89), "pro_right": _device("pro_right", 30)}
+    left = devices["pro_left"]
+    left._capabilities = left.capabilities.model_copy(  # noqa: SLF001
+        update={
+            "native_modes": left.capabilities.native_modes | {"random"},
+            "power_limits": PowerLimits(min_power=30, max_power=100),
+        }
+    )
+    left._state = left._state.model_copy(  # noqa: SLF001
+        update={
+            "mode": "random",
+            "frequency": 34,
+            "timer_enabled": True,
+            "schedule": DeviceSchedule(enabled=True),
+        }
+    )
+    right = devices["pro_right"]
+    right._state = right._state.model_copy(  # noqa: SLF001
+        update={
+            "frequency": 32,
+            "timer_enabled": True,
+            "schedule": DeviceSchedule(enabled=True),
+        }
+    )
+    _install_fakes(
+        monkeypatch,
+        config,
+        devices,
+        seed_qualifications=False,
+    )
+    args = _args("preflight")
+    args[args.index("sync_slave")] = "async_slave"
+    args[args.index("sine")] = "constant"
+    args[args.index("0.02")] = "0.08"
+    args.extend(
+        (
+            "--bootstrap-active-schedule",
+            "--slave-power-after",
+            "38",
+            "--power-change-after",
+            "0.02",
+        )
+    )
+
+    assert hardware_test.main(args) == 0
+    token = _token(capsys.readouterr().out)
+    run_args = [*args]
+    run_args[0] = "run-native-linkage"
+    assert hardware_test.main([*run_args, "--confirm", token]) == 0
+
+    assert (left._state.power, left._state.mode, left._state.timer_enabled) == (  # noqa: SLF001
+        89,
+        "random",
+        True,
+    )
+    assert (right._state.power, right._state.mode, right._state.timer_enabled) == (  # noqa: SLF001
+        30,
+        "constant",
+        True,
+    )
+    assert any(command.name == "power" and command.value == 38 for command in right.commands)
+    receipt_store = JsonQualificationStore(hardware_test.canonical_qualification_directory(config))
+    for device in devices.values():
+        binding = device.physical_binding
+        assert binding is not None
+        receipt = receipt_store.load(binding)
+        assert receipt is not None
+        assert (receipt.original_power, receipt.step_power) == (31, 30)
+    assert hardware_test.canonical_journal_path(config).exists() is False
+
+
+def test_schedule_bootstrap_early_stop_restores_but_issues_no_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 89), "pro_right": _device("pro_right", 30)}
+    left = devices["pro_left"]
+    left._capabilities = left.capabilities.model_copy(  # noqa: SLF001
+        update={
+            "native_modes": left.capabilities.native_modes | {"random"},
+            "power_limits": PowerLimits(min_power=30, max_power=100),
+        }
+    )
+    left._state = left._state.model_copy(  # noqa: SLF001
+        update={
+            "mode": "random",
+            "frequency": 34,
+            "timer_enabled": True,
+            "schedule": DeviceSchedule(enabled=True),
+        }
+    )
+    right = devices["pro_right"]
+    right._state = right._state.model_copy(  # noqa: SLF001
+        update={
+            "frequency": 32,
+            "timer_enabled": True,
+            "schedule": DeviceSchedule(enabled=True),
+        }
+    )
+    _install_fakes(monkeypatch, config, devices, seed_qualifications=False)
+    args = _args("preflight")
+    args[args.index("sync_slave")] = "async_slave"
+    args[args.index("sine")] = "constant"
+    args[args.index("0.02")] = "0.5"
+    args.extend(
+        (
+            "--bootstrap-active-schedule",
+            "--slave-power-after",
+            "38",
+            "--power-change-after",
+            "0.4",
+        )
+    )
+
+    assert hardware_test.main(args) == 0
+    token = _token(capsys.readouterr().out)
+    original_run_with_sigint = hardware_test._run_with_sigint
+
+    async def stop_as_soon_as_active(
+        controller: TemporaryLinkageController,
+        spec: LinkageTestSpec,
+        **kwargs: object,
+    ) -> object:
+        interrupt = asyncio.Event()
+        journal_store = JsonLinkageJournalStore(hardware_test.canonical_journal_path(config))
+
+        async def trigger() -> None:
+            while True:
+                record = journal_store.load()
+                if record is not None and record.phase is LinkageTransactionPhase.ACTIVE:
+                    interrupt.set()
+                    return
+                await asyncio.sleep(0)
+
+        trigger_task = asyncio.create_task(trigger())
+        try:
+            return await original_run_with_sigint(
+                controller,
+                spec,
+                interrupt_event=interrupt,
+                **kwargs,  # type: ignore[arg-type]
+            )
+        finally:
+            await trigger_task
+
+    monkeypatch.setattr(hardware_test, "_run_with_sigint", stop_as_soon_as_active)
+    run_args = [*args]
+    run_args[0] = "run-native-linkage"
+
+    assert hardware_test.main([*run_args, "--confirm", token]) == 2
+
+    assert "live power change was not verified" in capsys.readouterr().err
+    assert (left._state.power, left._state.mode, left._state.timer_enabled) == (  # noqa: SLF001
+        89,
+        "random",
+        True,
+    )
+    assert (right._state.power, right._state.mode, right._state.timer_enabled) == (  # noqa: SLF001
+        30,
+        "constant",
+        True,
+    )
+    assert not any(command.name == "power" and command.value == 38 for command in right.commands)
+    receipt_store = JsonQualificationStore(hardware_test.canonical_qualification_directory(config))
+    for device in devices.values():
+        binding = device.physical_binding
+        assert binding is not None
+        assert receipt_store.load(binding) is None
+    assert hardware_test.canonical_journal_path(config).exists() is False
+    intent = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    ).load()
+    assert intent is not None
+    assert intent.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
+    assert intent.outcome == "restored"
 
 
 @pytest.mark.parametrize("unsafe_kind", ["fifo", "hardlink", "mode"])
@@ -407,6 +596,21 @@ def test_attended_duration_is_capped_at_ten_seconds() -> None:
 
     with pytest.raises(hardware_test.HardwareTestError, match="10 seconds"):
         hardware_test._spec_from_args(args)
+
+
+def test_schedule_bootstrap_allows_two_minutes_but_caps_at_three() -> None:
+    values = _args("preflight")
+    values[values.index("sync_slave")] = "async_slave"
+    values[values.index("0.02")] = "120"
+    values.extend(("--bootstrap-active-schedule",))
+    args = hardware_test.build_parser().parse_args(values)
+
+    assert hardware_test._spec_from_args(args).duration_seconds == 120
+
+    too_long = ["180.01" if value == "120" else value for value in values]
+    too_long_args = hardware_test.build_parser().parse_args(too_long)
+    with pytest.raises(hardware_test.HardwareTestError, match="180 seconds"):
+        hardware_test._spec_from_args(too_long_args)
 
 
 def test_physical_lease_is_cross_instance_and_privacy_preserving(tmp_path: Path) -> None:
@@ -832,6 +1036,149 @@ def test_pending_journal_recovers_exact_snapshot_after_confirmation(
     assert devices["pro_left"]._state.timer_enabled is False  # noqa: SLF001
     assert devices["pro_right"]._state.timer_enabled is False  # noqa: SLF001
     assert not hardware_test.canonical_journal_path(config).exists()
+    recovered_intent = intent_store.load()
+    assert recovered_intent is not None
+    assert recovered_intent.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
+    assert recovered_intent.outcome == "recovered"
+
+
+def test_confirming_recovery_store_accepts_only_its_own_saved_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    intent = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    ).load()
+    assert intent is not None
+    now = datetime.now(UTC)
+    record = LinkageTransactionRecord(
+        operation_id=intent.operation_id,
+        phase=LinkageTransactionPhase.ACTIVE,
+        spec=intent.spec,
+        snapshots=intent.snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=10),
+    )
+    delegate = JsonLinkageJournalStore(hardware_test.canonical_journal_path(config))
+    delegate.create(record)
+    confirming = hardware_test.ConfirmingLinkageJournalStore(
+        delegate,
+        instance_id=config.instance.id,
+        expected_token=intent.confirmation_token,
+        expected_loaded_record=record,
+        require_loaded_record_match=True,
+    )
+
+    own_successor = record.model_copy(
+        update={
+            "phase": LinkageTransactionPhase.ROLLING_BACK,
+            "updated_at": now + timedelta(microseconds=1),
+        }
+    )
+    confirming.save(own_successor)
+    assert confirming.load() == own_successor
+
+    external_successor = own_successor.model_copy(
+        update={"updated_at": now + timedelta(microseconds=2)}
+    )
+    delegate.save(external_successor)
+    with pytest.raises(hardware_test.ConfirmationMismatchError, match="journal changed"):
+        confirming.load()
+
+
+def test_attended_recovery_retries_after_its_own_journal_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    intent_store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    intent = intent_store.load()
+    assert intent is not None
+    intent_store.save(
+        intent.model_copy(update={"phase": hardware_test.HardwareTestIntentPhase.STARTED})
+    )
+    now = datetime.now(UTC)
+    journal_store = JsonLinkageJournalStore(hardware_test.canonical_journal_path(config))
+    journal_store.create(
+        LinkageTransactionRecord(
+            operation_id=intent.operation_id,
+            phase=LinkageTransactionPhase.ACTIVE,
+            spec=intent.spec,
+            snapshots=intent.snapshots,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=10),
+        )
+    )
+
+    async def leave_only_slave_active() -> None:
+        slave = devices["pro_right"]
+        await slave.connect()
+        await slave.write_target(
+            hardware_test.DeviceTarget(
+                enabled=True,
+                power=33,
+                mode="sine",
+                frequency=20,
+                linkage=LinkageRole.SYNC_SLAVE,
+                timer_enabled=False,
+            )
+        )
+        await slave.disconnect()
+
+    asyncio.run(leave_only_slave_active())
+    assert hardware_test.main(["recover-linkage"]) == 0
+    recovery_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+
+    slave = devices["pro_right"]
+    original_write_target = slave.write_target
+    failed_once = False
+
+    async def fail_first_control_restore(target: object, **kwargs: object) -> None:
+        nonlocal failed_once
+        if (
+            not failed_once
+            and isinstance(target, hardware_test.DeviceTarget)
+            and target.power == 36
+            and target.timer_enabled is False
+        ):
+            failed_once = True
+            raise OSError("simulated transient restore failure")
+        await original_write_target(target, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(slave, "write_target", fail_first_control_restore)
+    original_recover_once = hardware_test._recover_once
+    attempts = 0
+
+    async def count_recover_attempts(*args: object, **kwargs: object) -> bool:
+        nonlocal attempts
+        attempts += 1
+        return await original_recover_once(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hardware_test, "_recover_once", count_recover_attempts)
+    monkeypatch.setattr(hardware_test, "_RECOVERY_RETRY_SECONDS", 0)
+
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 0
+
+    assert failed_once is True
+    assert attempts == 2
+    assert devices["pro_left"]._state.power == 34  # noqa: SLF001
+    assert devices["pro_right"]._state.power == 36  # noqa: SLF001
+    assert journal_store.load() is None
     recovered_intent = intent_store.load()
     assert recovered_intent is not None
     assert recovered_intent.phase is hardware_test.HardwareTestIntentPhase.TERMINAL

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
@@ -38,7 +39,9 @@ from jebao_flow.protocol.models import (
 
 DeviceIdentifier = Annotated[str, StringConstraints(min_length=1)]
 _AUDITED_SNAPSHOT_MODES = frozenset({"constant", "pulse", "sine"})
+_SCHEDULE_BOOTSTRAP_SNAPSHOT_MODES = _AUDITED_SNAPSHOT_MODES | {"random"}
 _SAFETY_STOP_TIMEOUT_SECONDS = 30.0
+_LOGGER = logging.getLogger(__name__)
 
 
 class LinkageTransactionError(RuntimeError):
@@ -151,6 +154,9 @@ class LinkageTestSpec(BaseModel):
     frequency: int = Field(ge=0, le=100)
     duration_seconds: float = Field(default=30, gt=0, le=900)
     verification_interval_seconds: float = Field(default=1, gt=0, le=30)
+    bootstrap_active_schedule: bool = False
+    slave_power_after: int | None = Field(default=None, ge=0, le=100)
+    power_change_after_seconds: float | None = Field(default=None, gt=0, le=900)
 
     @model_validator(mode="after")
     def validate_relationship(self) -> Self:
@@ -161,6 +167,19 @@ class LinkageTestSpec(BaseModel):
             LinkageRole.ASYNC_SLAVE,
         }:
             raise ValueError("slave_role must be sync_slave or async_slave")
+        if (self.slave_power_after is None) != (self.power_change_after_seconds is None):
+            raise ValueError(
+                "slave_power_after and power_change_after_seconds must be provided together"
+            )
+        if self.slave_power_after is not None:
+            if self.slave_role is not LinkageRole.ASYNC_SLAVE:
+                raise ValueError("a live slave power change requires async_slave")
+            if self.slave_power_after == self.slave_power:
+                raise ValueError("the live slave power change must request a different value")
+            if self.power_change_after_seconds is None:
+                raise AssertionError("validated power change has no change time")
+            if self.power_change_after_seconds >= self.duration_seconds:
+                raise ValueError("the live slave power change must occur before test expiry")
         return self
 
 
@@ -189,9 +208,9 @@ class DeviceControlSnapshot(BaseModel):
     @field_validator("mode")
     @classmethod
     def require_audited_restore_mode(cls, value: str) -> str:
-        if value not in _AUDITED_SNAPSHOT_MODES:
-            audited = ", ".join(sorted(_AUDITED_SNAPSHOT_MODES))
-            raise ValueError(f"snapshot mode must be one of the audited modes: {audited}")
+        if value not in _SCHEDULE_BOOTSTRAP_SNAPSHOT_MODES:
+            audited = ", ".join(sorted(_SCHEDULE_BOOTSTRAP_SNAPSHOT_MODES))
+            raise ValueError(f"snapshot mode must be one of the restorable modes: {audited}")
         return value
 
     @classmethod
@@ -210,11 +229,11 @@ class DeviceControlSnapshot(BaseModel):
             raise LinkagePreflightError(f"device {device_id!r} must start in independent mode")
         if state.timer_enabled is None:
             raise LinkagePreflightError(f"device {device_id!r} did not report TimerON")
-        if state.mode not in _AUDITED_SNAPSHOT_MODES:
-            audited = ", ".join(sorted(_AUDITED_SNAPSHOT_MODES))
+        if state.mode not in _SCHEDULE_BOOTSTRAP_SNAPSHOT_MODES:
+            audited = ", ".join(sorted(_SCHEDULE_BOOTSTRAP_SNAPSHOT_MODES))
             raise LinkagePreflightError(
                 f"device {device_id!r} current mode {state.mode!r} is outside "
-                f"the audited restore modes: {audited}"
+                f"the restorable modes: {audited}"
             )
         if state.timer_enabled:
             schedule = state.schedule
@@ -261,6 +280,7 @@ class LinkageTransactionRecord(BaseModel):
     error: str | None = None
     failed_device_ids: tuple[str, ...] = ()
     restored_device_ids: tuple[str, ...] = ()
+    bootstrap_qualified_device_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_record(self) -> Self:
@@ -277,14 +297,21 @@ class LinkageTransactionRecord(BaseModel):
             raise ValueError("record snapshots must cover exactly the master and slave")
         restored_ids = set(self.restored_device_ids)
         failed_ids = set(self.failed_device_ids)
+        bootstrap_qualified_ids = set(self.bootstrap_qualified_device_ids)
         if len(restored_ids) != len(self.restored_device_ids):
             raise ValueError("restored_device_ids must not contain duplicates")
         if len(failed_ids) != len(self.failed_device_ids):
             raise ValueError("failed_device_ids must not contain duplicates")
+        if len(bootstrap_qualified_ids) != len(self.bootstrap_qualified_device_ids):
+            raise ValueError("bootstrap-qualified device IDs must not contain duplicates")
         if not restored_ids <= snapshot_ids:
             raise ValueError("restored_device_ids must reference transaction snapshots")
         if not failed_ids <= snapshot_ids:
             raise ValueError("failed_device_ids must reference transaction snapshots")
+        if not bootstrap_qualified_ids <= snapshot_ids:
+            raise ValueError("bootstrap-qualified IDs must reference transaction snapshots")
+        if bootstrap_qualified_ids and not self.spec.bootstrap_active_schedule:
+            raise ValueError("only schedule-bootstrap records may qualify devices")
         if restored_ids & failed_ids:
             raise ValueError("restored and failed device IDs must not overlap")
         return self
@@ -296,6 +323,8 @@ class LinkageTestResult(BaseModel):
     operation_id: str
     stop_reason: LinkageStopReason
     completed_at: datetime
+    bootstrap_qualified_device_ids: tuple[str, ...] = ()
+    slave_power_change_verified: bool = False
 
 
 class LinkageJournalStore(Protocol):
@@ -439,14 +468,15 @@ class TemporaryLinkageController:
 
         operation_error: BaseException | None = None
         stop_reason: LinkageStopReason | None = None
+        slave_power_change_verified = False
 
         try:
             record = self._transition(record, LinkageTransactionPhase.APPLYING)
-            await self._stage_devices(record)
+            record = await self._stage_devices(record)
             await self._activate_relationship(record)
             await self._verify_active_relationship(record)
             record = self._transition(record, LinkageTransactionPhase.ACTIVE)
-            stop_reason = await self._monitor_until_stop(record)
+            stop_reason, slave_power_change_verified = await self._monitor_until_stop(record)
         except BaseException as error:
             if self._stop_requested() and self._safety_allows_operation():
                 stop_reason = LinkageStopReason.MANUAL
@@ -477,6 +507,8 @@ class TemporaryLinkageController:
             operation_id=spec.operation_id,
             stop_reason=stop_reason,
             completed_at=datetime.now(UTC),
+            bootstrap_qualified_device_ids=record.bootstrap_qualified_device_ids,
+            slave_power_change_verified=slave_power_change_verified,
         )
 
     async def enforce_safety_stop(
@@ -640,6 +672,20 @@ class TemporaryLinkageController:
                 state,
                 physical_binding=physical_binding,
             )
+            if (
+                not spec.bootstrap_active_schedule
+                and snapshot.mode not in _AUDITED_SNAPSHOT_MODES
+            ):
+                audited = ", ".join(sorted(_AUDITED_SNAPSHOT_MODES))
+                raise LinkagePreflightError(
+                    f"device {device.device_id!r} current mode {snapshot.mode!r} is outside "
+                    f"the audited restore modes: {audited}"
+                )
+            if spec.bootstrap_active_schedule and snapshot.timer_enabled is not True:
+                raise LinkagePreflightError(
+                    f"device {device.device_id!r} must have an active decoded schedule for "
+                    "schedule-bootstrap testing"
+                )
             self._validate_snapshot(device, snapshot)
             snapshots.append(snapshot)
 
@@ -687,6 +733,17 @@ class TemporaryLinkageController:
                 f"device {device.device_id!r} power {power} does not match step "
                 f"{capabilities.power_step}"
             )
+        if spec.slave_power_after is not None and device.device_id == spec.slave_device_id:
+            if not limits.min_power <= spec.slave_power_after <= limits.max_power:
+                raise LinkagePreflightError(
+                    f"device {device.device_id!r} power {spec.slave_power_after} is outside "
+                    f"{limits.min_power}..{limits.max_power}"
+                )
+            if spec.slave_power_after % capabilities.power_step:
+                raise LinkagePreflightError(
+                    f"device {device.device_id!r} power {spec.slave_power_after} does not "
+                    f"match step {capabilities.power_step}"
+                )
 
     @staticmethod
     def _validate_snapshot(
@@ -715,7 +772,12 @@ class TemporaryLinkageController:
                 f"step {capabilities.power_step}"
             )
 
-    async def _stage_devices(self, record: LinkageTransactionRecord) -> None:
+    async def _stage_devices(
+        self,
+        record: LinkageTransactionRecord,
+    ) -> LinkageTransactionRecord:
+        if record.spec.bootstrap_active_schedule:
+            return await self._bootstrap_scheduled_devices(record)
         for snapshot in record.snapshots:
             self._require_forward_write(record)
             device = self._get_device(snapshot.device_id)
@@ -730,6 +792,68 @@ class TemporaryLinkageController:
                 ),
                 guard=lambda: self._forward_write_allowed(record),
             )
+        return record
+
+    async def _bootstrap_scheduled_devices(
+        self,
+        record: LinkageTransactionRecord,
+    ) -> LinkageTransactionRecord:
+        """Qualify first writes while pausing, but never rewriting, an active schedule."""
+
+        # Re-read both snapshots before the first write. A schedule boundary may advance its
+        # separate Auto* fields, but the saved manual fallback control and schedule structure
+        # must still be identical to the armed preview.
+        for snapshot in record.snapshots:
+            state = await self._get_device(snapshot.device_id).get_state()
+            self._assert_snapshot_control(
+                snapshot,
+                state,
+                expected_timer=snapshot.timer_enabled,
+            )
+            self._assert_schedule_unchanged(snapshot, state)
+
+        for snapshot in record.snapshots:
+            device = self._get_device(snapshot.device_id)
+            qualification_power, step_power = self._bootstrap_qualification_levels(device)
+            baseline = DeviceTarget(
+                enabled=True,
+                power=qualification_power,
+                mode="constant",
+                frequency=record.spec.frequency,
+                linkage=LinkageRole.INDEPENDENT,
+                timer_enabled=False,
+            )
+            for target in (
+                baseline,
+                baseline.model_copy(update={"power": step_power}),
+                baseline,
+            ):
+                self._require_forward_write(record)
+                await device.write_target(
+                    target,
+                    guard=lambda current_record=record: self._forward_write_allowed(current_record),
+                )
+                qualification_state = await device.get_state()
+                self._assert_target(device.device_id, qualification_state, target)
+                self._assert_schedule_unchanged(snapshot, qualification_state)
+
+            _LOGGER.info(
+                "schedule-bootstrap qualified device=%s baseline_power=%s step_power=%s",
+                device.device_id,
+                qualification_power,
+                step_power,
+            )
+            qualified = tuple(
+                sorted({*record.bootstrap_qualified_device_ids, snapshot.device_id})
+            )
+            record = record.model_copy(
+                update={
+                    "bootstrap_qualified_device_ids": qualified,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            self._store.save(record)
+        return record
 
     async def _activate_relationship(self, record: LinkageTransactionRecord) -> None:
         spec = record.spec
@@ -760,9 +884,15 @@ class TemporaryLinkageController:
             guard=lambda: self._forward_write_allowed(record),
         )
 
-    async def _verify_active_relationship(self, record: LinkageTransactionRecord) -> None:
+    async def _verify_active_relationship(
+        self,
+        record: LinkageTransactionRecord,
+        *,
+        slave_power: int | None = None,
+    ) -> None:
         self._require_safety_interlock()
         spec = record.spec
+        expected_slave_power = spec.slave_power if slave_power is None else slave_power
         expected = {
             spec.master_device_id: DeviceTarget(
                 enabled=True,
@@ -774,24 +904,40 @@ class TemporaryLinkageController:
             ),
             spec.slave_device_id: DeviceTarget(
                 enabled=True,
-                power=spec.slave_power,
+                power=expected_slave_power,
                 mode=spec.mode,
                 frequency=spec.frequency,
                 linkage=spec.slave_role,
                 timer_enabled=False,
             ),
         }
+        snapshots = {snapshot.device_id: snapshot for snapshot in record.snapshots}
+        observed: dict[str, DeviceState] = {}
         for device_id, target in expected.items():
             state = await self._get_device(device_id).get_state()
             self._assert_target(device_id, state, target)
+            if spec.bootstrap_active_schedule:
+                self._assert_schedule_unchanged(snapshots[device_id], state)
+            observed[device_id] = state
+        _LOGGER.info(
+            "native-linkage readback master_power=%s slave_power=%s slave_role=%s",
+            observed[spec.master_device_id].power,
+            observed[spec.slave_device_id].power,
+            observed[spec.slave_device_id].linkage.value
+            if observed[spec.slave_device_id].linkage is not None
+            else "none",
+        )
 
     async def _monitor_until_stop(
         self,
         record: LinkageTransactionRecord,
-    ) -> LinkageStopReason:
+    ) -> tuple[LinkageStopReason, bool]:
         if self._stop_event is None:
             raise AssertionError("stop event is not initialized")
         loop = asyncio.get_running_loop()
+        monitor_started = loop.time()
+        expected_slave_power = record.spec.slave_power
+        power_changed = False
         wall_remaining = (record.expires_at - datetime.now(UTC)).total_seconds()
         monotonic_deadline = self._operation_monotonic_deadline
         if monotonic_deadline is None:
@@ -803,8 +949,16 @@ class TemporaryLinkageController:
                 monotonic_deadline - loop.time(),
             )
             if remaining <= 0:
-                return LinkageStopReason.TIMEOUT
+                if record.spec.slave_power_after is not None and not power_changed:
+                    raise LinkageTransactionError(
+                        "linkage test expired before the live slave power change"
+                    )
+                return LinkageStopReason.TIMEOUT, power_changed
             interval = min(record.spec.verification_interval_seconds, remaining)
+            change_after = record.spec.power_change_after_seconds
+            if not power_changed and change_after is not None:
+                until_change = change_after - (loop.time() - monitor_started)
+                interval = min(interval, max(0, until_change))
             stop_waiter = asyncio.create_task(self._stop_event.wait())
             safety_waiter = asyncio.create_task(self._safety_interlock.wait_until_blocked())
             waiters = {stop_waiter, safety_waiter}
@@ -822,7 +976,7 @@ class TemporaryLinkageController:
             # A simultaneous emergency stop always wins over a manual normal restore.
             self._require_safety_interlock()
             if stop_waiter in done:
-                return LinkageStopReason.MANUAL
+                return LinkageStopReason.MANUAL, power_changed
             if (
                 min(
                     (record.expires_at - datetime.now(UTC)).total_seconds(),
@@ -830,10 +984,42 @@ class TemporaryLinkageController:
                 )
                 <= 0
             ):
-                return LinkageStopReason.TIMEOUT
+                if record.spec.slave_power_after is not None and not power_changed:
+                    raise LinkageTransactionError(
+                        "linkage test expired before the live slave power change"
+                    )
+                return LinkageStopReason.TIMEOUT, power_changed
+            power_change_sent = False
+            if (
+                not power_changed
+                and record.spec.slave_power_after is not None
+                and record.spec.power_change_after_seconds is not None
+                and loop.time() - monitor_started >= record.spec.power_change_after_seconds
+            ):
+                self._require_forward_write(record)
+                expected_slave_power = record.spec.slave_power_after
+                slave = self._get_device(record.spec.slave_device_id)
+                await slave.write_target(
+                    DeviceTarget(
+                        enabled=True,
+                        power=expected_slave_power,
+                        mode=record.spec.mode,
+                        frequency=record.spec.frequency,
+                        linkage=record.spec.slave_role,
+                        timer_enabled=False,
+                    ),
+                    guard=lambda: self._forward_write_allowed(record),
+                )
+                power_change_sent = True
+                _LOGGER.info(
+                    "native-linkage requested live slave power change power=%s",
+                    expected_slave_power,
+                )
             # Detect the exact behavior this diagnostic is intended to measure: a native master
             # broadcast must not silently replace the requested per-slave Flow.
-            await self._verify_active_relationship(record)
+            await self._verify_active_relationship(record, slave_power=expected_slave_power)
+            if power_change_sent:
+                power_changed = True
 
     async def _rollback_uninterruptibly(self, record: LinkageTransactionRecord) -> None:
         task = asyncio.create_task(self._rollback(record))
@@ -902,23 +1088,33 @@ class TemporaryLinkageController:
                 await self._defer_restore_for_safety(record)
             device = self._get_device(snapshot.device_id)
             try:
-                await device.write_target(
-                    DeviceTarget(
-                        enabled=True,
-                        power=snapshot.power,
-                        mode=snapshot.mode,
-                        frequency=snapshot.frequency,
-                        linkage=snapshot.linkage,
-                        timer_enabled=False,
-                    ),
-                    guard=self._safety_allows_operation,
-                )
-                if not snapshot.enabled:
-                    await device.set_enabled(False)
-                state = await device.get_state()
-                self._assert_snapshot_control(snapshot, state, expected_timer=False)
-                if schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint:
-                    raise LinkageRollbackError("device-local schedule changed during linkage test")
+                if snapshot.timer_enabled and snapshot.enabled:
+                    # Keep the device at the already-verified safe detach target until the final
+                    # atomic manual-fallback + TimerON frame. Writing a saved high fallback with
+                    # TimerOFF would briefly expose that power before the schedule resumes.
+                    state = await device.get_state()
+                    if not state.online or state.error or state.timer_enabled is not False:
+                        raise LinkageRollbackError(
+                            "device is not safely paused before scheduled restore"
+                        )
+                    self._assert_schedule_unchanged(snapshot, state)
+                else:
+                    await device.write_target(
+                        DeviceTarget(
+                            enabled=True,
+                            power=snapshot.power,
+                            mode=snapshot.mode,
+                            frequency=snapshot.frequency,
+                            linkage=snapshot.linkage,
+                            timer_enabled=False,
+                        ),
+                        guard=self._safety_allows_operation,
+                    )
+                    if not snapshot.enabled:
+                        await device.set_enabled(False)
+                    state = await device.get_state()
+                    self._assert_snapshot_control(snapshot, state, expected_timer=False)
+                    self._assert_schedule_unchanged(snapshot, state)
                 restored_control.add(snapshot.device_id)
                 errors[snapshot.device_id].clear()
             except Exception:
@@ -931,8 +1127,9 @@ class TemporaryLinkageController:
                 await self._defer_restore_for_safety(record)
             device = self._get_device(snapshot.device_id)
             try:
-                # TimerON is restored in the final frame, but the guarded atomic target prevents
-                # a safety latch from racing this frame and accidentally re-enabling the pump.
+                # Restore the saved manual fallback and TimerON in one guarded frame. For a
+                # scheduled device this moves directly from safe-low TimerOFF to schedule
+                # authority without exposing a saved high manual fallback between frames.
                 await device.write_target(
                     DeviceTarget(
                         enabled=snapshot.enabled,
@@ -1217,6 +1414,24 @@ class TemporaryLinkageController:
         return safe
 
     @staticmethod
+    def _bootstrap_qualification_levels(device: JebaoDevice) -> tuple[int, int]:
+        capabilities = device.capabilities
+        limits = capabilities.power_limits
+        step = capabilities.power_step
+        minimum = ((limits.min_power + step - 1) // step) * step
+        qualification = minimum + step
+        stepped = minimum
+        if (
+            qualification > min(limits.max_power, 45)
+            or stepped < limits.min_power
+            or qualification <= stepped
+        ):
+            raise LinkagePreflightError(
+                f"device {device.device_id!r} has no safe bootstrap qualification step"
+            )
+        return qualification, stepped
+
+    @staticmethod
     def _assert_target(device_id: str, state: DeviceState, target: DeviceTarget) -> None:
         expected = {
             "online": True,
@@ -1266,6 +1481,16 @@ class TemporaryLinkageController:
         TemporaryLinkageController._assert_target(snapshot.device_id, state, target)
 
     @staticmethod
+    def _assert_schedule_unchanged(
+        snapshot: DeviceControlSnapshot,
+        state: DeviceState,
+    ) -> None:
+        if schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint:
+            raise LinkageTransactionError(
+                f"device {snapshot.device_id!r} schedule structure changed during testing"
+            )
+
+    @staticmethod
     def _assert_timer_and_schedule(
         snapshot: DeviceControlSnapshot,
         state: DeviceState,
@@ -1275,6 +1500,14 @@ class TemporaryLinkageController:
         if not state.online or state.error:
             raise LinkageRollbackError(
                 f"device {snapshot.device_id!r} is not healthy after TimerON restore"
+            )
+        if state.enabled is not snapshot.enabled:
+            raise LinkageRollbackError(
+                f"device {snapshot.device_id!r} enabled state was not restored"
+            )
+        if state.linkage is not snapshot.linkage:
+            raise LinkageRollbackError(
+                f"device {snapshot.device_id!r} linkage role was not restored"
             )
         if schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint:
             raise LinkageRollbackError(f"device {snapshot.device_id!r} schedule structure changed")

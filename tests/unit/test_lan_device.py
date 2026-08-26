@@ -172,6 +172,30 @@ def test_preview_combines_timer_linkage_mode_frequency_and_flow_in_one_payload()
     assert plan.payload[9:13] == bytes([0x0D, 0x01, 42, 30])
 
 
+def test_preview_restores_manual_fallback_and_timer_on_in_one_payload() -> None:
+    device = _device()
+
+    plan = device.preview_target(
+        DeviceTarget(
+            enabled=True,
+            power=70,
+            mode="random",
+            frequency=34,
+            linkage=LinkageRole.INDEPENDENT,
+            timer_enabled=True,
+        )
+    )
+
+    assert plan.changes == {
+        "SwitchON": True,
+        "TimerON": True,
+        "Linkage": LinkageRole.INDEPENDENT,
+        "Flow": 70,
+        "Mode": "random",
+        "Frequency": 34,
+    }
+
+
 async def test_hardware_write_lock_is_default() -> None:
     device = _device()
     await device.connect()

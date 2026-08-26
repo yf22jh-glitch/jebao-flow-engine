@@ -86,6 +86,23 @@ class _FailOnceOnRelationshipDevice(_RecordingDevice):
             raise RuntimeError("simulated ACK loss after apply")
 
 
+class _FailOnceOnBootstrapStepDevice(_RecordingDevice):
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.failed = False
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        await super().write_target(target, guard=guard)
+        if (
+            target.power == 30
+            and target.linkage is LinkageRole.INDEPENDENT
+            and target.timer_enabled is False
+            and not self.failed
+        ):
+            self.failed = True
+            raise RuntimeError("simulated bootstrap step ACK loss")
+
+
 class _FailTimerRestoreDevice(_RecordingDevice):
     def __init__(self, device_id: str) -> None:
         super().__init__(device_id)
@@ -139,6 +156,25 @@ class _SlowSnapshotDevice(_RecordingDevice):
     async def get_state(self):
         await asyncio.sleep(0.02)
         return await super().get_state()
+
+
+class _SlowBootstrapDevice(_RecordingDevice):
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id, latency_seconds=0.01)
+
+
+class _ScheduleAdvancesOnTimerResumeDevice(_RecordingDevice):
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.advance_on_resume = False
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        timer_was_disabled = self._state.timer_enabled is False  # noqa: SLF001
+        await super().write_target(target, guard=guard)
+        if self.advance_on_resume and timer_was_disabled and target.timer_enabled is True:
+            self._state = self._state.model_copy(  # noqa: SLF001
+                update={"power": 54, "mode": "pulse", "frequency": 11}
+            )
 
 
 class _DriftPeerOnTimerRestoreDevice(_RecordingDevice):
@@ -453,6 +489,279 @@ async def test_active_watchdog_detects_slave_power_being_overwritten(tmp_path: P
     assert (await master.get_state()).power == 47
     assert (await slave.get_state()).power == 53
     assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+
+
+async def test_schedule_bootstrap_qualifies_changes_async_slave_power_and_restores(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=89, frequency=34)
+    slave = await _ready_device("slave", power=30, frequency=32)
+    master._capabilities = master.capabilities.model_copy(  # noqa: SLF001
+        update={"native_modes": master.capabilities.native_modes | {"random"}}
+    )
+    await master.set_mode("random")
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    controller = _controller(master, slave, store)
+    spec = LinkageTestSpec(
+        operation_id="scheduled_async_power_step",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=0.08,
+        verification_interval_seconds=0.005,
+        bootstrap_active_schedule=True,
+        slave_power_after=38,
+        power_change_after_seconds=0.02,
+    )
+
+    result = await controller.run(spec)
+
+    assert result.stop_reason is LinkageStopReason.TIMEOUT
+    assert set(result.bootstrap_qualified_device_ids) == {"master", "slave"}
+    assert result.slave_power_change_verified is True
+    assert store.load() is None
+    master_state = await master.get_state()
+    slave_state = await slave.get_state()
+    assert (master_state.power, master_state.mode, master_state.frequency) == (89, "random", 34)
+    assert (slave_state.power, slave_state.mode, slave_state.frequency) == (30, "constant", 32)
+    assert master_state.linkage is LinkageRole.INDEPENDENT
+    assert slave_state.linkage is LinkageRole.INDEPENDENT
+    assert master_state.timer_enabled is True
+    assert slave_state.timer_enabled is True
+    assert any(command.name == "power" and command.value == 38 for command in slave.commands)
+    timer_values = [
+        command.value for command in slave.commands if command.name == "timer_enabled"
+    ]
+    assert timer_values[0] is False
+    assert timer_values[-1] is True
+    assert [
+        command.value for command in slave.commands if command.name == "power"
+    ][:3] == [31, 30, 31]
+    master_frames: dict[datetime, dict[str, object]] = {}
+    for command in master.commands:
+        master_frames.setdefault(command.issued_at, {})[command.name] = command.value
+    timer_off_powers = [
+        frame["power"]
+        for frame in master_frames.values()
+        if frame.get("timer_enabled") is False and "power" in frame
+    ]
+    assert timer_off_powers
+    assert max(timer_off_powers) <= 45
+    restored_high_frames = [
+        frame
+        for frame in master_frames.values()
+        if frame.get("power") == 89
+    ]
+    assert restored_high_frames == [
+        {
+            "enabled": True,
+            "timer_enabled": True,
+            "linkage": LinkageRole.INDEPENDENT,
+            "power": 89,
+            "mode": "random",
+            "frequency": 34,
+        }
+    ]
+
+
+async def test_schedule_bootstrap_requires_timer_on_before_any_write(tmp_path: Path) -> None:
+    master = await _ready_device("master", timer_enabled=False)
+    slave = await _ready_device("slave", timer_enabled=True)
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    controller = _controller(master, slave, store)
+    spec = LinkageTestSpec(
+        operation_id="scheduled_requires_timer",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=1,
+        bootstrap_active_schedule=True,
+    )
+
+    with pytest.raises(LinkagePreflightError, match="active decoded schedule"):
+        await controller.run(spec)
+
+    assert master.commands == []
+    assert slave.commands == []
+    assert store.load() is None
+
+
+async def test_schedule_bootstrap_step_failure_restores_original_timer_on_snapshots(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=70, frequency=34)
+    slave = await _ready_device(
+        "slave",
+        device_class=_FailOnceOnBootstrapStepDevice,
+        power=65,
+        frequency=32,
+    )
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    controller = _controller(master, slave, store)
+    spec = LinkageTestSpec(
+        operation_id="scheduled_step_failure",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=1,
+        bootstrap_active_schedule=True,
+    )
+
+    with pytest.raises(LinkageApplyError, match="failed and was restored"):
+        await controller.run(spec)
+
+    assert store.load() is None
+    master_state = await master.get_state()
+    slave_state = await slave.get_state()
+    assert (master_state.power, master_state.frequency, master_state.timer_enabled) == (
+        70,
+        34,
+        True,
+    )
+    assert (slave_state.power, slave_state.frequency, slave_state.timer_enabled) == (
+        65,
+        32,
+        True,
+    )
+    assert master_state.linkage is LinkageRole.INDEPENDENT
+    assert slave_state.linkage is LinkageRole.INDEPENDENT
+
+
+async def test_schedule_bootstrap_manual_stop_before_lower_step_reports_no_qualification(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", device_class=_SlowBootstrapDevice, power=70)
+    slave = await _ready_device("slave", device_class=_SlowBootstrapDevice, power=65)
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    controller = _controller(master, slave, store)
+    spec = LinkageTestSpec(
+        operation_id="scheduled_early_stop",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=5,
+        bootstrap_active_schedule=True,
+        slave_power_after=38,
+        power_change_after_seconds=4,
+    )
+
+    task = asyncio.create_task(controller.run(spec))
+    while not master.commands:  # noqa: ASYNC110 - wait for first safe bootstrap frame
+        await asyncio.sleep(0.001)
+    assert await controller.stop(spec.operation_id) is True
+    result = await task
+
+    assert result.stop_reason is LinkageStopReason.MANUAL
+    assert result.bootstrap_qualified_device_ids == ()
+    assert result.slave_power_change_verified is False
+    assert store.load() is None
+    assert (await master.get_state()).power == 70
+    assert (await master.get_state()).timer_enabled is True
+    assert (await slave.get_state()).power == 65
+    assert (await slave.get_state()).timer_enabled is True
+
+
+async def test_schedule_bootstrap_fails_closed_if_timer_resume_changes_manual_fallback(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device(
+        "master",
+        device_class=_ScheduleAdvancesOnTimerResumeDevice,
+        power=70,
+        frequency=34,
+    )
+    slave = await _ready_device("slave", power=65, frequency=32)
+    master.advance_on_resume = True
+    master.commands.clear()
+    slave.commands.clear()
+    original_schedule_fingerprint = schedule_structure_fingerprint(
+        (await master.get_state()).schedule
+    )
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    controller = _controller(master, slave, store)
+    spec = LinkageTestSpec(
+        operation_id="scheduled_timer_boundary",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=0.08,
+        verification_interval_seconds=0.005,
+        bootstrap_active_schedule=True,
+        slave_power_after=38,
+        power_change_after_seconds=0.02,
+    )
+
+    with pytest.raises(LinkageRollbackError, match="final_verification_failed"):
+        await controller.run(spec)
+
+    pending = store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
+    assert pending.failed_device_ids == ("master",)
+    master_state = await master.get_state()
+    assert master_state.timer_enabled is False
+    assert master_state.linkage is LinkageRole.INDEPENDENT
+    assert schedule_structure_fingerprint(master_state.schedule) == original_schedule_fingerprint
+
+
+async def test_schedule_bootstrap_setup_expiry_never_reports_slave_step(tmp_path: Path) -> None:
+    master = await _ready_device("master", device_class=_SlowBootstrapDevice, power=70)
+    slave = await _ready_device("slave", device_class=_SlowBootstrapDevice, power=65)
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    controller = _controller(master, slave, store)
+    spec = LinkageTestSpec(
+        operation_id="scheduled_setup_expiry",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=0.05,
+        verification_interval_seconds=0.005,
+        bootstrap_active_schedule=True,
+        slave_power_after=38,
+        power_change_after_seconds=0.04,
+    )
+
+    with pytest.raises(LinkageApplyError, match="failed and was restored"):
+        await controller.run(spec)
+
+    assert store.load() is None
+    assert not any(command.name == "power" and command.value == 38 for command in slave.commands)
+    assert (await master.get_state()).timer_enabled is True
+    assert (await slave.get_state()).timer_enabled is True
 
 
 async def test_journal_lease_blocks_second_daemon_recovery_during_active_run(
