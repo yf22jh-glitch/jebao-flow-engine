@@ -4,10 +4,21 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from jebao_flow.safety.limits import PowerLimits
+
+ScheduleSlotIndex = Annotated[int, Field(ge=0, lt=48)]
+ScheduleStartTime = Annotated[
+    str,
+    StringConstraints(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"),
+]
+ScheduleEndTime = Annotated[
+    str,
+    StringConstraints(pattern=r"^(?:(?:[01][0-9]|2[0-3]):[0-5][0-9]|24:00)$"),
+]
 
 
 class Capability(StrEnum):
@@ -29,6 +40,31 @@ class DeviceCapabilities(BaseModel):
     power_step: int = Field(default=1, ge=1, le=100)
 
 
+class ScheduleEntry(BaseModel):
+    """One decoded device-local timer slot with product-specific parameters."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    slot: ScheduleSlotIndex
+    start: ScheduleStartTime
+    end: ScheduleEndTime
+    mode: str = Field(min_length=1)
+    mode_code: int = Field(ge=0, le=255)
+    parameters: dict[str, int | bool] = Field(default_factory=dict)
+
+
+class DeviceSchedule(BaseModel):
+    """Read-only view of the controller's 48-slot wall-clock schedule."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool
+    device_local_time: datetime | None = None
+    slot_capacity: Literal[48] = 48
+    entries: tuple[ScheduleEntry, ...] = ()
+    invalid_slots: tuple[ScheduleSlotIndex, ...] = ()
+
+
 class DeviceState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -38,6 +74,7 @@ class DeviceState(BaseModel):
     mode: str = "constant"
     frequency: int | None = Field(default=None, ge=0, le=100)
     error: str | None = None
+    schedule: DeviceSchedule | None = None
     observed_attributes: dict[str, bool | int | float | str | None] = Field(
         default_factory=dict
     )

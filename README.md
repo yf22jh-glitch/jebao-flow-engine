@@ -29,7 +29,8 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 - Gizwits GAgent 프레임 코덱, 인증 세션과 UDP 장비 검색
 - 여러 장비의 인증/raw 상태를 쓰기 없이 확인하는 `jebao-flowctl probe`
 - 안정적인 device ID/MAC 바인딩, 장비별 재접속과 5초 poll을 수행하는 읽기 전용 Observer
-- 실제 상태와 타이머·Auto 설정 단서의 변경 시각 및 안전한 JSONL 변경 기록
+- 실제 상태, 타이머·Auto 설정 단서와 장비 내장 시간표의 읽기 전용 디코딩 및 안전한
+  JSONL 변경 기록
 - 보유 제품군 5종의 상태 디코더와 fault 판독
 - 전역·장비별 이중 잠금, 출력 제한, 명령 간격과 read-back 검증을 갖춘 LAN 어댑터
 - 비동기 가상 장비 시뮬레이터

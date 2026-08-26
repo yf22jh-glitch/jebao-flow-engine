@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from jebao_flow.config import DeviceType, RuntimeMode
 from jebao_flow.groups.models import GroupMemberRole, GroupState, PatternKind
+from jebao_flow.protocol.models import DeviceSchedule
 
 
 class GroupAction(StrEnum):
@@ -167,6 +168,7 @@ class DeviceStatePayload(BaseModel):
     observed_attributes: dict[str, bool | int | float | str | None] = Field(
         default_factory=dict
     )
+    schedule: DeviceSchedule | None = None
     observation_source: ObservationSource | None = None
     change_source: ChangeSource = ChangeSource.UNKNOWN
     status: str

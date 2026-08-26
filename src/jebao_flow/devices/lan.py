@@ -18,10 +18,12 @@ from jebao_flow.protocol.control import build_control_payload
 from jebao_flow.protocol.models import (
     Capability,
     DeviceCapabilities,
+    DeviceSchedule,
     DeviceState,
     DeviceTarget,
 )
 from jebao_flow.protocol.profiles import get_product_schema
+from jebao_flow.protocol.schedule import decode_schedule
 from jebao_flow.protocol.schema import DataType
 from jebao_flow.protocol.session import GizwitsSession
 from jebao_flow.safety.limits import PowerLimits
@@ -153,8 +155,14 @@ class LanJebaoDevice(JebaoDevice):
 
     async def get_state(self) -> DeviceState:
         async with self._io_lock:
-            values = await self._read_values()
-            return self._to_device_state(values)
+            raw = await self._session.read_raw_state()
+            values = self.schema.decode_status(raw)
+            schedule = decode_schedule(
+                self.schema.product_key,
+                raw,
+                enabled=bool(values.get("TimerON", False)),
+            )
+            return self._to_device_state(values, schedule=schedule)
 
     async def set_enabled(self, enabled: bool) -> None:
         attribute = self._require_logical_attribute(Capability.ENABLED)
@@ -258,7 +266,12 @@ class LanJebaoDevice(JebaoDevice):
         if remaining > 0:
             await asyncio.sleep(remaining)
 
-    def _to_device_state(self, values: dict[str, Any]) -> DeviceState:
+    def _to_device_state(
+        self,
+        values: dict[str, Any],
+        *,
+        schedule: DeviceSchedule | None = None,
+    ) -> DeviceState:
         enabled = bool(values.get(self.schema.enabled_attribute, False))
         power_value = values.get(self.schema.power_attribute, 0)
         mode_value = values.get(self.schema.mode_attribute, "unknown")
@@ -286,6 +299,7 @@ class LanJebaoDevice(JebaoDevice):
             mode=mode_value if isinstance(mode_value, str) else f"raw_{mode_value}",
             frequency=None if frequency_value is None else round(float(frequency_value)),
             error=", ".join(problems) if problems else None,
+            schedule=schedule,
             observed_attributes=observed_attributes,
             observed_at=datetime.now(UTC),
         )

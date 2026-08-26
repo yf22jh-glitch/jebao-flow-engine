@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
@@ -16,6 +17,106 @@ from .entity import (
     async_setup_device_entities,
     async_setup_group_entities,
 )
+
+_SCHEDULE_SLOT_CAPACITY = 48
+
+
+def _is_schedule_time(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 5 or value[2] != ":":
+        return False
+    hour, minute = value[:2], value[3:]
+    if not hour.isdigit() or not minute.isdigit():
+        return False
+    if value == "24:00":
+        return True
+    return int(hour) < 24 and int(minute) < 60
+
+
+def _schedule_scalar(
+    value: object,
+) -> tuple[bool, bool | int | float | str | None]:
+    if value is None or isinstance(value, bool | int):
+        return True, value
+    if isinstance(value, float):
+        return (True, value) if math.isfinite(value) else (False, None)
+    if isinstance(value, str):
+        return True, value[:80]
+    return False, None
+
+
+def _schedule_entries(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for item in value[:_SCHEDULE_SLOT_CAPACITY]:
+        if not isinstance(item, dict):
+            continue
+        slot = item.get("slot")
+        start = item.get("start")
+        end = item.get("end")
+        mode = item.get("mode")
+        mode_code = item.get("mode_code")
+        if (
+            isinstance(slot, bool)
+            or not isinstance(slot, int)
+            or not 0 <= slot < _SCHEDULE_SLOT_CAPACITY
+            or not _is_schedule_time(start)
+            or not _is_schedule_time(end)
+            or not isinstance(mode, str)
+            or not mode.strip()
+            or isinstance(mode_code, bool)
+            or not isinstance(mode_code, int)
+            or not 0 <= mode_code <= 255
+        ):
+            continue
+
+        parameters = item.get("parameters")
+        safe_parameters: dict[str, bool | int | float | str | None] = {}
+        if isinstance(parameters, dict):
+            for key, parameter in list(parameters.items())[:16]:
+                if not isinstance(key, str):
+                    continue
+                normalized_key = key.strip()[:64]
+                if (
+                    not normalized_key
+                    or "hex" in normalized_key.lower()
+                    or normalized_key.lower().startswith("raw")
+                ):
+                    continue
+                is_safe, safe_parameter = _schedule_scalar(parameter)
+                if is_safe:
+                    safe_parameters[normalized_key] = safe_parameter
+
+        entries.append(
+            {
+                "slot": slot,
+                "start": start,
+                "end": end,
+                "mode": mode.strip()[:64],
+                "mode_code": mode_code,
+                "parameters": safe_parameters,
+            }
+        )
+    return entries
+
+
+def _invalid_schedule_slots(value: object) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    return [
+        slot
+        for slot in value[:_SCHEDULE_SLOT_CAPACITY]
+        if not isinstance(slot, bool)
+        and isinstance(slot, int)
+        and 0 <= slot < _SCHEDULE_SLOT_CAPACITY
+    ]
+
+
+def _schedule_slot_capacity(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value == _SCHEDULE_SLOT_CAPACITY else None
 
 
 async def async_setup_entry(
@@ -42,6 +143,11 @@ async def async_setup_entry(
         + (
             [JebaoFlowActualModeSensor(runtime, device)]
             if "mode" in device.get("observables", ())
+            else []
+        )
+        + (
+            [JebaoFlowScheduleSensor(runtime, device)]
+            if "schedule" in device.get("observables", ())
             else []
         ),
     )
@@ -187,3 +293,53 @@ class JebaoFlowActualModeSensor(JebaoFlowDeviceEntity, SensorEntity):
         if self.state_payload is not None:
             attributes["actual_frequency"] = self.state_payload.get("actual_frequency")
         return attributes
+
+
+class JebaoFlowScheduleSensor(JebaoFlowDeviceEntity, SensorEntity):
+    """Expose the decoded device schedule without its fast-changing local clock."""
+
+    _attr_name = "장비 시간표"
+    _attr_icon = "mdi:calendar-clock"
+
+    def __init__(self, runtime, device: dict[str, Any]) -> None:
+        super().__init__(runtime, device, "schedule")
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._schedule_payload is not None
+
+    @property
+    def native_value(self) -> int | None:
+        schedule = self._schedule_payload
+        if schedule is None:
+            return None
+        return len(_schedule_entries(schedule.get("entries")))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attributes = super().extra_state_attributes
+        schedule = self._schedule_payload
+        if schedule is None:
+            return attributes
+
+        enabled = schedule.get("enabled")
+        attributes.update(
+            {
+                "enabled": enabled if isinstance(enabled, bool) else None,
+                "slot_capacity": _schedule_slot_capacity(
+                    schedule.get("slot_capacity")
+                ),
+                "entries": _schedule_entries(schedule.get("entries")),
+                "invalid_slots": _invalid_schedule_slots(
+                    schedule.get("invalid_slots")
+                ),
+            }
+        )
+        return attributes
+
+    @property
+    def _schedule_payload(self) -> dict[str, Any] | None:
+        if self.state_payload is None:
+            return None
+        schedule = self.state_payload.get("schedule")
+        return schedule if isinstance(schedule, dict) else None

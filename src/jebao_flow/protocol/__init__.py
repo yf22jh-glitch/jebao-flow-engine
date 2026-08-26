@@ -4,15 +4,19 @@ from jebao_flow.protocol.discovery import DiscoveryProvider, GizwitsDiscovery
 from jebao_flow.protocol.models import (
     Capability,
     DeviceCapabilities,
+    DeviceSchedule,
     DeviceState,
     DeviceTarget,
     DiscoveredDevice,
+    ScheduleEntry,
 )
+from jebao_flow.protocol.schedule import decode_device_schedule, decode_schedule
 from jebao_flow.protocol.session import GizwitsSession
 
 __all__ = [
     "Capability",
     "DeviceCapabilities",
+    "DeviceSchedule",
     "DeviceState",
     "DeviceTarget",
     "DiscoveredDevice",
@@ -22,4 +26,7 @@ __all__ = [
     "GizwitsFrame",
     "GizwitsSession",
     "ProtocolConnection",
+    "ScheduleEntry",
+    "decode_device_schedule",
+    "decode_schedule",
 ]

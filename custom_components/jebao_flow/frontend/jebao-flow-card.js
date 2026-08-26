@@ -29,6 +29,30 @@ const STATUS_LABELS = {
   emergency_stop: "비상 정지",
 };
 
+const SCHEDULE_MODE_LABELS = {
+  stopped: "정지",
+  constant: "고정",
+  pulse: "펄스",
+  sine: "사인",
+  random: "랜덤",
+  classic: "클래식",
+  tidal: "조석",
+  nutrient_transport: "영양염 배출",
+  circulation: "순환",
+  feed: "급여",
+  custom: "사용자 설정",
+  auto: "자동",
+};
+
+const SCHEDULE_PARAMETER_LABELS = {
+  flow: "출력",
+  frequency: "주파수",
+  feed_time: "급여 값",
+  pulse_tide: "펄스/조석",
+  custom_frequency: "사용자 주파수",
+  gears: "출력/단계",
+};
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -36,6 +60,127 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isScheduleTime(value) {
+  if (typeof value !== "string") return false;
+  if (value === "24:00") return true;
+  return /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
+}
+
+function scheduleScalar(value) {
+  if (value === null) return "—";
+  if (typeof value === "boolean") return value ? "켜짐" : "꺼짐";
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string") return value.slice(0, 80) || "—";
+  return undefined;
+}
+
+function scheduleParameterValue(key, value) {
+  if (key.toLowerCase() === "pulse_tide") {
+    if (value === false || value === 0) return "펄스";
+    if (value === true || value === 1) return "조석";
+  }
+  return scheduleScalar(value);
+}
+
+function normalizeScheduleEntry(value) {
+  if (!isPlainObject(value)) return null;
+  const slot = value.slot;
+  const modeCode = value.mode_code;
+  if (!Number.isInteger(slot) || slot < 0 || slot >= 48) return null;
+  if (!isScheduleTime(value.start) || !isScheduleTime(value.end)) return null;
+  if (typeof value.mode !== "string" || !value.mode.trim()) return null;
+  if (!Number.isInteger(modeCode) || modeCode < 0 || modeCode > 255) return null;
+
+  const parameters = [];
+  if (isPlainObject(value.parameters)) {
+    Object.entries(value.parameters).slice(0, 16).forEach(([key, parameter]) => {
+      const normalizedKey = key.trim().slice(0, 64);
+      if (!normalizedKey
+        || normalizedKey.toLowerCase().includes("hex")
+        || normalizedKey.toLowerCase().startsWith("raw")) return;
+      const formatted = scheduleParameterValue(normalizedKey, parameter);
+      if (formatted === undefined) return;
+      parameters.push({ key: normalizedKey, value: formatted });
+    });
+  }
+  return {
+    slot,
+    start: value.start,
+    end: value.end,
+    mode: value.mode.trim().slice(0, 64),
+    modeCode,
+    parameters,
+  };
+}
+
+function normalizeSchedule(entity) {
+  const attributes = entity?.attributes;
+  if (!isPlainObject(attributes) || !Array.isArray(attributes.entries)) return null;
+  const entries = attributes.entries
+    .slice(0, 48)
+    .map(normalizeScheduleEntry)
+    .filter((entry) => entry !== null)
+    .sort((left, right) => left.slot - right.slot);
+  const invalidSlots = Array.isArray(attributes.invalid_slots)
+    ? attributes.invalid_slots
+      .slice(0, 48)
+      .filter((slot) => Number.isInteger(slot) && slot >= 0 && slot < 48)
+    : [];
+  return {
+    enabled: typeof attributes.enabled === "boolean" ? attributes.enabled : null,
+    entries,
+    invalidSlots,
+  };
+}
+
+function scheduleModeLabel(mode) {
+  const key = mode.toLowerCase();
+  return Object.hasOwn(SCHEDULE_MODE_LABELS, key)
+    ? SCHEDULE_MODE_LABELS[key]
+    : `기타 모드 (${mode})`;
+}
+
+function scheduleParameterLabel(key) {
+  return Object.hasOwn(SCHEDULE_PARAMETER_LABELS, key)
+    ? SCHEDULE_PARAMETER_LABELS[key]
+    : key;
+}
+
+function renderScheduleDetails(entity) {
+  const schedule = normalizeSchedule(entity);
+  if (!schedule) return "";
+  const stateLabel = schedule.enabled === true
+    ? "사용"
+    : schedule.enabled === false ? "사용 안 함" : "상태 미확인";
+  const rows = schedule.entries.map((entry) => {
+    const parameters = entry.parameters.length
+      ? `<div class="schedule-parameters">${entry.parameters.map((parameter) => (
+        `<span>${escapeHtml(scheduleParameterLabel(parameter.key))} ${escapeHtml(parameter.value)}</span>`
+      )).join("")}</div>`
+      : "";
+    return `<li>
+      <span class="schedule-slot">슬롯 ${escapeHtml(entry.slot)}</span>
+      <time>${escapeHtml(entry.start)}–${escapeHtml(entry.end)}</time>
+      <strong>${escapeHtml(scheduleModeLabel(entry.mode))}</strong>
+      <small>코드 ${escapeHtml(entry.modeCode)}</small>
+      ${parameters}
+    </li>`;
+  }).join("") || `<p class="schedule-empty">유효한 시간 구간이 없습니다.</p>`;
+  const invalid = schedule.invalidSlots.length
+    ? `<p class="schedule-warning">해석 실패 슬롯: ${schedule.invalidSlots.map((slot) => (
+      escapeHtml(slot)
+    )).join(", ")}</p>`
+    : "";
+  return `<details class="device-schedule">
+    <summary><span><ha-icon icon="mdi:calendar-clock"></ha-icon>장비 시간표</span><small>${stateLabel} · ${escapeHtml(schedule.entries.length)}개</small></summary>
+    <div class="schedule-body">${rows.startsWith("<li>") ? `<ol>${rows}</ol>` : rows}${invalid}</div>
+  </details>`;
 }
 
 function numericState(entity, fallback = 0) {
@@ -280,6 +425,7 @@ class JebaoFlowCard extends HTMLElement {
       const lastSeen = statusAttributes.last_seen_at ?? member.last_seen_at;
       const observedAttributes = statusAttributes.observed_attributes || member.observed_attributes || {};
       const error = statusAttributes.error ?? member.error;
+      const scheduleState = deviceEntities[deviceId]?.schedule?.state;
       const displayPower = observerMode ? Number(actual ?? 0) : target;
       const manual = member.control_mode === "manual_override";
       const devicePower = deviceEntities[deviceId]?.device_power?.state;
@@ -315,6 +461,7 @@ class JebaoFlowCard extends HTMLElement {
           <small>확인 ${escapeHtml(formatTimestamp(lastSeen))}</small>
           ${error ? `<small class="error">${escapeHtml(error)}</small>` : ""}
         </div>` : ""}
+        ${renderScheduleDetails(scheduleState)}
       </article>`;
     }).join("");
   }
@@ -498,6 +645,21 @@ class JebaoFlowCard extends HTMLElement {
       .observation-meta .error { color:#ff8795; }
       .observed-settings { grid-column:1/-1; display:flex; flex-wrap:wrap; gap:4px; }
       .observed-settings span { padding:3px 5px; color:#9fb9c7; background:rgba(67,107,130,.18); border-radius:5px; }
+      .device-schedule { margin-top:10px; padding-top:9px; border-top:1px solid rgba(120,168,194,.12); }
+      .device-schedule summary { display:flex; justify-content:space-between; align-items:center; gap:7px; color:#a9bfcb; font-size:9px; cursor:pointer; }
+      .device-schedule summary span { display:flex; align-items:center; gap:5px; }
+      .device-schedule summary ha-icon { width:15px; height:15px; color:#73dbe6; }
+      .device-schedule summary small { color:#718b9b; font-size:8px; }
+      .schedule-body { margin-top:8px; }
+      .schedule-body ol { display:grid; gap:6px; margin:0; padding:0; list-style:none; }
+      .schedule-body li { display:grid; grid-template-columns:auto auto minmax(0,1fr) auto; align-items:center; gap:5px; padding:6px; color:#90a7b5; background:rgba(5,18,28,.42); border-radius:6px; font-size:8px; }
+      .schedule-body li strong { overflow:hidden; color:#d7e9ef; font-size:8px; text-overflow:ellipsis; white-space:nowrap; }
+      .schedule-body li small,.schedule-slot { color:#637d8d; font-size:7px; }
+      .schedule-parameters { grid-column:1/-1; display:flex; flex-wrap:wrap; gap:3px; }
+      .schedule-parameters span { padding:2px 4px; color:#a7c5cf; background:rgba(67,107,130,.2); border-radius:4px; }
+      .schedule-empty,.schedule-warning { margin:5px 0 0; font-size:8px; }
+      .schedule-empty { color:#6f8798; }
+      .schedule-warning { color:#ffb27e; }
       .no-members { grid-column:1/-1; padding:24px; color:#708798; text-align:center; }
       .tuning-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 17px; }
       .compact-control { display:block; padding:10px 12px; border-radius:10px; background:rgba(12,29,42,.62); }
@@ -566,7 +728,7 @@ class JebaoEquipmentCard extends HTMLElement {
       const control = attributes.jebao_flow_control;
       if (attributes.jebao_flow_entry_id !== selectedEntry) return;
       discovered[deviceId] = discovered[deviceId] || {
-        name: attributes.friendly_name?.replace(/ (개별 운전|개별 출력|개별 상태|개별 연결)$/, "") || deviceId,
+        name: attributes.friendly_name?.replace(/ (개별 운전|개별 출력|개별 상태|개별 연결|실제 출력|실제 모드|실제 운전|장비 오류|장비 시간표)$/, "") || deviceId,
         type: type === "dosing_pump" ? "dosing" : "return",
         observerMode: false,
       };
@@ -576,6 +738,7 @@ class JebaoEquipmentCard extends HTMLElement {
       if (control === "device_status") discovered[deviceId].status = entityId;
       if (control === "actual_power") discovered[deviceId].actualPower = entityId;
       if (control === "device_availability") discovered[deviceId].availability = entityId;
+      if (control === "schedule") discovered[deviceId].schedule = entityId;
     });
     return Object.values(discovered);
   }
@@ -594,6 +757,7 @@ class JebaoEquipmentCard extends HTMLElement {
       const enabledState = device.enabled ? this._hass.states[device.enabled] : null;
       const statusState = device.status ? this._hass.states[device.status] : null;
       const actualPowerState = device.actualPower ? this._hass.states[device.actualPower] : null;
+      const scheduleState = device.schedule ? this._hass.states[device.schedule] : null;
       const attributes = statusState?.attributes || {};
       const observerMode = attributes.jebao_flow_runtime_mode === "observer" || device.observerMode;
       const online = attributes.online === true;
@@ -606,6 +770,7 @@ class JebaoEquipmentCard extends HTMLElement {
         ${observerMode && actualPower != null ? `<div class="actual-output"><b>${Math.round(Number(actualPower))}%</b><span>실제 출력</span></div>` : ""}
         ${!observerMode && powerState ? `<label><input type="range" min="0" max="100" step="1" value="${numericState(powerState)}" data-equipment-power="${index}"><b>${Math.round(numericState(powerState))}%</b></label>` : ""}
         ${!observerMode && enabledState ? `<button class="toggle ${enabledState.state === "on" ? "on" : ""}" data-equipment-toggle="${index}"><ha-icon icon="mdi:power"></ha-icon></button>` : `<span class="member-dot ${online ? "online" : "offline"}"></span>`}
+        ${renderScheduleDetails(scheduleState)}
       </article>`;
     }).join("") || `<div class="empty-equipment">리턴·도징 장비 상태를 기다리는 중입니다.</div>`;
     this.shadowRoot.innerHTML = `<style>
@@ -614,6 +779,7 @@ class JebaoEquipmentCard extends HTMLElement {
       .equipment-row>ha-icon{color:#55d9e8}.equipment-main{display:flex;flex-direction:column}.equipment-main strong{font-size:12px}.equipment-main span{color:#7892a3;font-size:10px}.equipment-main small{margin-top:3px;color:#60798a;font-size:8px}
       .actual-output{display:flex;align-items:baseline;justify-content:flex-end;gap:5px}.actual-output b{font-size:17px}.actual-output span{color:#7892a3;font-size:8px}.member-dot{width:8px;height:8px;border-radius:50%;background:#ff6477}.member-dot.online{background:#4be3aa;box-shadow:0 0 10px rgba(75,227,170,.7)}
       label{display:flex;align-items:center;gap:7px}input{min-width:0;width:100%;accent-color:#55d9e8}b{font-size:10px}.toggle{width:35px;height:35px;border-radius:50%;border:1px solid #345064;background:#102433;color:#718a9a}.toggle.on{color:white;border-color:#55d9e8;background:#1b7185}
+      .device-schedule{grid-column:1/-1;padding:9px 0 2px;border-top:1px solid rgba(130,180,205,.12)}.device-schedule summary{display:flex;justify-content:space-between;align-items:center;gap:8px;color:#a9bfcb;font-size:10px;cursor:pointer}.device-schedule summary span{display:flex;align-items:center;gap:5px}.device-schedule summary ha-icon{width:16px;height:16px;color:#73dbe6}.device-schedule summary small{color:#718b9b;font-size:9px}.schedule-body{margin-top:8px}.schedule-body ol{display:grid;gap:6px;margin:0;padding:0;list-style:none}.schedule-body li{display:grid;grid-template-columns:auto auto minmax(0,1fr) auto;align-items:center;gap:7px;padding:7px;color:#90a7b5;background:rgba(5,18,28,.42);border-radius:6px;font-size:9px}.schedule-body li strong{overflow:hidden;color:#d7e9ef;text-overflow:ellipsis;white-space:nowrap}.schedule-body li small,.schedule-slot{color:#637d8d;font-size:8px}.schedule-parameters{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:4px}.schedule-parameters span{padding:2px 5px;color:#a7c5cf;background:rgba(67,107,130,.2);border-radius:4px}.schedule-empty,.schedule-warning{margin:5px 0 0;font-size:9px}.schedule-empty{color:#6f8798}.schedule-warning{color:#ffb27e}
       @media(max-width:600px){.equipment-row{grid-template-columns:auto 1fr auto}.equipment-row label{grid-column:2/4}}
     </style><ha-card><h3>${escapeHtml(this._config.title || "펌프 장비")}</h3>${rows}</ha-card>`;
     this.shadowRoot.querySelectorAll("[data-equipment-toggle]").forEach((button) => button.addEventListener("click", () => {
