@@ -55,6 +55,8 @@ from jebao_flow.hardware_safety import (
     native_linkage_journal_path,
     physical_lock_directory,
     qualification_directory,
+    schedule_linkage_intent_path,
+    schedule_linkage_journal_path,
     validate_hardware_safety_root,
     verification_intent_path,
     verification_journal_path,
@@ -69,6 +71,10 @@ from jebao_flow.persistence import (
 from jebao_flow.protocol.discovery import GizwitsDiscovery
 from jebao_flow.protocol.models import DeviceTarget, LinkageRole
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
+from jebao_flow.schedule_intent_validation import (
+    TerminalScheduleIntentError,
+    validate_terminal_schedule_intent_payload,
+)
 
 _TOKEN_VERSION = 1
 _MAX_ATTENDED_POWER = 45
@@ -504,6 +510,7 @@ def _require_current_qualifications(
 
 
 def _assert_no_verification_conflict() -> None:
+    _assert_no_schedule_linkage_conflict()
     journal_path = verification_journal_path()
     if os.path.lexists(journal_path):
         if journal_path.is_symlink():
@@ -539,7 +546,10 @@ def _assert_no_verification_conflict() -> None:
             raise HardwareTestError("device-verification intent has unsafe metadata")
         with os.fdopen(descriptor, encoding="utf-8") as stream:
             descriptor = -1
-            payload = json.load(stream)
+            encoded = stream.read(_MAX_SAFETY_ARTIFACT_BYTES + 1)
+        if len(encoded.encode()) > _MAX_SAFETY_ARTIFACT_BYTES:
+            raise HardwareTestError("device-verification intent is too large")
+        payload = json.loads(encoded)
     except HardwareTestError:
         raise
     except (OSError, TypeError, ValueError) as error:
@@ -572,6 +582,50 @@ def _assert_no_verification_conflict() -> None:
         raise HardwareTestError(
             "nonterminal device verification exists; close it before native linkage"
         )
+
+
+def _assert_no_schedule_linkage_conflict() -> None:
+    """Fail closed when the separate TimerON linkage-only workflow is unfinished."""
+
+    journal_path = schedule_linkage_journal_path()
+    if os.path.lexists(journal_path):
+        descriptor = _open_existing_private_file(
+            journal_path,
+            label="schedule-linkage recovery state",
+            allow_absent=False,
+        )
+        if descriptor is not None:
+            os.close(descriptor)
+        raise HardwareTestError(
+            "unfinished schedule-linkage operation blocks native linkage"
+        )
+
+    intent_path = schedule_linkage_intent_path()
+    descriptor = _open_existing_private_file(
+        intent_path,
+        label="schedule-linkage intent",
+        allow_absent=True,
+    )
+    if descriptor is None:
+        return
+    try:
+        with os.fdopen(descriptor, encoding="utf-8") as stream:
+            descriptor = -1
+            encoded = stream.read(_MAX_SAFETY_ARTIFACT_BYTES + 1)
+        if len(encoded.encode()) > _MAX_SAFETY_ARTIFACT_BYTES:
+            raise HardwareTestError("schedule-linkage intent is too large")
+        payload = json.loads(encoded)
+    except (OSError, TypeError, ValueError) as error:
+        raise HardwareTestError("schedule-linkage intent is unreadable") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        validate_terminal_schedule_intent_payload(payload)
+    except TerminalScheduleIntentError as error:
+        raise HardwareTestError(
+            "nonterminal schedule-linkage intent blocks native linkage"
+        ) from error
 
 
 def _physical_lock_key(config: DeviceConfig) -> str:

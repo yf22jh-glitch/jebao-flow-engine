@@ -14,12 +14,19 @@ from jebao_flow.devices.linkage import (
     LinkageTransactionPhase,
     LinkageTransactionRecord,
 )
+from jebao_flow.devices.schedule_linkage import (
+    ScheduleLinkageBusyError,
+    ScheduleLinkageJournalClaimError,
+    ScheduleLinkagePhase,
+    ScheduleLinkageRecord,
+)
 from jebao_flow.devices.verification import (
     DeviceVerificationPhase,
     DeviceVerificationRecord,
     DeviceVerificationRecoveryReason,
 )
 from jebao_flow.hardware_test import HardwareTestIntentPhase
+from jebao_flow.persistence.schedule_linkage import ScheduleLinkageJournalError
 from jebao_flow.recovery_supervisor import (
     RecoveryArtifactError,
     RecoveryArtifacts,
@@ -28,6 +35,11 @@ from jebao_flow.recovery_supervisor import (
     RecoverySupervisorDependencies,
     RecoverySupervisorStatus,
     run_once,
+)
+from jebao_flow.schedule_linkage_cli import (
+    ScheduleLinkageCliError,
+    ScheduleLinkageIntentOutcome,
+    ScheduleLinkageIntentPhase,
 )
 
 
@@ -52,6 +64,21 @@ def _verification_intent(
         phase=phase,
         instance_id="main",
         operation_id="verification-operation",
+    )
+
+
+def _schedule_intent(
+    phase: ScheduleLinkageIntentPhase = ScheduleLinkageIntentPhase.STARTED,
+    *,
+    record: object | None = None,
+) -> object:
+    spec = getattr(record, "spec", SimpleNamespace(operation_id="schedule-operation"))
+    snapshots = getattr(record, "snapshots", (SimpleNamespace(device_id="master"),))
+    return SimpleNamespace(
+        phase=phase,
+        instance_id="main",
+        operation_id="schedule-operation",
+        preflight=SimpleNamespace(spec=spec, snapshots=snapshots),
     )
 
 
@@ -105,11 +132,52 @@ def _verification_record(
     )
 
 
+def _schedule_record(
+    *,
+    stale: bool = False,
+    safety: bool = False,
+    mutation_scope: str = "linkage_only",
+) -> ScheduleLinkageRecord:
+    now = datetime.now(UTC)
+    return cast(
+        ScheduleLinkageRecord,
+        SimpleNamespace(
+            phase=ScheduleLinkagePhase.RECOVERY_REQUIRED,
+            mutation_scope=mutation_scope,
+            created_at=now - timedelta(minutes=2) if stale else now - timedelta(seconds=1),
+            updated_at=now - timedelta(minutes=2) if stale else now - timedelta(seconds=1),
+            expires_at=now - timedelta(minutes=1) if stale else now + timedelta(seconds=5),
+            operation_id="schedule-operation",
+            spec=SimpleNamespace(operation_id="schedule-operation"),
+            snapshots=(SimpleNamespace(device_id="master"),),
+            error="safety_interlock" if safety else "role-only detach verification failed",
+        ),
+    )
+
+
+def _schedule_artifacts(
+    *,
+    stale: bool = False,
+    safety: bool = False,
+    mutation_scope: str = "linkage_only",
+) -> RecoveryArtifacts:
+    record = _schedule_record(
+        stale=stale,
+        safety=safety,
+        mutation_scope=mutation_scope,
+    )
+    return RecoveryArtifacts(
+        schedule_intent=_schedule_intent(record=record),
+        schedule_journal=record,
+    )
+
+
 def _dependencies(
     artifacts: RecoveryArtifacts,
     *,
     native_dispatch=None,
     verification_dispatch=None,
+    schedule_dispatch=None,
     latch_present=False,
 ) -> RecoverySupervisorDependencies:
     async def unused_native(config, args) -> int:
@@ -120,12 +188,17 @@ def _dependencies(
         del config, args
         raise AssertionError("verification recovery must not be dispatched")
 
+    async def unused_schedule(config, args) -> int:
+        del config, args
+        raise AssertionError("schedule recovery must not be dispatched")
+
     return RecoverySupervisorDependencies(
         validate_safety_root=lambda: None,
         scan_artifacts=lambda: artifacts,
         latch_present=lambda: latch_present,
         native_dispatch=native_dispatch or unused_native,
         verification_dispatch=verification_dispatch or unused_verification,
+        schedule_dispatch=schedule_dispatch or unused_schedule,
     )
 
 
@@ -142,6 +215,7 @@ async def test_idle_poll_has_zero_recovery_callbacks() -> None:
         RecoveryArtifacts(),
         native_dispatch=dispatch,
         verification_dispatch=dispatch,
+        schedule_dispatch=dispatch,
     )
     supervisor = RecoverySupervisor(_config(), dependencies=dependencies)
 
@@ -150,7 +224,7 @@ async def test_idle_poll_has_zero_recovery_callbacks() -> None:
     assert supervisor.recovery_in_flight is False
 
 
-@pytest.mark.parametrize("workflow", ["native", "verification"])
+@pytest.mark.parametrize("workflow", ["native", "verification", "schedule"])
 async def test_one_workflow_dispatches_only_recovery_first_namespace(workflow: str) -> None:
     calls: list[tuple[str, object]] = []
 
@@ -164,17 +238,28 @@ async def test_one_workflow_dispatches_only_recovery_first_namespace(workflow: s
         calls.append(("verification", args))
         return 0
 
-    artifacts = (
-        RecoveryArtifacts(native_journal=_native_record())
-        if workflow == "native"
-        else RecoveryArtifacts(verification_journal=_verification_record())
-    )
+    async def schedule(config, args) -> int:
+        del config
+        calls.append(("schedule", args))
+        return 0
+
+    if workflow == "native":
+        artifacts = RecoveryArtifacts(native_journal=_native_record())
+    elif workflow == "verification":
+        artifacts = RecoveryArtifacts(verification_journal=_verification_record())
+    else:
+        record = _schedule_record()
+        artifacts = RecoveryArtifacts(
+            schedule_intent=_schedule_intent(record=record),
+            schedule_journal=record,
+        )
     supervisor = RecoverySupervisor(
         _config(),
         dependencies=_dependencies(
             artifacts,
             native_dispatch=native,
             verification_dispatch=verification,
+            schedule_dispatch=schedule,
         ),
     )
 
@@ -184,9 +269,11 @@ async def test_one_workflow_dispatches_only_recovery_first_namespace(workflow: s
     assert called_workflow == workflow
     assert args.confirm is None
     assert args.recovery_first is True
-    assert args.command == (
-        "recover-linkage" if workflow == "native" else "recover-device-verification"
-    )
+    assert args.command == {
+        "native": "recover-linkage",
+        "verification": "recover-device-verification",
+        "schedule": "recover-schedule-linkage",
+    }[workflow]
 
 
 @pytest.mark.parametrize(
@@ -218,6 +305,44 @@ async def test_recovery_intent_without_journal_uses_recovery_dispatch(
     assert calls == 1
 
 
+async def test_started_schedule_intent_without_journal_dispatches_no_write_recovery() -> None:
+    calls = 0
+
+    async def dispatch(config, args) -> int:
+        nonlocal calls
+        del config
+        calls += 1
+        assert args.command == "recover-schedule-linkage"
+        assert args.recovery_first is True
+        return 0
+
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            RecoveryArtifacts(schedule_intent=_schedule_intent()),
+            schedule_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.RECOVERED
+    assert calls == 1
+
+
+async def test_recovery_required_schedule_intent_without_journal_requires_attendance() -> None:
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            RecoveryArtifacts(
+                schedule_intent=_schedule_intent(
+                    ScheduleLinkageIntentPhase.RECOVERY_REQUIRED
+                )
+            )
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
+
+
 async def test_dual_nonterminal_conflict_has_zero_callbacks() -> None:
     calls = 0
 
@@ -236,6 +361,7 @@ async def test_dual_nonterminal_conflict_has_zero_callbacks() -> None:
             ),
             native_dispatch=dispatch,
             verification_dispatch=dispatch,
+            schedule_dispatch=dispatch,
         ),
     )
 
@@ -243,14 +369,54 @@ async def test_dual_nonterminal_conflict_has_zero_callbacks() -> None:
     assert calls == 0
 
 
-async def test_corrupt_artifact_is_error_with_zero_callbacks(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("other", ["native", "verification"])
+async def test_schedule_conflict_with_other_nonterminal_has_zero_callbacks(
+    other: str,
+) -> None:
+    calls = 0
+
+    async def dispatch(config, args) -> int:
+        nonlocal calls
+        del config, args
+        calls += 1
+        return 0
+
+    values: dict[str, object] = {"schedule_intent": _schedule_intent()}
+    values[f"{other}_intent"] = (
+        _native_intent() if other == "native" else _verification_intent()
+    )
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            RecoveryArtifacts(**values),
+            native_dispatch=dispatch,
+            verification_dispatch=dispatch,
+            schedule_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
+    assert calls == 0
+
+
+@pytest.mark.parametrize(
+    "corrupt_name",
+    ["native_linkage_journal_path", "schedule_linkage_journal_path"],
+)
+async def test_corrupt_artifact_is_error_with_zero_callbacks(
+    tmp_path: Path,
+    monkeypatch,
+    corrupt_name: str,
+) -> None:
     paths = {
         "native_linkage_intent_path": tmp_path / "native-intent.json",
         "native_linkage_journal_path": tmp_path / "native-journal.json",
         "verification_intent_path": tmp_path / "verification-intent.json",
         "verification_journal_path": tmp_path / "verification-journal.json",
+        "schedule_linkage_intent_path": tmp_path / "schedule-intent.json",
+        "schedule_linkage_journal_path": tmp_path / "schedule-journal.json",
     }
-    corrupt = paths["native_linkage_journal_path"]
+    corrupt = paths[corrupt_name]
     corrupt.write_text("not-json", encoding="utf-8")
     corrupt.chmod(0o600)
 
@@ -271,6 +437,7 @@ async def test_corrupt_artifact_is_error_with_zero_callbacks(tmp_path: Path, mon
         validate_safety_root=lambda: None,
         native_dispatch=dispatch,
         verification_dispatch=dispatch,
+        schedule_dispatch=dispatch,
     )
     supervisor = RecoverySupervisor(_config(), dependencies=dependencies)
 
@@ -286,12 +453,129 @@ async def test_corrupt_artifact_is_error_with_zero_callbacks(tmp_path: Path, mon
         RecoveryArtifacts(native_journal=_native_record(timer_enabled=True)),
         RecoveryArtifacts(verification_journal=_verification_record(stale=True)),
         RecoveryArtifacts(verification_journal=_verification_record(safety=True)),
+        _schedule_artifacts(stale=True),
+        _schedule_artifacts(safety=True),
+        _schedule_artifacts(mutation_scope="full_target"),
     ],
 )
 async def test_unsafe_automatic_recovery_requires_attendance_without_dispatch(
     artifacts: RecoveryArtifacts,
 ) -> None:
     supervisor = RecoverySupervisor(_config(), dependencies=_dependencies(artifacts))
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
+
+
+@pytest.mark.parametrize("mismatch", ["operation", "spec", "snapshots", "instance"])
+async def test_schedule_candidate_requires_exact_intent_record_binding(
+    mismatch: str,
+) -> None:
+    record = _schedule_record()
+    intent = _schedule_intent(record=record)
+    if mismatch == "operation":
+        intent.operation_id = "different-operation"
+    elif mismatch == "spec":
+        intent.preflight.spec = SimpleNamespace(operation_id="different-operation")
+    elif mismatch == "snapshots":
+        intent.preflight.snapshots = (SimpleNamespace(device_id="different"),)
+    else:
+        intent.instance_id = "different-instance"
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            RecoveryArtifacts(schedule_intent=intent, schedule_journal=record)
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ERROR
+
+
+async def test_schedule_journal_without_instance_bound_intent_is_error() -> None:
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            RecoveryArtifacts(schedule_journal=_schedule_record())
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ERROR
+
+
+async def test_schedule_record_within_expiry_grace_is_recoverable() -> None:
+    now = datetime.now(UTC)
+    record = _schedule_record()
+    record.created_at = now - timedelta(seconds=20)
+    record.updated_at = now - timedelta(seconds=20)
+    record.expires_at = now - timedelta(seconds=10)
+    calls = 0
+
+    async def dispatch(config, args) -> int:
+        nonlocal calls
+        del config, args
+        calls += 1
+        return 0
+
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            RecoveryArtifacts(
+                schedule_intent=_schedule_intent(record=record),
+                schedule_journal=record,
+            ),
+            schedule_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.RECOVERED
+    assert calls == 1
+
+
+async def test_terminal_intent_with_fully_detached_journal_finishes_clear_crash() -> None:
+    calls = 0
+    record = _schedule_record()
+    record.linkage_write_intent_device_ids = ("master", "slave")
+    record.detached_device_ids = ("slave", "master")
+    intent = _schedule_intent(
+        ScheduleLinkageIntentPhase.TERMINAL,
+        record=record,
+    )
+    intent.outcome = ScheduleLinkageIntentOutcome.ROLES_DETACHED
+
+    async def dispatch(config, args) -> int:
+        nonlocal calls
+        del config
+        calls += 1
+        assert args.command == "recover-schedule-linkage"
+        assert args.recovery_first is True
+        return 0
+
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            RecoveryArtifacts(schedule_intent=intent, schedule_journal=record),
+            schedule_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.RECOVERED
+    assert calls == 1
+
+
+async def test_terminal_intent_with_incomplete_detach_requires_attendance() -> None:
+    record = _schedule_record()
+    record.linkage_write_intent_device_ids = ("master", "slave")
+    record.detached_device_ids = ("slave",)
+    intent = _schedule_intent(
+        ScheduleLinkageIntentPhase.TERMINAL,
+        record=record,
+    )
+    intent.outcome = ScheduleLinkageIntentOutcome.ROLES_DETACHED
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            RecoveryArtifacts(schedule_intent=intent, schedule_journal=record)
+        ),
+    )
 
     assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
 
@@ -358,6 +642,134 @@ async def test_busy_is_retried_on_next_poll() -> None:
     assert await supervisor.run_once() is RecoverySupervisorStatus.BUSY
     assert await supervisor.run_once() is RecoverySupervisorStatus.RECOVERED
     assert calls == 2
+
+
+@pytest.mark.parametrize(
+    "busy_error",
+    [
+        ScheduleLinkageBusyError("busy"),
+        ScheduleLinkageJournalClaimError("claimed"),
+        ScheduleLinkageCliError("another schedule-linkage process is active"),
+    ],
+)
+async def test_schedule_busy_errors_are_retried_on_next_poll(
+    busy_error: BaseException,
+) -> None:
+    calls = 0
+
+    async def dispatch(config, args) -> int:
+        nonlocal calls
+        del config, args
+        calls += 1
+        if calls == 1:
+            raise busy_error
+        return 0
+
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            _schedule_artifacts(),
+            schedule_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.BUSY
+    assert await supervisor.run_once() is RecoverySupervisorStatus.RECOVERED
+    assert calls == 2
+
+
+async def test_generic_schedule_journal_error_is_latched_without_retry() -> None:
+    calls = 0
+
+    async def dispatch(config, args) -> int:
+        nonlocal calls
+        del config, args
+        calls += 1
+        raise ScheduleLinkageJournalError("private journal failure")
+
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            _schedule_artifacts(),
+            schedule_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ERROR
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ERROR
+    assert calls == 1
+
+
+async def test_schedule_dispatch_self_mutation_is_latched_without_retry() -> None:
+    calls = 0
+    artifacts = _schedule_artifacts()
+
+    async def dispatch(config, args) -> int:
+        nonlocal calls
+        del config, args
+        calls += 1
+        record = artifacts.schedule_journal
+        assert record is not None
+        record.updated_at += timedelta(microseconds=1)
+        raise ScheduleLinkageJournalError("private journal failure after intent update")
+
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            artifacts,
+            schedule_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ERROR
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ERROR
+    assert calls == 1
+
+
+async def test_schedule_dispatch_error_text_is_not_logged(caplog) -> None:
+    secret = "private-device-endpoint"
+
+    async def dispatch(config, args) -> int:
+        del config, args
+        raise RuntimeError(secret)
+
+    caplog.set_level("INFO", logger="jebao_flow.recovery_supervisor")
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            _schedule_artifacts(),
+            schedule_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ERROR
+    assert secret not in caplog.text
+
+
+async def test_schedule_recovery_exposes_sanitized_inflight_status() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def dispatch(config, args) -> int:
+        del config, args
+        started.set()
+        await release.wait()
+        return 0
+
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            _schedule_artifacts(),
+            schedule_dispatch=dispatch,
+        ),
+    )
+    task = asyncio.create_task(supervisor.run_once())
+    await started.wait()
+
+    assert supervisor.status is RecoverySupervisorStatus.RECOVERING_SCHEDULE
+    assert supervisor.recovery_in_flight is True
+    release.set()
+    assert await task is RecoverySupervisorStatus.RECOVERED
 
 
 async def test_stop_waits_for_inflight_recovery() -> None:
@@ -437,6 +849,8 @@ def test_artifact_reader_rejects_symlink_without_following_target(
     monkeypatch.setattr(module, "native_linkage_intent_path", lambda: tmp_path / "missing-1")
     monkeypatch.setattr(module, "verification_intent_path", lambda: tmp_path / "missing-2")
     monkeypatch.setattr(module, "verification_journal_path", lambda: tmp_path / "missing-3")
+    monkeypatch.setattr(module, "schedule_linkage_intent_path", lambda: tmp_path / "missing-4")
+    monkeypatch.setattr(module, "schedule_linkage_journal_path", lambda: tmp_path / "missing-5")
 
     with pytest.raises(RecoveryArtifactError):
         module._default_scan_artifacts()
@@ -454,6 +868,8 @@ def test_artifact_reader_rejects_hardlink(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "native_linkage_intent_path", lambda: tmp_path / "missing-1")
     monkeypatch.setattr(module, "verification_intent_path", lambda: tmp_path / "missing-2")
     monkeypatch.setattr(module, "verification_journal_path", lambda: tmp_path / "missing-3")
+    monkeypatch.setattr(module, "schedule_linkage_intent_path", lambda: tmp_path / "missing-4")
+    monkeypatch.setattr(module, "schedule_linkage_journal_path", lambda: tmp_path / "missing-5")
 
     with pytest.raises(RecoveryArtifactError, match="metadata is unsafe"):
         module._default_scan_artifacts()

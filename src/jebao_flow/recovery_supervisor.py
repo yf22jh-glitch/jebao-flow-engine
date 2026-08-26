@@ -1,7 +1,7 @@
 """Always-on, recovery-only supervisor for attended hardware workflows.
 
 The supervisor is deliberately inert while no durable recovery artifact exists.  Its idle poll
-opens only the four fixed intent/journal files and the persistent emergency-stop marker; device
+opens only the six fixed intent/journal files and the persistent emergency-stop marker; device
 discovery, TCP connections, and all control writes remain inside the already-audited recovery
 dispatchers and are reached only for one unambiguous, fresh automatic-recovery candidate.
 """
@@ -37,6 +37,11 @@ from jebao_flow.devices.linkage import (
     LinkageTransactionBusyError,
     LinkageTransactionRecord,
 )
+from jebao_flow.devices.schedule_linkage import (
+    ScheduleLinkageBusyError,
+    ScheduleLinkageJournalClaimError,
+    ScheduleLinkageRecord,
+)
 from jebao_flow.devices.verification import (
     DeviceVerificationBusyError,
     DeviceVerificationRecord,
@@ -46,6 +51,8 @@ from jebao_flow.hardware_safety import (
     emergency_stop_latch_path,
     native_linkage_intent_path,
     native_linkage_journal_path,
+    schedule_linkage_intent_path,
+    schedule_linkage_journal_path,
     validate_hardware_safety_root,
     verification_intent_path,
     verification_journal_path,
@@ -57,6 +64,13 @@ from jebao_flow.hardware_test import (
 )
 from jebao_flow.hardware_test import _dispatch as dispatch_native_linkage
 from jebao_flow.logging import configure_logging
+from jebao_flow.schedule_linkage_cli import (
+    ScheduleLinkageCliError,
+    ScheduleLinkageIntent,
+    ScheduleLinkageIntentOutcome,
+    ScheduleLinkageIntentPhase,
+)
+from jebao_flow.schedule_linkage_cli import dispatch as dispatch_schedule_linkage
 
 _LOGGER = logging.getLogger(__name__)
 _AUTOMATIC_RECOVERY_GRACE_SECONDS = 30
@@ -70,6 +84,7 @@ class RecoverySupervisorStatus(StrEnum):
     IDLE = "idle"
     RECOVERING_NATIVE = "recovering_native"
     RECOVERING_VERIFICATION = "recovering_verification"
+    RECOVERING_SCHEDULE = "recovering_schedule"
     RECOVERED = "recovered"
     BUSY = "busy"
     ATTENDED_REQUIRED = "attended_required"
@@ -87,7 +102,7 @@ class RecoveryDispatchBusyError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class RecoveryArtifacts:
-    """One consistent-enough read of the four durable workflow artifacts.
+    """One consistent-enough read of the six durable workflow artifacts.
 
     The dispatchers re-read and lease their stores before connection, so this scan is only a
     fail-closed eligibility decision and never an authority for a physical write.
@@ -97,12 +112,15 @@ class RecoveryArtifacts:
     native_journal: LinkageTransactionRecord | None = None
     verification_intent: DeviceVerificationIntent | None = None
     verification_journal: DeviceVerificationRecord | None = None
+    schedule_intent: ScheduleLinkageIntent | None = None
+    schedule_journal: ScheduleLinkageRecord | None = None
 
 
 ArtifactScanner = Callable[[], RecoveryArtifacts]
 LatchReader = Callable[[], bool]
 NativeDispatcher = Callable[[AppConfig, argparse.Namespace], Awaitable[int]]
 VerificationDispatcher = Callable[[AppConfig, argparse.Namespace], Awaitable[int]]
+ScheduleDispatcher = Callable[[AppConfig, argparse.Namespace], Awaitable[int]]
 Clock = Callable[[], datetime]
 BusyClassifier = Callable[[BaseException], bool]
 
@@ -179,6 +197,14 @@ def _default_scan_artifacts() -> RecoveryArtifacts:
             verification_journal_path(),
             DeviceVerificationRecord,
         ),
+        schedule_intent=_load_fixed_artifact(
+            schedule_linkage_intent_path(),
+            ScheduleLinkageIntent,
+        ),
+        schedule_journal=_load_fixed_artifact(
+            schedule_linkage_journal_path(),
+            ScheduleLinkageRecord,
+        ),
     )
 
 
@@ -201,19 +227,23 @@ async def _default_verification_dispatch(config: AppConfig, args: argparse.Names
     return await dispatch_device_verification(config, args)
 
 
+async def _default_schedule_dispatch(config: AppConfig, args: argparse.Namespace) -> int:
+    return await dispatch_schedule_linkage(config, args)
+
+
 def _default_is_busy(error: BaseException) -> bool:
     if isinstance(
         error,
-        (
-            RecoveryDispatchBusyError,
-            HardwareOperationBusyError,
-            LinkageJournalClaimError,
-            LinkageTransactionBusyError,
-            DeviceVerificationBusyError,
-        ),
+        RecoveryDispatchBusyError
+        | HardwareOperationBusyError
+        | LinkageJournalClaimError
+        | LinkageTransactionBusyError
+        | DeviceVerificationBusyError
+        | ScheduleLinkageBusyError
+        | ScheduleLinkageJournalClaimError,
     ):
         return True
-    # The two legacy intent leases predate typed busy errors. Match only their exact sanitized
+    # The CLI intent leases predate typed busy errors. Match only their exact sanitized
     # messages; never publish or log exception text from a lower network/device layer.
     return (
         isinstance(error, HardwareTestError)
@@ -221,6 +251,9 @@ def _default_is_busy(error: BaseException) -> bool:
     ) or (
         isinstance(error, DeviceVerificationCliError)
         and str(error) == "another device-verification process is active"
+    ) or (
+        isinstance(error, ScheduleLinkageCliError)
+        and str(error) == "another schedule-linkage process is active"
     )
 
 
@@ -233,6 +266,7 @@ class RecoverySupervisorDependencies:
     latch_present: LatchReader = _default_latch_present
     native_dispatch: NativeDispatcher = _default_native_dispatch
     verification_dispatch: VerificationDispatcher = _default_verification_dispatch
+    schedule_dispatch: ScheduleDispatcher = _default_schedule_dispatch
     clock: Clock = lambda: datetime.now(UTC)
     is_busy: BusyClassifier = _default_is_busy
 
@@ -247,6 +281,7 @@ def _phase_is_nonterminal(intent: object | None) -> bool:
     return phase not in {
         HardwareTestIntentPhase.TERMINAL,
         VerificationIntentPhase.TERMINAL,
+        ScheduleLinkageIntentPhase.TERMINAL,
     }
 
 
@@ -258,6 +293,8 @@ def _phase_needs_recovery(intent: object | None) -> bool:
         HardwareTestIntentPhase.RECOVERY_REQUIRED,
         VerificationIntentPhase.STARTED,
         VerificationIntentPhase.RECOVERY_REQUIRED,
+        ScheduleLinkageIntentPhase.STARTED,
+        ScheduleLinkageIntentPhase.RECOVERY_REQUIRED,
     }
 
 
@@ -268,6 +305,8 @@ def _artifact_fingerprint(artifacts: RecoveryArtifacts) -> str:
         artifacts.native_journal,
         artifacts.verification_intent,
         artifacts.verification_journal,
+        artifacts.schedule_intent,
+        artifacts.schedule_journal,
     ):
         if artifact is None:
             encoded = b"none"
@@ -308,6 +347,21 @@ def _has_safety_recovery_reason(record: object) -> bool:
     return isinstance(value, str) and value.startswith("safety_")
 
 
+def _has_safety_like_error(record: object) -> bool:
+    """Recognize safety markers without exposing journal error text to logs or output."""
+
+    error = getattr(record, "error", None)
+    if error is None:
+        return False
+    if not isinstance(error, str):
+        return True
+    normalized = error.casefold().replace("-", "_")
+    return any(
+        marker in normalized
+        for marker in ("safety", "failsafe", "interlock", "emergency", "e_stop", "latch")
+    )
+
+
 def _native_timer_restore_requires_attendance(record: object) -> bool:
     try:
         return any(snapshot.timer_enabled is not False for snapshot in record.snapshots)
@@ -333,7 +387,7 @@ class RecoverySupervisor:
     ) -> None:
         if (
             isinstance(poll_interval_seconds, bool)
-            or not isinstance(poll_interval_seconds, (int, float))
+            or not isinstance(poll_interval_seconds, int | float)
             or not math.isfinite(poll_interval_seconds)
             or not 0.1 <= poll_interval_seconds <= 60
         ):
@@ -389,6 +443,9 @@ class RecoverySupervisor:
                 artifacts.verification_journal is not None
                 or _phase_needs_recovery(artifacts.verification_intent)
             )
+            schedule_pending = artifacts.schedule_journal is not None or _phase_needs_recovery(
+                artifacts.schedule_intent
+            )
             native_nonterminal = artifacts.native_journal is not None or _phase_is_nonterminal(
                 artifacts.native_intent
             )
@@ -396,8 +453,12 @@ class RecoverySupervisor:
                 artifacts.verification_journal is not None
                 or _phase_is_nonterminal(artifacts.verification_intent)
             )
+            schedule_nonterminal = (
+                artifacts.schedule_journal is not None
+                or _phase_is_nonterminal(artifacts.schedule_intent)
+            )
 
-            if native_nonterminal and verification_nonterminal:
+            if sum((native_nonterminal, verification_nonterminal, schedule_nonterminal)) > 1:
                 self._blocked_fingerprint = None
                 self._set_status(RecoverySupervisorStatus.ATTENDED_REQUIRED)
                 return self._status
@@ -405,7 +466,7 @@ class RecoverySupervisor:
                 self._blocked_fingerprint = None
                 self._set_status(RecoverySupervisorStatus.ATTENDED_REQUIRED)
                 return self._status
-            if not native_pending and not verification_pending:
+            if not native_pending and not verification_pending and not schedule_pending:
                 self._blocked_fingerprint = None
                 self._set_status(RecoverySupervisorStatus.IDLE)
                 return self._status
@@ -419,7 +480,7 @@ class RecoverySupervisor:
                     recovery_first=True,
                 )
                 recovering = RecoverySupervisorStatus.RECOVERING_NATIVE
-            else:
+            elif verification_pending:
                 decision = self._verification_candidate_status(artifacts, now)
                 dispatcher = self._dependencies.verification_dispatch
                 args = argparse.Namespace(
@@ -428,6 +489,15 @@ class RecoverySupervisor:
                     recovery_first=True,
                 )
                 recovering = RecoverySupervisorStatus.RECOVERING_VERIFICATION
+            else:
+                decision = self._schedule_candidate_status(artifacts, now)
+                dispatcher = self._dependencies.schedule_dispatch
+                args = argparse.Namespace(
+                    command="recover-schedule-linkage",
+                    confirm=None,
+                    recovery_first=True,
+                )
+                recovering = RecoverySupervisorStatus.RECOVERING_SCHEDULE
 
             if decision is not None:
                 self._blocked_fingerprint = None
@@ -448,17 +518,29 @@ class RecoverySupervisor:
                     self._blocked_fingerprint = None
                     self._set_status(RecoverySupervisorStatus.BUSY)
                 else:
-                    self._blocked_fingerprint = fingerprint
+                    self._blocked_fingerprint = self._latest_artifact_fingerprint(
+                        fallback=fingerprint
+                    )
                     self._set_status(RecoverySupervisorStatus.ERROR)
                 return self._status
 
             if result != 0:
-                self._blocked_fingerprint = fingerprint
+                self._blocked_fingerprint = self._latest_artifact_fingerprint(
+                    fallback=fingerprint
+                )
                 self._set_status(RecoverySupervisorStatus.ERROR)
                 return self._status
             self._blocked_fingerprint = None
             self._set_status(RecoverySupervisorStatus.RECOVERED)
             return self._status
+
+    def _latest_artifact_fingerprint(self, *, fallback: str) -> str:
+        """Latch dispatcher-authored state so its own failure cannot trigger a retry storm."""
+
+        try:
+            return _artifact_fingerprint(self._dependencies.scan_artifacts())
+        except Exception:
+            return fallback
 
     async def run(self) -> RecoverySupervisorStatus:
         """Run until requested to stop, preserving every in-flight recovery to completion."""
@@ -531,9 +613,64 @@ class RecoverySupervisor:
             return RecoverySupervisorStatus.ATTENDED_REQUIRED
         return None
 
+    def _schedule_candidate_status(
+        self,
+        artifacts: RecoveryArtifacts,
+        now: datetime,
+    ) -> RecoverySupervisorStatus | None:
+        intent = artifacts.schedule_intent
+        record = artifacts.schedule_journal
+        if intent is None:
+            # A journal without its instance-bound intent cannot establish recovery authority.
+            return RecoverySupervisorStatus.ERROR
+        if getattr(intent, "instance_id", None) != self._config.instance.id:
+            return RecoverySupervisorStatus.ERROR
+        if record is None:
+            # STARTED is durably persisted before journal creation.  With no journal it proves
+            # that no role write was authorized, and the CLI can close the intent without I/O.
+            return (
+                None
+                if getattr(intent, "phase", None) is ScheduleLinkageIntentPhase.STARTED
+                else RecoverySupervisorStatus.ATTENDED_REQUIRED
+            )
+        expected_detached = tuple(
+            reversed(getattr(record, "linkage_write_intent_device_ids", ()))
+        )
+        terminal_clear_crash = (
+            getattr(intent, "phase", None) is ScheduleLinkageIntentPhase.TERMINAL
+            and getattr(intent, "outcome", None)
+            in {
+                ScheduleLinkageIntentOutcome.ROLES_DETACHED,
+                ScheduleLinkageIntentOutcome.BOUNDARY_VERIFIED,
+                ScheduleLinkageIntentOutcome.RECOVERED,
+            }
+            and getattr(record, "detached_device_ids", None) == expected_detached
+        )
+        if (
+            getattr(intent, "phase", None)
+            not in {
+                ScheduleLinkageIntentPhase.STARTED,
+                ScheduleLinkageIntentPhase.RECOVERY_REQUIRED,
+            }
+            and not terminal_clear_crash
+        ):
+            return RecoverySupervisorStatus.ATTENDED_REQUIRED
+        if getattr(record, "mutation_scope", None) != "linkage_only":
+            return RecoverySupervisorStatus.ATTENDED_REQUIRED
+        preflight = getattr(intent, "preflight", None)
+        if (
+            getattr(intent, "operation_id", None) != getattr(record, "operation_id", None)
+            or getattr(preflight, "spec", None) != getattr(record, "spec", None)
+            or getattr(preflight, "snapshots", None) != getattr(record, "snapshots", None)
+        ):
+            return RecoverySupervisorStatus.ERROR
+        if _has_safety_like_error(record) or _timestamps_are_stale(record, now):
+            return RecoverySupervisorStatus.ATTENDED_REQUIRED
+        return None
+
     async def _dispatch_uninterruptibly(
         self,
-        dispatcher: NativeDispatcher | VerificationDispatcher,
+        dispatcher: NativeDispatcher | VerificationDispatcher | ScheduleDispatcher,
         args: argparse.Namespace,
     ) -> int:
         task = asyncio.create_task(dispatcher(self._config, args))

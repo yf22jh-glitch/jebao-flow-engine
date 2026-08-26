@@ -6,11 +6,17 @@ from jebao_flow.persistence.qualification import (
     JsonQualificationStore,
     QualificationStoreError,
 )
+from jebao_flow.persistence.schedule_linkage import (
+    JsonScheduleLinkageJournalStore,
+    ScheduleLinkageJournalError,
+)
 
 __all__ = [
     "DeviceQualificationReceipt",
     "JsonLinkageJournalStore",
     "JsonQualificationStore",
     "LinkageJournalError",
+    "JsonScheduleLinkageJournalStore",
     "QualificationStoreError",
+    "ScheduleLinkageJournalError",
 ]

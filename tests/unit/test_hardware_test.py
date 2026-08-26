@@ -552,6 +552,20 @@ def test_nonterminal_device_verification_blocks_native_preflight(
     assert devices["pro_right"].commands == []
 
 
+def test_malformed_terminal_schedule_intent_blocks_native_workflow() -> None:
+    root = hardware_safety.hardware_safety_root()
+    root.mkdir(mode=0o700)
+    path = hardware_safety.schedule_linkage_intent_path()
+    path.write_text(
+        '{"version":1,"phase":"terminal","preflight":{},"outcome":"recovered"}\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+    with pytest.raises(hardware_test.HardwareTestError, match="schedule-linkage"):
+        hardware_test._assert_no_verification_conflict()
+
+
 @pytest.mark.parametrize(
     ("runtime", "observer_enabled", "allowed_right"),
     [

@@ -111,6 +111,18 @@ def verification_intent_path() -> Path:
     return hardware_safety_root() / "device-verification-intent.json"
 
 
+def schedule_linkage_journal_path() -> Path:
+    """Return the fixed, deployment-wide role-only schedule journal path."""
+
+    return hardware_safety_root() / "schedule-linkage.json"
+
+
+def schedule_linkage_intent_path() -> Path:
+    """Return the fixed, deployment-wide schedule diagnostic intent path."""
+
+    return hardware_safety_root() / "schedule-linkage-intent.json"
+
+
 def qualification_directory() -> Path:
     return hardware_safety_root() / "qualifications"
 
@@ -124,6 +136,8 @@ __all__ = [
     "native_linkage_journal_path",
     "physical_lock_directory",
     "qualification_directory",
+    "schedule_linkage_intent_path",
+    "schedule_linkage_journal_path",
     "verification_intent_path",
     "verification_journal_path",
     "validate_hardware_safety_root",

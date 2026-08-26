@@ -6,9 +6,9 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 
 > 현재 상태: 실제 장비의 읽기 전용 검증과 지속 Observer, 오프라인 control 프레임 생성,
 > MQTT 상태 계약과 Home Assistant 커스텀 통합 뼈대까지 구현했습니다. 기본 실행 모드는
-> `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 현장 전용 단일 Pro 검증과 짧은
-> Native Sync/Async 시험 하네스, 영속 복구 supervisor까지 별도 경로로 구현했지만 실제 장비
-> write는 아직 수행하지 않았습니다. 일반 데몬·MQTT·HA에는 이 시험 기능을 노출하지 않습니다.
+> `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 현장 전용 경로에서는 Pro 두 대에
+> 제한된 저출력 레지스터 write/read-back과 정확 복원을 완료했지만, 물리 유량과 파형은 아직
+> 검증하지 않았습니다. 일반 데몬·MQTT·HA에는 이 시험 기능을 노출하지 않습니다.
 
 ## 구조
 
@@ -42,6 +42,9 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
   물리 장비 바인딩 영수증
 - 모든 물리 write workflow가 공유하는 `/hardware-safety` 전역 lease, 비상정지 latch와
   recovery-only supervisor
+- TimerON을 유지한 채 `Linkage` 역할만 변경하고 장비별 `Auto*` 컨트롤러 레지스터의
+  시간표 경계 전환을 검증하는
+  [schedule-linkage 진단](docs/schedule-linkage.md)
 - 비동기 가상 장비 시뮬레이터
 - Constant, Sync, Anti Phase 및 VorTech 계열에서 영감을 얻은 그룹 패턴 계산기
 - 3대 수류모터의 `left`/`right`/`crossflow` 역할과 개별 `gain`/`phase`
@@ -53,8 +56,8 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 - 단위 테스트와 GitHub Actions CI
 
 실제 장비 6대의 읽기 전용 검증 결과와 제품군별 Capability는
-[검증된 장비 카탈로그](docs/devices/README.md)에 정리했습니다. 최초 write 전 절차는
-[실기 제어 전 체크리스트](docs/pre-hardware-test-checklist.md), VorTech 모드 대응은
+[검증된 장비 카탈로그](docs/devices/README.md)에 정리했습니다. 제한 실기 절차는
+[실기 제어 안전 체크리스트](docs/pre-hardware-test-checklist.md), VorTech 모드 대응은
 [VorTech 계열 패턴](docs/vortech-inspired-modes.md)을 참고하세요.
 Home Assistant 설치와 카드는
 [Home Assistant 연동 가이드](docs/home-assistant.md)를 참고하세요.
@@ -86,15 +89,15 @@ jebao-flowd --config config.example.yaml --check-config
 
 ```bash
 jebao-flowctl discover --timeout 5
-jebao-flowctl discover --target 192.168.20.255 --json
+jebao-flowctl discover --target 192.0.2.255 --json
 ```
 
 검색으로 확인한 주소에서 인증과 raw 상태 조회만 수행하려면 `probe`를 사용합니다. passcode는
 출력하지 않으며 장비에 control/write 프레임을 보내지 않습니다.
 
 ```bash
-jebao-flowctl probe 192.168.20.41 192.168.20.42 --json
-jebao-flowctl probe 192.168.20.41 --decode --json
+jebao-flowctl probe 192.0.2.41 192.0.2.42 --json
+jebao-flowctl probe 192.0.2.41 --decode --json
 ```
 
 ## Docker

@@ -1583,6 +1583,51 @@ def test_json_journal_round_trip_is_private_and_atomic(tmp_path: Path) -> None:
     assert store.load() is None
 
 
+def test_json_journal_durably_removes_create_hardlink_before_return(tmp_path: Path) -> None:
+    class RecordingFsyncStore(JsonLinkageJournalStore):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path)
+            self.link_counts: list[int | None] = []
+
+        def _fsync_parent(self) -> None:
+            self.link_counts.append(self.path.stat().st_nlink if self.path.exists() else None)
+            super()._fsync_parent()
+
+    now = datetime.now().astimezone()
+    spec = _spec()
+    record = LinkageTransactionRecord.model_validate(
+        {
+            "operation_id": spec.operation_id,
+            "phase": "prepared",
+            "spec": spec,
+            "snapshots": tuple(
+                {
+                    "device_id": device_id,
+                    "physical_binding": _binding(device_id),
+                    "enabled": True,
+                    "power": 45,
+                    "mode": "constant",
+                    "frequency": 20,
+                    "linkage": "independent",
+                    "timer_enabled": True,
+                }
+                for device_id in ("master", "slave")
+            ),
+            "created_at": now,
+            "updated_at": now,
+            "expires_at": now + timedelta(seconds=10),
+        }
+    )
+    store = RecordingFsyncStore(tmp_path / "linkage.json")
+
+    store.create(record)
+
+    assert store.link_counts == [2, 1]
+    assert store.path.stat().st_nlink == 1
+    assert list(tmp_path.glob(".linkage.json.*.tmp")) == []
+    assert store.load() == record
+
+
 def test_recovery_reason_is_required_only_for_recovery_required_records() -> None:
     now = datetime.now().astimezone()
     spec = _spec()

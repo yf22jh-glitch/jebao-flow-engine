@@ -92,6 +92,19 @@ class JsonLinkageJournalStore:
                 temporary_path = self._write_temporary(record)
                 os.link(temporary_path, self.path)
                 self._fsync_parent()
+                temporary_path.unlink()
+                temporary_path = None
+                # The destination and temporary name briefly refer to the same inode. Persist
+                # removal of the temporary hardlink before returning authority for a physical
+                # write; otherwise a power loss can replay nlink=2 and make recovery fail closed
+                # on its own journal.
+                self._fsync_parent()
+                descriptor = self._open_existing(allow_absent=False)
+                if descriptor is None:  # pragma: no cover - defensive type narrowing
+                    raise LinkageJournalError(
+                        "linkage recovery journal disappeared after creation"
+                    )
+                os.close(descriptor)
             except FileExistsError as error:
                 raise LinkageJournalClaimError(
                     f"linkage recovery journal {self.path} is already claimed"

@@ -22,8 +22,8 @@ validation:
   raw_state_read_succeeded: true
   decoded_state_cross_checked: true
   status_push_observed: false
-  control_write_tested: false
-  control_frames_sent: false
+  control_write_tested: true
+  control_frames_sent: true
 
 power:
   attribute: Flow
@@ -35,14 +35,16 @@ power:
 capabilities:
   observed_readable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime]
   schema_declared_writable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime]
-  write_validated: []
+  write_validated: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency]
   native_mode_values: [pulse, sine, constant, random, tidal, nutrient_transport, circulation, feed, custom]
   linkage_values: [independent, master, sync_slave, async_slave]
   faults_present: [overcurrent, overvoltage, overtemperature, undervoltage, locked_rotor, no_live_load, UART]
 
 evidence:
-  captured_at: 2026-08-25
+  captured_at: 2026-08-26
   capture_environment: isolated IoT VLAN through home server and router
   notes:
     - Two devices returned complete 452-byte status payloads.
     - Both live reads decoded as powered on and independent linkage.
+    - Bounded low-power register writes and exact restoration were read back on both devices.
+    - An async-slave-only Flow change did not persist; physical water flow was not validated.

@@ -84,8 +84,9 @@ product key 모두 UDP discovery, TCP 연결, 로컬 인증과 raw 상태 읽기
 교차검증에 사용했으며, 해당 코드나 스키마 파일은 이 저장소로 복사하지 않았습니다.
 
 개별 MAC, device id, 사설 IP와 passcode는 공개 저장소에 기록하지 않습니다. 익명화한
-제품군별 결과는 [검증된 장비 카탈로그](devices/README.md)에 있습니다. 실제 장비에는
-control/write 프레임을 보내지 않았으므로 쓰기 경로는 아직 미검증입니다.
+제품군별 결과는 [검증된 장비 카탈로그](devices/README.md)에 있습니다. 이후 2026-08-26
+Local Wavemaker Pro 두 대에 한해 제한된 저출력 레지스터 write/read-back과 정확 복원을
+수행했습니다. 다른 제품군의 쓰기 경로와 Pro의 물리 유량·파형은 아직 미검증입니다.
 
 ## 실기 제어 전 오프라인 검증
 

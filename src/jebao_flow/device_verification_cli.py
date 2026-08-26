@@ -59,6 +59,8 @@ from jebao_flow.hardware_safety import (
     native_linkage_intent_path,
     native_linkage_journal_path,
     qualification_directory,
+    schedule_linkage_intent_path,
+    schedule_linkage_journal_path,
     validate_hardware_safety_root,
     verification_intent_path,
     verification_journal_path,
@@ -77,6 +79,10 @@ from jebao_flow.persistence.qualification import (
 from jebao_flow.protocol.discovery import GizwitsDiscovery
 from jebao_flow.protocol.models import Capability, DeviceTarget, DiscoveredDevice, LinkageRole
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
+from jebao_flow.schedule_intent_validation import (
+    TerminalScheduleIntentError,
+    validate_terminal_schedule_intent_payload,
+)
 
 _TOKEN_VERSION = 1
 _MAX_ATTENDED_POWER = 45
@@ -87,6 +93,7 @@ _MAX_READBACK_ATTEMPTS = 3
 _MAX_DISCOVERY_TIMEOUT_SECONDS = 5
 _AUTOMATIC_RECOVERY_GRACE_SECONDS = 30
 _ATTENDED_AUTHORITY_SECONDS = 120
+_MAX_SAFETY_ARTIFACT_BYTES = 1024 * 1024
 _SAFETY_RECOVERY_REASONS = frozenset(
     {
         DeviceVerificationRecoveryReason.SAFETY_INTERLOCK,
@@ -744,6 +751,7 @@ def _load_verification_journal(
 
 
 def _assert_no_native_conflict() -> None:
+    _assert_no_schedule_linkage_conflict()
     _require_safe_regular_file(
         native_linkage_journal_path(),
         allow_absent=True,
@@ -762,12 +770,57 @@ def _assert_no_native_conflict() -> None:
         raise DeviceVerificationCliError("active native-linkage intent blocks verification")
 
 
+def _assert_no_schedule_linkage_conflict() -> None:
+    journal = schedule_linkage_journal_path()
+    _require_safe_regular_file(
+        journal,
+        allow_absent=True,
+        label="schedule-linkage journal",
+    )
+    if os.path.lexists(journal):
+        raise DeviceVerificationCliError(
+            "unfinished schedule-linkage operation blocks verification"
+        )
+
+    intent_path = schedule_linkage_intent_path()
+    _require_safe_regular_file(
+        intent_path,
+        allow_absent=True,
+        label="schedule-linkage intent",
+    )
+    if not os.path.lexists(intent_path):
+        return
+    descriptor = -1
+    try:
+        descriptor = _open_nofollow(intent_path, os.O_RDONLY)
+        _validate_open_file(descriptor, intent_path, mode=0o600)
+        with os.fdopen(descriptor, encoding="utf-8") as stream:
+            descriptor = -1
+            encoded = stream.read(_MAX_SAFETY_ARTIFACT_BYTES + 1)
+        if len(encoded.encode()) > _MAX_SAFETY_ARTIFACT_BYTES:
+            raise DeviceVerificationCliError("schedule-linkage intent is too large")
+        payload = json.loads(encoded)
+    except (OSError, TypeError, ValueError) as error:
+        raise DeviceVerificationCliError("schedule-linkage intent is unreadable") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        validate_terminal_schedule_intent_payload(payload)
+    except TerminalScheduleIntentError as error:
+        raise DeviceVerificationCliError(
+            "nonterminal schedule-linkage intent blocks verification"
+        ) from error
+
+
 def _validate_artifact_paths() -> None:
     for path, label in (
         (verification_intent_path(), "verification intent"),
         (verification_journal_path(), "verification journal"),
         (native_linkage_intent_path(), "native-linkage intent"),
         (native_linkage_journal_path(), "native-linkage journal"),
+        (schedule_linkage_intent_path(), "schedule-linkage intent"),
+        (schedule_linkage_journal_path(), "schedule-linkage journal"),
     ):
         _require_safe_regular_file(path, allow_absent=True, label=label)
     directory = qualification_directory()
@@ -1357,11 +1410,11 @@ def _status(
 ) -> int:
     intent = intent_store.load()
     record = _load_verification_journal(journal_store)
-    native_conflict = False
+    other_workflow_conflict = False
     try:
         _assert_no_native_conflict()
     except DeviceVerificationCliError:
-        native_conflict = True
+        other_workflow_conflict = True
     guard = dependencies.guard_factory()
     guard.clear()
     latch_active = not guard.permitted
@@ -1372,7 +1425,10 @@ def _status(
     )
     print(f"Recovery reason: {recovery_reason}")
     print(f"Persistent safety latch: {'active' if latch_active else 'clear'}")
-    print(f"Native operation conflict: {'yes' if native_conflict else 'no'}")
+    print(
+        "Other hardware workflow conflict: "
+        f"{'yes' if other_workflow_conflict else 'no'}"
+    )
     source = record or intent
     if source is not None:
         device_id = (

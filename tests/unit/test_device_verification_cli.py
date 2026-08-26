@@ -1003,6 +1003,20 @@ async def test_native_journal_blocks_before_discovery_or_connection(
     assert device.write_targets == []
 
 
+def test_malformed_terminal_schedule_intent_blocks_device_verification(
+    safety_root: Path,
+) -> None:
+    path = hardware_safety.schedule_linkage_intent_path()
+    path.write_text(
+        '{"version":1,"phase":"terminal","preflight":{},"outcome":"recovered"}\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+    with pytest.raises(cli.DeviceVerificationCliError, match="schedule-linkage"):
+        cli._assert_no_native_conflict()
+
+
 async def test_recovery_rechecks_native_conflict_inside_global_lease_before_connect(
     safety_root: Path,
     monkeypatch,

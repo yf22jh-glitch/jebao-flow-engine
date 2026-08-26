@@ -5,9 +5,12 @@ Local Wavemaker Pro 스키마에는 `independent`, `master`, `sync_slave`, `asyn
 종료가 명확한 임시 시험 트랜잭션으로 다룹니다.
 
 현재 구현 범위는 Python 서비스 코어, LAN payload 생성, 영속 JSON 저널, 현장 전용 one-shot
-CLI와 recovery-only supervisor입니다. 실제 장비 write는 한 건도 보내지 않았으며 데몬
-actuator, MQTT 명령, Home Assistant 버튼에는 아직 연결하지 않았습니다. 일반 `jebao-flowd`는
-계속 Observer로 운용하고, 현장 시험은 공유 `/hardware-safety` 볼륨을 쓰는 별도 컨테이너에서만
+CLI와 recovery-only supervisor입니다. 2026-08-26 Pro 두 대에서 제한된 저출력
+TimerOFF/Constant/Linkage 레지스터 write와 반복 read-back, 원래 TimerON 시간표 상태의 정확
+복원을 확인했습니다. `async_slave`의 Flow를 별도로 바꾸려 한 값은 유지되지 않았으므로 독립
+출력 지원으로 판정하지 않았고, 물리 유량과 파형도 아직 검증하지 않았습니다. 데몬 actuator,
+MQTT 명령, Home Assistant 버튼에는 이 경로를 연결하지 않았습니다. 일반 `jebao-flowd`는 계속
+Observer로 운용하고, 현장 시험은 공유 `/hardware-safety` 볼륨을 쓰는 별도 컨테이너에서만
 실행합니다.
 
 ## 지원 동작
@@ -87,9 +90,8 @@ slot entries, invalid slots, capacity만 포함하고 장비 시각과 `TimerON`
 
 ## 남은 실기 게이트
 
-1. 현장에서 단일 Pro 펌프의 동일값 write와 read-back을 먼저 검증
-2. `Flow`를 다르게 준 slave가 실제 유량도 독립적으로 유지하는지 관찰
-3. `sync_slave`와 `async_slave`의 물리 파형 및 Frequency 의미 확인
-4. 앱 스케줄은 별도 시험으로 분리하고, 첫 Linkage 시험에서는 계속 `TimerON=false` 유지
-5. 장비 한 대 전원 제거와 데몬 강제 종료 후 복구 확인
-6. 위 결과가 통과한 뒤에만 MQTT/HA 임시 시험 UI 연결
+1. `Flow`를 다르게 준 slave가 실제 유량도 독립적으로 유지하는지 현장에서 관찰
+2. `sync_slave`와 `async_slave`의 물리 파형 및 Frequency 의미 확인
+3. 별도 TimerON schedule-linkage 진단으로 각 장비의 `Auto*` 레지스터 전환 확인
+4. 장비 한 대 전원 제거와 프로세스 강제 종료 후 복구 확인
+5. 위 결과가 통과한 뒤에만 MQTT/HA 임시 시험 UI 연결

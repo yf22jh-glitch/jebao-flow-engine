@@ -33,6 +33,25 @@ from jebao_flow.devices.linkage import (
 )
 from jebao_flow.devices.observer import ReadOnlyObserver
 from jebao_flow.devices.registry import DeviceRegistry
+from jebao_flow.devices.schedule_linkage import (
+    ScheduleActiveLinkageController,
+    ScheduleAutoEvidence,
+    ScheduleBoundaryExpectation,
+    ScheduleLinkageApplyError,
+    ScheduleLinkageBusyError,
+    ScheduleLinkageError,
+    ScheduleLinkageJournalClaimError,
+    ScheduleLinkagePhase,
+    ScheduleLinkagePreflight,
+    ScheduleLinkagePreflightError,
+    ScheduleLinkageRecord,
+    ScheduleLinkageResult,
+    ScheduleLinkageRollbackError,
+    ScheduleLinkageSnapshot,
+    ScheduleLinkageSpec,
+    ScheduleLinkageStopReason,
+    schedule_linkage_confirmation_token,
+)
 from jebao_flow.devices.simulator import SimulatedJebaoDevice
 from jebao_flow.devices.verification import (
     AttendedRestoreAuthority,
@@ -85,6 +104,22 @@ __all__ = [
     "LinkageTransactionRecord",
     "PhysicalDeviceBinding",
     "ReadOnlyObserver",
+    "ScheduleActiveLinkageController",
+    "ScheduleAutoEvidence",
+    "ScheduleBoundaryExpectation",
+    "ScheduleLinkageApplyError",
+    "ScheduleLinkageBusyError",
+    "ScheduleLinkageError",
+    "ScheduleLinkageJournalClaimError",
+    "ScheduleLinkagePhase",
+    "ScheduleLinkagePreflight",
+    "ScheduleLinkagePreflightError",
+    "ScheduleLinkageRecord",
+    "ScheduleLinkageResult",
+    "ScheduleLinkageRollbackError",
+    "ScheduleLinkageSnapshot",
+    "ScheduleLinkageSpec",
+    "ScheduleLinkageStopReason",
     "SafetyInterlockError",
     "SimulatedJebaoDevice",
     "StateVerificationError",
@@ -94,4 +129,5 @@ __all__ = [
     "configuration_fingerprint",
     "physical_identity_key",
     "schedule_structure_fingerprint",
+    "schedule_linkage_confirmation_token",
 ]
