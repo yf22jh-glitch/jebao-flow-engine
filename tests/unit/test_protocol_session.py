@@ -4,7 +4,7 @@ import struct
 import pytest
 
 from jebao_flow.protocol.codec import MAGIC, GizwitsCommand, encode_frame, read_frame
-from jebao_flow.protocol.errors import ProtocolTimeoutError
+from jebao_flow.protocol.errors import AuthenticationError, ProtocolTimeoutError
 from jebao_flow.protocol.session import STATE_REPLY_ACTION, GizwitsSession
 
 
@@ -229,3 +229,115 @@ async def test_quarantined_session_reconnects_reauthenticates_and_reads_fresh_st
         (2, GizwitsCommand.LOGIN_REQUEST),
         (2, GizwitsCommand.SERIAL_TRANSMIT_REQUEST),
     ]
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "error_pattern"),
+    [
+        ("short_passcode", "too short"),
+        ("empty_passcode", "invalid length"),
+        ("truncated_passcode", "invalid length"),
+        ("rejected_login", "rejected the local login"),
+        ("cancelled", None),
+    ],
+)
+async def test_failed_authentication_discards_session_and_allows_fresh_reauthentication(
+    failure_mode: str,
+    error_pattern: str | None,
+) -> None:
+    accepted_connections = 0
+    completed_connections = 0
+    all_connections_completed = asyncio.Event()
+    first_auth_request = asyncio.Event()
+    received: list[tuple[int, int]] = []
+    server_errors: list[Exception] = []
+
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal accepted_connections, completed_connections
+        accepted_connections += 1
+        connection_number = accepted_connections
+        try:
+            request = await read_frame(reader)
+            received.append((connection_number, request.command))
+            assert request.command == GizwitsCommand.PASSCODE_REQUEST
+
+            if connection_number == 1 and failure_mode == "cancelled":
+                first_auth_request.set()
+                await reader.read()
+                return
+
+            if connection_number == 1 and failure_mode == "short_passcode":
+                passcode_payload = b"\x00"
+            elif connection_number == 1 and failure_mode == "empty_passcode":
+                passcode_payload = struct.pack(">H", 0)
+            elif connection_number == 1 and failure_mode == "truncated_passcode":
+                passcode_payload = struct.pack(">H", 6) + b"abc"
+            else:
+                passcode = b"abc123"
+                passcode_payload = struct.pack(">H", len(passcode)) + passcode
+            writer.write(
+                encode_frame(GizwitsCommand.PASSCODE_RESPONSE, passcode_payload)
+            )
+            await writer.drain()
+
+            if connection_number == 1 and failure_mode in {
+                "short_passcode",
+                "empty_passcode",
+                "truncated_passcode",
+            }:
+                await reader.read()
+                return
+
+            request = await read_frame(reader)
+            received.append((connection_number, request.command))
+            assert request.command == GizwitsCommand.LOGIN_REQUEST
+            login_status = b"\x01" if connection_number == 1 else b"\x00"
+            writer.write(encode_frame(GizwitsCommand.LOGIN_RESPONSE, login_status))
+            await writer.drain()
+            await reader.read()
+        except Exception as error:  # pragma: no cover - asserted empty below
+            server_errors.append(error)
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
+            completed_connections += 1
+            if completed_connections == 2:
+                all_connections_completed.set()
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    session = GizwitsSession("127.0.0.1", port=port, response_timeout_seconds=0.2)
+    try:
+        await session.connect()
+        if failure_mode == "cancelled":
+            authenticate_task = asyncio.create_task(session.authenticate())
+            await asyncio.wait_for(first_auth_request.wait(), timeout=1)
+            authenticate_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await authenticate_task
+        else:
+            if error_pattern is None:  # pragma: no cover - parameter table invariant
+                raise AssertionError("authentication error case has no expected pattern")
+            with pytest.raises(AuthenticationError, match=error_pattern):
+                await session.authenticate()
+
+        assert session.connected is False
+        assert session.authenticated is False
+
+        await session.connect()
+        assert await session.authenticate() == b"abc123"
+        assert session.connected is True
+        assert session.authenticated is True
+    finally:
+        await session.disconnect()
+        server.close()
+        await server.wait_closed()
+        await asyncio.wait_for(all_connections_completed.wait(), timeout=1)
+
+    assert accepted_connections == 2
+    assert (2, GizwitsCommand.PASSCODE_REQUEST) in received
+    assert (2, GizwitsCommand.LOGIN_REQUEST) in received
+    assert server_errors == []

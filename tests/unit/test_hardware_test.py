@@ -4,6 +4,7 @@ import re
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,7 @@ from jebao_flow.devices import (
     LinkageTransactionRecord,
     SimulatedJebaoDevice,
     TemporaryLinkageController,
+    schedule_structure_fingerprint,
 )
 from jebao_flow.persistence import (
     DeviceQualificationReceipt,
@@ -256,6 +258,62 @@ def _token(output: str, label: str = "Confirmation token") -> str:
     match = re.search(rf"{label}: (JF[LR]-[A-F0-9]+)", output)
     assert match is not None
     return match.group(1)
+
+
+def _seed_timer_on_recovery(
+    config: AppConfig,
+    devices: dict[str, SimulatedJebaoDevice],
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[
+    JsonLinkageJournalStore,
+    hardware_test.JsonHardwareTestIntentStore,
+    LinkageTransactionRecord,
+    str,
+]:
+    """Create one attended TimerON recovery record without emitting a control frame."""
+
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    intent_store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    intent = intent_store.load()
+    assert intent is not None
+    schedule = DeviceSchedule(enabled=True)
+    fingerprint = schedule_structure_fingerprint(schedule)
+    snapshots = tuple(
+        snapshot.model_copy(
+            update={
+                "timer_enabled": True,
+                "schedule_fingerprint": fingerprint,
+            }
+        )
+        for snapshot in intent.snapshots
+    )
+    intent_store.save(
+        intent.model_copy(
+            update={
+                "phase": hardware_test.HardwareTestIntentPhase.STARTED,
+                "snapshots": snapshots,
+            }
+        )
+    )
+    now = datetime.now(UTC)
+    record = LinkageTransactionRecord(
+        operation_id=intent.operation_id,
+        phase=LinkageTransactionPhase.ACTIVE,
+        spec=intent.spec,
+        snapshots=snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=10),
+    )
+    journal_store = JsonLinkageJournalStore(hardware_test.canonical_journal_path(config))
+    journal_store.create(record)
+    assert hardware_test.main(["recover-linkage"]) == 0
+    recovery_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+    assert all(device.commands == [] for device in devices.values())
+    return journal_store, intent_store, record, recovery_token
 
 
 def test_preflight_is_read_only_private_and_arms_exact_snapshot(
@@ -1276,6 +1334,552 @@ def test_schedule_change_stops_same_confirmation_retry_and_recovery_first(
     assert journal_store.load() == pending
 
 
+def test_safety_interlock_stops_same_confirmation_retry_and_requires_new_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    intent_store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    intent = intent_store.load()
+    assert intent is not None
+    intent_store.save(
+        intent.model_copy(update={"phase": hardware_test.HardwareTestIntentPhase.STARTED})
+    )
+    now = datetime.now(UTC)
+    journal_store = JsonLinkageJournalStore(hardware_test.canonical_journal_path(config))
+    journal_store.create(
+        LinkageTransactionRecord(
+            operation_id=intent.operation_id,
+            phase=LinkageTransactionPhase.ACTIVE,
+            spec=intent.spec,
+            snapshots=intent.snapshots,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=10),
+        )
+    )
+    assert hardware_test.main(["recover-linkage"]) == 0
+    recovery_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+
+    attempts = 0
+
+    async def observe_safety_interlock(*args: object, **kwargs: object) -> bool:
+        del kwargs
+        nonlocal attempts
+        attempts += 1
+        recovery_store = args[2]
+        assert isinstance(recovery_store, hardware_test.ConfirmingLinkageJournalStore)
+        current = recovery_store.load()
+        assert current is not None
+        recovery_store.save(
+            current.model_copy(
+                update={
+                    "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+                    "recovery_reason": LinkageRecoveryReason.SAFETY_INTERLOCK,
+                    "updated_at": datetime.now(UTC),
+                    "error": "secret-device-id: safety_stop_required",
+                    "failed_device_ids": ("pro_right",),
+                }
+            )
+        )
+        raise LinkageRollbackError("secret-device-id: simulated safety transition")
+
+    monkeypatch.setattr(hardware_test, "_recover_once", observe_safety_interlock)
+    monkeypatch.setattr(hardware_test, "_RECOVERY_RETRY_SECONDS", 0)
+
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 2
+    refusal = capsys.readouterr()
+    assert "safety interlock changed during recovery" in refusal.err
+    assert "request a new status and attended recovery token" in refusal.err
+    assert "secret-device-id" not in refusal.out + refusal.err
+    assert "pro_right" not in refusal.out + refusal.err
+    assert attempts == 1
+    pending = journal_store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+    assert pending.error == "recovery deferred by persistent safety interlock"
+    assert pending.failed_device_ids == ("pro_left", "pro_right")
+    assert pending.restored_device_ids == ()
+    assert intent_store.load().outcome == "recovery_required"
+    assert all(device._state.enabled is False for device in devices.values())  # noqa: SLF001
+
+    assert hardware_test.main(["status"]) == 0
+    status_output = capsys.readouterr().out
+    current_token = _token(status_output, "Recovery confirmation token")
+    assert current_token != recovery_token
+    assert "Automatic recovery blockers: safety_interlock" in status_output
+    assert attempts == 1
+
+
+def test_persistent_latch_during_retry_dwell_is_durably_latched_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    intent_store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    intent = intent_store.load()
+    assert intent is not None
+    intent_store.save(
+        intent.model_copy(update={"phase": hardware_test.HardwareTestIntentPhase.STARTED})
+    )
+    now = datetime.now(UTC)
+    journal_store = JsonLinkageJournalStore(hardware_test.canonical_journal_path(config))
+    journal_store.create(
+        LinkageTransactionRecord(
+            operation_id=intent.operation_id,
+            phase=LinkageTransactionPhase.ACTIVE,
+            spec=intent.spec,
+            snapshots=intent.snapshots,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=10),
+        )
+    )
+    assert hardware_test.main(["recover-linkage"]) == 0
+    recovery_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+    latch_path = hardware_test.canonical_safety_latch_path(config)
+    attempts = 0
+
+    async def fail_before_retry(*args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        nonlocal attempts
+        attempts += 1
+        asyncio.get_running_loop().call_later(
+            0.005,
+            hardware_test.activate_persistent_safety_latch,
+            latch_path,
+        )
+        raise LinkageRollbackError("secret-device-id: transient restore failure")
+
+    monkeypatch.setattr(hardware_test, "_recover_once", fail_before_retry)
+    monkeypatch.setattr(hardware_test, "_RECOVERY_RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(hardware_test, "_RECOVERY_LATCH_POLL_SECONDS", 0.001)
+
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 2
+    refusal = capsys.readouterr()
+    assert "safety interlock changed during recovery" in refusal.err
+    assert "secret-device-id" not in refusal.out + refusal.err
+    assert attempts == 1
+    assert latch_path.exists()
+    pending = journal_store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+    assert pending.error == "recovery deferred by persistent safety interlock"
+    assert pending.failed_device_ids == ("pro_left", "pro_right")
+    assert pending.restored_device_ids == ()
+
+    assert hardware_test.main(["status"]) == 0
+    status_output = capsys.readouterr().out
+    assert _token(status_output, "Recovery confirmation token") != recovery_token
+    assert "Automatic recovery blockers: safety_interlock" in status_output
+    assert "secret-device-id" not in status_output
+
+
+def test_latch_after_successful_recovery_clear_stops_both_and_invalidates_old_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    journal_store, intent_store, _, recovery_token = _seed_timer_on_recovery(
+        config,
+        devices,
+        capsys,
+    )
+    latch_path = hardware_test.canonical_safety_latch_path(config)
+    attempts = 0
+
+    async def succeed_then_latch(*args: object, **kwargs: object) -> bool:
+        del kwargs
+        nonlocal attempts
+        attempts += 1
+        recovery_store = args[2]
+        assert isinstance(recovery_store, hardware_test.ConfirmingLinkageJournalStore)
+        current = recovery_store.load()
+        assert current is not None
+        snapshots = {snapshot.device_id: snapshot for snapshot in current.snapshots}
+        for device_id in (current.spec.master_device_id, current.spec.slave_device_id):
+            snapshot = snapshots[device_id]
+            device = devices[device_id]
+            await device.connect()
+            await device.write_target(
+                hardware_test.DeviceTarget(
+                    enabled=snapshot.enabled,
+                    power=snapshot.power,
+                    mode=snapshot.mode,
+                    frequency=snapshot.frequency,
+                    linkage=snapshot.linkage,
+                    timer_enabled=snapshot.timer_enabled,
+                )
+            )
+            await device.disconnect()
+        recovery_store.clear()
+        hardware_test.activate_persistent_safety_latch(latch_path)
+        return True
+
+    monkeypatch.setattr(hardware_test, "_recover_once", succeed_then_latch)
+
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 2
+    refusal = capsys.readouterr()
+    assert "safety interlock changed during recovery" in refusal.err
+    assert attempts == 1
+    for device in devices.values():
+        assert device.connected is False
+        assert device._state.enabled is False  # noqa: SLF001
+        assert device._state.timer_enabled is False  # noqa: SLF001
+        assert device._state.linkage is LinkageRole.INDEPENDENT  # noqa: SLF001
+        timer_on_commands = [
+            command
+            for command in device.commands
+            if command.name == "timer_enabled" and command.value is True
+        ]
+        assert len(timer_on_commands) == 1
+
+    pending = journal_store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+    assert pending.failed_device_ids == ("pro_left", "pro_right")
+    assert pending.restored_device_ids == ()
+    recovered_intent = intent_store.load()
+    assert recovered_intent is not None
+    assert recovered_intent.phase is hardware_test.HardwareTestIntentPhase.RECOVERY_REQUIRED
+    assert recovered_intent.outcome == "recovery_required"
+
+    assert hardware_test.main(["status"]) == 0
+    current_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+    assert current_token != recovery_token
+    latch_path.unlink()
+    command_counts = {device_id: len(device.commands) for device_id, device in devices.items()}
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 2
+    stale_refusal = capsys.readouterr()
+    assert "confirmation token does not match" in stale_refusal.err
+    assert all(
+        len(device.commands) == command_counts[device_id]
+        for device_id, device in devices.items()
+    )
+
+
+def test_outer_safety_late_fsync_error_reloads_exact_record_and_still_stops_both(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    journal_store, _, _, recovery_token = _seed_timer_on_recovery(config, devices, capsys)
+    latch_path = hardware_test.canonical_safety_latch_path(config)
+    attempts = 0
+    late_failure_injected = False
+    original_save = JsonLinkageJournalStore.save
+
+    def save_then_report_late_fsync_failure(
+        store: JsonLinkageJournalStore,
+        record: LinkageTransactionRecord,
+    ) -> None:
+        nonlocal late_failure_injected
+        original_save(store, record)
+        if (
+            not late_failure_injected
+            and record.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+            and record.error == "recovery deferred by persistent safety interlock"
+        ):
+            late_failure_injected = True
+            raise OSError("secret-device-id: simulated late directory fsync failure")
+
+    async def succeed_then_latch(*args: object, **kwargs: object) -> bool:
+        del kwargs
+        nonlocal attempts
+        attempts += 1
+        recovery_store = args[2]
+        assert isinstance(recovery_store, hardware_test.ConfirmingLinkageJournalStore)
+        current = recovery_store.load()
+        assert current is not None
+        for snapshot in current.snapshots:
+            device = devices[snapshot.device_id]
+            await device.connect()
+            await device.write_target(
+                hardware_test.DeviceTarget(
+                    enabled=snapshot.enabled,
+                    power=snapshot.power,
+                    mode=snapshot.mode,
+                    frequency=snapshot.frequency,
+                    linkage=snapshot.linkage,
+                    timer_enabled=snapshot.timer_enabled,
+                )
+            )
+            await device.disconnect()
+        recovery_store.clear()
+        hardware_test.activate_persistent_safety_latch(latch_path)
+        return True
+
+    monkeypatch.setattr(JsonLinkageJournalStore, "save", save_then_report_late_fsync_failure)
+    monkeypatch.setattr(hardware_test, "_recover_once", succeed_then_latch)
+
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 2
+    refusal = capsys.readouterr()
+    assert "safety interlock changed during recovery" in refusal.err
+    assert "secret-device-id" not in refusal.out + refusal.err
+    assert late_failure_injected is True
+    assert attempts == 1
+    pending = journal_store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+    assert pending.failed_device_ids == ("pro_left", "pro_right")
+    assert pending.restored_device_ids == ()
+    assert pending.error == "recovery deferred by persistent safety interlock"
+    for device in devices.values():
+        assert device.connected is False
+        assert device._state.enabled is False  # noqa: SLF001
+        assert device._state.timer_enabled is False  # noqa: SLF001
+        timer_on_commands = [
+            command
+            for command in device.commands
+            if command.name == "timer_enabled" and command.value is True
+        ]
+        assert len(timer_on_commands) == 1
+
+
+def test_outer_safety_save_failure_without_exact_successor_sends_zero_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    journal_store, _, record, _ = _seed_timer_on_recovery(config, devices, capsys)
+    original_save = JsonLinkageJournalStore.save
+
+    def fail_before_atomic_replace(
+        store: JsonLinkageJournalStore,
+        successor: LinkageTransactionRecord,
+    ) -> None:
+        if successor.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK:
+            raise OSError("simulated pre-replace safety journal failure")
+        original_save(store, successor)
+
+    monkeypatch.setattr(JsonLinkageJournalStore, "save", fail_before_atomic_replace)
+    selected = {device.id: device for device in config.devices if device.id in devices}
+    interlock = hardware_test.PersistentSafetyInterlock(
+        hardware_test.canonical_safety_latch_path(config)
+    )
+
+    with pytest.raises(OSError, match="pre-replace safety journal failure"):
+        asyncio.run(
+            hardware_test._enforce_outer_recovery_safety_stop(
+                config,
+                selected,
+                journal_store,
+                interlock,
+                record,
+            )
+        )
+
+    assert journal_store.load() == record
+    assert all(device.commands == [] for device in devices.values())
+
+
+def test_latch_during_retry_dwell_pauses_restored_master_after_durable_safety_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    journal_store, _, _, recovery_token = _seed_timer_on_recovery(config, devices, capsys)
+    latch_path = hardware_test.canonical_safety_latch_path(config)
+    events: list[str] = []
+    attempts = 0
+
+    original_persist = hardware_test._persist_recovery_safety_interlock
+
+    def record_safety_persist(
+        store: JsonLinkageJournalStore,
+        record: LinkageTransactionRecord,
+    ) -> LinkageTransactionRecord:
+        successor = original_persist(store, record)
+        events.append("journal:safety")
+        return successor
+
+    master = devices["pro_left"]
+    original_master_write = master.write_target
+
+    async def record_master_off(target: object, **kwargs: object) -> None:
+        if isinstance(target, hardware_test.DeviceTarget) and target.enabled is False:
+            events.append("master:off")
+        await original_master_write(target, **kwargs)  # type: ignore[arg-type]
+
+    async def leave_partial_restore(*args: object, **kwargs: object) -> bool:
+        del kwargs
+        nonlocal attempts
+        attempts += 1
+        recovery_store = args[2]
+        assert isinstance(recovery_store, hardware_test.ConfirmingLinkageJournalStore)
+        current = recovery_store.load()
+        assert current is not None
+        snapshots = {snapshot.device_id: snapshot for snapshot in current.snapshots}
+        master_snapshot = snapshots[current.spec.master_device_id]
+        await master.connect()
+        await master.write_target(
+            hardware_test.DeviceTarget(
+                enabled=True,
+                power=master_snapshot.power,
+                mode=master_snapshot.mode,
+                frequency=master_snapshot.frequency,
+                linkage=master_snapshot.linkage,
+                timer_enabled=True,
+            )
+        )
+        await master.disconnect()
+        slave = devices["pro_right"]
+        await slave.connect()
+        await slave.write_target(
+            hardware_test.DeviceTarget(
+                enabled=True,
+                power=slave.capabilities.power_limits.min_power,
+                mode="constant",
+                frequency=current.spec.frequency,
+                linkage=LinkageRole.INDEPENDENT,
+                timer_enabled=False,
+            )
+        )
+        await slave.disconnect()
+        recovery_store.save(
+            current.model_copy(
+                update={
+                    "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+                    "recovery_reason": LinkageRecoveryReason.RESTORE_FAILED,
+                    "updated_at": datetime.now(UTC),
+                    "error": "transient bounded restore failure",
+                    "failed_device_ids": (current.spec.slave_device_id,),
+                    "restored_device_ids": (current.spec.master_device_id,),
+                }
+            )
+        )
+        events.clear()
+        asyncio.get_running_loop().call_later(
+            0.005,
+            hardware_test.activate_persistent_safety_latch,
+            latch_path,
+        )
+        raise LinkageRollbackError("secret-device-id: simulated partial restore")
+
+    monkeypatch.setattr(hardware_test, "_persist_recovery_safety_interlock", record_safety_persist)
+    monkeypatch.setattr(master, "write_target", record_master_off)
+    monkeypatch.setattr(hardware_test, "_recover_once", leave_partial_restore)
+    monkeypatch.setattr(hardware_test, "_RECOVERY_RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(hardware_test, "_RECOVERY_LATCH_POLL_SECONDS", 0.001)
+
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 2
+    refusal = capsys.readouterr()
+    assert "safety interlock changed during recovery" in refusal.err
+    assert "secret-device-id" not in refusal.out + refusal.err
+    assert attempts == 1
+    assert events.index("journal:safety") < events.index("master:off")
+    assert devices["pro_left"]._state.enabled is False  # noqa: SLF001
+    assert devices["pro_right"]._state.enabled is False  # noqa: SLF001
+    timer_on_commands = [
+        command
+        for command in devices["pro_left"].commands
+        if command.name == "timer_enabled" and command.value is True
+    ]
+    assert len(timer_on_commands) == 1
+    pending = journal_store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+    assert pending.failed_device_ids == ("pro_left", "pro_right")
+    assert pending.restored_device_ids == ()
+
+
+def test_outer_latch_off_failure_is_durable_and_never_replays_timer_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    journal_store, _, _, recovery_token = _seed_timer_on_recovery(config, devices, capsys)
+    latch_path = hardware_test.canonical_safety_latch_path(config)
+    master = devices["pro_left"]
+    original_master_write = master.write_target
+    attempts = 0
+
+    async def fail_master_off(target: object, **kwargs: object) -> None:
+        if isinstance(target, hardware_test.DeviceTarget) and target.enabled is False:
+            raise OSError("secret-device-id: simulated OFF failure")
+        await original_master_write(target, **kwargs)  # type: ignore[arg-type]
+
+    async def succeed_then_latch(*args: object, **kwargs: object) -> bool:
+        del kwargs
+        nonlocal attempts
+        attempts += 1
+        recovery_store = args[2]
+        assert isinstance(recovery_store, hardware_test.ConfirmingLinkageJournalStore)
+        current = recovery_store.load()
+        assert current is not None
+        for snapshot in current.snapshots:
+            device = devices[snapshot.device_id]
+            await device.connect()
+            await device.write_target(
+                hardware_test.DeviceTarget(
+                    enabled=snapshot.enabled,
+                    power=snapshot.power,
+                    mode=snapshot.mode,
+                    frequency=snapshot.frequency,
+                    linkage=snapshot.linkage,
+                    timer_enabled=snapshot.timer_enabled,
+                )
+            )
+            await device.disconnect()
+        recovery_store.clear()
+        hardware_test.activate_persistent_safety_latch(latch_path)
+        return True
+
+    monkeypatch.setattr(master, "write_target", fail_master_off)
+    monkeypatch.setattr(hardware_test, "_recover_once", succeed_then_latch)
+
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 2
+    refusal = capsys.readouterr()
+    assert "safety interlock changed during recovery" in refusal.err
+    assert "secret-device-id" not in refusal.out + refusal.err
+    assert attempts == 1
+    pending = journal_store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+    assert pending.failed_device_ids == ("pro_left", "pro_right")
+    assert pending.restored_device_ids == ()
+    assert pending.error is not None
+    assert "safe_stop_failed" in pending.error
+    assert "secret-device-id" not in pending.error
+    for device in devices.values():
+        timer_on_commands = [
+            command
+            for command in device.commands
+            if command.name == "timer_enabled" and command.value is True
+        ]
+        assert len(timer_on_commands) == 1
+    assert devices["pro_right"]._state.enabled is False  # noqa: SLF001
+
+
 @pytest.mark.parametrize(
     "recovery_reason",
     [
@@ -1317,7 +1921,11 @@ def test_status_reports_current_jfr_and_old_revision_token_sends_zero_frames(
     journal_store.create(record)
 
     assert hardware_test.main(["status"]) == 0
-    old_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+    initial_output = capsys.readouterr().out
+    old_token = _token(initial_output, "Recovery confirmation token")
+    assert "Recovery reason: none" in initial_output
+    assert "Automatic recovery blockers: none" in initial_output
+    assert "Next action: recover-linkage --recovery-first" in initial_output
     assert old_token == hardware_test.recovery_confirmation_token(
         config.instance.id,
         record.spec,
@@ -1336,7 +1944,25 @@ def test_status_reports_current_jfr_and_old_revision_token_sends_zero_frames(
     )
     journal_store.save(revised)
     assert hardware_test.main(["status"]) == 0
-    current_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+    revised_output = capsys.readouterr().out
+    current_token = _token(revised_output, "Recovery confirmation token")
+    assert f"Recovery reason: {recovery_reason.value}" in revised_output
+    expected_blocker = {
+        LinkageRecoveryReason.SAFETY_INTERLOCK: "safety_interlock",
+        LinkageRecoveryReason.SCHEDULE_CHANGED: "schedule_changed",
+        LinkageRecoveryReason.RESTORE_FAILED: "none",
+    }[recovery_reason]
+    assert f"Automatic recovery blockers: {expected_blocker}" in revised_output
+    if recovery_reason is LinkageRecoveryReason.RESTORE_FAILED:
+        assert "Next action: recover-linkage --recovery-first" in revised_output
+    elif recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK:
+        assert "use attended recover-linkage confirmation" in revised_output
+        assert "recover-linkage --recovery-first" not in revised_output
+    else:
+        assert "inspect the schedule" in revised_output
+        assert "recover-linkage --recovery-first" not in revised_output
+    assert f"simulated {recovery_reason.value}" not in revised_output
+    assert "pro_left" not in revised_output
     assert current_token == hardware_test.recovery_confirmation_token(
         config.instance.id,
         revised.spec,
@@ -1388,8 +2014,20 @@ def test_intent_and_journal_payload_mismatch_sends_zero_frames(
             created_at=now,
             updated_at=now,
             expires_at=now + timedelta(seconds=10),
+            error="secret-device-id: mismatched recovery authority",
         )
     )
+
+    assert hardware_test.main(["status"]) == 2
+    status_refusal = capsys.readouterr()
+    assert status_refusal.out == ""
+    assert "intent and recovery journal disagree" in status_refusal.err
+    assert "Next action:" not in status_refusal.out + status_refusal.err
+    assert "Recovery confirmation token:" not in status_refusal.out + status_refusal.err
+    assert "secret-device-id" not in status_refusal.out + status_refusal.err
+    assert "pro_left" not in status_refusal.out + status_refusal.err
+    assert _VENDOR_MASTER_ID not in status_refusal.out + status_refusal.err
+    assert _MASTER_MAC not in status_refusal.out + status_refusal.err
 
     assert hardware_test.main(["recover-linkage"]) == 2
     assert "intent and recovery journal disagree" in capsys.readouterr().err
@@ -1572,9 +2210,129 @@ def test_status_is_sanitized_for_fresh_state(
     output = capsys.readouterr().out
     assert "One-shot intent: none" in output
     assert "Recovery journal: none" in output
+    assert "Recovery reason: none" in output
+    assert "Automatic recovery blockers: none" in output
     assert "Persistent safety latch: clear" in output
     assert _VENDOR_MASTER_ID not in output
     assert _MASTER_MAC not in output
+
+
+def test_status_requires_attended_recovery_for_stale_timer_on_restore_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+
+    intent_store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    intent = intent_store.load()
+    assert intent is not None
+    timer_on_snapshots = tuple(
+        snapshot.model_copy(
+            update={
+                "timer_enabled": True,
+                "schedule_fingerprint": "a" * 64,
+            }
+        )
+        for snapshot in intent.snapshots
+    )
+    intent_store.save(
+        intent.model_copy(
+            update={
+                "phase": hardware_test.HardwareTestIntentPhase.RECOVERY_REQUIRED,
+                "snapshots": timer_on_snapshots,
+                "outcome": "recovery_required",
+            }
+        )
+    )
+    now = datetime.now(UTC)
+    JsonLinkageJournalStore(hardware_test.canonical_journal_path(config)).create(
+        LinkageTransactionRecord(
+            operation_id=intent.operation_id,
+            phase=LinkageTransactionPhase.RECOVERY_REQUIRED,
+            recovery_reason=LinkageRecoveryReason.RESTORE_FAILED,
+            spec=intent.spec,
+            snapshots=timer_on_snapshots,
+            created_at=now - timedelta(minutes=3),
+            updated_at=now - timedelta(minutes=2),
+            expires_at=now - timedelta(minutes=1),
+            error="secret-device-id: state_read_failed",
+            failed_device_ids=("pro_left",),
+        )
+    )
+
+    assert hardware_test.main(["status"]) == 0
+    output = capsys.readouterr().out
+    assert "Recovery reason: restore_failed" in output
+    assert (
+        "Automatic recovery blockers: timer_on_snapshot, stale_or_clock_invalid" in output
+    )
+    assert "use attended recover-linkage confirmation" in output
+    assert "recover-linkage --recovery-first" not in output
+    assert "secret-device-id" not in output
+    assert "state_read_failed" not in output
+    assert _VENDOR_MASTER_ID not in output
+    assert _MASTER_MAC not in output
+    assert devices["pro_left"].commands == []
+    assert devices["pro_right"].commands == []
+
+
+def test_prepared_record_has_no_automatic_recovery_blockers() -> None:
+    now = datetime.now(UTC)
+    record = SimpleNamespace(
+        phase=LinkageTransactionPhase.PREPARED,
+        recovery_reason=None,
+        snapshots=(SimpleNamespace(timer_enabled=True),),
+        created_at=now - timedelta(days=2),
+        updated_at=now - timedelta(days=2),
+        expires_at=now - timedelta(days=1),
+    )
+
+    assert hardware_test._automatic_recovery_blockers(record, now=now) == ()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("timer_on", ("timer_on_snapshot",)),
+        ("stale", ("stale_or_clock_invalid",)),
+        ("naive_clock", ("stale_or_clock_invalid",)),
+        ("deadline_overflow", ("stale_or_clock_invalid",)),
+    ],
+)
+def test_automatic_recovery_blockers_cover_individual_clock_and_timer_boundaries(
+    case: str,
+    expected: tuple[str, ...],
+) -> None:
+    now = datetime.now(UTC)
+    timer_enabled = case == "timer_on"
+    created_at = now
+    updated_at = now
+    expires_at = now + timedelta(minutes=1)
+    if case == "stale":
+        expires_at = now - timedelta(
+            seconds=hardware_test._MAX_AUTOMATIC_RECOVERY_GRACE_SECONDS + 1
+        )
+    elif case == "naive_clock":
+        created_at = created_at.replace(tzinfo=None)
+    elif case == "deadline_overflow":
+        expires_at = datetime.max.replace(tzinfo=UTC)
+    record = SimpleNamespace(
+        phase=LinkageTransactionPhase.ACTIVE,
+        recovery_reason=None,
+        snapshots=(SimpleNamespace(timer_enabled=timer_enabled),),
+        created_at=created_at,
+        updated_at=updated_at,
+        expires_at=expires_at,
+    )
+
+    assert hardware_test._automatic_recovery_blockers(record, now=now) == expected
 
 
 def test_timer_on_preflight_refuses_before_any_control_frame(
@@ -1615,6 +2373,12 @@ def test_hardware_timing_tuning_is_bounded(
 
     with pytest.raises(hardware_test.HardwareTestError, match=message):
         hardware_test._validate_config(config, frozenset({"pro_left", "pro_right"}))
+
+
+def test_recovery_retry_dwell_covers_audited_maximum_command_interval() -> None:
+    assert hardware_test._RECOVERY_RETRY_SECONDS >= (
+        hardware_test._MAX_ATTENDED_COMMAND_INTERVAL_MS / 1000
+    )
 
 
 def test_recovery_first_is_a_clean_noop_without_pending_state(

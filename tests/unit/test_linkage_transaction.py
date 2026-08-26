@@ -56,6 +56,14 @@ class _RecordingStore(JsonLinkageJournalStore):
         super().create(record)
 
 
+class _RestoreProgressRecordingStore(_RecordingStore):
+    def save(self, record):
+        super().save(record)
+        if self.events is not None:
+            restored = ",".join(record.restored_device_ids)
+            self.events.append(f"durable-restored:{restored}")
+
+
 class _CrashAfterScheduleLatchStore(_RecordingStore):
     def __init__(self, path: Path) -> None:
         super().__init__(path)
@@ -327,6 +335,51 @@ class _NeverConvergingTimerResumeDevice(_RecordingDevice):
         return state
 
 
+class _NeverConvergingThenFailSafeFallbackDevice(_NeverConvergingTimerResumeDevice):
+    """Leave the final TimerON result unconfirmed, then reject its safe fallback."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.safe_fallback_attempts = 0
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        safe_fallback_after_resume = (
+            self.pre_resume_state is not None
+            and target.timer_enabled is False
+            and target.linkage is LinkageRole.INDEPENDENT
+            and target.mode == "constant"
+            and target.power == self.capabilities.power_limits.min_power
+        )
+        if safe_fallback_after_resume:
+            self.safe_fallback_attempts += 1
+            raise RuntimeError("simulated unconfirmed slave safe fallback")
+        await super().write_target(target, guard=guard)
+
+
+class _FailMasterPauseAfterTimerResumeDevice(_RecordingDevice):
+    """Restore exactly once, but reject a later peer-triggered safe pause."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.timer_resume_completed = False
+        self.safe_pause_attempts = 0
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        safe_pause_after_resume = (
+            self.timer_resume_completed
+            and target.timer_enabled is False
+            and target.linkage is LinkageRole.INDEPENDENT
+            and target.mode == "constant"
+            and target.power == self.capabilities.power_limits.min_power
+        )
+        if safe_pause_after_resume:
+            self.safe_pause_attempts += 1
+            raise RuntimeError("simulated unconfirmed master safe pause")
+        await super().write_target(target, guard=guard)
+        if target.timer_enabled is True:
+            self.timer_resume_completed = True
+
+
 class _TransientScheduleDriftOnTimerResumeDevice(_RecordingDevice):
     def __init__(self, device_id: str) -> None:
         super().__init__(device_id)
@@ -370,6 +423,314 @@ class _TimeoutThenStaleExactRecoveryDevice(_RecordingDevice):
             if self.recovery_reads == 2 and self.stale_exact_state is not None:
                 return self.stale_exact_state
         return await super().get_state()
+
+
+class _StaleExactThenMismatchReconcileDevice(_RecordingDevice):
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.stale_exact_state = None
+        self.reconcile_armed = False
+        self.reconcile_reads = 0
+
+    async def get_state(self):
+        if self.reconcile_armed:
+            self.reconcile_reads += 1
+            if self.reconcile_reads == 1 and self.stale_exact_state is not None:
+                return self.stale_exact_state
+            self.reconcile_armed = False
+        return await super().get_state()
+
+
+class _ReadFailureThenFreshSequenceDevice(_RecordingDevice):
+    """Lose one read, then expose stale-exact/mismatch/exact/exact on a fresh session."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.verification_reads = 0
+        self.pre_resume_state = None
+        self.verify_resume = False
+        self.disconnect_calls = 0
+        self.connect_calls = 0
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        await super().connect()
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        await super().disconnect()
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        pre_write_state = self._state  # noqa: SLF001
+        await super().write_target(target, guard=guard)
+        if target.timer_enabled is False:
+            self.verify_resume = False
+            self.pre_resume_state = None
+        elif target.timer_enabled is True:
+            self.verify_resume = True
+            self.pre_resume_state = pre_write_state
+            self.verification_reads = 0
+
+    async def get_state(self):
+        if self.verify_resume:
+            self.verification_reads += 1
+            if self.verification_reads == 1:
+                # Keep connected=True to prove verification explicitly discards this stream.
+                raise TimeoutError("simulated partial-frame timeout")
+            state = await super().get_state()
+            if self.verification_reads == 3 and self.pre_resume_state is not None:
+                return self.pre_resume_state.model_copy(update={"observed_at": state.observed_at})
+            if self.verification_reads >= 5:
+                self.verify_resume = False
+            return state
+        return await super().get_state()
+
+
+class _TwoHardReadFailuresAfterTimerResumeDevice(_RecordingDevice):
+    """Fail both allowed TimerON verification streams, then accept safe TimerOFF."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.timer_resume_pending = False
+        self.resume_read_attempts = 0
+        self.resume_read_connection_counts: list[int] = []
+        self.safe_fallback_writes = 0
+        self.disconnect_calls = 0
+        self.connect_calls = 0
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        await super().connect()
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        await super().disconnect()
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        safe_fallback = (
+            self.timer_resume_pending
+            and target.timer_enabled is False
+            and target.linkage is LinkageRole.INDEPENDENT
+            and target.mode == "constant"
+            and target.power == self.capabilities.power_limits.min_power
+        )
+        await super().write_target(target, guard=guard)
+        if target.timer_enabled is True:
+            self.timer_resume_pending = True
+            self.resume_read_attempts = 0
+            self.resume_read_connection_counts.clear()
+        elif safe_fallback:
+            self.safe_fallback_writes += 1
+            self.timer_resume_pending = False
+
+    async def get_state(self):
+        if self.timer_resume_pending:
+            self.resume_read_attempts += 1
+            self.resume_read_connection_counts.append(self.connect_calls)
+            raise TimeoutError("simulated hard TimerON verification read failure")
+        return await super().get_state()
+
+
+class _ReadFailureThenHangingReconnectDevice(_RecordingDevice):
+    """Fail final read and hang exactly the following fresh-session connect."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.fail_resume_read = False
+        self.hang_reconnect_once = False
+        self.reconnect_started = asyncio.Event()
+        self.reconnect_cancelled = asyncio.Event()
+        self.never_set = asyncio.Event()
+        self.connect_calls = 0
+        self.disconnect_calls = 0
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        if self.hang_reconnect_once:
+            self.hang_reconnect_once = False
+            self.reconnect_started.set()
+            try:
+                await self.never_set.wait()
+            except asyncio.CancelledError:
+                self.reconnect_cancelled.set()
+                raise
+        await super().connect()
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        await super().disconnect()
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        await super().write_target(target, guard=guard)
+        if target.timer_enabled is True:
+            self.fail_resume_read = True
+            self.hang_reconnect_once = True
+
+    async def get_state(self):
+        if self.fail_resume_read:
+            self.fail_resume_read = False
+            raise TimeoutError("simulated verification transport failure")
+        return await super().get_state()
+
+
+class _ApplyThenHangConnectedRestoreWriteDevice(_RecordingDevice):
+    """Apply TimerON but leave the session apparently connected when its wait is cancelled."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.arm_timer_resume_hang = False
+        self.restore_write_started = asyncio.Event()
+        self.restore_write_cancelled = asyncio.Event()
+        self.never_set = asyncio.Event()
+        self.connect_calls = 0
+        self.disconnect_calls = 0
+        self.fresh_reads_after_cancel = 0
+        self.fail_first_fresh_read = False
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        await super().connect()
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        await super().disconnect()
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        await super().write_target(target, guard=guard)
+        if target.timer_enabled is not True or not self.arm_timer_resume_hang:
+            return
+        self.arm_timer_resume_hang = False
+        self.restore_write_started.set()
+        try:
+            await self.never_set.wait()
+        except asyncio.CancelledError:
+            self.restore_write_cancelled.set()
+            # Deliberately retain connected=True: cancellation can happen outside the protocol
+            # exchange, after the ACK but during command pacing/readback delay.
+            raise
+
+    async def get_state(self):
+        if self.restore_write_cancelled.is_set() and self.fail_first_fresh_read:
+            self.fail_first_fresh_read = False
+            raise TimeoutError("simulated hard read failure after uncertain write")
+        state = await super().get_state()
+        if self.restore_write_cancelled.is_set():
+            self.fresh_reads_after_cancel += 1
+        return state
+
+
+class _HalfConnectedHangingConnectDevice(_RecordingDevice):
+    """Expose connected=True before a connect attempt stalls and is cancelled."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.connect_started = asyncio.Event()
+        self.connect_cancelled = asyncio.Event()
+        self.never_set = asyncio.Event()
+        self.disconnect_calls = 0
+
+    async def connect(self) -> None:
+        self._connected = True  # noqa: SLF001
+        self.connect_started.set()
+        try:
+            await self.never_set.wait()
+        except asyncio.CancelledError:
+            self.connect_cancelled.set()
+            raise
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        # Model GizwitsSession.disconnect(): quarantine reader/writer/auth synchronously before
+        # its bounded wait_closed tail yields.
+        self._connected = False  # noqa: SLF001
+        await asyncio.sleep(0)
+
+
+class _HalfAuthenticatedSafetyReconnectDevice(_RecordingDevice):
+    """Leave reconnect half-authenticated until safety cancels it, then allow fresh OFF auth."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.authenticated = False
+        self.fail_resume_read = False
+        self.half_auth_reconnect = False
+        self.half_auth_started = asyncio.Event()
+        self.half_auth_cancelled = asyncio.Event()
+        self.half_auth_closed = asyncio.Event()
+        self.never_set = asyncio.Event()
+        self.connect_calls = 0
+        self.disconnect_calls = 0
+        self.unauthenticated_write_attempts = 0
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        if self.half_auth_reconnect:
+            self.half_auth_reconnect = False
+            self._connected = True  # noqa: SLF001
+            self.authenticated = False
+            self.half_auth_started.set()
+            try:
+                await self.never_set.wait()
+            except asyncio.CancelledError:
+                # A decoded-but-invalid auth response can leave TCP connected even though the
+                # higher-level connect attempt is being cancelled by safety.
+                self.half_auth_cancelled.set()
+                raise
+        await super().connect()
+        self.authenticated = True
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        was_half_authenticated = self.connected and not self.authenticated
+        self._connected = False  # noqa: SLF001
+        self.authenticated = False
+        await asyncio.sleep(0)
+        if was_half_authenticated:
+            self.half_auth_closed.set()
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        if self.connected and not self.authenticated:
+            self.unauthenticated_write_attempts += 1
+            raise RuntimeError("simulated unauthenticated control attempt")
+        await super().write_target(target, guard=guard)
+        if target.timer_enabled is True:
+            self.fail_resume_read = True
+            self.half_auth_reconnect = True
+
+    async def get_state(self):
+        if self.fail_resume_read:
+            self.fail_resume_read = False
+            raise TimeoutError("simulated final read failure before half-auth reconnect")
+        return await super().get_state()
+
+
+class _FailedConnectWithHangingCleanupDevice(_RecordingDevice):
+    """Fail half-connected on demand, then release quarantine only when cleanup is cancelled."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.connect_started = asyncio.Event()
+        self.fail_connect = asyncio.Event()
+        self.disconnect_started = asyncio.Event()
+        self.disconnect_cancelled = asyncio.Event()
+        self.never_set = asyncio.Event()
+
+    async def connect(self) -> None:
+        self._connected = True  # noqa: SLF001
+        self.connect_started.set()
+        await self.fail_connect.wait()
+        raise RuntimeError("simulated half-authenticated connect failure")
+
+    async def disconnect(self) -> None:
+        self.disconnect_started.set()
+        try:
+            await self.never_set.wait()
+        except asyncio.CancelledError:
+            # Match the production transport postcondition: the local stream is quarantined even
+            # when waiting for its close acknowledgement exhausts the caller's deadline.
+            self._connected = False  # noqa: SLF001
+            self.disconnect_cancelled.set()
+            raise
 
 
 class _ReadFailureThenHangingDisconnectDevice(_RecordingDevice):
@@ -583,9 +944,15 @@ def _controller(
         ("restore_verification_backoff_seconds", float("nan"), ValueError),
         ("restore_verification_read_timeout_seconds", float("inf"), ValueError),
         ("restore_verification_total_timeout_seconds", 10**10000, ValueError),
+        ("restore_write_timeout_seconds", None, TypeError),
+        ("restore_connection_timeout_seconds", "16", TypeError),
+        ("restore_verification_convergence_timeout_seconds", float("inf"), ValueError),
         ("restore_verification_backoff_seconds", -0.1, ValueError),
         ("restore_verification_read_timeout_seconds", 0, ValueError),
         ("restore_verification_total_timeout_seconds", 0, ValueError),
+        ("restore_write_timeout_seconds", 0, ValueError),
+        ("restore_connection_timeout_seconds", -1, ValueError),
+        ("restore_verification_convergence_timeout_seconds", 0, ValueError),
     ],
     ids=[
         "bool",
@@ -593,9 +960,15 @@ def _controller(
         "nan",
         "infinity",
         "huge-integer",
+        "explicit-none",
+        "connection-string",
+        "convergence-infinity",
         "negative-backoff",
         "zero-read-timeout",
         "zero-total-timeout",
+        "zero-write-timeout",
+        "negative-connection-timeout",
+        "zero-convergence-timeout",
     ],
 )
 def test_restore_verification_timing_rejects_invalid_values(
@@ -611,6 +984,38 @@ def test_restore_verification_timing_rejects_invalid_values(
             safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
             **{argument: value},
         )
+
+
+def test_restore_timing_defaults_and_legacy_override_are_split(tmp_path: Path) -> None:
+    devices = {"master": _RecordingDevice("master"), "slave": _RecordingDevice("slave")}
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    default_controller = TemporaryLinkageController(
+        devices,
+        JsonLinkageJournalStore(tmp_path / "default-timing.json"),
+        safety_interlock=interlock,
+    )
+
+    assert default_controller._restore_write_timeout_seconds == 31.0  # noqa: SLF001
+    assert default_controller._restore_connection_timeout_seconds == 16.0  # noqa: SLF001
+    assert (  # noqa: SLF001
+        default_controller._restore_verification_read_timeout_seconds == 5.5
+    )
+    assert (  # noqa: SLF001
+        default_controller._restore_verification_convergence_timeout_seconds == 64.0
+    )
+
+    legacy_controller = TemporaryLinkageController(
+        devices,
+        JsonLinkageJournalStore(tmp_path / "legacy-timing.json"),
+        safety_interlock=interlock,
+        restore_verification_total_timeout_seconds=0.7,
+        restore_write_timeout_seconds=0.9,
+    )
+    assert legacy_controller._restore_write_timeout_seconds == 0.9  # noqa: SLF001
+    assert legacy_controller._restore_connection_timeout_seconds == 0.7  # noqa: SLF001
+    assert (  # noqa: SLF001
+        legacy_controller._restore_verification_convergence_timeout_seconds == 0.7
+    )
 
 
 async def _wait_until_active(
@@ -1127,14 +1532,17 @@ async def test_schedule_bootstrap_reconciles_apply_then_raise_with_delayed_timer
         master_power=35,
         slave_power=33,
         frequency=20,
-        duration_seconds=0.03,
+        duration_seconds=5,
         verification_interval_seconds=0.005,
         bootstrap_active_schedule=True,
     )
 
-    result = await controller.run(spec)
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
+    result = await task
 
-    assert result.stop_reason is LinkageStopReason.TIMEOUT
+    assert result.stop_reason is LinkageStopReason.MANUAL
     assert store.load() is None
     slave_state = await slave.get_state()
     assert (
@@ -1153,6 +1561,298 @@ async def test_schedule_bootstrap_reconciles_apply_then_raise_with_delayed_timer
         if command.name == "timer_enabled" and command.value is True
     ]
     assert len(timer_on_commands) == 1
+
+
+async def test_restore_read_failure_reconnects_once_and_requires_fresh_exact_streak(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=70, frequency=34)
+    slave = await _ready_device(
+        "slave",
+        device_class=_ReadFailureThenFreshSequenceDevice,
+        power=65,
+        frequency=32,
+    )
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "read-failure-fresh-sequence.json")
+    controller = _controller(master, slave, store)
+    spec = LinkageTestSpec(
+        operation_id="scheduled_read_failure_fresh_sequence",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=5,
+        verification_interval_seconds=0.005,
+        bootstrap_active_schedule=True,
+    )
+
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
+    result = await task
+
+    assert result.stop_reason is LinkageStopReason.MANUAL
+    assert store.load() is None
+    assert slave.verification_reads == 5
+    assert slave.disconnect_calls == 1
+    assert slave.connect_calls == 2
+    timer_on_commands = [
+        command
+        for command in slave.commands
+        if command.name == "timer_enabled" and command.value is True
+    ]
+    assert len(timer_on_commands) == 1
+    slave_state = await slave.get_state()
+    assert (
+        slave_state.power,
+        slave_state.mode,
+        slave_state.frequency,
+        slave_state.linkage,
+        slave_state.timer_enabled,
+    ) == (65, "constant", 32, LinkageRole.INDEPENDENT, True)
+
+
+async def test_second_hard_restore_read_fails_without_third_verification_reconnect(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=70, frequency=34)
+    slave = await _ready_device(
+        "slave",
+        device_class=_TwoHardReadFailuresAfterTimerResumeDevice,
+        power=65,
+        frequency=32,
+    )
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "second-hard-read-failure.json")
+    controller = _controller(master, slave, store)
+    spec = LinkageTestSpec(
+        operation_id="scheduled_second_hard_read_failure",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=5,
+        verification_interval_seconds=0.005,
+        bootstrap_active_schedule=True,
+    )
+
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
+    with pytest.raises(LinkageRollbackError, match="state_read_failed"):
+        await task
+
+    pending = store.load()
+    assert pending is not None
+    assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
+    assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
+    assert pending.failed_device_ids == ("slave",)
+    assert pending.restored_device_ids == ("master",)
+    assert slave.resume_read_attempts == 2
+    assert slave.resume_read_connection_counts == [1, 2]
+    # Initial session + one read-only verification reconnect + one safe-fallback reconnect.
+    assert slave.connect_calls == 3
+    assert slave.disconnect_calls == 2
+    assert slave.safe_fallback_writes == 1
+    timer_on_commands = [
+        command
+        for command in slave.commands
+        if command.name == "timer_enabled" and command.value is True
+    ]
+    assert len(timer_on_commands) == 1
+    slave_state = await slave.get_state()
+    assert (
+        slave_state.enabled,
+        slave_state.power,
+        slave_state.mode,
+        slave_state.frequency,
+        slave_state.linkage,
+        slave_state.timer_enabled,
+    ) == (
+        True,
+        slave.capabilities.power_limits.min_power,
+        "constant",
+        20,
+        LinkageRole.INDEPENDENT,
+        False,
+    )
+
+
+async def test_uncertain_connected_timer_write_forces_fresh_read_only_session(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=70, frequency=34)
+    slave = await _ready_device(
+        "slave",
+        device_class=_ApplyThenHangConnectedRestoreWriteDevice,
+        power=65,
+        frequency=32,
+    )
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "connected-write-timeout.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        restore_read_timeout_seconds=0.05,
+        restore_total_timeout_seconds=0.03,
+    )
+    spec = _spec(duration=5)
+    slave.arm_timer_resume_hang = True
+    slave.fail_first_fresh_read = True
+
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
+    result = await asyncio.wait_for(task, timeout=1)
+
+    assert result.stop_reason is LinkageStopReason.MANUAL
+    assert store.load() is None
+    assert slave.restore_write_started.is_set()
+    assert slave.restore_write_cancelled.is_set()
+    # The uncertain write forces one fresh session; the following hard read is independently
+    # allowed one further session recovery. Neither path replays the TimerON target.
+    assert slave.disconnect_calls == 2
+    assert slave.connect_calls == 3
+    assert slave.fresh_reads_after_cancel >= 2
+    timer_on_commands = [
+        command
+        for command in slave.commands
+        if command.name == "timer_enabled" and command.value is True
+    ]
+    assert len(timer_on_commands) == 1
+
+
+async def test_failed_half_authenticated_connect_is_closed_after_timeout(
+    tmp_path: Path,
+) -> None:
+    master = _RecordingDevice("master")
+    slave = _HalfConnectedHangingConnectDevice("slave")
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    controller = TemporaryLinkageController(
+        {"master": master, "slave": slave},
+        JsonLinkageJournalStore(tmp_path / "half-connected-timeout.json"),
+        safety_interlock=interlock,
+        restore_connection_timeout_seconds=0.01,
+    )
+    controller._safety_epoch = interlock.epoch  # noqa: SLF001
+
+    with pytest.raises(LinkageRollbackError, match="reconnect timed out"):
+        await controller._ensure_restore_connection(  # noqa: SLF001
+            slave,
+            deadline=asyncio.get_running_loop().time() + 0.01,
+        )
+
+    assert slave.connect_started.is_set()
+    assert slave.connect_cancelled.is_set()
+    assert slave.disconnect_calls == 1
+    assert slave.connected is False
+
+
+async def test_failed_connect_cleanup_uses_caller_deadline_and_quarantines_on_timeout(
+    tmp_path: Path,
+) -> None:
+    master = _RecordingDevice("master")
+    slave = _FailedConnectWithHangingCleanupDevice("slave")
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    controller = TemporaryLinkageController(
+        {"master": master, "slave": slave},
+        JsonLinkageJournalStore(tmp_path / "half-connected-cleanup-deadline.json"),
+        safety_interlock=interlock,
+    )
+    controller._safety_epoch = interlock.epoch  # noqa: SLF001
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 0.05
+
+    task = asyncio.create_task(
+        controller._ensure_restore_connection(slave, deadline=deadline)  # noqa: SLF001
+    )
+    await asyncio.wait_for(slave.connect_started.wait(), timeout=1)
+    slave.fail_connect.set()
+    await asyncio.wait_for(slave.disconnect_started.wait(), timeout=1)
+
+    with pytest.raises(LinkageRollbackError, match="reconnect failed"):
+        await asyncio.wait_for(task, timeout=0.2)
+
+    assert loop.time() < deadline + 0.1
+    assert slave.disconnect_cancelled.is_set()
+    assert slave.connected is False
+
+
+async def test_safety_trip_during_half_authenticated_restore_connect_closes_and_stops(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    master = await _ready_device("master", power=70, frequency=34)
+    slave = await _ready_device(
+        "slave",
+        device_class=_HalfAuthenticatedSafetyReconnectDevice,
+        power=65,
+        frequency=32,
+    )
+    master.events = events
+    slave.events = events
+    master.commands.clear()
+    slave.commands.clear()
+    store = _RecordingStore(tmp_path / "safety-during-half-auth-connect.json", events)
+    controller = _controller(
+        master,
+        slave,
+        store,
+        interlock=interlock,
+        # A one-second assertion proves cleanup and OFF beat this longer caller deadline.
+        restore_total_timeout_seconds=5,
+    )
+    spec = _spec(duration=5)
+
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
+    await asyncio.wait_for(slave.half_auth_started.wait(), timeout=1)
+    assert slave.connected is True
+    assert slave.authenticated is False
+    events.clear()
+    interlock.trip()
+
+    with pytest.raises(LinkageRollbackError, match="safety interlock"):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert slave.half_auth_cancelled.is_set()
+    assert slave.half_auth_closed.is_set()
+    assert slave.unauthenticated_write_attempts == 0
+    assert slave.connect_calls == 3
+    assert slave.disconnect_calls == 2
+    pending = store.load()
+    assert pending is not None
+    assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+    assert pending.failed_device_ids == ("master", "slave")
+    recovery_index = events.index("journal:recovery_required")
+    safe_stop_indexes = [index for index, event in enumerate(events) if event.startswith("write:")]
+    assert safe_stop_indexes
+    assert recovery_index < min(safe_stop_indexes)
+    timer_on_commands = [
+        command
+        for command in slave.commands
+        if command.name == "timer_enabled" and command.value is True
+    ]
+    assert len(timer_on_commands) == 1
+    for device in (master, slave):
+        state = await device.get_state()
+        assert state.enabled is False
+        assert state.timer_enabled is False
+        assert state.linkage is LinkageRole.INDEPENDENT
 
 
 async def test_safety_trip_during_applied_hanging_timer_restore_cancels_and_stops(
@@ -1342,20 +2042,23 @@ async def test_schedule_bootstrap_exhausts_fresh_reads_without_retransmitting_ti
         master_power=35,
         slave_power=33,
         frequency=20,
-        duration_seconds=0.03,
+        duration_seconds=5,
         verification_interval_seconds=0.005,
         bootstrap_active_schedule=True,
     )
 
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
     with pytest.raises(LinkageRollbackError, match="final_verification_failed"):
-        await controller.run(spec)
+        await task
 
     pending = store.load()
     assert pending is not None
     assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
     assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
     assert pending.failed_device_ids == ("slave",)
-    assert slave.resume_read_count == 3
+    assert slave.resume_read_count == 4
     assert (await slave.get_state()).timer_enabled is False
     timer_on_commands = [
         command
@@ -1363,6 +2066,122 @@ async def test_schedule_bootstrap_exhausts_fresh_reads_without_retransmitting_ti
         if command.name == "timer_enabled" and command.value is True
     ]
     assert len(timer_on_commands) == 1
+
+
+async def test_unconfirmed_slave_final_fallback_reopens_and_pauses_newly_restored_master(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    master = await _ready_device("master", power=70, frequency=34)
+    slave = await _ready_device(
+        "slave",
+        device_class=_NeverConvergingThenFailSafeFallbackDevice,
+        power=65,
+        frequency=32,
+    )
+    master.events = events
+    slave.events = events
+    master.commands.clear()
+    slave.commands.clear()
+    store = _RestoreProgressRecordingStore(
+        tmp_path / "unconfirmed-slave-final-fallback.json",
+        events,
+    )
+    controller = _controller(master, slave, store)
+    spec = LinkageTestSpec(
+        operation_id="scheduled_unconfirmed_slave_final_fallback",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=5,
+        verification_interval_seconds=0.005,
+        bootstrap_active_schedule=True,
+    )
+
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
+    with pytest.raises(LinkageRollbackError, match="safe_fallback_failed"):
+        await task
+
+    pending = store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
+    assert pending.failed_device_ids == ("master", "slave")
+    assert pending.restored_device_ids == ()
+    assert pending.error is not None
+    assert "master: slave_safe_fallback_unconfirmed" in pending.error
+    assert "slave:" in pending.error
+    assert "safe_fallback_failed" in pending.error
+    assert slave.safe_fallback_attempts == 1
+
+    master_exact_index = events.index("durable-restored:master")
+    master_unmarked_index = events.index("durable-restored:", master_exact_index + 1)
+    master_pause_index = next(
+        index
+        for index, event in enumerate(events)
+        if index > master_unmarked_index and event.startswith("write:master:independent:False:")
+    )
+    assert master_exact_index < master_unmarked_index < master_pause_index
+    master_state = await master.get_state()
+    assert master_state.power == master.capabilities.power_limits.min_power
+    assert master_state.mode == "constant"
+    assert master_state.linkage is LinkageRole.INDEPENDENT
+    assert master_state.timer_enabled is False
+
+
+async def test_failed_master_pause_after_slave_fallback_is_durable(tmp_path: Path) -> None:
+    master = await _ready_device(
+        "master",
+        device_class=_FailMasterPauseAfterTimerResumeDevice,
+        power=70,
+        frequency=34,
+    )
+    slave = await _ready_device(
+        "slave",
+        device_class=_NeverConvergingThenFailSafeFallbackDevice,
+        power=65,
+        frequency=32,
+    )
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "failed-master-pause.json")
+    controller = _controller(master, slave, store)
+    spec = LinkageTestSpec(
+        operation_id="scheduled_failed_master_pause",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=5,
+        verification_interval_seconds=0.005,
+        bootstrap_active_schedule=True,
+    )
+
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
+    with pytest.raises(LinkageRollbackError, match="safe_fallback_failed"):
+        await task
+
+    pending = store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
+    assert pending.failed_device_ids == ("master", "slave")
+    assert pending.restored_device_ids == ()
+    assert pending.error is not None
+    assert "master: slave_safe_fallback_unconfirmed,safe_fallback_failed" in pending.error
+    assert "slave:" in pending.error
+    assert "safe_fallback_failed" in pending.error
+    assert master.safe_pause_attempts == 1
+    assert slave.safe_fallback_attempts == 1
 
 
 async def test_schedule_bootstrap_never_clears_a_transient_schedule_fingerprint_change(
@@ -1391,13 +2210,16 @@ async def test_schedule_bootstrap_never_clears_a_transient_schedule_fingerprint_
         master_power=35,
         slave_power=33,
         frequency=20,
-        duration_seconds=0.03,
+        duration_seconds=5,
         verification_interval_seconds=0.005,
         bootstrap_active_schedule=True,
     )
 
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
     with pytest.raises(LinkageRollbackError, match="final_verification_failed"):
-        await controller.run(spec)
+        await task
 
     pending = store.load()
     assert pending is not None
@@ -1452,8 +2274,8 @@ async def test_schedule_bootstrap_bounds_hanging_restore_reads(tmp_path: Path) -
     pending = store.load()
     assert pending is not None
     assert pending.failed_device_ids == ("slave",)
-    assert slave.hanging_read_attempts == 1
-    assert slave.connect_calls == 2
+    assert slave.hanging_read_attempts == 2
+    assert slave.connect_calls == 3
     assert (await slave.get_state()).timer_enabled is False
     timer_on_commands = [
         command
@@ -1495,12 +2317,14 @@ async def test_safety_trip_during_restore_backoff_defers_restore_and_stops_devic
         master_power=35,
         slave_power=33,
         frequency=20,
-        duration_seconds=0.03,
+        duration_seconds=5,
         verification_interval_seconds=0.005,
         bootstrap_active_schedule=True,
     )
 
     task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
     await asyncio.wait_for(slave.first_stale_read.wait(), timeout=1)
     await asyncio.sleep(0.01)
     assert task.done() is False
@@ -1552,12 +2376,14 @@ async def test_safety_trip_during_restore_read_interrupts_wait_and_stops_devices
         master_power=35,
         slave_power=33,
         frequency=20,
-        duration_seconds=0.03,
+        duration_seconds=5,
         verification_interval_seconds=0.005,
         bootstrap_active_schedule=True,
     )
 
     task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
     await asyncio.wait_for(slave.read_started.wait(), timeout=1)
     interlock.trip()
 
@@ -1568,6 +2394,59 @@ async def test_safety_trip_during_restore_read_interrupts_wait_and_stops_devices
     assert pending is not None
     assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
     assert pending.failed_device_ids == ("master", "slave")
+    for device in (master, slave):
+        state = await device.get_state()
+        assert state.enabled is False
+        assert state.timer_enabled is False
+        assert state.linkage is LinkageRole.INDEPENDENT
+
+
+async def test_safety_trip_during_restore_reconnect_wins_and_stops_devices(
+    tmp_path: Path,
+) -> None:
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    master = await _ready_device("master", power=70, frequency=34)
+    slave = await _ready_device(
+        "slave",
+        device_class=_ReadFailureThenHangingReconnectDevice,
+        power=65,
+        frequency=32,
+    )
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "safety-during-restore-reconnect.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        interlock=interlock,
+        # A one-second assertion proves the safety event wins this much longer bound.
+        restore_total_timeout_seconds=5,
+    )
+    spec = _spec(duration=5)
+
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
+    await asyncio.wait_for(slave.reconnect_started.wait(), timeout=1)
+    interlock.trip()
+
+    with pytest.raises(LinkageRollbackError, match="safety interlock"):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert slave.reconnect_cancelled.is_set()
+    assert slave.disconnect_calls == 1
+    assert slave.connect_calls == 3
+    pending = store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+    assert pending.failed_device_ids == ("master", "slave")
+    timer_on_commands = [
+        command
+        for command in slave.commands
+        if command.name == "timer_enabled" and command.value is True
+    ]
+    assert len(timer_on_commands) == 1
     for device in (master, slave):
         state = await device.get_state()
         assert state.enabled is False
@@ -2324,6 +3203,77 @@ async def test_recovery_never_reuses_a_device_after_state_read_failure(tmp_path:
     slave_state = await slave.get_state()
     assert slave_state.timer_enabled is False
     assert slave_state.linkage is LinkageRole.INDEPENDENT
+
+
+async def test_recovery_reconciliation_rejects_one_stale_exact_before_mismatch(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=46, frequency=22)
+    slave = await _ready_device(
+        "slave",
+        device_class=_StaleExactThenMismatchReconcileDevice,
+        power=54,
+        frequency=28,
+    )
+    spec = _spec(duration=5)
+    master_snapshot_state = await master.get_state()
+    slave_snapshot_state = await slave.get_state()
+    snapshots = (
+        DeviceControlSnapshot.from_state(
+            "master",
+            master_snapshot_state,
+            physical_binding=master.physical_binding,
+        ),
+        DeviceControlSnapshot.from_state(
+            "slave",
+            slave_snapshot_state,
+            physical_binding=slave.physical_binding,
+        ),
+    )
+    await slave.write_target(
+        DeviceTarget(
+            enabled=True,
+            power=42,
+            mode="sine",
+            frequency=30,
+            linkage=LinkageRole.SYNC_SLAVE,
+            timer_enabled=False,
+        )
+    )
+    slave.stale_exact_state = slave_snapshot_state
+    slave.reconcile_armed = True
+    master.commands.clear()
+    slave.commands.clear()
+    now = datetime.now().astimezone()
+    store = JsonLinkageJournalStore(tmp_path / "stale-exact-reconcile.json")
+    store.create(
+        LinkageTransactionRecord(
+            operation_id=spec.operation_id,
+            phase=LinkageTransactionPhase.ACTIVE,
+            spec=spec,
+            snapshots=snapshots,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=5),
+        )
+    )
+
+    assert (
+        await _controller(master, slave, store).recover_pending(
+            authority=LinkageRecoveryAuthority.ATTENDED
+        )
+        is True
+    )
+
+    assert store.load() is None
+    assert slave.reconcile_reads == 2
+    assert master.commands == []
+    timer_on_commands = [
+        command
+        for command in slave.commands
+        if command.name == "timer_enabled" and command.value is True
+    ]
+    assert len(timer_on_commands) == 1
 
 
 async def test_safety_trip_cancels_hanging_forced_disconnect_and_stops_devices(

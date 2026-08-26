@@ -1,9 +1,11 @@
 # 실기 제어 안전 체크리스트
 
 이 문서는 실제 펌프의 제한된 control/write 검증을 반복하거나 다음 실기 단계를 진행하기 전에
-확인할 중단 지점입니다. 2026-08-26 Pro 두 대의 저출력 레지스터 write/read-back과 정확 복원은
-완료했지만, 물리 유량·파형과 TimerON 시간표 경계 동작은 사용자가 수조를 직접 볼 수 있을 때
-별도로 검증합니다.
+확인할 중단 지점입니다. 2026-08-26 Pro 두 대의 저출력 레지스터 write/read-back을 수행했지만
+최초 자동 원복 확인은 실패해 recovery journal이 남았고, 이후 새 확인 토큰을 사용한 attended
+recovery에서 원래 TimerON 시간표 상태의 exact recovery가 성공했습니다. 이 실행은 시험 또는
+qualification 성공으로 처리하지 않았으며 두 Pro 모두 재qualification 대기 중입니다. 물리
+유량·파형과 TimerON 시간표 경계 동작은 사용자가 수조를 직접 볼 수 있을 때 별도로 검증합니다.
 
 ## 완료된 사전 검증
 
@@ -15,7 +17,9 @@
 - 출력 범위, 출력 step, 최소 명령 간격, 중복 억제와 read-back 불일치 단위 테스트
 - 어댑터 write 잠금 기본값 적용
 - 전역 `runtime.dry_run`이 장비별 write 허용보다 우선하도록 적용
-- Pro 두 대의 제한된 TimerOFF/Constant/Linkage 레지스터 write, 반복 read-back과 원상 복구
+- Pro 두 대의 제한된 TimerOFF/Constant/Linkage 레지스터 write와 반복 read-back 수행,
+  최초 자동 원복 확인 실패 뒤 attended exact recovery 성공
+- 위 실행에는 qualification 영수증을 발급하지 않았으며 두 Pro 모두 재qualification 대기
 - `async_slave` Flow 별도 변경은 유지되지 않음을 확인했으며 물리 유량은 미검증
 - 네이티브 Linkage의 Pro 4역할과 `TimerON` encode/decode 단위 테스트
 - Sync/Async 개별 출력, timeout·수동 종료·취소·부분 실패·재시작 원복 시뮬레이터 테스트
@@ -41,6 +45,10 @@
 - 명령 전 영속 journal, 명령 뒤 fresh read-back, 종료 뒤 exact state read-back
 - 모든 도구와 supervisor가 같은 `/hardware-safety` 볼륨과 전역 operation lease 사용
 - 최근 30초 복구 유예를 벗어나거나 TimerON/safety 기록이면 자동 ON 복구 금지
+- 복구 단계별 production 상한은 guarded write 31초, connect/disconnect 16초, fresh read 1회
+  5.5초, 연결 이후 convergence 64초이며 합산된 완료 보장 시간이 아님
+- outer recovery attempt 사이는 audited 최대 장비 명령 간격 이상인 2초를 대기하고, 모든 timeout과
+  retry보다 safety interlock을 우선
 
 `config.hardware-test.example.yaml`을 private 파일로 복사하고 실제 두 Pro identity와 IoT VLAN
 directed broadcast 주소를 넣습니다. 저장소의 예제는 `dry_run: true`라서 write 명령을 통과하지
@@ -164,6 +172,13 @@ TimerOFF → 30% → 31%`를 atomic frame과 fresh read-back으로 검증한 뒤
 TimerON을 하나의 guarded atomic frame으로 복원합니다. 따라서 TimerOFF 상태에서 저장된 고출력
 fallback이 별도 프레임으로 노출되지 않습니다.
 
+마지막 TimerON 원복 write가 timeout 또는 ACK 유실로 불확실해지면 같은 target을 재전송하지
+않습니다. 오염된 세션은 convergence 전에 한 번 교체하고, convergence 중 최초의 transport read
+실패가 발생하면 64초 창 안에서 read-only session recovery를 한 번 더 허용합니다. 이 과정에서
+fresh state가 snapshot과 두 번 연속 exact 일치할 때만 복구 완료로 인정합니다. 단계별
+31/16/5.5/64초 상한 안에서 확인되지 않거나 safety interlock이 걸리면 journal을 유지하고 안전한
+TimerOFF fallback을 우선합니다.
+
 Async 슬레이브 출력 변경이 실제로 독립 유지되는지 확인하는 2분 예시는 다음과 같습니다. 전체
 bootstrap 실행은 최대 180초이고 임시 시험·qualification target은 45% 이하로 제한됩니다. 마지막
 atomic 원복 frame만 journal에 저장된 원래 수동 fallback 값을 그대로 사용합니다.
@@ -213,6 +228,11 @@ docker compose exec jebao-flow-recovery \
 TimerON, `safety_interlock` 또는 `schedule_changed` 기록은 현장 확인 토큰 없이는 한 건도
 쓰지 않습니다. `schedule_changed`를 한 번 관측한 확인 시도는 즉시 멈추며, 스케줄을 확인한 뒤
 새 status에서 발급된 새 토큰으로만 attended recovery를 다시 시작합니다.
+
+`status`는 raw 오류나 장비 식별자 대신 typed recovery reason과 고정 blocker label만 표시합니다.
+`PREPARED`는 blocker가 없지만, 그 밖의 record에 `timer_on_snapshot`,
+`stale_or_clock_invalid`, `safety_interlock`, `schedule_changed` 중 하나라도 표시되면
+`--recovery-first`를 사용하지 않고 새 `JFR-...` 토큰으로 attended recovery를 실행합니다.
 
 ```bash
 docker compose exec jebao-flow-recovery \

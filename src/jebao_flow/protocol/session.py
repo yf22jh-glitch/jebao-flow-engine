@@ -93,27 +93,36 @@ class GizwitsSession:
             pass
 
     async def authenticate(self) -> bytes:
-        passcode_response = await self._exchange(
-            GizwitsCommand.PASSCODE_REQUEST,
-            expected={GizwitsCommand.PASSCODE_RESPONSE},
-        )
-        if len(passcode_response.payload) < 2:
-            raise AuthenticationError("passcode response is too short")
-        passcode_size = struct.unpack(">H", passcode_response.payload[:2])[0]
-        passcode = passcode_response.payload[2 : 2 + passcode_size]
-        if not passcode or len(passcode) != passcode_size:
-            raise AuthenticationError("passcode response has an invalid length")
+        try:
+            passcode_response = await self._exchange(
+                GizwitsCommand.PASSCODE_REQUEST,
+                expected={GizwitsCommand.PASSCODE_RESPONSE},
+            )
+            if len(passcode_response.payload) < 2:
+                raise AuthenticationError("passcode response is too short")
+            passcode_size = struct.unpack(">H", passcode_response.payload[:2])[0]
+            passcode = passcode_response.payload[2 : 2 + passcode_size]
+            if not passcode or len(passcode) != passcode_size:
+                raise AuthenticationError("passcode response has an invalid length")
 
-        login_response = await self._exchange(
-            GizwitsCommand.LOGIN_REQUEST,
-            struct.pack(">H", len(passcode)) + passcode,
-            expected={GizwitsCommand.LOGIN_RESPONSE},
-        )
-        if not login_response.payload or login_response.payload[-1] != 0:
-            raise AuthenticationError("device rejected the local login")
+            login_response = await self._exchange(
+                GizwitsCommand.LOGIN_REQUEST,
+                struct.pack(">H", len(passcode)) + passcode,
+                expected={GizwitsCommand.LOGIN_RESPONSE},
+            )
+            if not login_response.payload or login_response.payload[-1] != 0:
+                raise AuthenticationError("device rejected the local login")
 
-        self._authenticated = True
-        return passcode
+            self._authenticated = True
+            return passcode
+        except BaseException:
+            # Content validation and login rejection happen after a complete protocol exchange,
+            # so ``_exchange`` has no reason to quarantine that stream itself. Authentication is
+            # nevertheless an all-or-nothing session boundary: cancellation or any failure must
+            # synchronously discard the half-authenticated connection before control returns.
+            # A prior ``_exchange`` abort is harmless because ``_drop_connection`` is idempotent.
+            self._abort_connection()
+            raise
 
     async def heartbeat(self) -> None:
         self._require_authenticated()

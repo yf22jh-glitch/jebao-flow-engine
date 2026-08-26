@@ -40,6 +40,7 @@ from jebao_flow.devices.linkage import (
     LinkageJournalClaimError,
     LinkageRecoveryAuthority,
     LinkageRecoveryReason,
+    LinkageRollbackError,
     LinkageSafetyInterlock,
     LinkageTestSpec,
     LinkageTransactionPhase,
@@ -86,7 +87,8 @@ _MAX_ATTENDED_READBACK_ATTEMPTS = 3
 _MAX_ATTENDED_DISCOVERY_TIMEOUT_SECONDS = 5
 _MAX_AUTOMATIC_RECOVERY_GRACE_SECONDS = 30
 _RECOVERY_ATTEMPTS = 3
-_RECOVERY_RETRY_SECONDS = 1.0
+_RECOVERY_RETRY_SECONDS = _MAX_ATTENDED_COMMAND_INTERVAL_MS / 1000
+_RECOVERY_LATCH_POLL_SECONDS = 0.1
 _LATE_EMERGENCY_STOP_TIMEOUT_SECONDS = 35.0
 _MAX_SAFETY_ARTIFACT_BYTES = 1024 * 1024
 _AUDITED_SNAPSHOT_MODES = frozenset({"constant", "pulse", "sine"})
@@ -1461,6 +1463,50 @@ def _recovery_source(
     return intent.spec, intent.snapshots, intent
 
 
+def _automatic_recovery_blockers(
+    record: LinkageTransactionRecord,
+    *,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """Return fixed, sanitized reasons why recovery-first must not touch this journal."""
+
+    if record.phase is LinkageTransactionPhase.PREPARED:
+        # PREPARED is durably written before the first frame and therefore needs no compensation.
+        return ()
+
+    blockers: list[str] = []
+    if record.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK:
+        blockers.append("safety_interlock")
+    elif record.recovery_reason is LinkageRecoveryReason.SCHEDULE_CHANGED:
+        blockers.append("schedule_changed")
+    if any(snapshot.timer_enabled for snapshot in record.snapshots):
+        blockers.append("timer_on_snapshot")
+
+    checked_at = now or datetime.now(UTC)
+    try:
+        automatic_deadline = record.expires_at + timedelta(
+            seconds=_MAX_AUTOMATIC_RECOVERY_GRACE_SECONDS
+        )
+        stale = (
+            checked_at.tzinfo is None
+            or checked_at.utcoffset() is None
+            or record.created_at.tzinfo is None
+            or record.created_at.utcoffset() is None
+            or record.updated_at.tzinfo is None
+            or record.updated_at.utcoffset() is None
+            or record.expires_at.tzinfo is None
+            or record.expires_at.utcoffset() is None
+            or checked_at < record.created_at
+            or checked_at < record.updated_at
+            or checked_at > automatic_deadline
+        )
+    except (OverflowError, TypeError):
+        stale = True
+    if stale:
+        blockers.append("stale_or_clock_invalid")
+    return tuple(blockers)
+
+
 def _status(
     config: AppConfig,
     intent_store: JsonHardwareTestIntentStore,
@@ -1470,9 +1516,22 @@ def _status(
         raise HardwareTestError("runtime.state_path must be an absolute persistent path")
     intent = intent_store.load()
     record = journal_store.load()
+    recovery_details = None
+    if record is not None or (
+        intent is not None and intent.phase is not HardwareTestIntentPhase.TERMINAL
+    ):
+        # Validate the two durable authorities before printing an actionable status. A partial
+        # status followed by a mismatch refusal can otherwise advertise an unsafe next command.
+        recovery_details = _recovery_source(config, intent, record)
 
     intent_status = intent.phase.value if intent is not None else "none"
     journal_status = record.phase.value if record is not None else "none"
+    recovery_reason = (
+        record.recovery_reason.value
+        if record is not None and record.recovery_reason is not None
+        else "none"
+    )
+    automatic_blockers = _automatic_recovery_blockers(record) if record is not None else ()
     latch_active = _safety_latch_present(canonical_safety_latch_path(config))
     if record is not None and record.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK:
         next_action = (
@@ -1490,7 +1549,11 @@ def _status(
         next_action = (
             "clear the persistent safety latch outside this harness"
             if latch_active
-            else "recover-linkage --recovery-first"
+            else (
+                "use attended recover-linkage confirmation (automatic recovery is blocked)"
+                if automatic_blockers
+                else "recover-linkage --recovery-first"
+            )
         )
     elif intent is not None and intent.phase is HardwareTestIntentPhase.STARTED:
         next_action = "recover-linkage (closes proven no-write crash state)"
@@ -1502,12 +1565,15 @@ def _status(
         next_action = "preflight with a new operation ID"
     print(f"One-shot intent: {intent_status}")
     print(f"Recovery journal: {journal_status}")
+    print(f"Recovery reason: {recovery_reason}")
+    print(
+        "Automatic recovery blockers: "
+        + (", ".join(automatic_blockers) if automatic_blockers else "none")
+    )
     print(f"Persistent safety latch: {'active' if latch_active else 'clear'}")
     print(f"Next action: {next_action}")
-    if record is not None or (
-        intent is not None and intent.phase is not HardwareTestIntentPhase.TERMINAL
-    ):
-        spec, snapshots, revision = _recovery_source(config, intent, record)
+    if recovery_details is not None:
+        spec, snapshots, revision = recovery_details
         print(
             "Recovery confirmation token: "
             + recovery_confirmation_token(
@@ -1541,6 +1607,140 @@ async def _recover_once(
             return await controller.recover_pending(authority=authority)
         finally:
             interlock.trip()
+
+
+def _persist_recovery_safety_interlock(
+    journal_store: JsonLinkageJournalStore,
+    fallback_record: LinkageTransactionRecord,
+) -> LinkageTransactionRecord:
+    """Durably invalidate recovery authority after observing a safety interlock."""
+
+    current = journal_store.load() or fallback_record
+    successor = current.model_copy(
+        update={
+            "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+            "recovery_reason": LinkageRecoveryReason.SAFETY_INTERLOCK,
+            "updated_at": datetime.now(UTC),
+            "error": "recovery deferred by persistent safety interlock",
+            "failed_device_ids": tuple(
+                sorted(snapshot.device_id for snapshot in current.snapshots)
+            ),
+            "restored_device_ids": (),
+        }
+    )
+    try:
+        journal_store.save(successor)
+    except BaseException as save_error:
+        # Atomic replacement can finish before a trailing file/directory fsync reports failure.
+        # Continue to the physical safe stop only when a fresh reload proves that the exact typed
+        # successor is already the durable authority. Any absent, stale or unreadable record must
+        # preserve the original exception and emit no device command.
+        try:
+            persisted = journal_store.load()
+        except BaseException:
+            raise save_error from None
+        if persisted != successor:
+            raise
+    return successor
+
+
+async def _enforce_outer_recovery_safety_stop(
+    config: AppConfig,
+    selected: Mapping[str, DeviceConfig],
+    journal_store: JsonLinkageJournalStore,
+    interlock: PersistentSafetyInterlock,
+    fallback_record: LinkageTransactionRecord,
+) -> LinkageTransactionRecord:
+    """Durably latch an outer-loop safety observation, then stop both devices.
+
+    ``TemporaryLinkageController`` normally observes the deployment guard while it still owns its
+    device sessions. There remains a narrow outer-loop window after an attempt has returned (and
+    may already have cleared the journal), plus the audited retry dwell. A persistent e-stop or a
+    durable typed safety transition seen there must do more than invalidate the JFR token: an
+    already-restored TimerON master must be physically stopped as well. The fixed safety record is
+    therefore fsynced before device construction or any OFF frame.
+    """
+
+    safety_record = _persist_recovery_safety_interlock(journal_store, fallback_record)
+    devices: Mapping[str, JebaoDevice] = {}
+    unexpected_stop_failure = False
+    try:
+        devices = await _build_devices(config, selected, writable=True)
+        controller = TemporaryLinkageController(
+            devices,
+            journal_store,
+            safety_interlock=interlock,
+        )
+        try:
+            # This method always raises LinkageRollbackError after its bounded OFF compensation.
+            # Its durable journal is the result; the exception text is intentionally not exposed.
+            await controller.enforce_safety_stop(safety_record)
+        except LinkageRollbackError:
+            pass
+        except Exception:
+            unexpected_stop_failure = True
+    except Exception:
+        unexpected_stop_failure = True
+    finally:
+        if devices:
+            try:
+                async with asyncio.timeout(_MAX_ATTENDED_DISCOVERY_TIMEOUT_SECONDS):
+                    await asyncio.gather(
+                        *(device.disconnect() for device in devices.values()),
+                        return_exceptions=True,
+                    )
+            except TimeoutError:
+                # The safety journal already precedes the OFF attempt. A stuck local close must
+                # not revive recovery authority or delay the fail-closed outer-loop exit.
+                unexpected_stop_failure = True
+            if any(device.connected for device in devices.values()):
+                unexpected_stop_failure = True
+
+    current = journal_store.load()
+    expected_ids = tuple(sorted(snapshot.device_id for snapshot in safety_record.snapshots))
+    if (
+        current is None
+        or current.operation_id != safety_record.operation_id
+        or current.spec != safety_record.spec
+        or current.snapshots != safety_record.snapshots
+        or current.phase is not LinkageTransactionPhase.RECOVERY_REQUIRED
+        or current.recovery_reason is not LinkageRecoveryReason.SAFETY_INTERLOCK
+        or current.failed_device_ids != expected_ids
+        or current.restored_device_ids
+    ):
+        # Do not issue another physical command when durable authority is inconsistent.
+        raise HardwareTestError("outer safety stop did not remain durably latched")
+
+    safe_stop_failed = unexpected_stop_failure or "safe_stop_failed" in (current.error or "")
+    normalized_error = "recovery deferred by persistent safety interlock"
+    if safe_stop_failed:
+        normalized_error = f"{normalized_error}; safe_stop_failed"
+    if current.error != normalized_error:
+        current = current.model_copy(
+            update={
+                "updated_at": datetime.now(UTC),
+                # Never copy an adapter/discovery exception or physical identifier into this
+                # outer authority record. Preserve only the fixed typed stop-failure category.
+                "error": normalized_error,
+            }
+        )
+        journal_store.save(current)
+    return current
+
+
+async def _wait_for_recovery_retry_or_latch(config: AppConfig) -> bool:
+    """Keep the audited retry dwell while polling the persistent safety authority."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _RECOVERY_RETRY_SECONDS
+    latch_path = canonical_safety_latch_path(config)
+    while True:  # noqa: ASYNC110 - a filesystem latch has no event source to await
+        if _safety_latch_present(latch_path):
+            return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(_RECOVERY_LATCH_POLL_SECONDS, remaining))
 
 
 async def _recover_linkage(
@@ -1699,8 +1899,17 @@ async def _recover_linkage(
 
         recovered = False
         schedule_change_detected = False
+        safety_interlock_detected = False
         for attempt in range(1, _RECOVERY_ATTEMPTS + 1):
             if _safety_latch_present(canonical_safety_latch_path(config)):
+                await _enforce_outer_recovery_safety_stop(
+                    config,
+                    selected,
+                    journal_store,
+                    interlock,
+                    journal_store.load() or record,
+                )
+                safety_interlock_detected = True
                 break
             try:
                 recovered = await _recover_once(
@@ -1717,7 +1926,36 @@ async def _recover_linkage(
             except Exception:
                 recovered = False
             pending_after_attempt = journal_store.load()
+            if _safety_latch_present(canonical_safety_latch_path(config)):
+                await _enforce_outer_recovery_safety_stop(
+                    config,
+                    selected,
+                    journal_store,
+                    interlock,
+                    pending_after_attempt or record,
+                )
+                recovered = False
+                safety_interlock_detected = True
+                break
             if recovered and pending_after_attempt is None:
+                break
+            if (
+                pending_after_attempt is not None
+                and pending_after_attempt.recovery_reason
+                is LinkageRecoveryReason.SAFETY_INTERLOCK
+            ):
+                # A safety transition invalidates the confirmation that authorized this loop.
+                # A journal save can become durable and still report a late fsync failure before
+                # the controller reaches its OFF compensation. Re-enforce the bounded safe stop;
+                # never clear it or reconnect for ON restore under the same JFR token.
+                await _enforce_outer_recovery_safety_stop(
+                    config,
+                    selected,
+                    journal_store,
+                    interlock,
+                    pending_after_attempt,
+                )
+                safety_interlock_detected = True
                 break
             if (
                 pending_after_attempt is not None
@@ -1729,7 +1967,16 @@ async def _recover_linkage(
                 schedule_change_detected = True
                 break
             if attempt < _RECOVERY_ATTEMPTS:
-                await asyncio.sleep(_RECOVERY_RETRY_SECONDS)
+                if await _wait_for_recovery_retry_or_latch(config):
+                    await _enforce_outer_recovery_safety_stop(
+                        config,
+                        selected,
+                        journal_store,
+                        interlock,
+                        pending_after_attempt or record,
+                    )
+                    safety_interlock_detected = True
+                    break
 
         if not recovered or journal_store.load() is not None:
             if intent is not None:
@@ -1744,6 +1991,11 @@ async def _recover_linkage(
                 raise HardwareTestError(
                     "schedule changed during recovery; inspect it and start a new attended "
                     "confirmed recovery"
+                )
+            if safety_interlock_detected:
+                raise HardwareTestError(
+                    "safety interlock changed during recovery; inspect the aquarium, then "
+                    "request a new status and attended recovery token"
                 )
             raise HardwareTestError(
                 f"exact recovery did not complete after {_RECOVERY_ATTEMPTS} bounded attempts"
