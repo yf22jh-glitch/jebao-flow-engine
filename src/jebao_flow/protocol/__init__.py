@@ -8,6 +8,7 @@ from jebao_flow.protocol.models import (
     DeviceState,
     DeviceTarget,
     DiscoveredDevice,
+    LinkageRole,
     ScheduleEntry,
 )
 from jebao_flow.protocol.schedule import decode_device_schedule, decode_schedule
@@ -25,6 +26,7 @@ __all__ = [
     "GizwitsDiscovery",
     "GizwitsFrame",
     "GizwitsSession",
+    "LinkageRole",
     "ProtocolConnection",
     "ScheduleEntry",
     "decode_device_schedule",

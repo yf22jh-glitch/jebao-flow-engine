@@ -11,8 +11,10 @@ from typing import Any, Protocol
 from jebao_flow.devices.base import (
     HardwareWritesDisabledError,
     JebaoDevice,
+    SafetyInterlockError,
     StateVerificationError,
     UnsupportedCapabilityError,
+    WriteGuard,
 )
 from jebao_flow.protocol.control import build_control_payload
 from jebao_flow.protocol.models import (
@@ -21,6 +23,7 @@ from jebao_flow.protocol.models import (
     DeviceSchedule,
     DeviceState,
     DeviceTarget,
+    LinkageRole,
 )
 from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.schedule import decode_schedule
@@ -52,6 +55,7 @@ class ControlPlan:
 
 
 SessionFactory = Callable[[str], RawSession]
+_LINKAGE_ROLES_BY_VALUE = {role.value: role for role in LinkageRole}
 
 
 class LanJebaoDevice(JebaoDevice):
@@ -112,6 +116,8 @@ class LanJebaoDevice(JebaoDevice):
     def capabilities(self) -> DeviceCapabilities:
         readable: set[Capability] = {Capability.ERROR}
         writable: set[Capability] = set()
+        native_modes: frozenset[str] = frozenset()
+        linkage_roles: frozenset[LinkageRole] = frozenset()
         if self.schema.enabled_attribute:
             readable.add(Capability.ENABLED)
             if self.schema.control_supported:
@@ -123,6 +129,7 @@ class LanJebaoDevice(JebaoDevice):
         if self.schema.mode_attribute:
             readable.add(Capability.MODE)
             mode = self.schema.by_name(self.schema.mode_attribute)
+            native_modes = frozenset(mode.enum_values)
             if self.schema.control_supported and (
                 mode.data_type is DataType.ENUM or mode.enum_values
             ):
@@ -131,6 +138,20 @@ class LanJebaoDevice(JebaoDevice):
             readable.add(Capability.FREQUENCY)
             if self.schema.control_supported:
                 writable.add(Capability.FREQUENCY)
+        if self.schema.linkage_attribute:
+            readable.add(Capability.LINKAGE)
+            linkage = self.schema.by_name(self.schema.linkage_attribute)
+            linkage_roles = frozenset(
+                _LINKAGE_ROLES_BY_VALUE[value]
+                for value in linkage.enum_values
+                if value in _LINKAGE_ROLES_BY_VALUE
+            )
+            if self.schema.control_supported and linkage.data_type is DataType.ENUM:
+                writable.add(Capability.LINKAGE)
+        if self.schema.timer_attribute:
+            readable.add(Capability.TIMER)
+            if self.schema.control_supported:
+                writable.add(Capability.TIMER)
         return DeviceCapabilities(
             model=self.schema.name,
             product_key=self.schema.product_key,
@@ -138,6 +159,8 @@ class LanJebaoDevice(JebaoDevice):
             writable=frozenset(writable),
             power_limits=self._power_limits,
             power_step=self._power_step,
+            native_modes=native_modes,
+            linkage_roles=linkage_roles,
         )
 
     async def connect(self) -> None:
@@ -160,7 +183,7 @@ class LanJebaoDevice(JebaoDevice):
             schedule = decode_schedule(
                 self.schema.product_key,
                 raw,
-                enabled=bool(values.get("TimerON", False)),
+                enabled=bool(values.get(self.schema.timer_attribute, False)),
             )
             return self._to_device_state(values, schedule=schedule)
 
@@ -188,6 +211,23 @@ class LanJebaoDevice(JebaoDevice):
         attribute = self._require_logical_attribute(Capability.FREQUENCY)
         await self._apply_changes({attribute: value})
 
+    async def set_linkage(self, role: LinkageRole) -> None:
+        if not isinstance(role, LinkageRole):
+            raise TypeError("linkage role must be a LinkageRole")
+        attribute_name = self._require_logical_attribute(Capability.LINKAGE)
+        if role not in self.capabilities.linkage_roles:
+            choices = ", ".join(sorted(value.value for value in self.capabilities.linkage_roles))
+            raise UnsupportedCapabilityError(
+                f"{self.schema.name} linkage {role.value!r} is unsupported; expected {choices}"
+            )
+        await self._apply_changes({attribute_name: role})
+
+    async def set_timer_enabled(self, enabled: bool) -> None:
+        if not isinstance(enabled, bool):
+            raise TypeError("timer enabled must be a boolean")
+        attribute = self._require_logical_attribute(Capability.TIMER)
+        await self._apply_changes({attribute: enabled})
+
     def preview_target(self, target: DeviceTarget) -> ControlPlan:
         changes = self._target_changes(target)
         return ControlPlan(
@@ -196,12 +236,31 @@ class LanJebaoDevice(JebaoDevice):
             payload=build_control_payload(self.schema, changes),
         )
 
-    async def write_target(self, target: DeviceTarget) -> None:
-        await self._apply_changes(self._target_changes(target))
+    async def write_target(
+        self,
+        target: DeviceTarget,
+        *,
+        guard: WriteGuard | None = None,
+    ) -> None:
+        await self._apply_changes(self._target_changes(target), guard=guard)
 
     def _target_changes(self, target: DeviceTarget) -> dict[str, Any]:
         enabled_attribute = self._require_logical_attribute(Capability.ENABLED)
         changes: dict[str, Any] = {enabled_attribute: target.enabled}
+        if target.timer_enabled is not None:
+            timer_attribute = self._require_logical_attribute(Capability.TIMER)
+            changes[timer_attribute] = target.timer_enabled
+        if target.linkage is not None:
+            linkage_attribute = self._require_logical_attribute(Capability.LINKAGE)
+            if target.linkage not in self.capabilities.linkage_roles:
+                choices = ", ".join(
+                    sorted(value.value for value in self.capabilities.linkage_roles)
+                )
+                raise UnsupportedCapabilityError(
+                    f"{self.schema.name} linkage {target.linkage.value!r} is unsupported; "
+                    f"expected {choices}"
+                )
+            changes[linkage_attribute] = target.linkage
         if not target.enabled:
             return changes
 
@@ -223,7 +282,12 @@ class LanJebaoDevice(JebaoDevice):
             changes[frequency_attribute] = target.frequency
         return changes
 
-    async def _apply_changes(self, changes: dict[str, Any]) -> None:
+    async def _apply_changes(
+        self,
+        changes: dict[str, Any],
+        *,
+        guard: WriteGuard | None = None,
+    ) -> None:
         if not self._allow_hardware_writes:
             raise HardwareWritesDisabledError(
                 f"hardware writes are locked for {self._device_id}; review preview_target first"
@@ -231,15 +295,28 @@ class LanJebaoDevice(JebaoDevice):
         payload = build_control_payload(self.schema, changes)
 
         async with self._io_lock:
+            self._require_write_guard(guard)
             if all(self._last_sent_values.get(name) == value for name, value in changes.items()):
-                return
+                # The app, native schedules or master broadcasts may have changed the device
+                # after our last verified write. Never let the duplicate cache hide that drift,
+                # especially while a linkage transaction is being rolled back.
+                values = await self._read_values()
+                if all(values.get(name) == expected for name, expected in changes.items()):
+                    self._require_write_guard(guard)
+                    return
             await self._respect_command_interval()
+            # The guard is intentionally checked under the same device I/O lock and immediately
+            # before send. An emergency-stop writer that trips the guard while waiting cannot be
+            # followed by this stale ON target.
+            self._require_write_guard(guard)
             await self._session.send_raw_control(payload)
             self._last_command_at = asyncio.get_running_loop().time()
+            self._require_write_guard(guard)
 
             for attempt in range(self._readback_attempts):
                 if self._readback_delay:
                     await asyncio.sleep(self._readback_delay)
+                self._require_write_guard(guard)
                 values = await self._read_values()
                 if all(values.get(name) == expected for name, expected in changes.items()):
                     self._last_sent_values.update(changes)
@@ -253,6 +330,11 @@ class LanJebaoDevice(JebaoDevice):
                     raise StateVerificationError(
                         f"device {self._device_id!r} did not apply control: {mismatches}"
                     )
+
+    @staticmethod
+    def _require_write_guard(guard: WriteGuard | None) -> None:
+        if guard is not None and guard() is not True:
+            raise SafetyInterlockError("device write was blocked by the safety interlock")
 
     async def _read_values(self) -> dict[str, Any]:
         raw = await self._session.read_raw_state()
@@ -276,6 +358,13 @@ class LanJebaoDevice(JebaoDevice):
         power_value = values.get(self.schema.power_attribute, 0)
         mode_value = values.get(self.schema.mode_attribute, "unknown")
         frequency_value = values.get(self.schema.frequency_attribute)
+        linkage_value = values.get(self.schema.linkage_attribute)
+        timer_value = values.get(self.schema.timer_attribute)
+        linkage = (
+            _LINKAGE_ROLES_BY_VALUE[linkage_value]
+            if isinstance(linkage_value, str) and linkage_value in _LINKAGE_ROLES_BY_VALUE
+            else None
+        )
         problems = self.schema.active_problems(values)
         observed_attributes = {
             name: value
@@ -298,6 +387,8 @@ class LanJebaoDevice(JebaoDevice):
             power=round(float(power_value)),
             mode=mode_value if isinstance(mode_value, str) else f"raw_{mode_value}",
             frequency=None if frequency_value is None else round(float(frequency_value)),
+            linkage=linkage,
+            timer_enabled=bool(timer_value) if timer_value is not None else None,
             error=", ".join(problems) if problems else None,
             schedule=schedule,
             observed_attributes=observed_attributes,
@@ -310,6 +401,8 @@ class LanJebaoDevice(JebaoDevice):
             Capability.POWER: self.schema.power_attribute,
             Capability.MODE: self.schema.mode_attribute,
             Capability.FREQUENCY: self.schema.frequency_attribute,
+            Capability.LINKAGE: self.schema.linkage_attribute,
+            Capability.TIMER: self.schema.timer_attribute,
         }
         attribute = names.get(capability)
         if attribute is None:

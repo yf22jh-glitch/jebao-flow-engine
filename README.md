@@ -7,7 +7,8 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 > 현재 상태: 실제 장비의 읽기 전용 검증과 지속 Observer, 오프라인 control 프레임 생성,
 > MQTT 상태 계약과 Home Assistant 커스텀 통합 뼈대까지 구현했습니다. 기본 실행 모드는
 > `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 실제 수조 제어에는 아직 사용하면
-> 안 됩니다.
+> 안 됩니다. 네이티브 Sync/Async 임시 시험과 자동 원복 코어도 구현됐지만 아직 데몬/MQTT
+> 실행 경로에는 연결하지 않았습니다.
 
 ## 구조
 
@@ -33,6 +34,10 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
   JSONL 변경 기록
 - 보유 제품군 5종의 상태 디코더와 fault 판독
 - 전역·장비별 이중 잠금, 출력 제한, 명령 간격과 read-back 검증을 갖춘 LAN 어댑터
+- Pro 수류모터의 `master`/`sync_slave`/`async_slave`, `TimerON` typed read/write와
+  장비당 원자적 목표 프레임 생성
+- 첫 write 전 영속 저널, 서로 다른 마스터/슬레이브 출력, 수동·시간초과·오류·취소 원복,
+  재시작 복구를 갖춘 임시 네이티브 Linkage 트랜잭션 코어
 - 비동기 가상 장비 시뮬레이터
 - Constant, Sync, Anti Phase 및 VorTech 계열에서 영감을 얻은 그룹 패턴 계산기
 - 3대 수류모터의 `left`/`right`/`crossflow` 역할과 개별 `gain`/`phase`
@@ -51,6 +56,8 @@ Home Assistant 설치와 카드는
 [Home Assistant 연동 가이드](docs/home-assistant.md)를 참고하세요.
 기존 스케줄을 write 없이 관찰하는 방법과 한계는
 [Observer 모드](docs/observer-mode.md)를 참고하세요.
+네이티브 Sync/Async 시험의 경계와 원복 순서는
+[네이티브 Linkage 트랜잭션](docs/native-linkage.md)을 참고하세요.
 
 ## 로컬 개발
 

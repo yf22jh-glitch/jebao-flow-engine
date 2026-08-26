@@ -42,8 +42,21 @@ class StateUpdate:
 
 
 class GroupControlService:
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        command_executor_ready: bool = False,
+    ) -> None:
+        """Build the MQTT state service.
+
+        The daemon has no command executor yet, so the service deliberately fails closed.
+        Application wiring must set ``command_executor_ready`` only after a real actuator and
+        reconciliation worker have started successfully.
+        """
+
         self._config = config
+        self._command_executor_ready = command_executor_ready
         self._groups = {group.id: group for group in config.groups}
         self._calculator = PatternCalculator()
         self._states = {
@@ -65,10 +78,34 @@ class GroupControlService:
 
     @property
     def system_config(self) -> SystemConfigPayload:
+        runtime_control_ready = self._runtime_control_rejection_reason() is None
+        group_control_ready = any(
+            self._group_control_rejection_reason(group_id) is None
+            for group_id in self._groups
+        )
+        device_control_ready = any(
+            self._device_control_rejection_reason(device.id) is None
+            and device.type.value != "dosing_pump"
+            for device in self._config.devices
+        )
+        features = ["hardware_write_lock"]
+        if not runtime_control_ready:
+            features.insert(0, "observer")
+        else:
+            if group_control_ready:
+                features[:0] = ["feed", "emergency_stop"]
+            if device_control_ready:
+                features.append("individual_override")
         return SystemConfigPayload(
             instance_id=self._config.instance.id,
             name=self._config.instance.name,
-            runtime_mode=self._config.runtime.mode,
+            # This is the effective externally available mode. Advertising configured
+            # control mode without an executor makes Home Assistant expose unsafe controls.
+            runtime_mode=(
+                self._config.runtime.mode
+                if runtime_control_ready
+                else RuntimeMode.OBSERVER
+            ),
             groups=tuple(
                 GroupDescriptor(id=group.id, name=group.name)
                 for group in self._config.groups
@@ -96,16 +133,7 @@ class GroupControlService:
                 for device in self._config.devices
             ),
             patterns=tuple(sorted(self._calculator.supported_patterns(), key=str)),
-            features=(
-                ("observer", "hardware_write_lock")
-                if self._config.runtime.mode is RuntimeMode.OBSERVER
-                else (
-                    "feed",
-                    "emergency_stop",
-                    "hardware_write_lock",
-                    "individual_override",
-                )
-            ),
+            features=tuple(features),
         )
 
     def snapshots(self) -> tuple[GroupStatePayload, ...]:
@@ -329,6 +357,10 @@ class GroupControlService:
                 )
             )
 
+        rejection_reason = self._group_control_rejection_reason(group_id)
+        if rejection_reason is not None:
+            return self._reject(self._states[group_id], command, rejection_reason)
+
         current = self._states[group_id]
         if (
             command.pattern is not None
@@ -435,6 +467,10 @@ class GroupControlService:
         if self._config.runtime.mode is RuntimeMode.OBSERVER:
             return self._reject_device(current, command, "observer_mode_read_only")
 
+        rejection_reason = self._device_control_rejection_reason(device_id)
+        if rejection_reason is not None:
+            return self._reject_device(current, command, rejection_reason)
+
         if any(
             self._states[group_id].status is GroupState.EMERGENCY_STOP
             for group_id in current.group_ids
@@ -504,8 +540,7 @@ class GroupControlService:
     def _initial_state(self, group_id: str) -> GroupStatePayload:
         group = self._groups[group_id]
         hardware_writes_locked = (
-            self._config.runtime.mode is RuntimeMode.OBSERVER
-            or self._config.runtime.dry_run
+            self._runtime_control_rejection_reason() is not None
             or any(
                 not self._device_config(member.device).control.allow_hardware_writes
                 for member in group.members
@@ -629,15 +664,14 @@ class GroupControlService:
             ),
             group_ids=group_ids,
             hardware_writes_locked=(
-                self._config.runtime.mode is RuntimeMode.OBSERVER
-                or self._config.runtime.dry_run
+                self._runtime_control_rejection_reason() is not None
                 or not device.control.allow_hardware_writes
             ),
         )
 
     def _device_controls(self, device_id: str) -> tuple[str, ...]:
         device = self._device_config(device_id)
-        if self._config.runtime.mode is RuntimeMode.OBSERVER:
+        if self._device_control_rejection_reason(device_id) is not None:
             return ()
         if device.type.value == "dosing_pump":
             return ("status",)
@@ -650,6 +684,34 @@ class GroupControlService:
         if grouped:
             controls.append("resume_group")
         return tuple(controls)
+
+    def _runtime_control_rejection_reason(self) -> str | None:
+        if self._config.runtime.mode is RuntimeMode.OBSERVER:
+            return "observer_mode_read_only"
+        if not self._command_executor_ready:
+            return "control_executor_unavailable"
+        if self._config.runtime.dry_run:
+            return "hardware_writes_locked"
+        return None
+
+    def _device_control_rejection_reason(self, device_id: str) -> str | None:
+        runtime_reason = self._runtime_control_rejection_reason()
+        if runtime_reason is not None:
+            return runtime_reason
+        if not self._device_config(device_id).control.allow_hardware_writes:
+            return "hardware_writes_locked"
+        return None
+
+    def _group_control_rejection_reason(self, group_id: str) -> str | None:
+        runtime_reason = self._runtime_control_rejection_reason()
+        if runtime_reason is not None:
+            return runtime_reason
+        if any(
+            not self._device_config(member.device).control.allow_hardware_writes
+            for member in self._groups[group_id].members
+        ):
+            return "hardware_writes_locked"
+        return None
 
     def _device_observables(self, device_id: str) -> tuple[str, ...]:
         device = self._device_config(device_id)
@@ -694,7 +756,9 @@ class GroupControlService:
         observed = [member for member in members.values() if member.online is not None]
         online = [member for member in members.values() if member.online is True]
         errors = [member for member in members.values() if member.error]
-        if errors and len(errors) == len(members):
+        if state.status is GroupState.EMERGENCY_STOP:
+            status = GroupState.EMERGENCY_STOP
+        elif errors and len(errors) == len(members):
             status = GroupState.ERROR
         elif errors:
             status = GroupState.DEGRADED

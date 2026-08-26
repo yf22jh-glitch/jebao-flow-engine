@@ -122,6 +122,7 @@ DC_PUMP_PRO = ProductSchema(
     power_attribute="Flow",
     mode_attribute="Mode",
     frequency_attribute="Frequency",
+    timer_attribute="TimerON",
 )
 
 
@@ -185,6 +186,8 @@ LOCAL_WAVEMAKER = ProductSchema(
     power_attribute="Flow",
     mode_attribute="Mode",
     frequency_attribute="Frequency",
+    linkage_attribute="Linkage",
+    timer_attribute="TimerON",
 )
 
 
@@ -209,6 +212,7 @@ AQUARIUM_PUMP = ProductSchema(
     ),
     enabled_attribute="SwitchON",
     power_attribute="Motor_Speed",
+    timer_attribute="TimerON",
 )
 
 
@@ -273,6 +277,8 @@ LOCAL_WAVEMAKER_PRO = ProductSchema(
     power_attribute="Flow",
     mode_attribute="Mode",
     frequency_attribute="Frequency",
+    linkage_attribute="Linkage",
+    timer_attribute="TimerON",
 )
 
 

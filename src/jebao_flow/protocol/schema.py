@@ -106,6 +106,8 @@ class ProductSchema:
     power_attribute: str | None = None
     mode_attribute: str | None = None
     frequency_attribute: str | None = None
+    linkage_attribute: str | None = None
+    timer_attribute: str | None = None
     control_supported: bool = True
 
     def __post_init__(self) -> None:
@@ -129,6 +131,8 @@ class ProductSchema:
             self.power_attribute,
             self.mode_attribute,
             self.frequency_attribute,
+            self.linkage_attribute,
+            self.timer_attribute,
         ):
             if logical_name is not None and logical_name not in known:
                 raise ValueError(f"logical datapoint {logical_name!r} is not defined")

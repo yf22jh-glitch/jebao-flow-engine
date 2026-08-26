@@ -55,7 +55,13 @@ def _device_schedule(
 def service() -> GroupControlService:
     raw = yaml.safe_load(open("config.example.yaml", encoding="utf-8"))
     raw["runtime"]["mode"] = "control"
-    return GroupControlService(AppConfig.model_validate(raw))
+    raw["runtime"]["dry_run"] = False
+    for device in raw["devices"]:
+        device["control"]["allow_hardware_writes"] = True
+    return GroupControlService(
+        AppConfig.model_validate(raw),
+        command_executor_ready=True,
+    )
 
 
 @pytest.fixture
@@ -101,7 +107,7 @@ def test_service_applies_patch_and_calculates_member_targets(
     assert state.pattern is PatternKind.GYRE
     assert state.power == 60
     assert state.period_seconds == 30
-    assert state.hardware_writes_locked is True
+    assert state.hardware_writes_locked is False
     assert set(state.members) == {
         "wavemaker_left",
         "wavemaker_right",
@@ -140,6 +146,130 @@ def test_emergency_stop_requires_explicit_clear(service: GroupControlService) ->
     assert rejected.reason == "emergency_stop_locked"
     assert cleared.accepted is True
     assert service.snapshot("main_flow").status is GroupState.STOPPED
+
+
+def test_observation_refresh_preserves_emergency_stop_until_explicit_clear(
+    service: GroupControlService,
+) -> None:
+    stopped = service.apply(
+        "main_flow",
+        GroupCommand(request_id="emergency_observation_1", action=GroupAction.EMERGENCY_STOP),
+    )
+    observed_at = datetime(2026, 8, 26, 10, 0, tzinfo=UTC)
+
+    service.record_observer_event(
+        ObserverEvent(
+            "wavemaker_left",
+            ObserverStatus.ONLINE,
+            observed_at,
+            state=DeviceState(
+                online=True,
+                enabled=True,
+                power=55,
+                observed_at=observed_at,
+            ),
+        )
+    )
+
+    assert stopped.accepted is True
+    assert service.snapshot("main_flow").status is GroupState.EMERGENCY_STOP
+
+    cleared = service.apply(
+        "main_flow",
+        GroupCommand(
+            request_id="clear_after_observation_1",
+            action=GroupAction.CLEAR_EMERGENCY,
+        ),
+    )
+
+    assert cleared.accepted is True
+    assert service.snapshot("main_flow").status is GroupState.STOPPED
+
+
+def test_control_mode_without_executor_rejects_and_does_not_advertise_control() -> None:
+    raw = yaml.safe_load(open("config.example.yaml", encoding="utf-8"))
+    raw["runtime"].update(mode="control", dry_run=False)
+    for device in raw["devices"]:
+        device["control"]["allow_hardware_writes"] = True
+    service = GroupControlService(AppConfig.model_validate(raw))
+    before = service.snapshot("main_flow")
+
+    group_result = service.apply(
+        "main_flow",
+        GroupCommand(request_id="missing_executor_group_1", power=45),
+    )
+    device_result = service.apply_device(
+        "wavemaker_left",
+        DeviceCommand(request_id="missing_executor_device_1", power=45),
+    )
+
+    assert group_result.accepted is False
+    assert group_result.reason == "control_executor_unavailable"
+    assert device_result.accepted is False
+    assert device_result.reason == "control_executor_unavailable"
+    assert service.snapshot("main_flow") == before
+    assert service.system_config.runtime_mode == "observer"
+    assert service.system_config.features == ("observer", "hardware_write_lock")
+    assert all(not device.controls for device in service.system_config.devices)
+    assert all(state.hardware_writes_locked for state in service.device_snapshots())
+
+
+def test_runtime_and_device_write_locks_reject_control_commands() -> None:
+    raw = yaml.safe_load(open("config.example.yaml", encoding="utf-8"))
+    raw["runtime"].update(mode="control", dry_run=False)
+    for device in raw["devices"]:
+        device["control"]["allow_hardware_writes"] = True
+    locked_device = next(
+        device for device in raw["devices"] if device["id"] == "wavemaker_left"
+    )
+    locked_device["control"]["allow_hardware_writes"] = False
+    service = GroupControlService(
+        AppConfig.model_validate(raw),
+        command_executor_ready=True,
+    )
+
+    group_result = service.apply(
+        "main_flow",
+        GroupCommand(request_id="locked_group_write_1", power=45),
+    )
+    device_result = service.apply_device(
+        "wavemaker_left",
+        DeviceCommand(request_id="locked_device_write_1", power=45),
+    )
+
+    assert group_result.accepted is False
+    assert group_result.reason == "hardware_writes_locked"
+    assert device_result.accepted is False
+    assert device_result.reason == "hardware_writes_locked"
+    descriptor = next(
+        device
+        for device in service.system_config.devices
+        if device.id == "wavemaker_left"
+    )
+    assert descriptor.controls == ()
+    assert "feed" not in service.system_config.features
+    assert "emergency_stop" not in service.system_config.features
+
+
+def test_dry_run_rejects_and_does_not_advertise_control() -> None:
+    raw = yaml.safe_load(open("config.example.yaml", encoding="utf-8"))
+    raw["runtime"]["mode"] = "control"
+    for device in raw["devices"]:
+        device["control"]["allow_hardware_writes"] = True
+    service = GroupControlService(
+        AppConfig.model_validate(raw),
+        command_executor_ready=True,
+    )
+
+    result = service.apply(
+        "main_flow",
+        GroupCommand(request_id="dry_run_group_write_1", power=45),
+    )
+
+    assert result.accepted is False
+    assert result.reason == "hardware_writes_locked"
+    assert service.system_config.runtime_mode == "observer"
+    assert all(not device.controls for device in service.system_config.devices)
 
 
 def test_invalid_limits_do_not_change_state(service: GroupControlService) -> None:

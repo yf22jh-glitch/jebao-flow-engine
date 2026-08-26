@@ -26,7 +26,19 @@ class Capability(StrEnum):
     ENABLED = "enabled"
     MODE = "mode"
     FREQUENCY = "frequency"
+    LINKAGE = "linkage"
+    TIMER = "timer"
     ERROR = "error"
+
+
+class LinkageRole(StrEnum):
+    """Native controller role used for Jebao master/slave wave timing."""
+
+    INDEPENDENT = "independent"
+    MASTER = "master"
+    SLAVE = "slave"
+    SYNC_SLAVE = "sync_slave"
+    ASYNC_SLAVE = "async_slave"
 
 
 class DeviceCapabilities(BaseModel):
@@ -38,6 +50,8 @@ class DeviceCapabilities(BaseModel):
     writable: frozenset[Capability] = frozenset()
     power_limits: PowerLimits = Field(default_factory=PowerLimits)
     power_step: int = Field(default=1, ge=1, le=100)
+    native_modes: frozenset[str] = frozenset()
+    linkage_roles: frozenset[LinkageRole] = frozenset()
 
 
 class ScheduleEntry(BaseModel):
@@ -73,6 +87,8 @@ class DeviceState(BaseModel):
     power: int = Field(ge=0, le=100)
     mode: str = "constant"
     frequency: int | None = Field(default=None, ge=0, le=100)
+    linkage: LinkageRole | None = None
+    timer_enabled: bool | None = None
     error: str | None = None
     schedule: DeviceSchedule | None = None
     observed_attributes: dict[str, bool | int | float | str | None] = Field(
@@ -88,6 +104,8 @@ class DeviceTarget(BaseModel):
     power: int = Field(ge=0, le=100)
     mode: str | None = None
     frequency: int | None = Field(default=None, ge=0, le=100)
+    linkage: LinkageRole | None = None
+    timer_enabled: bool | None = None
 
 
 class DiscoveredDevice(BaseModel):

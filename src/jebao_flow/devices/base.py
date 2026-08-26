@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
-from jebao_flow.protocol.models import DeviceCapabilities, DeviceState
+from jebao_flow.protocol.models import DeviceCapabilities, DeviceState, DeviceTarget, LinkageRole
 
 
 class DeviceError(RuntimeError):
@@ -25,6 +26,13 @@ class HardwareWritesDisabledError(DeviceError):
 
 class StateVerificationError(DeviceError):
     pass
+
+
+class SafetyInterlockError(DeviceError):
+    pass
+
+
+WriteGuard = Callable[[], bool]
 
 
 class JebaoDevice(ABC):
@@ -60,3 +68,17 @@ class JebaoDevice(ABC):
 
     @abstractmethod
     async def set_frequency(self, value: int) -> None: ...
+
+    @abstractmethod
+    async def set_linkage(self, role: LinkageRole) -> None: ...
+
+    @abstractmethod
+    async def set_timer_enabled(self, enabled: bool) -> None: ...
+
+    @abstractmethod
+    async def write_target(
+        self,
+        target: DeviceTarget,
+        *,
+        guard: WriteGuard | None = None,
+    ) -> None: ...

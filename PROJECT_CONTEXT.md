@@ -47,6 +47,8 @@ Home Assistant 엔티티와 데몬의 MQTT 계약만 사용합니다.
 - 설정과 외부 명령은 엄격하게 검증합니다.
 - 인증정보는 환경 변수나 secret으로 주입하고 로그/저장 상태에 남기지 않습니다.
 - 그룹 소속 펌프를 개별 조작하면 `manual_override`로 전환하고 명시적으로 그룹에 복귀시킵니다.
+- 네이티브 master/slave 시험은 일반 그룹 패턴과 분리한 bounded transaction으로 실행하고,
+  첫 write 전 snapshot journal을 저장하며 모든 종료 경로에서 원복합니다.
 
 ## 현재 안전 단계: Observer
 
@@ -59,6 +61,14 @@ Observer는 5초 기본 주기로 실제 전원·출력·모드·주파수와 �
 지원 제품군의 48슬롯 장비 내장 시간표를 읽어 MQTT와 로컬 JSONL 변경 기록에 반영합니다.
 시간표 슬롯의 시각·모드·파라미터 변화는 추적하지만, 명령 출처는 프로토콜에 없으므로
 앱·클라우드·장비 자체 중 하나로 단정하지 않고 `external_or_native`로 기록합니다.
+
+네이티브 Linkage 트랜잭션 코어는 오프라인 구현과 시뮬레이터 검증까지만 완료됐습니다.
+현재 데몬에는 실제 actuator가 없으므로 `control`로 설정해도 MQTT 명령을 fail-closed로
+거부하며, Sync/Async 시험 API를 Home Assistant에 광고하지 않습니다. 실기 write 검증과
+startup recovery wiring이 끝나기 전에는 이 경계를 해제하지 않습니다.
+실제 wiring에서는 fail-closed Linkage safety interlock을 비상정지·정비 latch와 공유해야
+하며, journal lease를 획득하지 못한 다른 daemon은 시험이나 startup recovery를 실행하지
+않습니다.
 
 ## 상태 모델
 

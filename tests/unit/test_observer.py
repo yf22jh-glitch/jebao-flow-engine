@@ -25,7 +25,9 @@ from jebao_flow.protocol.models import (
     DeviceCapabilities,
     DeviceSchedule,
     DeviceState,
+    DeviceTarget,
     DiscoveredDevice,
+    LinkageRole,
     ScheduleEntry,
 )
 
@@ -112,6 +114,18 @@ class ScriptedReadOnlyDevice(JebaoDevice):
         raise AssertionError("observer attempted a write")
 
     async def set_frequency(self, value):
+        self.write_calls += 1
+        raise AssertionError("observer attempted a write")
+
+    async def set_linkage(self, role: LinkageRole):
+        self.write_calls += 1
+        raise AssertionError("observer attempted a write")
+
+    async def set_timer_enabled(self, enabled: bool):
+        self.write_calls += 1
+        raise AssertionError("observer attempted a write")
+
+    async def write_target(self, target: DeviceTarget):
         self.write_calls += 1
         raise AssertionError("observer attempted a write")
 

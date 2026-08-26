@@ -6,17 +6,27 @@ from jebao_flow.config import DeviceConfig, DeviceControlConfig, DeviceType, Run
 from jebao_flow.devices import (
     HardwareWritesDisabledError,
     LanJebaoDevice,
+    SafetyInterlockError,
     StateVerificationError,
+    UnsupportedCapabilityError,
     create_lan_device,
 )
-from jebao_flow.protocol.models import DeviceTarget
+from jebao_flow.protocol.models import Capability, DeviceTarget, LinkageRole
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
 from jebao_flow.safety.limits import PowerLimits
 
 
-def _pro_state(*, enabled: bool = True, power: int = 30, fault: int = 0) -> bytes:
+def _pro_state(
+    *,
+    enabled: bool = True,
+    timer_enabled: bool = False,
+    linkage: LinkageRole = LinkageRole.INDEPENDENT,
+    power: int = 30,
+    fault: int = 0,
+) -> bytes:
     raw = bytearray(LOCAL_WAVEMAKER_PRO.raw_status_size)
-    raw[0] = int(enabled)
+    linkage_index = LOCAL_WAVEMAKER_PRO.by_name("Linkage").enum_values.index(linkage.value)
+    raw[0] = int(enabled) | (int(timer_enabled) << 1) | (linkage_index << 2)
     raw[1] = 2
     raw[2] = power
     raw[3] = 32
@@ -81,7 +91,25 @@ async def test_adapter_reads_protocol_neutral_state_and_faults() -> None:
     assert state.power == 55
     assert state.mode == "constant"
     assert state.frequency == 32
+    assert state.linkage is LinkageRole.INDEPENDENT
+    assert state.timer_enabled is False
     assert state.error == "Fault_UART"
+
+
+def test_pro_profile_exposes_native_linkage_and_timer_capabilities() -> None:
+    capabilities = _device().capabilities
+
+    assert Capability.LINKAGE in capabilities.writable
+    assert Capability.TIMER in capabilities.writable
+    assert capabilities.linkage_roles == frozenset(
+        {
+            LinkageRole.INDEPENDENT,
+            LinkageRole.MASTER,
+            LinkageRole.SYNC_SLAVE,
+            LinkageRole.ASYNC_SLAVE,
+        }
+    )
+    assert {"pulse", "sine", "constant"} <= capabilities.native_modes
 
 
 async def test_adapter_attaches_read_only_schedule_to_device_state() -> None:
@@ -115,12 +143,52 @@ async def test_preview_builds_atomic_target_without_sending() -> None:
     assert _FakeSession.instances[0].sent == []
 
 
+def test_preview_combines_timer_linkage_mode_frequency_and_flow_in_one_payload() -> None:
+    device = _device()
+
+    plan = device.preview_target(
+        DeviceTarget(
+            enabled=True,
+            power=42,
+            mode="sine",
+            frequency=30,
+            linkage=LinkageRole.ASYNC_SLAVE,
+            timer_enabled=False,
+        )
+    )
+
+    assert plan.changes == {
+        "SwitchON": True,
+        "TimerON": False,
+        "Linkage": LinkageRole.ASYNC_SLAVE,
+        "Flow": 42,
+        "Mode": "sine",
+        "Frequency": 30,
+    }
+    assert plan.payload[0] == 0x01
+    assert plan.payload[1:9] == bytes(7) + bytes([0x3F])
+    assert plan.payload[9:13] == bytes([0x0D, 0x01, 42, 30])
+
+
 async def test_hardware_write_lock_is_default() -> None:
     device = _device()
     await device.connect()
 
     with pytest.raises(HardwareWritesDisabledError, match="writes are locked"):
         await device.set_power(50)
+
+    assert _FakeSession.instances[0].sent == []
+
+
+async def test_safety_guard_blocks_target_before_lan_send() -> None:
+    device = _device(allow_writes=True)
+    await device.connect()
+
+    with pytest.raises(SafetyInterlockError, match="safety interlock"):
+        await device.write_target(
+            DeviceTarget(enabled=True, power=50),
+            guard=lambda: False,
+        )
 
     assert _FakeSession.instances[0].sent == []
 
@@ -139,6 +207,43 @@ def test_disabled_target_only_writes_switch_and_never_zero_flow() -> None:
     plan = device.preview_target(DeviceTarget(enabled=False, power=0))
 
     assert plan.changes == {"SwitchON": False}
+
+
+def test_disabled_target_can_still_unlink_and_disable_timer() -> None:
+    device = _device()
+
+    plan = device.preview_target(
+        DeviceTarget(
+            enabled=False,
+            power=0,
+            linkage=LinkageRole.INDEPENDENT,
+            timer_enabled=False,
+        )
+    )
+
+    assert plan.changes == {
+        "SwitchON": False,
+        "TimerON": False,
+        "Linkage": LinkageRole.INDEPENDENT,
+    }
+
+
+def test_bar_wavemaker_rejects_async_linkage() -> None:
+    device = LanJebaoDevice(
+        "bar",
+        "pump.local",
+        LOCAL_WAVEMAKER.product_key,
+        session_factory=_FakeSession,
+    )
+
+    with pytest.raises(UnsupportedCapabilityError, match="async_slave"):
+        device.preview_target(
+            DeviceTarget(
+                enabled=True,
+                power=50,
+                linkage=LinkageRole.ASYNC_SLAVE,
+            )
+        )
 
 
 async def test_write_requires_readback_match() -> None:
@@ -160,6 +265,20 @@ async def test_verified_duplicate_write_is_suppressed() -> None:
     await device.set_power(50)
 
     assert len(_FakeSession.instances[0].sent) == 1
+
+
+async def test_duplicate_cache_does_not_hide_external_or_schedule_drift() -> None:
+    _FakeSession.state = _pro_state(power=50)
+    device = _device(allow_writes=True)
+    await device.connect()
+    await device.set_power(50)
+    _FakeSession.state = _pro_state(power=40)
+    device._last_command_at = None
+
+    with pytest.raises(StateVerificationError, match="did not apply control"):
+        await device.set_power(50)
+
+    assert len(_FakeSession.instances[0].sent) == 2
 
 
 async def test_numeric_mode_with_audited_labels_can_be_previewed() -> None:
