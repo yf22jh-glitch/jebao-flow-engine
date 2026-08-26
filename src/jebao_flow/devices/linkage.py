@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
@@ -76,6 +77,14 @@ class _ForwardDeadlineExpired(LinkageTransactionError):
     """The bounded experiment expired before the next forward-control frame."""
 
 
+class _ScheduleStructureChangedDuringRestore(LinkageRollbackError):
+    """A saved schedule fingerprint changed while exact restore was in progress."""
+
+
+class _RestoreStateReadFailed(LinkageRollbackError):
+    """A restore read failed before producing one complete decoded DeviceState."""
+
+
 class LinkageTransactionPhase(StrEnum):
     PREPARED = "prepared"
     APPLYING = "applying"
@@ -88,6 +97,7 @@ class LinkageRecoveryReason(StrEnum):
     """Typed reason why an unfinished transaction remains recovery-latched."""
 
     SAFETY_INTERLOCK = "safety_interlock"
+    SCHEDULE_CHANGED = "schedule_changed"
     RESTORE_FAILED = "restore_failed"
 
 
@@ -362,6 +372,10 @@ class TemporaryLinkageController:
     """Apply one bounded relationship and guarantee journaled compensating restore."""
 
     _AUTOMATIC_RECOVERY_GRACE_SECONDS = 30.0
+    _RESTORE_VERIFICATION_ATTEMPTS = 3
+    _DEFAULT_RESTORE_VERIFICATION_BACKOFF_SECONDS = 0.25
+    _DEFAULT_RESTORE_VERIFICATION_READ_TIMEOUT_SECONDS = 5.5
+    _DEFAULT_RESTORE_VERIFICATION_TOTAL_TIMEOUT_SECONDS = 8.0
     _REQUIRED_WRITABLE = frozenset(
         {
             Capability.ENABLED,
@@ -379,11 +393,54 @@ class TemporaryLinkageController:
         store: LinkageJournalStore,
         *,
         safety_interlock: LinkageSafetyInterlock,
+        restore_verification_backoff_seconds: float = (
+            _DEFAULT_RESTORE_VERIFICATION_BACKOFF_SECONDS
+        ),
+        restore_verification_read_timeout_seconds: float = (
+            _DEFAULT_RESTORE_VERIFICATION_READ_TIMEOUT_SECONDS
+        ),
+        restore_verification_total_timeout_seconds: float = (
+            _DEFAULT_RESTORE_VERIFICATION_TOTAL_TIMEOUT_SECONDS
+        ),
     ) -> None:
+        timing_values = {
+            "restore_verification_backoff_seconds": restore_verification_backoff_seconds,
+            "restore_verification_read_timeout_seconds": (
+                restore_verification_read_timeout_seconds
+            ),
+            "restore_verification_total_timeout_seconds": (
+                restore_verification_total_timeout_seconds
+            ),
+        }
+        for name, value in timing_values.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a finite number")
+            try:
+                finite = math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise ValueError(f"{name} must be finite")
+        if restore_verification_backoff_seconds < 0:
+            raise ValueError("restore_verification_backoff_seconds must be non-negative")
+        if restore_verification_read_timeout_seconds <= 0:
+            raise ValueError("restore_verification_read_timeout_seconds must be positive")
+        if restore_verification_total_timeout_seconds <= 0:
+            raise ValueError("restore_verification_total_timeout_seconds must be positive")
+
         self._devices = dict(devices)
         self._store = store
         self._run_lock = asyncio.Lock()
         self._safety_interlock = safety_interlock
+        self._restore_verification_backoff_seconds = float(
+            restore_verification_backoff_seconds
+        )
+        self._restore_verification_read_timeout_seconds = float(
+            restore_verification_read_timeout_seconds
+        )
+        self._restore_verification_total_timeout_seconds = float(
+            restore_verification_total_timeout_seconds
+        )
         self._stop_event: asyncio.Event | None = None
         self._active_operation_id: str | None = None
         self._safety_epoch: int | None = None
@@ -578,6 +635,13 @@ class TemporaryLinkageController:
             return False
         self._validate_recovery_bindings(record)
         if (
+            record.recovery_reason is LinkageRecoveryReason.SCHEDULE_CHANGED
+            and authority is not LinkageRecoveryAuthority.ATTENDED
+        ):
+            raise LinkagePreflightError(
+                "schedule-changed recovery requires explicit attended authority"
+            )
+        if (
             authority is LinkageRecoveryAuthority.AUTOMATIC
             and record.phase is not LinkageTransactionPhase.PREPARED
         ):
@@ -609,11 +673,21 @@ class TemporaryLinkageController:
                 # legitimately advanced while the daemon was offline.
                 self._store.clear()
             elif self._safety_allows_operation():
-                record = await self._reconcile_exactly_restored_devices(record)
+                schedule_change_ids: set[str] = set()
+                read_failure_ids: set[str] = set()
+                record = await self._reconcile_exactly_restored_devices(
+                    record,
+                    schedule_change_ids=schedule_change_ids,
+                    read_failure_ids=read_failure_ids,
+                )
                 if len(record.restored_device_ids) == len(record.snapshots):
                     self._store.clear()
                 else:
-                    await self._rollback_uninterruptibly(record)
+                    await self._rollback_uninterruptibly(
+                        record,
+                        schedule_change_ids=schedule_change_ids,
+                        read_failure_ids=read_failure_ids,
+                    )
             else:
                 await self._rollback_uninterruptibly(record)
         finally:
@@ -1021,8 +1095,20 @@ class TemporaryLinkageController:
             if power_change_sent:
                 power_changed = True
 
-    async def _rollback_uninterruptibly(self, record: LinkageTransactionRecord) -> None:
-        task = asyncio.create_task(self._rollback(record))
+    async def _rollback_uninterruptibly(
+        self,
+        record: LinkageTransactionRecord,
+        *,
+        schedule_change_ids: set[str] | None = None,
+        read_failure_ids: set[str] | None = None,
+    ) -> None:
+        task = asyncio.create_task(
+            self._rollback(
+                record,
+                schedule_change_ids=schedule_change_ids,
+                read_failure_ids=read_failure_ids,
+            )
+        )
         cancellation_received = False
         while not task.done():
             try:
@@ -1035,23 +1121,40 @@ class TemporaryLinkageController:
         if cancellation_received:
             raise asyncio.CancelledError
 
-    async def _rollback(self, record: LinkageTransactionRecord) -> None:
+    async def _rollback(
+        self,
+        record: LinkageTransactionRecord,
+        *,
+        schedule_change_ids: set[str] | None = None,
+        read_failure_ids: set[str] | None = None,
+    ) -> None:
         # A tripped interlock must become durable before a bookkeeping transition can erase its
         # typed reason, and before any physical safe-stop frame is attempted.
         if not self._safety_allows_operation():
             await self._defer_restore_for_safety(record)
 
-        try:
-            record = self._transition(record, LinkageTransactionPhase.ROLLING_BACK)
-        except Exception:
-            # A previously durable record is still usable. Restore first even if the phase update
-            # cannot be written; never trade aquarium safety for nicer bookkeeping.
-            pass
+        if record.recovery_reason is not LinkageRecoveryReason.SCHEDULE_CHANGED:
+            try:
+                record = self._transition(record, LinkageTransactionPhase.ROLLING_BACK)
+            except Exception:
+                # A previously durable record is still usable. Restore first even if the phase
+                # update cannot be written; never trade aquarium safety for nicer bookkeeping.
+                pass
+        # Once schedule drift has been observed, keep that typed reason durable throughout an
+        # attended retry. Only terminal journal removal may erase it; otherwise a crash here could
+        # let recovery-first treat the next process as an ordinary transient restore failure.
 
         if not self._safety_allows_operation():
             await self._defer_restore_for_safety(record)
 
-        record = await self._reconcile_exactly_restored_devices(record)
+        schedule_change_ids = set() if schedule_change_ids is None else set(schedule_change_ids)
+        read_failure_ids = set() if read_failure_ids is None else set(read_failure_ids)
+        record = await self._reconcile_exactly_restored_devices(
+            record,
+            excluded_device_ids=frozenset(schedule_change_ids | read_failure_ids),
+            schedule_change_ids=schedule_change_ids,
+            read_failure_ids=read_failure_ids,
+        )
         already_restored = set(record.restored_device_ids)
         pending_snapshots = tuple(
             snapshot for snapshot in record.snapshots if snapshot.device_id not in already_restored
@@ -1062,44 +1165,110 @@ class TemporaryLinkageController:
 
         errors: dict[str, list[str]] = {snapshot.device_id: [] for snapshot in pending_snapshots}
         detach_order = (record.spec.slave_device_id, record.spec.master_device_id)
+        restore_blocked_ids: set[str] = set()
+        safe_fallback_attempted_ids: set[str] = set()
+        detach_targets: dict[str, DeviceTarget] = {}
+
+        async def block_after_slave_detach_failure() -> None:
+            nonlocal record
+            master_id = record.spec.master_device_id
+            restore_blocked_ids.update({master_id, record.spec.slave_device_id})
+            if master_id not in already_restored:
+                return
+            # Durable progress must be invalidated before disturbing a master that was already
+            # exact. Then pause it immediately: the former slave may still obey native linkage.
+            record = self._mark_devices_unrestored(record, {master_id})
+            errors.setdefault(master_id, []).append("slave_detach_unconfirmed")
+            safe_fallback_attempted_ids.add(master_id)
+            await self._try_safe_fallback(
+                self._get_device(master_id),
+                record.spec.frequency,
+            )
+            if not self._safety_allows_operation():
+                await self._defer_restore_for_safety(record)
 
         for device_id in detach_order:
             if device_id in already_restored:
                 continue
+            if device_id in read_failure_ids:
+                errors[device_id].append("state_read_failed")
+                safe_fallback_attempted_ids.add(device_id)
+                detached = await self._try_safe_fallback(
+                    self._get_device(device_id),
+                    record.spec.frequency,
+                    force_reconnect=True,
+                )
+                if not detached:
+                    errors[device_id].append("detach_failed")
+                    if device_id == record.spec.slave_device_id:
+                        await block_after_slave_detach_failure()
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+                continue
             device = self._get_device(device_id)
+            detach_target = DeviceTarget(
+                enabled=True,
+                power=self._safe_power(device),
+                mode="constant",
+                frequency=record.spec.frequency,
+                linkage=LinkageRole.INDEPENDENT,
+                timer_enabled=False,
+            )
+            detach_targets[device_id] = detach_target
             try:
-                await device.write_target(
-                    DeviceTarget(
-                        enabled=True,
-                        power=self._safe_power(device),
-                        mode="constant",
-                        frequency=record.spec.frequency,
-                        linkage=LinkageRole.INDEPENDENT,
-                        timer_enabled=False,
-                    ),
-                    guard=self._safety_allows_operation,
+                await self._write_restore_target(
+                    device,
+                    detach_target,
                 )
             except Exception:
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
                 errors[device_id].append("detach_failed")
+                restore_blocked_ids.add(device_id)
+                if device_id == record.spec.slave_device_id:
+                    await block_after_slave_detach_failure()
+            if not self._safety_allows_operation():
+                await self._defer_restore_for_safety(record)
 
         restored_control: set[str] = set()
+        verified_detach_ids: set[str] = set()
         for snapshot in pending_snapshots:
             if not self._safety_allows_operation():
                 await self._defer_restore_for_safety(record)
+            if snapshot.device_id in (
+                schedule_change_ids | read_failure_ids | restore_blocked_ids
+            ):
+                errors[snapshot.device_id].append("control_restore_failed")
+                continue
             device = self._get_device(snapshot.device_id)
             try:
                 if snapshot.timer_enabled and snapshot.enabled:
                     # Keep the device at the already-verified safe detach target until the final
                     # atomic manual-fallback + TimerON frame. Writing a saved high fallback with
                     # TimerOFF would briefly expose that power before the schedule resumes.
-                    state = await device.get_state()
-                    if not state.online or state.error or state.timer_enabled is not False:
-                        raise LinkageRollbackError(
-                            "device is not safely paused before scheduled restore"
+                    state = await self._read_restore_state(
+                        device,
+                        timeout_seconds=self._restore_verification_read_timeout_seconds,
+                    )
+                    detach_error: Exception | None = None
+                    try:
+                        self._assert_target(
+                            snapshot.device_id,
+                            state,
+                            detach_targets[snapshot.device_id],
                         )
-                    self._assert_schedule_unchanged(snapshot, state)
+                    except Exception as error:
+                        detach_error = error
+                    if detach_error is None:
+                        verified_detach_ids.add(snapshot.device_id)
+                    # Observe schedule drift even when the same frame does not prove detach. A
+                    # later matching schedule must never erase that hard failure.
+                    self._assert_restore_schedule_unchanged(snapshot, state)
+                    if detach_error is not None:
+                        raise detach_error
                 else:
-                    await device.write_target(
+                    await self._write_restore_target(
+                        device,
                         DeviceTarget(
                             enabled=True,
                             power=snapshot.power,
@@ -1108,29 +1277,57 @@ class TemporaryLinkageController:
                             linkage=snapshot.linkage,
                             timer_enabled=False,
                         ),
-                        guard=self._safety_allows_operation,
                     )
                     if not snapshot.enabled:
                         await device.set_enabled(False)
-                    state = await device.get_state()
+                    state = await self._read_restore_state(
+                        device,
+                        timeout_seconds=self._restore_verification_read_timeout_seconds,
+                    )
+                    self._assert_restore_schedule_unchanged(snapshot, state)
                     self._assert_snapshot_control(snapshot, state, expected_timer=False)
-                    self._assert_schedule_unchanged(snapshot, state)
+                    verified_detach_ids.add(snapshot.device_id)
                 restored_control.add(snapshot.device_id)
                 errors[snapshot.device_id].clear()
+            except _ScheduleStructureChangedDuringRestore:
+                schedule_change_ids.add(snapshot.device_id)
+                record = self._latch_schedule_change(record, snapshot.device_id)
+                if snapshot.device_id not in verified_detach_ids:
+                    restore_blocked_ids.add(snapshot.device_id)
+                    if snapshot.device_id == record.spec.slave_device_id:
+                        await block_after_slave_detach_failure()
+                errors[snapshot.device_id].append("control_restore_failed")
+            except _RestoreStateReadFailed:
+                read_failure_ids.add(snapshot.device_id)
+                restore_blocked_ids.add(snapshot.device_id)
+                if snapshot.device_id == record.spec.slave_device_id:
+                    await block_after_slave_detach_failure()
+                errors[snapshot.device_id].append("state_read_failed")
             except Exception:
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+                restore_blocked_ids.add(snapshot.device_id)
+                if snapshot.device_id == record.spec.slave_device_id:
+                    await block_after_slave_detach_failure()
                 errors[snapshot.device_id].append("control_restore_failed")
 
+        restore_verification_failed_ids: set[str] = set()
         for snapshot in pending_snapshots:
-            if snapshot.device_id not in restored_control:
+            if (
+                snapshot.device_id not in restored_control
+                or snapshot.device_id in restore_blocked_ids
+            ):
                 continue
             if not self._safety_allows_operation():
                 await self._defer_restore_for_safety(record)
             device = self._get_device(snapshot.device_id)
+            # Restore the saved manual fallback and TimerON in one guarded frame. For a scheduled
+            # device this moves directly from safe-low TimerOFF to schedule authority without
+            # exposing a saved high manual fallback between frames. The frame is never resent:
+            # an exception may mean the controller applied it but its ACK/readback was lost.
             try:
-                # Restore the saved manual fallback and TimerON in one guarded frame. For a
-                # scheduled device this moves directly from safe-low TimerOFF to schedule
-                # authority without exposing a saved high manual fallback between frames.
-                await device.write_target(
+                await self._write_restore_target(
+                    device,
                     DeviceTarget(
                         enabled=snapshot.enabled,
                         power=snapshot.power,
@@ -1139,16 +1336,45 @@ class TemporaryLinkageController:
                         linkage=snapshot.linkage,
                         timer_enabled=snapshot.timer_enabled,
                     ),
-                    guard=self._safety_allows_operation,
                 )
-                state = await device.get_state()
-                self._assert_timer_and_schedule(snapshot, state)
+            except Exception:
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+
+            try:
+                await self._verify_exact_restore(snapshot, device)
                 record = self._mark_device_restored(record, snapshot.device_id)
                 errors[snapshot.device_id].clear()
+            except _ScheduleStructureChangedDuringRestore:
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+                schedule_change_ids.add(snapshot.device_id)
+                record = self._latch_schedule_change(record, snapshot.device_id)
+                restore_verification_failed_ids.add(snapshot.device_id)
+                errors[snapshot.device_id].append("timer_restore_failed")
+            except _RestoreStateReadFailed:
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+                read_failure_ids.add(snapshot.device_id)
+                restore_verification_failed_ids.add(snapshot.device_id)
+                errors[snapshot.device_id].append("state_read_failed")
             except Exception:
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+                restore_verification_failed_ids.add(snapshot.device_id)
                 errors[snapshot.device_id].append("timer_restore_failed")
 
-        record = await self._reconcile_exactly_restored_devices(record)
+        record = await self._reconcile_exactly_restored_devices(
+            record,
+            excluded_device_ids=frozenset(
+                schedule_change_ids
+                | read_failure_ids
+                | restore_blocked_ids
+                | restore_verification_failed_ids
+            ),
+            schedule_change_ids=schedule_change_ids,
+            read_failure_ids=read_failure_ids,
+        )
         exactly_restored = set(record.restored_device_ids)
         # A transient write/read failure can leave a local diagnostic behind even though the
         # final fresh read proves that the device is now exactly restored.  Durable reconciliation
@@ -1166,14 +1392,26 @@ class TemporaryLinkageController:
             if not self._safety_allows_operation():
                 await self._defer_restore_for_safety(record)
             for device_id in failed:
-                await self._try_safe_fallback(self._get_device(device_id), record.spec.frequency)
+                if device_id not in safe_fallback_attempted_ids:
+                    await self._try_safe_fallback(
+                        self._get_device(device_id),
+                        record.spec.frequency,
+                        force_reconnect=device_id in read_failure_ids,
+                    )
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
             message = "; ".join(
                 f"{device_id}: {','.join(values)}" for device_id, values in sorted(failed.items())
             )
             recovery_record = record.model_copy(
                 update={
                     "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
-                    "recovery_reason": LinkageRecoveryReason.RESTORE_FAILED,
+                    "recovery_reason": (
+                        LinkageRecoveryReason.SCHEDULE_CHANGED
+                        if schedule_change_ids
+                        or record.recovery_reason is LinkageRecoveryReason.SCHEDULE_CHANGED
+                        else LinkageRecoveryReason.RESTORE_FAILED
+                    ),
                     "updated_at": datetime.now(UTC),
                     "error": message,
                     "failed_device_ids": tuple(sorted(failed)),
@@ -1187,6 +1425,277 @@ class TemporaryLinkageController:
         if not self._safety_allows_operation():
             await self._defer_restore_for_safety(record)
         self._store.clear()
+
+    async def _verify_exact_restore(
+        self,
+        snapshot: DeviceControlSnapshot,
+        device: JebaoDevice,
+    ) -> None:
+        """Allow bounded fresh reads for delayed TimerON/schedule convergence.
+
+        The restore frame is sent exactly once.  Some controllers acknowledge its raw fields
+        before a following full state+schedule read reflects the resumed TimerON authority, so
+        retry only readback and never retransmit the saved ON target.
+        """
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._restore_verification_total_timeout_seconds
+        last_error: Exception | None = None
+        if not device.connected:
+            await self._ensure_restore_connection(
+                device,
+                timeout_seconds=self._restore_verification_total_timeout_seconds,
+            )
+        for attempt in range(self._RESTORE_VERIFICATION_ATTEMPTS):
+            self._require_restore_safety()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                state = await self._read_restore_state(
+                    device,
+                    timeout_seconds=min(
+                        self._restore_verification_read_timeout_seconds,
+                        remaining,
+                    ),
+                )
+            except _RestoreStateReadFailed:
+                raise
+            except Exception as error:
+                if not self._safety_allows_operation():
+                    raise LinkageRollbackError(
+                        "safety interlock changed during exact restore verification"
+                    ) from error
+                # A timed-out/cancelled/invalid protocol read may leave a stream between frames.
+                # Reusing that session could mistake a late response for a fresh observation, so
+                # only a successfully decoded DeviceState mismatch is eligible for another read.
+                raise LinkageRollbackError(
+                    f"device {snapshot.device_id!r} exact restore state read failed"
+                ) from error
+            else:
+                self._require_restore_safety()
+                # A schedule edit is not eventual controller convergence. Once observed, it is a
+                # hard invariant failure and cannot be hidden by a later matching read.
+                self._assert_restore_schedule_unchanged(snapshot, state)
+                try:
+                    self._assert_snapshot_control(
+                        snapshot,
+                        state,
+                        expected_timer=snapshot.timer_enabled,
+                    )
+                    self._assert_timer_and_schedule(snapshot, state)
+                except _ScheduleStructureChangedDuringRestore:
+                    raise
+                except Exception as error:
+                    last_error = error
+                else:
+                    self._require_restore_safety()
+                    return
+
+            if attempt + 1 < self._RESTORE_VERIFICATION_ATTEMPTS:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                delay = min(
+                    self._restore_verification_backoff_seconds * (2**attempt),
+                    remaining,
+                )
+                await self._wait_for_restore_retry(delay)
+
+        raise LinkageRollbackError(
+            f"device {snapshot.device_id!r} exact restore was not confirmed by bounded reads"
+        ) from last_error
+
+    async def _read_restore_state(
+        self,
+        device: JebaoDevice,
+        *,
+        timeout_seconds: float,
+    ) -> DeviceState:
+        """Read once with both a wall-clock bound and an interruptible safety race."""
+
+        self._require_restore_safety()
+        read_task = asyncio.create_task(device.get_state())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = {read_task, safety_task}
+        try:
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if safety_task in done or not self._safety_allows_operation():
+                raise LinkageRollbackError(
+                    "safety interlock changed during exact restore verification"
+                )
+            if read_task not in done:
+                raise _RestoreStateReadFailed("exact restore state read timed out")
+            try:
+                state = read_task.result()
+            except asyncio.CancelledError as error:
+                raise _RestoreStateReadFailed("exact restore state read was cancelled") from error
+            except Exception as error:
+                raise _RestoreStateReadFailed("exact restore state read failed") from error
+            self._require_restore_safety()
+            return state
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _write_restore_target(
+        self,
+        device: JebaoDevice,
+        target: DeviceTarget,
+    ) -> None:
+        """Write once with a wall-clock bound and let a safety trip win immediately.
+
+        Cancellation makes the request outcome uncertain, so this helper never retransmits the
+        target. The LAN implementation quarantines the cancelled TCP stream; callers either
+        verify by fresh readback or move to the independently safe fallback path.
+        """
+
+        self._require_restore_safety()
+        write_task = asyncio.create_task(
+            device.write_target(
+                target,
+                guard=self._safety_allows_operation,
+            )
+        )
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = {write_task, safety_task}
+        try:
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=self._restore_verification_total_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # A simultaneous completed write and safety trip is still a safety event. The caller
+            # will durably latch recovery and issue OFF compensation after cancellation cleanup.
+            if safety_task in done or not self._safety_allows_operation():
+                raise LinkageRollbackError(
+                    "safety interlock changed during exact restore write"
+                )
+            if write_task not in done:
+                raise LinkageRollbackError("exact restore target write timed out")
+            try:
+                write_task.result()
+            except asyncio.CancelledError as error:
+                raise LinkageRollbackError(
+                    "exact restore target write was cancelled"
+                ) from error
+            self._require_restore_safety()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            # JebaoDevice.write_target() requires prompt cancellation propagation so a LAN
+            # stream is quarantined and its I/O lock is released before any OFF compensation.
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _ensure_restore_connection(
+        self,
+        device: JebaoDevice,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        """Reconnect without replaying a target, bounded by safety and monotonic time."""
+
+        self._require_restore_safety()
+        if device.connected:
+            return
+        connect_task = asyncio.create_task(device.connect())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = {connect_task, safety_task}
+        try:
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if safety_task in done or not self._safety_allows_operation():
+                raise LinkageRollbackError(
+                    "safety interlock changed during exact restore verification"
+                )
+            if connect_task not in done:
+                raise _RestoreStateReadFailed("restore verification reconnect timed out")
+            try:
+                connect_task.result()
+            except asyncio.CancelledError as error:
+                raise _RestoreStateReadFailed(
+                    "restore verification reconnect was cancelled"
+                ) from error
+            except Exception as error:
+                raise _RestoreStateReadFailed("restore verification reconnect failed") from error
+            self._require_restore_safety()
+            if not device.connected:
+                raise _RestoreStateReadFailed(
+                    "restore verification reconnect did not establish a session"
+                )
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _disconnect_restore_session(self, device: JebaoDevice) -> None:
+        """Force a fresh restore session without delaying a concurrent safety stop."""
+
+        self._require_restore_safety()
+        disconnect_task = asyncio.create_task(device.disconnect())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = {disconnect_task, safety_task}
+        try:
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=self._restore_verification_total_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if safety_task in done or not self._safety_allows_operation():
+                raise LinkageRollbackError(
+                    "safety interlock changed during restore session disconnect"
+                )
+            if disconnect_task not in done:
+                raise _RestoreStateReadFailed("restore session disconnect timed out")
+            try:
+                disconnect_task.result()
+            except asyncio.CancelledError as error:
+                raise _RestoreStateReadFailed(
+                    "restore session disconnect was cancelled"
+                ) from error
+            except Exception as error:
+                raise _RestoreStateReadFailed("restore session disconnect failed") from error
+            self._require_restore_safety()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _wait_for_restore_retry(self, delay_seconds: float) -> None:
+        """Wait between fresh reads while allowing a safety latch to win immediately."""
+
+        self._require_restore_safety()
+        if delay_seconds <= 0:
+            await asyncio.sleep(0)
+            self._require_restore_safety()
+            return
+
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        try:
+            await asyncio.wait({safety_task}, timeout=delay_seconds)
+        finally:
+            if not safety_task.done():
+                safety_task.cancel()
+            await asyncio.gather(safety_task, return_exceptions=True)
+        self._require_restore_safety()
+
+    def _require_restore_safety(self) -> None:
+        if not self._safety_allows_operation():
+            raise LinkageRollbackError(
+                "safety interlock changed during exact restore verification"
+            )
 
     async def _defer_restore_for_safety(self, record: LinkageTransactionRecord) -> None:
         """Keep an emergency/maintenance latch authoritative over saved enabled state."""
@@ -1213,6 +1722,11 @@ class TemporaryLinkageController:
         async def stop_device(device_id: str) -> tuple[str, str | None]:
             device = self._get_device(device_id)
             try:
+                # A cancelled/timed-out Gizwits read quarantines its TCP session because the
+                # frame boundary is no longer trustworthy. Reconnect before the OFF frame rather
+                # than attempting a safety command on a poisoned stream.
+                if not device.connected:
+                    await device.connect()
                 await device.write_target(
                     DeviceTarget(
                         enabled=False,
@@ -1252,9 +1766,22 @@ class TemporaryLinkageController:
             )
         raise LinkageRollbackError(f"linkage operation {record.operation_id!r}: {message}")
 
-    async def _try_safe_fallback(self, device: JebaoDevice, frequency: int) -> None:
+    async def _try_safe_fallback(
+        self,
+        device: JebaoDevice,
+        frequency: int,
+        *,
+        force_reconnect: bool = False,
+    ) -> bool:
         try:
-            await device.write_target(
+            if force_reconnect and device.connected:
+                await self._disconnect_restore_session(device)
+            await self._ensure_restore_connection(
+                device,
+                timeout_seconds=self._restore_verification_total_timeout_seconds,
+            )
+            await self._write_restore_target(
+                device,
                 DeviceTarget(
                     enabled=True,
                     power=self._safe_power(device),
@@ -1263,33 +1790,69 @@ class TemporaryLinkageController:
                     linkage=LinkageRole.INDEPENDENT,
                     timer_enabled=False,
                 ),
-                guard=self._safety_allows_operation,
             )
         except Exception:
             # One bounded attempt only. Recovery remains latched in the journal and a later
             # reconnect can call recover_pending() without causing a command storm.
-            return
+            return False
+        return True
 
     async def _reconcile_exactly_restored_devices(
         self,
         record: LinkageTransactionRecord,
+        *,
+        excluded_device_ids: frozenset[str] = frozenset(),
+        schedule_change_ids: set[str] | None = None,
+        read_failure_ids: set[str] | None = None,
     ) -> LinkageTransactionRecord:
         """Freshly reconcile durable progress before skipping writes or clearing the journal."""
 
+        if not self._safety_allows_operation():
+            await self._defer_restore_for_safety(record)
         exactly_restored: list[str] = []
         for snapshot in record.snapshots:
+            if snapshot.device_id in excluded_device_ids:
+                continue
             try:
-                state = await self._get_device(snapshot.device_id).get_state()
+                state = await self._read_restore_state(
+                    self._get_device(snapshot.device_id),
+                    timeout_seconds=self._restore_verification_read_timeout_seconds,
+                )
+            except _RestoreStateReadFailed:
+                if read_failure_ids is not None:
+                    read_failure_ids.add(snapshot.device_id)
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+                continue
+            except Exception:
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+                continue
+            try:
+                self._assert_restore_schedule_unchanged(snapshot, state)
                 self._assert_snapshot_control(
                     snapshot,
                     state,
                     expected_timer=snapshot.timer_enabled,
                 )
                 self._assert_timer_and_schedule(snapshot, state)
-            except Exception:
+            except _ScheduleStructureChangedDuringRestore:
+                if schedule_change_ids is not None:
+                    schedule_change_ids.add(snapshot.device_id)
+                record = self._latch_schedule_change(record, snapshot.device_id)
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
                 continue
+            except Exception:
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+                continue
+            if not self._safety_allows_operation():
+                await self._defer_restore_for_safety(record)
             exactly_restored.append(snapshot.device_id)
 
+        if not self._safety_allows_operation():
+            await self._defer_restore_for_safety(record)
         restored = tuple(sorted(exactly_restored))
         failed = tuple(
             value for value in record.failed_device_ids if value not in exactly_restored
@@ -1337,6 +1900,63 @@ class TemporaryLinkageController:
                 "failed_device_ids": tuple(
                     value for value in record.failed_device_ids if value != device_id
                 ),
+                "restored_device_ids": restored,
+            }
+        )
+        self._store.save(updated)
+        return updated
+
+    def _latch_schedule_change(
+        self,
+        record: LinkageTransactionRecord,
+        device_id: str,
+    ) -> LinkageTransactionRecord:
+        """Persist schedule drift before any later read or compensating write can obscure it."""
+
+        failed = tuple(sorted({*record.failed_device_ids, device_id}))
+        restored = tuple(
+            restored_id
+            for restored_id in record.restored_device_ids
+            if restored_id != device_id
+        )
+        if (
+            record.recovery_reason is LinkageRecoveryReason.SCHEDULE_CHANGED
+            and failed == record.failed_device_ids
+            and restored == record.restored_device_ids
+        ):
+            return record
+        schedule_message = f"{device_id}: schedule_changed"
+        message = record.error or schedule_message
+        if schedule_message not in message:
+            message = f"{message}; {schedule_message}"
+        updated = record.model_copy(
+            update={
+                "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+                "recovery_reason": LinkageRecoveryReason.SCHEDULE_CHANGED,
+                "updated_at": datetime.now(UTC),
+                "error": message,
+                "failed_device_ids": failed,
+                "restored_device_ids": restored,
+            }
+        )
+        self._store.save(updated)
+        return updated
+
+    def _mark_devices_unrestored(
+        self,
+        record: LinkageTransactionRecord,
+        device_ids: set[str],
+    ) -> LinkageTransactionRecord:
+        restored = tuple(
+            device_id
+            for device_id in record.restored_device_ids
+            if device_id not in device_ids
+        )
+        if restored == record.restored_device_ids:
+            return record
+        updated = record.model_copy(
+            update={
+                "updated_at": datetime.now(UTC),
                 "restored_device_ids": restored,
             }
         )
@@ -1498,6 +2118,16 @@ class TemporaryLinkageController:
             )
 
     @staticmethod
+    def _assert_restore_schedule_unchanged(
+        snapshot: DeviceControlSnapshot,
+        state: DeviceState,
+    ) -> None:
+        if schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint:
+            raise _ScheduleStructureChangedDuringRestore(
+                f"device {snapshot.device_id!r} schedule structure changed during restore"
+            )
+
+    @staticmethod
     def _assert_timer_and_schedule(
         snapshot: DeviceControlSnapshot,
         state: DeviceState,
@@ -1517,4 +2147,6 @@ class TemporaryLinkageController:
                 f"device {snapshot.device_id!r} linkage role was not restored"
             )
         if schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint:
-            raise LinkageRollbackError(f"device {snapshot.device_id!r} schedule structure changed")
+            raise _ScheduleStructureChangedDuringRestore(
+                f"device {snapshot.device_id!r} schedule structure changed"
+            )

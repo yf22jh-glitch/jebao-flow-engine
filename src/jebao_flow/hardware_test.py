@@ -1480,6 +1480,12 @@ def _status(
             if latch_active
             else "use attended recover-linkage confirmation (automatic recovery is blocked)"
         )
+    elif record is not None and record.recovery_reason is LinkageRecoveryReason.SCHEDULE_CHANGED:
+        next_action = (
+            "clear the persistent safety latch outside this harness"
+            if latch_active
+            else "inspect the schedule, then use a new attended recover-linkage confirmation"
+        )
     elif record is not None:
         next_action = (
             "clear the persistent safety latch outside this harness"
@@ -1636,6 +1642,11 @@ async def _recover_linkage(
                 "safety-interlock recovery requires an attended confirmation; "
                 "automatic ON-state recovery is blocked"
             )
+        if recovery_first and record.recovery_reason is LinkageRecoveryReason.SCHEDULE_CHANGED:
+            raise HardwareTestError(
+                "schedule-changed recovery requires a new attended confirmation; "
+                "automatic recovery is blocked"
+            )
         if _safety_latch_present(canonical_safety_latch_path(config)):
             raise HardwareTestError(
                 "persistent safety latch is active; exact ON-state recovery is blocked"
@@ -1687,6 +1698,7 @@ async def _recover_linkage(
         )
 
         recovered = False
+        schedule_change_detected = False
         for attempt in range(1, _RECOVERY_ATTEMPTS + 1):
             if _safety_latch_present(canonical_safety_latch_path(config)):
                 break
@@ -1704,7 +1716,17 @@ async def _recover_linkage(
                 )
             except Exception:
                 recovered = False
-            if recovered and journal_store.load() is None:
+            pending_after_attempt = journal_store.load()
+            if recovered and pending_after_attempt is None:
+                break
+            if (
+                pending_after_attempt is not None
+                and pending_after_attempt.recovery_reason
+                is LinkageRecoveryReason.SCHEDULE_CHANGED
+            ):
+                # A complete decoded state proved the schedule changed. Never let another
+                # controller/reconnect attempt in the same confirmation erase that observation.
+                schedule_change_detected = True
                 break
             if attempt < _RECOVERY_ATTEMPTS:
                 await asyncio.sleep(_RECOVERY_RETRY_SECONDS)
@@ -1717,6 +1739,11 @@ async def _recover_linkage(
                         HardwareTestIntentPhase.RECOVERY_REQUIRED,
                         "recovery_required",
                     )
+                )
+            if schedule_change_detected:
+                raise HardwareTestError(
+                    "schedule changed during recovery; inspect it and start a new attended "
+                    "confirmed recovery"
                 )
             raise HardwareTestError(
                 f"exact recovery did not complete after {_RECOVERY_ATTEMPTS} bounded attempts"

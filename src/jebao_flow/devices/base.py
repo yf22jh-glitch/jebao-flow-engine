@@ -57,10 +57,25 @@ class JebaoDevice(ABC):
     async def connect(self) -> None: ...
 
     @abstractmethod
-    async def disconnect(self) -> None: ...
+    async def disconnect(self) -> None:
+        """Close the device session and propagate cancellation promptly.
+
+        Implementations must release device and transport locks when cancelled. Safety rollback
+        may interrupt a stuck close before persisting and enforcing an emergency OFF state.
+        """
+
+        ...
 
     @abstractmethod
-    async def get_state(self) -> DeviceState: ...
+    async def get_state(self) -> DeviceState:
+        """Return one fresh state and propagate cancellation promptly.
+
+        Implementations must not suppress ``CancelledError`` and must release any device or
+        transport lock when cancelled. Safety rollback races this read against an interlock and
+        waits for cancellation cleanup before issuing a compensating command.
+        """
+
+        ...
 
     @abstractmethod
     async def set_enabled(self, enabled: bool) -> None: ...
@@ -97,4 +112,13 @@ class JebaoDevice(ABC):
         target: DeviceTarget,
         *,
         guard: WriteGuard | None = None,
-    ) -> None: ...
+    ) -> None:
+        """Apply one target and propagate cancellation promptly.
+
+        Implementations must not suppress ``CancelledError`` and must release any device or
+        transport lock when cancelled. Exact restore races guarded writes against the safety
+        interlock; a cancelled request has an uncertain outcome and its transport must not be
+        reused unless the implementation can prove the request boundary is still intact.
+        """
+
+        ...

@@ -343,6 +343,30 @@ async def test_recovery_required_schedule_intent_without_journal_requires_attend
     assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
 
 
+async def test_schedule_changed_native_journal_requires_attendance_without_dispatch() -> None:
+    calls = 0
+
+    async def dispatch(config, args) -> int:
+        nonlocal calls
+        del config, args
+        calls += 1
+        return 0
+
+    record = _native_record()
+    record.phase = LinkageTransactionPhase.RECOVERY_REQUIRED
+    record.recovery_reason = LinkageRecoveryReason.SCHEDULE_CHANGED
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            RecoveryArtifacts(native_journal=record),
+            native_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
+    assert calls == 0
+
+
 async def test_dual_nonterminal_conflict_has_zero_callbacks() -> None:
     calls = 0
 

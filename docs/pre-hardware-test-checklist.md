@@ -210,7 +210,9 @@ docker compose exec jebao-flow-recovery \
 ```
 
 최근 TimerOFF 기록은 supervisor가 `expires_at + 30초` 안에서 복구할 수 있습니다. stale,
-TimerON 또는 `safety_interlock` 기록은 현장 확인 토큰 없이는 한 건도 쓰지 않습니다.
+TimerON, `safety_interlock` 또는 `schedule_changed` 기록은 현장 확인 토큰 없이는 한 건도
+쓰지 않습니다. `schedule_changed`를 한 번 관측한 확인 시도는 즉시 멈추며, 스케줄을 확인한 뒤
+새 status에서 발급된 새 토큰으로만 attended recovery를 다시 시작합니다.
 
 ```bash
 docker compose exec jebao-flow-recovery \

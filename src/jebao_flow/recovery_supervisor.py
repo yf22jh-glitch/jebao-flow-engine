@@ -34,6 +34,7 @@ from jebao_flow.device_verification_cli import (
 from jebao_flow.device_verification_cli import dispatch as dispatch_device_verification
 from jebao_flow.devices.linkage import (
     LinkageJournalClaimError,
+    LinkageRecoveryReason,
     LinkageTransactionBusyError,
     LinkageTransactionRecord,
 )
@@ -580,7 +581,10 @@ class RecoverySupervisor:
                 }
                 else RecoverySupervisorStatus.ATTENDED_REQUIRED
             )
-        if _has_safety_recovery_reason(record):
+        if (
+            _has_safety_recovery_reason(record)
+            or record.recovery_reason is LinkageRecoveryReason.SCHEDULE_CHANGED
+        ):
             return RecoverySupervisorStatus.ATTENDED_REQUIRED
         if _native_timer_restore_requires_attendance(record):
             return RecoverySupervisorStatus.ATTENDED_REQUIRED

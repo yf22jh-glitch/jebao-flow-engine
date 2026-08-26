@@ -28,6 +28,10 @@ Observer로 운용하고, 현장 시험은 공유 `/hardware-safety` 볼륨을 �
 - 한 장비 원복 실패 시 다른 장비는 계속 복구하고, 실패 장비는 안전한
   `independent + constant + low + TimerOFF`를 한 번만 시도
 - 정확한 복구가 끝나지 않으면 `RECOVERY_REQUIRED` 저널을 유지하고 새 시험 차단
+- 마지막 원복 frame의 ACK가 유실되거나 timeout되면 같은 TimerON target을 다시 보내지 않고,
+  오염된 TCP 세션을 폐기한 뒤 새 연결의 fresh read-back만 제한 횟수로 수행
+- snapshot 이후 스케줄 구조 변경을 한 번이라도 관측하면 즉시 `schedule_changed` 사유를
+  fsync하고, 새 현장 확인 토큰을 받은 attended recovery 전에는 후속 read나 재시도로 해제 금지
 - 비상 정지·정비 safety interlock이 걸리면 저장된 ON 상태보다 안전 정지를 우선하고,
   명시적인 latch 해제 전까지 정확한 복원을 보류
 - 두 장비 각각의 최근 단일 write 자격 영수증이 preflight와 첫 linkage frame 직전에 모두
@@ -38,7 +42,7 @@ Observer로 운용하고, 현장 시험은 공유 `/hardware-safety` 볼륨을 �
 - `async_slave` ACTIVE 중 한 번만 슬레이브 Flow를 변경하고 이후 fresh read-back으로 독립 출력
   유지 여부를 검증하는 선택적 진단
 - 프로세스가 비정상 종료되면 시험을 재개하지 않고, 최근 TimerOFF 기록만 30초 유예 안에서
-  supervisor가 복구하며 stale·TimerON·safety 기록은 현장 확인을 요구
+  supervisor가 복구하며 stale·TimerON·safety·schedule-changed 기록은 현장 확인을 요구
 
 ## 사전 조건
 

@@ -1199,9 +1199,90 @@ def test_attended_recovery_retries_after_its_own_journal_successor(
     assert recovered_intent.outcome == "recovered"
 
 
+def test_schedule_change_stops_same_confirmation_retry_and_recovery_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    intent_store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    intent = intent_store.load()
+    assert intent is not None
+    intent_store.save(
+        intent.model_copy(update={"phase": hardware_test.HardwareTestIntentPhase.STARTED})
+    )
+    now = datetime.now(UTC)
+    journal_store = JsonLinkageJournalStore(hardware_test.canonical_journal_path(config))
+    journal_store.create(
+        LinkageTransactionRecord(
+            operation_id=intent.operation_id,
+            phase=LinkageTransactionPhase.ACTIVE,
+            spec=intent.spec,
+            snapshots=intent.snapshots,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=10),
+        )
+    )
+    assert hardware_test.main(["recover-linkage"]) == 0
+    recovery_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+
+    attempts = 0
+
+    async def observe_schedule_change(*args: object, **kwargs: object) -> bool:
+        del kwargs
+        nonlocal attempts
+        attempts += 1
+        recovery_store = args[2]
+        assert isinstance(recovery_store, hardware_test.ConfirmingLinkageJournalStore)
+        current = recovery_store.load()
+        assert current is not None
+        recovery_store.save(
+            current.model_copy(
+                update={
+                    "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+                    "recovery_reason": LinkageRecoveryReason.SCHEDULE_CHANGED,
+                    "updated_at": datetime.now(UTC),
+                    "error": "pro_right: control_restore_failed",
+                    "failed_device_ids": ("pro_right",),
+                }
+            )
+        )
+        raise LinkageRollbackError("simulated transient schedule drift")
+
+    monkeypatch.setattr(hardware_test, "_recover_once", observe_schedule_change)
+    monkeypatch.setattr(hardware_test, "_RECOVERY_RETRY_SECONDS", 0)
+
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 2
+    assert "schedule changed during recovery" in capsys.readouterr().err
+    assert attempts == 1
+    pending = journal_store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.SCHEDULE_CHANGED
+    assert intent_store.load().outcome == "recovery_required"
+
+    assert hardware_test.main(["recover-linkage", "--recovery-first"]) == 2
+    assert (
+        "schedule-changed recovery requires a new attended confirmation"
+        in capsys.readouterr().err
+    )
+    assert attempts == 1
+    assert journal_store.load() == pending
+
+
 @pytest.mark.parametrize(
     "recovery_reason",
-    [LinkageRecoveryReason.SAFETY_INTERLOCK, LinkageRecoveryReason.RESTORE_FAILED],
+    [
+        LinkageRecoveryReason.SAFETY_INTERLOCK,
+        LinkageRecoveryReason.SCHEDULE_CHANGED,
+        LinkageRecoveryReason.RESTORE_FAILED,
+    ],
 )
 def test_status_reports_current_jfr_and_old_revision_token_sends_zero_frames(
     tmp_path: Path,

@@ -11,6 +11,7 @@ from jebao_flow.protocol.codec import GizwitsCommand, GizwitsFrame, encode_frame
 from jebao_flow.protocol.errors import (
     AuthenticationError,
     ProtocolConnectionError,
+    ProtocolError,
     ProtocolTimeoutError,
     UnexpectedResponseError,
 )
@@ -82,10 +83,7 @@ class GizwitsSession:
         self._authenticated = False
 
     async def disconnect(self) -> None:
-        writer = self._writer
-        self._reader = None
-        self._writer = None
-        self._authenticated = False
+        writer = self._drop_connection()
         if writer is None:
             return
         writer.close()
@@ -193,15 +191,39 @@ class GizwitsSession:
                             },
                         )
             except TimeoutError as error:
+                self._abort_connection()
                 raise ProtocolTimeoutError(
                     f"timed out waiting for response from {self.address}:{self.port}"
                 ) from error
+            except asyncio.CancelledError:
+                # read_frame consumes a TCP frame in pieces. Cancellation can leave the stream
+                # between magic/length/body, so no later request may reuse this connection.
+                self._abort_connection()
+                raise
+            except (ProtocolError, OSError):
+                self._abort_connection()
+                raise
 
         expected_text = ", ".join(f"0x{value:04x}" for value in sorted(expected_values))
+        self._abort_connection()
         raise UnexpectedResponseError(
             f"no expected response ({expected_text}) after skipping "
             f"{self.max_skipped_frames} frames"
         )
+
+    def _drop_connection(self) -> asyncio.StreamWriter | None:
+        writer = self._writer
+        self._reader = None
+        self._writer = None
+        self._authenticated = False
+        return writer
+
+    def _abort_connection(self) -> None:
+        """Quarantine a stream whose frame boundary or request outcome is uncertain."""
+
+        writer = self._drop_connection()
+        if writer is not None:
+            writer.close()
 
     def _require_connection(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         if self._reader is None or self._writer is None or self._writer.is_closing():
