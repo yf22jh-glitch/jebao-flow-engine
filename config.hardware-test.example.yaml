@@ -28,7 +28,7 @@ devices:
   - id: wavemaker_left
     name: Left Pro (replace identity)
     type: wavemaker
-    product_key: 0696a19599bc484f8e1866f5ccf4ee7e
+    product_key: 50dbc92221fd4d33ae69a1fedd43b555
     discovery: auto
     identity:
       device_id: replace_with_left_vendor_device_id
@@ -45,7 +45,7 @@ devices:
   - id: wavemaker_right
     name: Right Pro (replace identity)
     type: wavemaker
-    product_key: 0696a19599bc484f8e1866f5ccf4ee7e
+    product_key: 50dbc92221fd4d33ae69a1fedd43b555
     discovery: auto
     identity:
       device_id: replace_with_right_vendor_device_id
