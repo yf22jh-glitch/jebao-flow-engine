@@ -16,6 +16,7 @@ from jebao_flow.devices.base import (
     UnsupportedCapabilityError,
     WriteGuard,
 )
+from jebao_flow.devices.identity import PhysicalDeviceBinding
 from jebao_flow.protocol.control import build_control_payload
 from jebao_flow.protocol.models import (
     Capability,
@@ -77,6 +78,7 @@ class LanJebaoDevice(JebaoDevice):
         readback_delay_ms: int = 500,
         readback_attempts: int = 3,
         allow_hardware_writes: bool = False,
+        physical_binding: PhysicalDeviceBinding | None = None,
         session_factory: SessionFactory = GizwitsSession,
     ) -> None:
         if not device_id or not address:
@@ -93,6 +95,9 @@ class LanJebaoDevice(JebaoDevice):
         self._device_id = device_id
         self.address = address
         self.schema = get_product_schema(product_key)
+        if physical_binding is not None and physical_binding.product_key != product_key:
+            raise ValueError("physical binding product key does not match the device schema")
+        self._physical_binding = physical_binding
         self._power_limits = power_limits or PowerLimits()
         self._power_step = power_step
         self._minimum_command_interval = minimum_command_interval_ms / 1000
@@ -107,6 +112,10 @@ class LanJebaoDevice(JebaoDevice):
     @property
     def device_id(self) -> str:
         return self._device_id
+
+    @property
+    def physical_binding(self) -> PhysicalDeviceBinding | None:
+        return self._physical_binding
 
     @property
     def connected(self) -> bool:

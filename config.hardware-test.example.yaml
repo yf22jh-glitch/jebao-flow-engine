@@ -1,0 +1,62 @@
+# Attended hardware-test template. Copy to a private host-only file and replace both identities.
+# The committed template stays dry-run and cannot pass any physical-write command.
+instance:
+  id: attended_main
+  name: Attended Main Aquarium Test
+  timezone: Asia/Seoul
+
+mqtt:
+  host: 127.0.0.1
+  topic_prefix: jebao-flow/attended-main
+
+runtime:
+  state_path: /data/hardware-test-state.json
+  log_level: INFO
+  mode: control
+  dry_run: true
+
+observer:
+  enabled: false
+  journal_path: /data/hardware-test-observations.jsonl
+  # Replace with the directed broadcast address reachable from the router/home-server namespace.
+  targets:
+    - 255.255.255.255
+  bind_address: 0.0.0.0
+  discovery_timeout_seconds: 5
+
+devices:
+  - id: wavemaker_left
+    name: Left Pro (replace identity)
+    type: wavemaker
+    product_key: 0696a19599bc484f8e1866f5ccf4ee7e
+    discovery: auto
+    identity:
+      device_id: replace_with_left_vendor_device_id
+      mac_address: "020000000001"
+    limits:
+      min_power: 30
+      max_power: 75
+    control:
+      minimum_command_interval_ms: 1000
+      allow_hardware_writes: true
+      readback_delay_ms: 500
+      readback_attempts: 3
+
+  - id: wavemaker_right
+    name: Right Pro (replace identity)
+    type: wavemaker
+    product_key: 0696a19599bc484f8e1866f5ccf4ee7e
+    discovery: auto
+    identity:
+      device_id: replace_with_right_vendor_device_id
+      mac_address: "020000000002"
+    limits:
+      min_power: 30
+      max_power: 75
+    control:
+      minimum_command_interval_ms: 1000
+      allow_hardware_writes: true
+      readback_delay_ms: 500
+      readback_attempts: 3
+
+groups: []

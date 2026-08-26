@@ -34,6 +34,9 @@ dev = [
 [project.scripts]
 jebao-flowd = "jebao_flow.app:main"
 jebao-flowctl = "jebao_flow.cli:main"
+jebao-flow-hwtest = "jebao_flow.hardware_test:main"
+jebao-flow-device-verify = "jebao_flow.device_verification_cli:main"
+jebao-flow-recovery = "jebao_flow.recovery_supervisor:main"
 
 [project.urls]
 Homepage = "https://github.com/yf22jh-glitch/jebao-flow-engine"

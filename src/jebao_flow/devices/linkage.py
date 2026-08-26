@@ -27,6 +27,7 @@ from pydantic import (
 )
 
 from jebao_flow.devices.base import JebaoDevice
+from jebao_flow.devices.identity import PhysicalDeviceBinding
 from jebao_flow.protocol.models import (
     Capability,
     DeviceSchedule,
@@ -36,6 +37,8 @@ from jebao_flow.protocol.models import (
 )
 
 DeviceIdentifier = Annotated[str, StringConstraints(min_length=1)]
+_AUDITED_SNAPSHOT_MODES = frozenset({"constant", "pulse", "sine"})
+_SAFETY_STOP_TIMEOUT_SECONDS = 30.0
 
 
 class LinkageTransactionError(RuntimeError):
@@ -62,12 +65,34 @@ class LinkageJournalClaimError(LinkageTransactionError):
     """A durable journal already belongs to another daemon or recovery."""
 
 
+class _ForwardStopRequested(LinkageTransactionError):
+    """A normal stop won before the next temporary forward-control frame."""
+
+
+class _ForwardDeadlineExpired(LinkageTransactionError):
+    """The bounded experiment expired before the next forward-control frame."""
+
+
 class LinkageTransactionPhase(StrEnum):
     PREPARED = "prepared"
     APPLYING = "applying"
     ACTIVE = "active"
     ROLLING_BACK = "rolling_back"
     RECOVERY_REQUIRED = "recovery_required"
+
+
+class LinkageRecoveryReason(StrEnum):
+    """Typed reason why an unfinished transaction remains recovery-latched."""
+
+    SAFETY_INTERLOCK = "safety_interlock"
+    RESTORE_FAILED = "restore_failed"
+
+
+class LinkageRecoveryAuthority(StrEnum):
+    """Authority level for compensation that may restore a saved ON state."""
+
+    AUTOMATIC = "automatic"
+    ATTENDED = "attended"
 
 
 class LinkageStopReason(StrEnum):
@@ -145,6 +170,7 @@ class DeviceControlSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     device_id: DeviceIdentifier
+    physical_binding: PhysicalDeviceBinding
     enabled: bool
     power: int = Field(ge=0, le=100)
     mode: str = Field(min_length=1)
@@ -160,20 +186,51 @@ class DeviceControlSnapshot(BaseModel):
             raise ValueError("temporary linkage snapshots must start independent")
         return value
 
+    @field_validator("mode")
     @classmethod
-    def from_state(cls, device_id: str, state: DeviceState) -> Self:
+    def require_audited_restore_mode(cls, value: str) -> str:
+        if value not in _AUDITED_SNAPSHOT_MODES:
+            audited = ", ".join(sorted(_AUDITED_SNAPSHOT_MODES))
+            raise ValueError(f"snapshot mode must be one of the audited modes: {audited}")
+        return value
+
+    @classmethod
+    def from_state(
+        cls,
+        device_id: str,
+        state: DeviceState,
+        *,
+        physical_binding: PhysicalDeviceBinding,
+    ) -> Self:
         if state.frequency is None:
             raise LinkagePreflightError(f"device {device_id!r} did not report frequency")
         if state.linkage is None:
             raise LinkagePreflightError(f"device {device_id!r} did not report linkage")
         if state.linkage is not LinkageRole.INDEPENDENT:
-            raise LinkagePreflightError(
-                f"device {device_id!r} must start in independent mode"
-            )
+            raise LinkagePreflightError(f"device {device_id!r} must start in independent mode")
         if state.timer_enabled is None:
             raise LinkagePreflightError(f"device {device_id!r} did not report TimerON")
+        if state.mode not in _AUDITED_SNAPSHOT_MODES:
+            audited = ", ".join(sorted(_AUDITED_SNAPSHOT_MODES))
+            raise LinkagePreflightError(
+                f"device {device_id!r} current mode {state.mode!r} is outside "
+                f"the audited restore modes: {audited}"
+            )
+        if state.timer_enabled:
+            schedule = state.schedule
+            if schedule is None:
+                raise LinkagePreflightError(
+                    f"device {device_id!r} has TimerON without a decoded schedule"
+                )
+            if not schedule.enabled:
+                raise LinkagePreflightError(
+                    f"device {device_id!r} TimerON disagrees with its decoded schedule"
+                )
+            if schedule.invalid_slots:
+                raise LinkagePreflightError(f"device {device_id!r} schedule contains invalid slots")
         return cls(
             device_id=device_id,
+            physical_binding=physical_binding,
             enabled=state.enabled,
             power=state.power,
             mode=state.mode,
@@ -189,9 +246,13 @@ class LinkageTransactionRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: int = Field(default=1, ge=1, le=1)
+    # Version 2 adds privacy-preserving physical bindings and per-device restore progress. A
+    # version-1 record cannot be migrated safely because it contains neither stable identity nor
+    # enough information to prove which physical controller should receive compensation.
+    version: Literal[2] = 2
     operation_id: str = Field(min_length=1)
     phase: LinkageTransactionPhase
+    recovery_reason: LinkageRecoveryReason | None = None
     spec: LinkageTestSpec
     snapshots: tuple[DeviceControlSnapshot, ...] = Field(min_length=2, max_length=2)
     created_at: datetime
@@ -199,15 +260,33 @@ class LinkageTransactionRecord(BaseModel):
     expires_at: datetime
     error: str | None = None
     failed_device_ids: tuple[str, ...] = ()
+    restored_device_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_record(self) -> Self:
         if self.operation_id != self.spec.operation_id:
             raise ValueError("record operation_id must match spec operation_id")
+        if self.phase is LinkageTransactionPhase.RECOVERY_REQUIRED:
+            if self.recovery_reason is None:
+                raise ValueError("recovery_reason is required when recovery is required")
+        elif self.recovery_reason is not None:
+            raise ValueError("recovery_reason must be None outside recovery_required")
         snapshot_ids = {snapshot.device_id for snapshot in self.snapshots}
         expected_ids = {self.spec.master_device_id, self.spec.slave_device_id}
         if snapshot_ids != expected_ids:
             raise ValueError("record snapshots must cover exactly the master and slave")
+        restored_ids = set(self.restored_device_ids)
+        failed_ids = set(self.failed_device_ids)
+        if len(restored_ids) != len(self.restored_device_ids):
+            raise ValueError("restored_device_ids must not contain duplicates")
+        if len(failed_ids) != len(self.failed_device_ids):
+            raise ValueError("failed_device_ids must not contain duplicates")
+        if not restored_ids <= snapshot_ids:
+            raise ValueError("restored_device_ids must reference transaction snapshots")
+        if not failed_ids <= snapshot_ids:
+            raise ValueError("failed_device_ids must reference transaction snapshots")
+        if restored_ids & failed_ids:
+            raise ValueError("restored and failed device IDs must not overlap")
         return self
 
 
@@ -253,6 +332,7 @@ def schedule_structure_fingerprint(schedule: DeviceSchedule | None) -> str | Non
 class TemporaryLinkageController:
     """Apply one bounded relationship and guarantee journaled compensating restore."""
 
+    _AUTOMATIC_RECOVERY_GRACE_SECONDS = 30.0
     _REQUIRED_WRITABLE = frozenset(
         {
             Capability.ENABLED,
@@ -278,6 +358,8 @@ class TemporaryLinkageController:
         self._stop_event: asyncio.Event | None = None
         self._active_operation_id: str | None = None
         self._safety_epoch: int | None = None
+        self._operation_monotonic_deadline: float | None = None
+        self._last_prepared_record: LinkageTransactionRecord | None = None
 
     @property
     def active_operation_id(self) -> str | None:
@@ -308,6 +390,9 @@ class TemporaryLinkageController:
             try:
                 return await self._run_owned(spec)
             finally:
+                self._active_operation_id = None
+                self._stop_event = None
+                self._operation_monotonic_deadline = None
                 self._safety_epoch = None
                 lease.__exit__(None, None, None)
 
@@ -318,15 +403,40 @@ class TemporaryLinkageController:
                 f"linkage recovery {pending.operation_id!r} must complete first"
             )
 
-        record = await self._prepare(spec)
+        started_at = datetime.now(UTC)
+        self._operation_monotonic_deadline = (
+            asyncio.get_running_loop().time() + spec.duration_seconds
+        )
+        self._active_operation_id = spec.operation_id
+        self._stop_event = asyncio.Event()
+        record = await self._prepare(
+            spec,
+            created_at=started_at,
+            expires_at=started_at + timedelta(seconds=spec.duration_seconds),
+        )
+        self._last_prepared_record = record
+
+        if self._stop_requested() and self._safety_allows_operation():
+            return self._stopped_result(spec)
+
         try:
             self._store.create(record)
         except LinkageJournalClaimError as error:
             raise LinkageTransactionBusyError(
                 "another daemon claimed the linkage recovery journal"
             ) from error
-        self._active_operation_id = spec.operation_id
-        self._stop_event = asyncio.Event()
+
+        if not self._safety_allows_operation():
+            await self._rollback_uninterruptibly(record)
+        if self._stop_requested():
+            self._store.clear()
+            return self._stopped_result(spec)
+        if self._forward_deadline_expired(record):
+            self._store.clear()
+            raise LinkageApplyError(
+                f"linkage operation {spec.operation_id!r} expired before its first control frame"
+            )
+
         operation_error: BaseException | None = None
         stop_reason: LinkageStopReason | None = None
 
@@ -338,25 +448,22 @@ class TemporaryLinkageController:
             record = self._transition(record, LinkageTransactionPhase.ACTIVE)
             stop_reason = await self._monitor_until_stop(record)
         except BaseException as error:
-            operation_error = error
+            if self._stop_requested() and self._safety_allows_operation():
+                stop_reason = LinkageStopReason.MANUAL
+            else:
+                operation_error = error
 
         try:
             await self._rollback_uninterruptibly(record)
         except asyncio.CancelledError:
-            self._active_operation_id = None
-            self._stop_event = None
             raise
         except BaseException as rollback_error:
-            self._active_operation_id = None
-            self._stop_event = None
             if isinstance(rollback_error, LinkageRollbackError):
                 raise
             raise LinkageRollbackError(
                 f"linkage operation {spec.operation_id!r} could not be restored"
             ) from rollback_error
 
-        self._active_operation_id = None
-        self._stop_event = None
         if operation_error is not None:
             if isinstance(operation_error, asyncio.CancelledError):
                 raise operation_error
@@ -372,6 +479,33 @@ class TemporaryLinkageController:
             completed_at=datetime.now(UTC),
         )
 
+    async def enforce_safety_stop(
+        self,
+        fallback_record: LinkageTransactionRecord | None = None,
+    ) -> None:
+        """Durably defer exact restore, then stop both devices after a late e-stop race."""
+
+        if self._run_lock.locked():
+            raise LinkageTransactionBusyError("another linkage transaction is still running")
+        async with self._run_lock:
+            try:
+                lease = self._store.lease()
+                lease.__enter__()
+            except LinkageJournalClaimError as error:
+                raise LinkageTransactionBusyError(
+                    "another daemon owns the linkage journal lease"
+                ) from error
+            try:
+                record = self._store.load() or self._last_prepared_record or fallback_record
+                if record is None:
+                    raise LinkageRollbackError(
+                        "cannot persist a late safety stop without a recovery snapshot"
+                    )
+                self._validate_recovery_bindings(record)
+                await self._defer_restore_for_safety(record)
+            finally:
+                lease.__exit__(None, None, None)
+
     async def stop(self, operation_id: str | None = None) -> bool:
         """Request early restore of the active transaction."""
 
@@ -382,7 +516,11 @@ class TemporaryLinkageController:
         self._stop_event.set()
         return True
 
-    async def recover_pending(self) -> bool:
+    async def recover_pending(
+        self,
+        *,
+        authority: LinkageRecoveryAuthority = LinkageRecoveryAuthority.AUTOMATIC,
+    ) -> bool:
         """Restore, never resume, a transaction found after process restart."""
 
         if self._run_lock.locked():
@@ -397,15 +535,39 @@ class TemporaryLinkageController:
                 ) from error
             self._safety_epoch = self._safety_interlock.epoch
             try:
-                return await self._recover_owned()
+                return await self._recover_owned(authority)
             finally:
                 self._safety_epoch = None
                 lease.__exit__(None, None, None)
 
-    async def _recover_owned(self) -> bool:
+    async def _recover_owned(self, authority: LinkageRecoveryAuthority) -> bool:
         record = self._store.load()
         if record is None:
             return False
+        self._validate_recovery_bindings(record)
+        if (
+            authority is LinkageRecoveryAuthority.AUTOMATIC
+            and record.phase is not LinkageTransactionPhase.PREPARED
+        ):
+            if any(snapshot.timer_enabled for snapshot in record.snapshots):
+                raise LinkagePreflightError(
+                    "TimerON linkage recovery requires explicit attended authority"
+                )
+            now = datetime.now(UTC)
+            automatic_deadline = record.expires_at + timedelta(
+                seconds=self._AUTOMATIC_RECOVERY_GRACE_SECONDS
+            )
+            if now < record.created_at or now < record.updated_at or now > automatic_deadline:
+                raise LinkagePreflightError(
+                    "stale linkage recovery requires explicit attended authority"
+                )
+        if (
+            record.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+            and authority is not LinkageRecoveryAuthority.ATTENDED
+        ):
+            raise LinkagePreflightError(
+                "safety-interlock recovery requires explicit attended authority"
+            )
         self._active_operation_id = record.operation_id
         self._stop_event = asyncio.Event()
         try:
@@ -414,11 +576,12 @@ class TemporaryLinkageController:
                 # proves no compensation is needed and must not disturb a schedule that
                 # legitimately advanced while the daemon was offline.
                 self._store.clear()
-            elif (
-                self._safety_allows_operation()
-                and await self._snapshots_are_restored(record)
-            ):
-                self._store.clear()
+            elif self._safety_allows_operation():
+                record = await self._reconcile_exactly_restored_devices(record)
+                if len(record.restored_device_ids) == len(record.snapshots):
+                    self._store.clear()
+                else:
+                    await self._rollback_uninterruptibly(record)
             else:
                 await self._rollback_uninterruptibly(record)
         finally:
@@ -426,7 +589,13 @@ class TemporaryLinkageController:
             self._stop_event = None
         return True
 
-    async def _prepare(self, spec: LinkageTestSpec) -> LinkageTransactionRecord:
+    async def _prepare(
+        self,
+        spec: LinkageTestSpec,
+        *,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> LinkageTransactionRecord:
         if not self._safety_allows_operation():
             raise LinkagePreflightError("linkage test is blocked by the safety interlock")
         master = self._get_device(spec.master_device_id)
@@ -448,6 +617,15 @@ class TemporaryLinkageController:
 
         snapshots: list[DeviceControlSnapshot] = []
         for device in (master, slave):
+            physical_binding = device.physical_binding
+            if physical_binding is None:
+                raise LinkagePreflightError(
+                    f"device {device.device_id!r} has no exact stable physical binding"
+                )
+            if physical_binding.product_key != device.capabilities.product_key:
+                raise LinkagePreflightError(
+                    f"device {device.device_id!r} physical binding does not match its product"
+                )
             if not device.connected:
                 raise LinkagePreflightError(f"device {device.device_id!r} is disconnected")
             state = await device.get_state()
@@ -457,19 +635,22 @@ class TemporaryLinkageController:
                 raise LinkagePreflightError(
                     f"device {device.device_id!r} reports an error: {state.error}"
                 )
-            snapshot = DeviceControlSnapshot.from_state(device.device_id, state)
+            snapshot = DeviceControlSnapshot.from_state(
+                device.device_id,
+                state,
+                physical_binding=physical_binding,
+            )
             self._validate_snapshot(device, snapshot)
             snapshots.append(snapshot)
 
-        now = datetime.now(UTC)
         return LinkageTransactionRecord(
             operation_id=spec.operation_id,
             phase=LinkageTransactionPhase.PREPARED,
             spec=spec,
             snapshots=tuple(snapshots),
-            created_at=now,
-            updated_at=now,
-            expires_at=now + timedelta(seconds=spec.duration_seconds),
+            created_at=created_at,
+            updated_at=datetime.now(UTC),
+            expires_at=expires_at,
         )
 
     def _validate_capabilities(
@@ -536,7 +717,7 @@ class TemporaryLinkageController:
 
     async def _stage_devices(self, record: LinkageTransactionRecord) -> None:
         for snapshot in record.snapshots:
-            self._require_safety_interlock()
+            self._require_forward_write(record)
             device = self._get_device(snapshot.device_id)
             await device.write_target(
                 DeviceTarget(
@@ -547,14 +728,14 @@ class TemporaryLinkageController:
                     linkage=LinkageRole.INDEPENDENT,
                     timer_enabled=False,
                 ),
-                guard=self._safety_allows_operation,
+                guard=lambda: self._forward_write_allowed(record),
             )
 
     async def _activate_relationship(self, record: LinkageTransactionRecord) -> None:
         spec = record.spec
         master = self._get_device(spec.master_device_id)
         slave = self._get_device(spec.slave_device_id)
-        self._require_safety_interlock()
+        self._require_forward_write(record)
         await master.write_target(
             DeviceTarget(
                 enabled=True,
@@ -564,9 +745,9 @@ class TemporaryLinkageController:
                 linkage=LinkageRole.MASTER,
                 timer_enabled=False,
             ),
-            guard=self._safety_allows_operation,
+            guard=lambda: self._forward_write_allowed(record),
         )
-        self._require_safety_interlock()
+        self._require_forward_write(record)
         await slave.write_target(
             DeviceTarget(
                 enabled=True,
@@ -576,7 +757,7 @@ class TemporaryLinkageController:
                 linkage=spec.slave_role,
                 timer_enabled=False,
             ),
-            guard=self._safety_allows_operation,
+            guard=lambda: self._forward_write_allowed(record),
         )
 
     async def _verify_active_relationship(self, record: LinkageTransactionRecord) -> None:
@@ -612,7 +793,9 @@ class TemporaryLinkageController:
             raise AssertionError("stop event is not initialized")
         loop = asyncio.get_running_loop()
         wall_remaining = (record.expires_at - datetime.now(UTC)).total_seconds()
-        monotonic_deadline = loop.time() + max(0, wall_remaining)
+        monotonic_deadline = self._operation_monotonic_deadline
+        if monotonic_deadline is None:
+            monotonic_deadline = loop.time() + max(0, wall_remaining)
         while True:
             self._require_safety_interlock()
             remaining = min(
@@ -623,9 +806,7 @@ class TemporaryLinkageController:
                 return LinkageStopReason.TIMEOUT
             interval = min(record.spec.verification_interval_seconds, remaining)
             stop_waiter = asyncio.create_task(self._stop_event.wait())
-            safety_waiter = asyncio.create_task(
-                self._safety_interlock.wait_until_blocked()
-            )
+            safety_waiter = asyncio.create_task(self._safety_interlock.wait_until_blocked())
             waiters = {stop_waiter, safety_waiter}
             try:
                 done, _ = await asyncio.wait(
@@ -642,10 +823,13 @@ class TemporaryLinkageController:
             self._require_safety_interlock()
             if stop_waiter in done:
                 return LinkageStopReason.MANUAL
-            if min(
-                (record.expires_at - datetime.now(UTC)).total_seconds(),
-                monotonic_deadline - loop.time(),
-            ) <= 0:
+            if (
+                min(
+                    (record.expires_at - datetime.now(UTC)).total_seconds(),
+                    monotonic_deadline - loop.time(),
+                )
+                <= 0
+            ):
                 return LinkageStopReason.TIMEOUT
             # Detect the exact behavior this diagnostic is intended to measure: a native master
             # broadcast must not silently replace the requested per-slave Flow.
@@ -666,6 +850,11 @@ class TemporaryLinkageController:
             raise asyncio.CancelledError
 
     async def _rollback(self, record: LinkageTransactionRecord) -> None:
+        # A tripped interlock must become durable before a bookkeeping transition can erase its
+        # typed reason, and before any physical safe-stop frame is attempted.
+        if not self._safety_allows_operation():
+            await self._defer_restore_for_safety(record)
+
         try:
             record = self._transition(record, LinkageTransactionPhase.ROLLING_BACK)
         except Exception:
@@ -676,12 +865,21 @@ class TemporaryLinkageController:
         if not self._safety_allows_operation():
             await self._defer_restore_for_safety(record)
 
-        errors: dict[str, list[str]] = {
-            snapshot.device_id: [] for snapshot in record.snapshots
-        }
+        record = await self._reconcile_exactly_restored_devices(record)
+        already_restored = set(record.restored_device_ids)
+        pending_snapshots = tuple(
+            snapshot for snapshot in record.snapshots if snapshot.device_id not in already_restored
+        )
+        if not pending_snapshots:
+            self._store.clear()
+            return
+
+        errors: dict[str, list[str]] = {snapshot.device_id: [] for snapshot in pending_snapshots}
         detach_order = (record.spec.slave_device_id, record.spec.master_device_id)
 
         for device_id in detach_order:
+            if device_id in already_restored:
+                continue
             device = self._get_device(device_id)
             try:
                 await device.write_target(
@@ -695,11 +893,11 @@ class TemporaryLinkageController:
                     ),
                     guard=self._safety_allows_operation,
                 )
-            except Exception as error:
-                errors[device_id].append(f"detach: {error}")
+            except Exception:
+                errors[device_id].append("detach_failed")
 
         restored_control: set[str] = set()
-        for snapshot in record.snapshots:
+        for snapshot in pending_snapshots:
             if not self._safety_allows_operation():
                 await self._defer_restore_for_safety(record)
             device = self._get_device(snapshot.device_id)
@@ -719,19 +917,14 @@ class TemporaryLinkageController:
                     await device.set_enabled(False)
                 state = await device.get_state()
                 self._assert_snapshot_control(snapshot, state, expected_timer=False)
-                if (
-                    schedule_structure_fingerprint(state.schedule)
-                    != snapshot.schedule_fingerprint
-                ):
-                    raise LinkageRollbackError(
-                        "device-local schedule changed during linkage test"
-                    )
+                if schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint:
+                    raise LinkageRollbackError("device-local schedule changed during linkage test")
                 restored_control.add(snapshot.device_id)
                 errors[snapshot.device_id].clear()
-            except Exception as error:
-                errors[snapshot.device_id].append(f"restore: {error}")
+            except Exception:
+                errors[snapshot.device_id].append("control_restore_failed")
 
-        for snapshot in record.snapshots:
+        for snapshot in pending_snapshots:
             if snapshot.device_id not in restored_control:
                 continue
             if not self._safety_allows_operation():
@@ -753,9 +946,16 @@ class TemporaryLinkageController:
                 )
                 state = await device.get_state()
                 self._assert_timer_and_schedule(snapshot, state)
+                record = self._mark_device_restored(record, snapshot.device_id)
                 errors[snapshot.device_id].clear()
-            except Exception as error:
-                errors[snapshot.device_id].append(f"timer restore: {error}")
+            except Exception:
+                errors[snapshot.device_id].append("timer_restore_failed")
+
+        record = await self._reconcile_exactly_restored_devices(record)
+        exactly_restored = set(record.restored_device_ids)
+        for snapshot in record.snapshots:
+            if snapshot.device_id not in exactly_restored:
+                errors.setdefault(snapshot.device_id, []).append("final_verification_failed")
 
         failed = {device_id: values for device_id, values in errors.items() if values}
         if failed:
@@ -764,12 +964,12 @@ class TemporaryLinkageController:
             for device_id in failed:
                 await self._try_safe_fallback(self._get_device(device_id), record.spec.frequency)
             message = "; ".join(
-                f"{device_id}: {', '.join(values)}"
-                for device_id, values in sorted(failed.items())
+                f"{device_id}: {','.join(values)}" for device_id, values in sorted(failed.items())
             )
             recovery_record = record.model_copy(
                 update={
                     "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+                    "recovery_reason": LinkageRecoveryReason.RESTORE_FAILED,
                     "updated_at": datetime.now(UTC),
                     "error": message,
                     "failed_device_ids": tuple(sorted(failed)),
@@ -787,8 +987,26 @@ class TemporaryLinkageController:
     async def _defer_restore_for_safety(self, record: LinkageTransactionRecord) -> None:
         """Keep an emergency/maintenance latch authoritative over saved enabled state."""
 
-        stop_errors: dict[str, str] = {}
-        for device_id in (record.spec.slave_device_id, record.spec.master_device_id):
+        message = "exact restore deferred by safety interlock"
+        recovery_record = record.model_copy(
+            update={
+                "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+                "recovery_reason": LinkageRecoveryReason.SAFETY_INTERLOCK,
+                "updated_at": datetime.now(UTC),
+                "error": message,
+                # Safe-stop intentionally disturbs every saved state, so no prior exact-restore
+                # progress remains valid after this durable transition.
+                "failed_device_ids": tuple(
+                    sorted(snapshot.device_id for snapshot in record.snapshots)
+                ),
+                "restored_device_ids": (),
+            }
+        )
+        # This fsynced record is the authority used by recovery-first when the external latch
+        # cannot be created. It must precede every physical safe-stop attempt.
+        self._store.save(recovery_record)
+
+        async def stop_device(device_id: str) -> tuple[str, str | None]:
             device = self._get_device(device_id)
             try:
                 await device.write_target(
@@ -799,31 +1017,36 @@ class TemporaryLinkageController:
                         timer_enabled=False,
                     )
                 )
-            except Exception as error:
-                stop_errors[device_id] = str(error)
+            except Exception:
+                return device_id, "safe_stop_failed"
+            return device_id, None
 
-        message = "exact restore deferred by safety interlock"
+        async with asyncio.timeout(_SAFETY_STOP_TIMEOUT_SECONDS):
+            results = await asyncio.gather(
+                *(
+                    stop_device(device_id)
+                    for device_id in (
+                        record.spec.slave_device_id,
+                        record.spec.master_device_id,
+                    )
+                )
+            )
+        stop_errors = {device_id: error for device_id, error in results if error is not None}
+
         if stop_errors:
             details = ", ".join(
                 f"{device_id}: {error}" for device_id, error in sorted(stop_errors.items())
             )
             message = f"{message}; safe stop errors: {details}"
-        recovery_record = record.model_copy(
-            update={
-                "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
-                "updated_at": datetime.now(UTC),
-                "error": message,
-                # Even a successfully stopped device still needs its exact snapshot restored
-                # after the operator explicitly clears the safety latch.
-                "failed_device_ids": tuple(
-                    sorted(snapshot.device_id for snapshot in record.snapshots)
-                ),
-            }
-        )
-        self._store.save(recovery_record)
-        raise LinkageRollbackError(
-            f"linkage operation {record.operation_id!r}: {message}"
-        )
+            self._store.save(
+                recovery_record.model_copy(
+                    update={
+                        "updated_at": datetime.now(UTC),
+                        "error": message,
+                    }
+                )
+            )
+        raise LinkageRollbackError(f"linkage operation {record.operation_id!r}: {message}")
 
     async def _try_safe_fallback(self, device: JebaoDevice, frequency: int) -> None:
         try:
@@ -843,7 +1066,13 @@ class TemporaryLinkageController:
             # reconnect can call recover_pending() without causing a command storm.
             return
 
-    async def _snapshots_are_restored(self, record: LinkageTransactionRecord) -> bool:
+    async def _reconcile_exactly_restored_devices(
+        self,
+        record: LinkageTransactionRecord,
+    ) -> LinkageTransactionRecord:
+        """Freshly reconcile durable progress before skipping writes or clearing the journal."""
+
+        exactly_restored: list[str] = []
         for snapshot in record.snapshots:
             try:
                 state = await self._get_device(snapshot.device_id).get_state()
@@ -854,20 +1083,57 @@ class TemporaryLinkageController:
                 )
                 self._assert_timer_and_schedule(snapshot, state)
             except Exception:
-                return False
-        return True
+                continue
+            exactly_restored.append(snapshot.device_id)
+
+        restored = tuple(sorted(exactly_restored))
+        failed = tuple(
+            value for value in record.failed_device_ids if value not in exactly_restored
+        )
+        if restored == record.restored_device_ids and failed == record.failed_device_ids:
+            return record
+        updated = record.model_copy(
+            update={
+                "updated_at": datetime.now(UTC),
+                "failed_device_ids": failed,
+                "restored_device_ids": restored,
+            }
+        )
+        self._store.save(updated)
+        return updated
 
     def _transition(
         self,
         record: LinkageTransactionRecord,
         phase: LinkageTransactionPhase,
     ) -> LinkageTransactionRecord:
+        if phase is LinkageTransactionPhase.RECOVERY_REQUIRED:
+            raise ValueError("recovery_required transitions need an explicit recovery reason")
         updated = record.model_copy(
             update={
                 "phase": phase,
+                "recovery_reason": None,
                 "updated_at": datetime.now(UTC),
                 "error": None,
                 "failed_device_ids": (),
+            }
+        )
+        self._store.save(updated)
+        return updated
+
+    def _mark_device_restored(
+        self,
+        record: LinkageTransactionRecord,
+        device_id: str,
+    ) -> LinkageTransactionRecord:
+        restored = tuple(sorted({*record.restored_device_ids, device_id}))
+        updated = record.model_copy(
+            update={
+                "updated_at": datetime.now(UTC),
+                "failed_device_ids": tuple(
+                    value for value in record.failed_device_ids if value != device_id
+                ),
+                "restored_device_ids": restored,
             }
         )
         self._store.save(updated)
@@ -879,6 +1145,22 @@ class TemporaryLinkageController:
         except KeyError as error:
             raise LinkagePreflightError(f"unknown device {device_id!r}") from error
 
+    def _validate_recovery_bindings(self, record: LinkageTransactionRecord) -> None:
+        """Reject config/device remapping before recovery can emit a physical write."""
+
+        for snapshot in record.snapshots:
+            device = self._get_device(snapshot.device_id)
+            binding = device.physical_binding
+            if binding is None:
+                raise LinkagePreflightError(
+                    f"device {snapshot.device_id!r} has no exact stable physical binding"
+                )
+            if binding != snapshot.physical_binding:
+                raise LinkagePreflightError(
+                    f"device {snapshot.device_id!r} physical binding does not match "
+                    "the recovery journal"
+                )
+
     def _safety_allows_operation(self) -> bool:
         return (
             self._safety_epoch is not None
@@ -886,9 +1168,41 @@ class TemporaryLinkageController:
             and self._safety_interlock.epoch == self._safety_epoch
         )
 
+    def _stop_requested(self) -> bool:
+        return self._stop_event is not None and self._stop_event.is_set()
+
+    def _forward_deadline_expired(self, record: LinkageTransactionRecord) -> bool:
+        monotonic_deadline = self._operation_monotonic_deadline
+        return datetime.now(UTC) >= record.expires_at or (
+            monotonic_deadline is not None
+            and asyncio.get_running_loop().time() >= monotonic_deadline
+        )
+
+    def _forward_write_allowed(self, record: LinkageTransactionRecord) -> bool:
+        return (
+            self._safety_allows_operation()
+            and not self._stop_requested()
+            and not self._forward_deadline_expired(record)
+        )
+
+    def _require_forward_write(self, record: LinkageTransactionRecord) -> None:
+        self._require_safety_interlock()
+        if self._stop_requested():
+            raise _ForwardStopRequested("linkage test was stopped before the next control frame")
+        if self._forward_deadline_expired(record):
+            raise _ForwardDeadlineExpired("linkage test expired before the next control frame")
+
     def _require_safety_interlock(self) -> None:
         if not self._safety_allows_operation():
             raise LinkageTransactionError("linkage test was stopped by the safety interlock")
+
+    @staticmethod
+    def _stopped_result(spec: LinkageTestSpec) -> LinkageTestResult:
+        return LinkageTestResult(
+            operation_id=spec.operation_id,
+            stop_reason=LinkageStopReason.MANUAL,
+            completed_at=datetime.now(UTC),
+        )
 
     @staticmethod
     def _safe_power(device: JebaoDevice) -> int:
@@ -957,14 +1271,10 @@ class TemporaryLinkageController:
         state: DeviceState,
     ) -> None:
         if state.timer_enabled is not snapshot.timer_enabled:
-            raise LinkageRollbackError(
-                f"device {snapshot.device_id!r} TimerON was not restored"
-            )
+            raise LinkageRollbackError(f"device {snapshot.device_id!r} TimerON was not restored")
         if not state.online or state.error:
             raise LinkageRollbackError(
                 f"device {snapshot.device_id!r} is not healthy after TimerON restore"
             )
         if schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint:
-            raise LinkageRollbackError(
-                f"device {snapshot.device_id!r} schedule structure changed"
-            )
+            raise LinkageRollbackError(f"device {snapshot.device_id!r} schedule structure changed")

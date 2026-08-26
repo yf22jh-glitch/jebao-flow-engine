@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -14,9 +15,11 @@ from jebao_flow.devices.base import (
     UnsupportedCapabilityError,
     WriteGuard,
 )
+from jebao_flow.devices.identity import PhysicalDeviceBinding, configuration_fingerprint
 from jebao_flow.protocol.models import (
     Capability,
     DeviceCapabilities,
+    DeviceSchedule,
     DeviceState,
     DeviceTarget,
     LinkageRole,
@@ -56,6 +59,23 @@ class SimulatedJebaoDevice(JebaoDevice):
             native_modes=frozenset({"constant", "pulse", "sine"}),
             linkage_roles=frozenset(LinkageRole),
         )
+        product_key = self._capabilities.product_key
+        self._physical_binding = (
+            PhysicalDeviceBinding.from_identifiers(
+                vendor_device_id=f"simulated-{device_id}",
+                mac_address=hashlib.sha256(device_id.encode()).hexdigest()[:12],
+                product_key=product_key,
+                config_fingerprint=configuration_fingerprint(
+                    {
+                        "device_id": device_id,
+                        "model": self._capabilities.model,
+                        "product_key": product_key,
+                    }
+                ),
+            )
+            if product_key is not None
+            else None
+        )
         self._latency_seconds = latency_seconds
         self._connected = False
         self._lock = asyncio.Lock()
@@ -67,12 +87,17 @@ class SimulatedJebaoDevice(JebaoDevice):
             frequency=None,
             linkage=LinkageRole.INDEPENDENT,
             timer_enabled=False,
+            schedule=DeviceSchedule(enabled=False),
         )
         self.commands: list[SimulatedCommand] = []
 
     @property
     def device_id(self) -> str:
         return self._device_id
+
+    @property
+    def physical_binding(self) -> PhysicalDeviceBinding | None:
+        return self._physical_binding
 
     @property
     def connected(self) -> bool:
@@ -209,6 +234,10 @@ class SimulatedJebaoDevice(JebaoDevice):
             command_values: list[tuple[str, Any]] = [("enabled", target.enabled)]
             if target.timer_enabled is not None:
                 updates["timer_enabled"] = target.timer_enabled
+                if self._state.schedule is not None:
+                    updates["schedule"] = self._state.schedule.model_copy(
+                        update={"enabled": target.timer_enabled}
+                    )
                 command_values.append(("timer_enabled", target.timer_enabled))
             if target.linkage is not None:
                 updates["linkage"] = target.linkage
@@ -243,7 +272,12 @@ class SimulatedJebaoDevice(JebaoDevice):
                 )
             await self._delay()
             now = datetime.now(UTC)
-            self._state = self._state.model_copy(update={field: value, "observed_at": now})
+            updates = {field: value, "observed_at": now}
+            if field == "timer_enabled" and self._state.schedule is not None:
+                updates["schedule"] = self._state.schedule.model_copy(
+                    update={"enabled": value}
+                )
+            self._state = self._state.model_copy(update=updates)
             self.commands.append(SimulatedCommand(field, value, now))
 
     async def _delay(self) -> None:

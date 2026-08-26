@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import stat
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -22,6 +23,8 @@ class LinkageJournalError(RuntimeError):
 class JsonLinkageJournalStore:
     """Persist one unfinished operation with atomic replace and filesystem sync."""
 
+    _MAX_JOURNAL_BYTES = 1024 * 1024
+
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.lock_path = self.path.with_name(f".{self.path.name}.lock")
@@ -29,16 +32,25 @@ class JsonLinkageJournalStore:
 
     def load(self) -> LinkageTransactionRecord | None:
         with self._lock:
-            if not self.path.exists():
+            descriptor = self._open_existing(allow_absent=True)
+            if descriptor is None:
                 return None
             try:
-                return LinkageTransactionRecord.model_validate_json(
-                    self.path.read_text(encoding="utf-8")
-                )
+                with os.fdopen(descriptor, encoding="utf-8") as stream:
+                    descriptor = -1
+                    payload = stream.read(self._MAX_JOURNAL_BYTES + 1)
+                if len(payload.encode()) > self._MAX_JOURNAL_BYTES:
+                    raise LinkageJournalError("linkage recovery journal is too large")
+                return LinkageTransactionRecord.model_validate_json(payload)
+            except LinkageJournalError:
+                raise
             except (OSError, ValidationError, ValueError) as error:
                 raise LinkageJournalError(
                     f"cannot read linkage recovery journal {self.path}"
                 ) from error
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
 
     @contextmanager
     def lease(self) -> Iterator[None]:
@@ -46,8 +58,11 @@ class JsonLinkageJournalStore:
 
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-            os.fchmod(descriptor, 0o600)
+            flags = os.O_CREAT | os.O_RDWR
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(self.lock_path, flags, 0o600)
+            self._validate_open_file(descriptor, self.lock_path)
         except OSError as error:
             raise LinkageJournalError(
                 f"cannot open linkage journal lease {self.lock_path}"
@@ -59,6 +74,7 @@ class JsonLinkageJournalStore:
                 raise LinkageJournalClaimError(
                     f"linkage journal {self.path} is owned by another daemon"
                 ) from error
+            self._validate_open_file(descriptor, self.lock_path)
             yield
         finally:
             try:
@@ -93,6 +109,9 @@ class JsonLinkageJournalStore:
             temporary_path: Path | None = None
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
+                existing = self._open_existing(allow_absent=True)
+                if existing is not None:
+                    os.close(existing)
                 temporary_path = self._write_temporary(record)
                 temporary_path.replace(self.path)
                 self._fsync_parent()
@@ -107,6 +126,9 @@ class JsonLinkageJournalStore:
     def clear(self) -> None:
         with self._lock:
             try:
+                existing = self._open_existing(allow_absent=True)
+                if existing is not None:
+                    os.close(existing)
                 self.path.unlink(missing_ok=True)
                 self._fsync_parent()
             except OSError as error:
@@ -148,3 +170,50 @@ class JsonLinkageJournalStore:
             temporary_path.unlink(missing_ok=True)
             raise
         return temporary_path
+
+    def _open_existing(self, *, allow_absent: bool) -> int | None:
+        """Open one private regular journal without following or blocking on special files."""
+
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise LinkageJournalError("O_NOFOLLOW is required for linkage recovery state")
+        try:
+            metadata = self.path.lstat()
+        except FileNotFoundError:
+            if allow_absent:
+                return None
+            raise LinkageJournalError("linkage recovery journal disappeared") from None
+        except OSError as error:
+            raise LinkageJournalError("linkage recovery journal metadata is unavailable") from error
+        self._require_safe_metadata(metadata)
+
+        descriptor = -1
+        try:
+            descriptor = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            self._validate_open_file(descriptor, self.path)
+            return descriptor
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _require_safe_metadata(metadata: os.stat_result) -> None:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            raise LinkageJournalError("linkage recovery journal has unsafe metadata")
+
+    @classmethod
+    def _validate_open_file(cls, descriptor: int, path: Path) -> None:
+        try:
+            opened = os.fstat(descriptor)
+            current = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise LinkageJournalError("linkage safety file changed while opening") from error
+        cls._require_safe_metadata(opened)
+        cls._require_safe_metadata(current)
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise LinkageJournalError("linkage safety file changed while opening")

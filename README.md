@@ -6,9 +6,9 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 
 > 현재 상태: 실제 장비의 읽기 전용 검증과 지속 Observer, 오프라인 control 프레임 생성,
 > MQTT 상태 계약과 Home Assistant 커스텀 통합 뼈대까지 구현했습니다. 기본 실행 모드는
-> `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 실제 수조 제어에는 아직 사용하면
-> 안 됩니다. 네이티브 Sync/Async 임시 시험과 자동 원복 코어도 구현됐지만 아직 데몬/MQTT
-> 실행 경로에는 연결하지 않았습니다.
+> `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 현장 전용 단일 Pro 검증과 짧은
+> Native Sync/Async 시험 하네스, 영속 복구 supervisor까지 별도 경로로 구현했지만 실제 장비
+> write는 아직 수행하지 않았습니다. 일반 데몬·MQTT·HA에는 이 시험 기능을 노출하지 않습니다.
 
 ## 구조
 
@@ -38,6 +38,10 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
   장비당 원자적 목표 프레임 생성
 - 첫 write 전 영속 저널, 서로 다른 마스터/슬레이브 출력, 수동·시간초과·오류·취소 원복,
   재시작 복구를 갖춘 임시 네이티브 Linkage 트랜잭션 코어
+- 한 대씩 `동일값 → 1~5%p 하향 → 정확한 원복`을 검증하는 최초 write 자격 절차와 24시간
+  물리 장비 바인딩 영수증
+- 모든 물리 write workflow가 공유하는 `/hardware-safety` 전역 lease, 비상정지 latch와
+  recovery-only supervisor
 - 비동기 가상 장비 시뮬레이터
 - Constant, Sync, Anti Phase 및 VorTech 계열에서 영감을 얻은 그룹 패턴 계산기
 - 3대 수류모터의 `left`/`right`/`crossflow` 역할과 개별 `gain`/`phase`

@@ -6,10 +6,12 @@ from jebao_flow.config import DeviceConfig, DeviceControlConfig, DeviceType, Run
 from jebao_flow.devices import (
     HardwareWritesDisabledError,
     LanJebaoDevice,
+    PhysicalDeviceBinding,
     SafetyInterlockError,
     StateVerificationError,
     UnsupportedCapabilityError,
     create_lan_device,
+    create_read_only_lan_device,
 )
 from jebao_flow.protocol.models import Capability, DeviceTarget, LinkageRole
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
@@ -328,3 +330,61 @@ async def test_runtime_dry_run_overrides_per_device_write_opt_in() -> None:
 
     with pytest.raises(HardwareWritesDisabledError):
         await device.set_power(50)
+
+
+def test_factory_only_exposes_binding_when_both_stable_identifiers_exist() -> None:
+    complete = DeviceConfig(
+        id="right",
+        name="Right",
+        type=DeviceType.WAVEMAKER,
+        address="pump.local",
+        product_key=LOCAL_WAVEMAKER_PRO.product_key,
+        identity={
+            "device_id": "private-vendor-id",
+            "mac_address": "00:11:22:33:44:55",
+        },
+    )
+    incomplete_data = complete.model_dump(mode="json")
+    incomplete_data["identity"] = {"device_id": "private-vendor-id"}
+    incomplete = DeviceConfig.model_validate(incomplete_data)
+    discovery_config = complete.model_copy(update={"product_key": None})
+    changed_limits = complete.model_copy(
+        update={"limits": PowerLimits(min_power=30, max_power=74)}
+    )
+
+    bound = create_lan_device(complete, RuntimeConfig(), session_factory=_FakeSession)
+    read_only_bound = create_read_only_lan_device(
+        discovery_config,
+        "new-dhcp-address.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        session_factory=_FakeSession,
+    )
+    unbound = create_lan_device(incomplete, RuntimeConfig(), session_factory=_FakeSession)
+    changed = create_lan_device(changed_limits, RuntimeConfig(), session_factory=_FakeSession)
+
+    assert bound.physical_binding is not None
+    assert bound.physical_binding.product_key == LOCAL_WAVEMAKER_PRO.product_key
+    serialized = bound.physical_binding.model_dump_json()
+    assert "private-vendor-id" not in serialized
+    assert "001122334455" not in serialized
+    assert read_only_bound.physical_binding == bound.physical_binding
+    assert changed.physical_binding != bound.physical_binding
+    assert unbound.physical_binding is None
+
+
+def test_lan_adapter_rejects_binding_for_a_different_product() -> None:
+    binding = PhysicalDeviceBinding.from_identifiers(
+        vendor_device_id="private-vendor-id",
+        mac_address="001122334455",
+        product_key=LOCAL_WAVEMAKER.product_key,
+        config_fingerprint="1" * 64,
+    )
+
+    with pytest.raises(ValueError, match="binding product key"):
+        LanJebaoDevice(
+            "right",
+            "pump.local",
+            LOCAL_WAVEMAKER_PRO.product_key,
+            physical_binding=binding,
+            session_factory=_FakeSession,
+        )

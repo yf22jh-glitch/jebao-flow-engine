@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import stat
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,6 +12,8 @@ from jebao_flow.devices import (
     LinkageApplyError,
     LinkageJournalClaimError,
     LinkagePreflightError,
+    LinkageRecoveryAuthority,
+    LinkageRecoveryReason,
     LinkageRollbackError,
     LinkageSafetyInterlock,
     LinkageStopReason,
@@ -17,6 +21,7 @@ from jebao_flow.devices import (
     LinkageTransactionBusyError,
     LinkageTransactionPhase,
     LinkageTransactionRecord,
+    PhysicalDeviceBinding,
     SimulatedJebaoDevice,
     TemporaryLinkageController,
     schedule_structure_fingerprint,
@@ -36,13 +41,16 @@ class _RecordingStore(JsonLinkageJournalStore):
     def __init__(self, path: Path, events: list[str] | None = None) -> None:
         super().__init__(path)
         self.events = events
+        self.records = []
 
     def save(self, record):
+        self.records.append(record)
         if self.events is not None:
             self.events.append(f"journal:{record.phase.value}")
         super().save(record)
 
     def create(self, record):
+        self.records.append(record)
         if self.events is not None:
             self.events.append(f"journal:{record.phase.value}")
         super().create(record)
@@ -66,10 +74,14 @@ class _FailOnceOnRelationshipDevice(_RecordingDevice):
 
     async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
         await super().write_target(target, guard=guard)
-        if target.linkage in {
-            LinkageRole.SYNC_SLAVE,
-            LinkageRole.ASYNC_SLAVE,
-        } and not self.failed:
+        if (
+            target.linkage
+            in {
+                LinkageRole.SYNC_SLAVE,
+                LinkageRole.ASYNC_SLAVE,
+            }
+            and not self.failed
+        ):
             self.failed = True
             raise RuntimeError("simulated ACK loss after apply")
 
@@ -99,11 +111,58 @@ class _ScheduledDevice(_RecordingDevice):
         state = await super().get_state()
         return state.model_copy(
             update={
-                "schedule": self.schedule.model_copy(
-                    update={"enabled": bool(state.timer_enabled)}
+                "schedule": self.schedule.model_copy(update={"enabled": bool(state.timer_enabled)})
+            }
+        )
+
+
+class _MissingScheduleDevice(_RecordingDevice):
+    async def get_state(self):
+        state = await super().get_state()
+        return state.model_copy(update={"schedule": None})
+
+
+class _InvalidScheduleDevice(_RecordingDevice):
+    async def get_state(self):
+        state = await super().get_state()
+        return state.model_copy(
+            update={
+                "schedule": DeviceSchedule(
+                    enabled=bool(state.timer_enabled),
+                    invalid_slots=(0,),
                 )
             }
         )
+
+
+class _SlowSnapshotDevice(_RecordingDevice):
+    async def get_state(self):
+        await asyncio.sleep(0.02)
+        return await super().get_state()
+
+
+class _DriftPeerOnTimerRestoreDevice(_RecordingDevice):
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.peer: SimulatedJebaoDevice | None = None
+        self.drift_once = False
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        await super().write_target(target, guard=guard)
+        if target.timer_enabled is True and self.drift_once and self.peer is not None:
+            self.drift_once = False
+            self.peer._state = self.peer._state.model_copy(  # noqa: SLF001
+                update={"power": self.peer._state.power + 1}  # noqa: SLF001
+            )
+
+
+def _binding(device_id: str, *, product_key: str = "simulator") -> PhysicalDeviceBinding:
+    return PhysicalDeviceBinding.from_identifiers(
+        vendor_device_id=f"private-vendor-{device_id}",
+        mac_address="001122334455" if device_id == "master" else "aabbccddeeff",
+        product_key=product_key,
+        config_fingerprint="1" * 64 if device_id == "master" else "2" * 64,
+    )
 
 
 async def _ready_device(
@@ -116,9 +175,13 @@ async def _ready_device(
     frequency: int = 25,
     timer_enabled: bool = True,
 ) -> _RecordingDevice:
-    device = device_class(device_id) if capabilities is None else device_class(
-        device_id,
-        capabilities=capabilities,
+    device = (
+        device_class(device_id)
+        if capabilities is None
+        else device_class(
+            device_id,
+            capabilities=capabilities,
+        )
     )
     await device.connect()
     await device.set_enabled(enabled)
@@ -161,8 +224,7 @@ def _controller(
     return TemporaryLinkageController(
         {"master": master, "slave": slave},
         store,
-        safety_interlock=interlock
-        or LinkageSafetyInterlock(initially_permitted=True),
+        safety_interlock=interlock or LinkageSafetyInterlock(initially_permitted=True),
     )
 
 
@@ -220,7 +282,13 @@ async def test_temporary_linkage_applies_distinct_power_and_restores_on_manual_s
         "linkage": LinkageRole.INDEPENDENT,
         "timer_enabled": True,
         "error": None,
-        "schedule": None,
+        "schedule": {
+            "enabled": True,
+            "device_local_time": None,
+            "slot_capacity": 48,
+            "entries": (),
+            "invalid_slots": (),
+        },
         "observed_attributes": {},
     }
     assert (await slave.get_state()).power == 52
@@ -250,12 +318,47 @@ async def test_timeout_restores_and_journal_precedes_first_device_write(tmp_path
     store = _RecordingStore(tmp_path / "linkage.json", events)
     controller = _controller(master, slave, store)
 
-    result = await controller.run(_spec(duration=0.01))
+    result = await controller.run(_spec(duration=0.1))
 
     first_write = next(index for index, value in enumerate(events) if value.startswith("write:"))
     assert events.index("journal:prepared") < first_write
     assert events.index("journal:applying") < first_write
     assert result.stop_reason is LinkageStopReason.TIMEOUT
+    assert store.load() is None
+
+
+async def test_prewrite_stop_during_snapshot_sends_zero_control_frames(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", device_class=_SlowSnapshotDevice)
+    slave = await _ready_device("slave")
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    controller = _controller(master, slave, store)
+
+    task = asyncio.create_task(controller.run(_spec(duration=1)))
+    while controller.active_operation_id is None:  # noqa: ASYNC110
+        await asyncio.sleep(0)
+    assert await controller.stop() is True
+
+    result = await task
+
+    assert result.stop_reason is LinkageStopReason.MANUAL
+    assert master.commands == []
+    assert slave.commands == []
+    assert store.load() is None
+
+
+async def test_snapshot_delay_expiry_sends_zero_control_frames(tmp_path: Path) -> None:
+    master = await _ready_device("master", device_class=_SlowSnapshotDevice)
+    slave = await _ready_device("slave", device_class=_SlowSnapshotDevice)
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    controller = _controller(master, slave, store)
+
+    with pytest.raises(LinkageApplyError, match="expired before its first control frame"):
+        await controller.run(_spec(duration=0.005))
+
+    assert master.commands == []
+    assert slave.commands == []
     assert store.load() is None
 
 
@@ -336,9 +439,7 @@ async def test_active_watchdog_detects_slave_power_being_overwritten(tmp_path: P
     slave = await _ready_device("slave", power=53)
     store = JsonLinkageJournalStore(tmp_path / "linkage.json")
     controller = _controller(master, slave, store)
-    task = asyncio.create_task(
-        controller.run(_spec(duration=5, verification_interval=0.005))
-    )
+    task = asyncio.create_task(controller.run(_spec(duration=5, verification_interval=0.005)))
     await _wait_until_active(controller, store)
 
     # Simulate the controller behavior seen in the vendor app: master propagation overwrites
@@ -385,21 +486,147 @@ async def test_failed_restore_latches_journal_and_recovery_retries(tmp_path: Pat
     controller = _controller(master, slave, store)
 
     with pytest.raises(LinkageRollbackError, match="requires recovery"):
-        await controller.run(_spec(duration=0.01))
+        await controller.run(_spec(duration=0.1))
 
     pending = store.load()
     assert pending is not None
     assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
+    assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
     assert pending.failed_device_ids == ("slave",)
+    assert pending.restored_device_ids == ("master",)
     assert (await master.get_state()).timer_enabled is True
     assert (await slave.get_state()).timer_enabled is False
     with pytest.raises(LinkageTransactionBusyError, match="must complete first"):
-        await controller.run(_spec(duration=0.01))
+        await controller.run(_spec(duration=0.1))
+
+    master_command_count = len(master.commands)
+    with pytest.raises(LinkageRollbackError, match="requires recovery"):
+        await controller.recover_pending(authority=LinkageRecoveryAuthority.ATTENDED)
+    assert len(master.commands) == master_command_count
+    assert store.load().restored_device_ids == ("master",)
 
     slave.fail_timer_restore = False
-    assert await controller.recover_pending() is True
+    assert (
+        await controller.recover_pending(authority=LinkageRecoveryAuthority.ATTENDED) is True
+    )
     assert store.load() is None
     assert (await slave.get_state()).timer_enabled is True
+
+
+async def test_stale_linkage_recovery_requires_attended_authority(tmp_path: Path) -> None:
+    master = await _ready_device("master", timer_enabled=False)
+    slave = await _ready_device("slave", timer_enabled=False)
+    spec = _spec(duration=5)
+    snapshots = (
+        DeviceControlSnapshot.from_state(
+            "master",
+            await master.get_state(),
+            physical_binding=master.physical_binding,
+        ),
+        DeviceControlSnapshot.from_state(
+            "slave",
+            await slave.get_state(),
+            physical_binding=slave.physical_binding,
+        ),
+    )
+    await master.write_target(
+        DeviceTarget(
+            enabled=True,
+            power=40,
+            mode="sine",
+            frequency=30,
+            linkage=LinkageRole.MASTER,
+            timer_enabled=False,
+        )
+    )
+    await slave.write_target(
+        DeviceTarget(
+            enabled=True,
+            power=40,
+            mode="sine",
+            frequency=30,
+            linkage=LinkageRole.SYNC_SLAVE,
+            timer_enabled=False,
+        )
+    )
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    now = datetime.now().astimezone()
+    store.create(
+        LinkageTransactionRecord(
+            operation_id=spec.operation_id,
+            phase=LinkageTransactionPhase.ACTIVE,
+            spec=spec,
+            snapshots=snapshots,
+            created_at=now - timedelta(minutes=2),
+            updated_at=now - timedelta(minutes=1),
+            expires_at=now - timedelta(minutes=1, seconds=30),
+        )
+    )
+    controller = _controller(master, slave, store)
+    master.commands.clear()
+    slave.commands.clear()
+    command_counts = (len(master.commands), len(slave.commands))
+
+    with pytest.raises(LinkagePreflightError, match="attended authority"):
+        await controller.recover_pending()
+
+    assert (len(master.commands), len(slave.commands)) == command_counts
+    assert (
+        await controller.recover_pending(authority=LinkageRecoveryAuthority.ATTENDED) is True
+    )
+    assert store.load() is None
+
+
+async def test_backwards_clock_from_updated_record_blocks_automatic_recovery(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", timer_enabled=False)
+    slave = await _ready_device("slave", timer_enabled=False)
+    spec = _spec(duration=5)
+    snapshots = (
+        DeviceControlSnapshot.from_state(
+            "master", await master.get_state(), physical_binding=master.physical_binding
+        ),
+        DeviceControlSnapshot.from_state(
+            "slave", await slave.get_state(), physical_binding=slave.physical_binding
+        ),
+    )
+    for device, role in (
+        (master, LinkageRole.MASTER),
+        (slave, LinkageRole.SYNC_SLAVE),
+    ):
+        await device.write_target(
+            DeviceTarget(
+                enabled=True,
+                power=40,
+                mode="sine",
+                frequency=30,
+                linkage=role,
+                timer_enabled=False,
+            )
+        )
+        device.commands.clear()
+
+    now = datetime.now().astimezone()
+    store = JsonLinkageJournalStore(tmp_path / "future-update.json")
+    store.create(
+        LinkageTransactionRecord(
+            operation_id=spec.operation_id,
+            phase=LinkageTransactionPhase.ACTIVE,
+            spec=spec,
+            snapshots=snapshots,
+            created_at=now - timedelta(seconds=1),
+            updated_at=now + timedelta(minutes=1),
+            expires_at=now + timedelta(seconds=5),
+        )
+    )
+
+    with pytest.raises(LinkagePreflightError, match="attended authority"):
+        await _controller(master, slave, store).recover_pending()
+
+    assert master.commands == []
+    assert slave.commands == []
+    assert store.load() is not None
 
 
 async def test_schedule_change_keeps_timer_off_and_requires_recovery(tmp_path: Path) -> None:
@@ -425,16 +652,19 @@ async def test_schedule_change_keeps_timer_off_and_requires_recovery(tmp_path: P
     )
     assert await controller.stop() is True
 
-    with pytest.raises(LinkageRollbackError, match="schedule changed"):
+    with pytest.raises(LinkageRollbackError, match="control_restore_failed"):
         await task
 
     pending = store.load()
     assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
     assert pending.failed_device_ids == ("slave",)
     assert (await slave.get_state()).timer_enabled is False
 
     slave.schedule = DeviceSchedule(enabled=False)
-    assert await controller.recover_pending() is True
+    assert (
+        await controller.recover_pending(authority=LinkageRecoveryAuthority.ATTENDED) is True
+    )
     assert store.load() is None
     assert (await slave.get_state()).timer_enabled is True
 
@@ -457,6 +687,7 @@ async def test_safety_interlock_keeps_emergency_stop_authoritative(tmp_path: Pat
     pending = store.load()
     assert pending is not None
     assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
     assert pending.failed_device_ids == ("master", "slave")
     for device in (master, slave):
         state = await device.get_state()
@@ -464,12 +695,45 @@ async def test_safety_interlock_keeps_emergency_stop_authoritative(tmp_path: Pat
         assert state.linkage is LinkageRole.INDEPENDENT
         assert state.timer_enabled is False
 
-    assert await controller.recover_pending() is True
+    with pytest.raises(LinkagePreflightError, match="attended authority"):
+        await controller.recover_pending()
+
+    assert (
+        await controller.recover_pending(authority=LinkageRecoveryAuthority.ATTENDED) is True
+    )
     assert store.load() is None
     assert (await master.get_state()).power == 47
     assert (await slave.get_state()).power == 53
     assert (await master.get_state()).enabled is True
     assert (await slave.get_state()).enabled is True
+
+
+async def test_safety_reason_is_durable_before_any_safe_stop_write(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    master = await _ready_device("master")
+    slave = await _ready_device("slave")
+    master.events = events
+    slave.events = events
+    store = _RecordingStore(tmp_path / "linkage.json", events)
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    controller = _controller(master, slave, store, interlock=interlock)
+    task = asyncio.create_task(controller.run(_spec(duration=5)))
+    await _wait_until_active(controller, store)
+    events.clear()
+
+    interlock.trip()
+    with pytest.raises(LinkageRollbackError, match="safety interlock"):
+        await task
+
+    recovery_index = events.index("journal:recovery_required")
+    safe_stop_indexes = [index for index, event in enumerate(events) if event.startswith("write:")]
+    assert safe_stop_indexes
+    assert recovery_index < min(safe_stop_indexes)
+    pending = store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
 
 
 async def test_safety_interlock_is_fail_closed_by_default(tmp_path: Path) -> None:
@@ -511,13 +775,26 @@ async def test_startup_recovery_never_resumes_an_unfinished_transaction(
     slave = await _ready_device("slave", power=54, frequency=28)
     spec = _spec(duration=5)
     snapshots = (
-        DeviceControlSnapshot.from_state("master", await master.get_state()),
-        DeviceControlSnapshot.from_state("slave", await slave.get_state()),
+        DeviceControlSnapshot.from_state(
+            "master",
+            await master.get_state(),
+            physical_binding=master.physical_binding,
+        ),
+        DeviceControlSnapshot.from_state(
+            "slave",
+            await slave.get_state(),
+            physical_binding=slave.physical_binding,
+        ),
     )
     now = datetime.now().astimezone()
     record = LinkageTransactionRecord(
         operation_id=spec.operation_id,
         phase=phase,
+        recovery_reason=(
+            LinkageRecoveryReason.RESTORE_FAILED
+            if phase is LinkageTransactionPhase.RECOVERY_REQUIRED
+            else None
+        ),
         spec=spec,
         snapshots=snapshots,
         created_at=now,
@@ -551,7 +828,16 @@ async def test_startup_recovery_never_resumes_an_unfinished_transaction(
     slave.commands.clear()
     restarted = _controller(master, slave, store)
 
-    assert await restarted.recover_pending() is True
+    assert (
+        await restarted.recover_pending(
+            authority=(
+                LinkageRecoveryAuthority.AUTOMATIC
+                if phase is LinkageTransactionPhase.PREPARED
+                else LinkageRecoveryAuthority.ATTENDED
+            )
+        )
+        is True
+    )
 
     assert store.load() is None
     assert (await master.get_state()).power == 46
@@ -580,9 +866,7 @@ async def test_preflight_rejects_bar_style_async_without_writes(tmp_path: Path) 
             }
         ),
         native_modes=frozenset({"constant", "sine"}),
-        linkage_roles=frozenset(
-            {LinkageRole.INDEPENDENT, LinkageRole.MASTER, LinkageRole.SLAVE}
-        ),
+        linkage_roles=frozenset({LinkageRole.INDEPENDENT, LinkageRole.MASTER, LinkageRole.SLAVE}),
     )
     master = await _ready_device("master", capabilities=capabilities)
     slave = await _ready_device("slave", capabilities=capabilities)
@@ -647,6 +931,233 @@ async def test_preflight_requires_known_matching_product_keys(tmp_path: Path) ->
     assert store.load() is None
 
 
+async def test_preflight_requires_exact_stable_physical_bindings(tmp_path: Path) -> None:
+    master = await _ready_device("master")
+    slave = await _ready_device("slave")
+    master._physical_binding = None
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+
+    with pytest.raises(LinkagePreflightError, match="stable physical binding"):
+        await _controller(master, slave, store).run(_spec())
+
+    assert master.commands == []
+    assert slave.commands == []
+    assert store.load() is None
+
+
+async def test_preflight_rejects_unaudited_current_mode_without_writes(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master")
+    slave = await _ready_device("slave")
+    await master.set_mode("random")
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    controller = _controller(master, slave, store)
+
+    with pytest.raises(LinkagePreflightError, match="audited restore modes"):
+        await controller.run(_spec())
+
+    assert master.commands == []
+    assert slave.commands == []
+    assert store.load() is None
+
+
+@pytest.mark.parametrize(
+    ("device_class", "message"),
+    [
+        (_MissingScheduleDevice, "without a decoded schedule"),
+        (_InvalidScheduleDevice, "invalid slots"),
+    ],
+)
+async def test_preflight_requires_valid_schedule_when_timer_is_enabled(
+    tmp_path: Path,
+    device_class: type[_RecordingDevice],
+    message: str,
+) -> None:
+    master = await _ready_device("master", device_class=device_class)
+    slave = await _ready_device("slave")
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    controller = _controller(master, slave, store)
+
+    with pytest.raises(LinkagePreflightError, match=message):
+        await controller.run(_spec())
+
+    assert master.commands == []
+    assert slave.commands == []
+    assert store.load() is None
+
+
+async def test_recovery_rejects_physical_binding_mismatch_without_writes(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master")
+    slave = await _ready_device("slave")
+    spec = _spec()
+    snapshots = (
+        DeviceControlSnapshot.from_state(
+            "master",
+            await master.get_state(),
+            physical_binding=master.physical_binding,
+        ),
+        DeviceControlSnapshot.from_state(
+            "slave",
+            await slave.get_state(),
+            physical_binding=slave.physical_binding,
+        ),
+    )
+    now = datetime.now().astimezone()
+    record = LinkageTransactionRecord(
+        operation_id=spec.operation_id,
+        phase=LinkageTransactionPhase.ACTIVE,
+        spec=spec,
+        snapshots=snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=5),
+    )
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    store.save(record)
+    slave._physical_binding = _binding("slave-remapped")
+    master.commands.clear()
+    slave.commands.clear()
+
+    with pytest.raises(LinkagePreflightError, match="physical binding"):
+        await _controller(master, slave, store).recover_pending()
+
+    assert master.commands == []
+    assert slave.commands == []
+    assert store.load() == record
+
+
+async def test_recovery_detects_and_durably_skips_an_already_exact_device(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=46, frequency=22)
+    slave = await _ready_device("slave", power=54, frequency=28)
+    spec = _spec()
+    snapshots = (
+        DeviceControlSnapshot.from_state(
+            "master",
+            await master.get_state(),
+            physical_binding=master.physical_binding,
+        ),
+        DeviceControlSnapshot.from_state(
+            "slave",
+            await slave.get_state(),
+            physical_binding=slave.physical_binding,
+        ),
+    )
+    await slave.write_target(
+        DeviceTarget(
+            enabled=True,
+            power=42,
+            mode="sine",
+            frequency=30,
+            linkage=LinkageRole.SYNC_SLAVE,
+            timer_enabled=False,
+        )
+    )
+    now = datetime.now().astimezone()
+    record = LinkageTransactionRecord(
+        operation_id=spec.operation_id,
+        phase=LinkageTransactionPhase.ACTIVE,
+        spec=spec,
+        snapshots=snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=5),
+    )
+    store = _RecordingStore(tmp_path / "linkage.json")
+    store.save(record)
+    master.commands.clear()
+    slave.commands.clear()
+
+    assert (
+        await _controller(master, slave, store).recover_pending(
+            authority=LinkageRecoveryAuthority.ATTENDED
+        )
+        is True
+    )
+
+    assert master.commands == []
+    assert slave.commands
+    assert any(saved.restored_device_ids == ("master",) for saved in store.records)
+    assert store.load() is None
+    assert (await slave.get_state()).power == 54
+    assert (await slave.get_state()).timer_enabled is True
+
+
+async def test_final_recovery_readback_reopens_a_stale_restored_marker(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=46, frequency=22)
+    slave = await _ready_device(
+        "slave",
+        power=54,
+        frequency=28,
+        device_class=_DriftPeerOnTimerRestoreDevice,
+    )
+    slave.peer = master
+    spec = _spec()
+    snapshots = (
+        DeviceControlSnapshot.from_state(
+            "master",
+            await master.get_state(),
+            physical_binding=master.physical_binding,
+        ),
+        DeviceControlSnapshot.from_state(
+            "slave",
+            await slave.get_state(),
+            physical_binding=slave.physical_binding,
+        ),
+    )
+    await slave.write_target(
+        DeviceTarget(
+            enabled=True,
+            power=42,
+            mode="sine",
+            frequency=30,
+            linkage=LinkageRole.SYNC_SLAVE,
+            timer_enabled=False,
+        )
+    )
+    now = datetime.now().astimezone()
+    store = JsonLinkageJournalStore(tmp_path / "linkage.json")
+    store.save(
+        LinkageTransactionRecord(
+            operation_id=spec.operation_id,
+            phase=LinkageTransactionPhase.RECOVERY_REQUIRED,
+            recovery_reason=LinkageRecoveryReason.RESTORE_FAILED,
+            spec=spec,
+            snapshots=snapshots,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=5),
+            failed_device_ids=("slave",),
+            restored_device_ids=("master",),
+        )
+    )
+    master.commands.clear()
+    slave.commands.clear()
+    slave.drift_once = True
+
+    with pytest.raises(LinkageRollbackError, match="final_verification_failed"):
+        await _controller(master, slave, store).recover_pending(
+            authority=LinkageRecoveryAuthority.ATTENDED
+        )
+
+    pending = store.load()
+    assert pending is not None
+    assert pending.restored_device_ids == ("slave",)
+    assert pending.failed_device_ids == ("master",)
+
+
 def test_schedule_fingerprint_ignores_clock_and_timer_state() -> None:
     entry = ScheduleEntry(
         slot=0,
@@ -667,11 +1178,7 @@ def test_schedule_fingerprint_ignores_clock_and_timer_state() -> None:
         entries=(entry,),
     )
     changed = second.model_copy(
-        update={
-            "entries": (
-                entry.model_copy(update={"parameters": {"flow": 50}}),
-            )
-        }
+        update={"entries": (entry.model_copy(update={"parameters": {"flow": 50}}),)}
     )
 
     assert schedule_structure_fingerprint(first) == schedule_structure_fingerprint(second)
@@ -684,6 +1191,7 @@ def test_json_journal_round_trip_is_private_and_atomic(tmp_path: Path) -> None:
     snapshots = tuple(
         {
             "device_id": device_id,
+            "physical_binding": _binding(device_id),
             "enabled": True,
             "power": 45,
             "mode": "constant",
@@ -709,6 +1217,10 @@ def test_json_journal_round_trip_is_private_and_atomic(tmp_path: Path) -> None:
     store.create(record)
 
     assert store.load() == record
+    assert record.version == 2
+    journal_text = path.read_text(encoding="utf-8")
+    assert "private-vendor-master" not in journal_text
+    assert "001122334455" not in journal_text
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert list(path.parent.glob("*.tmp")) == []
     with pytest.raises(LinkageJournalClaimError, match="already claimed"):
@@ -718,10 +1230,115 @@ def test_json_journal_round_trip_is_private_and_atomic(tmp_path: Path) -> None:
     assert store.load() is None
 
 
+def test_recovery_reason_is_required_only_for_recovery_required_records() -> None:
+    now = datetime.now().astimezone()
+    spec = _spec()
+    snapshots = tuple(
+        {
+            "device_id": device_id,
+            "physical_binding": _binding(device_id),
+            "enabled": True,
+            "power": 45,
+            "mode": "constant",
+            "frequency": 20,
+            "linkage": "independent",
+            "timer_enabled": True,
+        }
+        for device_id in ("master", "slave")
+    )
+    common = {
+        "operation_id": spec.operation_id,
+        "spec": spec,
+        "snapshots": snapshots,
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": now + timedelta(seconds=10),
+    }
+
+    with pytest.raises(ValueError, match="recovery_reason is required"):
+        LinkageTransactionRecord.model_validate(
+            {**common, "phase": LinkageTransactionPhase.RECOVERY_REQUIRED}
+        )
+    with pytest.raises(ValueError, match="must be None"):
+        LinkageTransactionRecord.model_validate(
+            {
+                **common,
+                "phase": LinkageTransactionPhase.ACTIVE,
+                "recovery_reason": LinkageRecoveryReason.SAFETY_INTERLOCK,
+            }
+        )
+
+    recovery = LinkageTransactionRecord.model_validate(
+        {
+            **common,
+            "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+            "recovery_reason": LinkageRecoveryReason.SAFETY_INTERLOCK,
+        }
+    )
+    assert recovery.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+    assert '"recovery_reason":"safety_interlock"' in recovery.model_dump_json()
+
+
 def test_corrupt_journal_fails_closed(tmp_path: Path) -> None:
     path = tmp_path / "linkage.json"
     path.write_text('{"phase":', encoding="utf-8")
+    path.chmod(0o600)
     store = JsonLinkageJournalStore(path)
 
     with pytest.raises(LinkageJournalError, match="cannot read"):
         store.load()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["fifo", "hardlink", "mode"])
+def test_journal_rejects_unsafe_files_without_blocking(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    path = tmp_path / "linkage.json"
+    if unsafe_kind == "fifo":
+        os.mkfifo(path, mode=0o600)
+    else:
+        path.write_text("{}", encoding="utf-8")
+        path.chmod(0o600)
+        if unsafe_kind == "hardlink":
+            os.link(path, tmp_path / "journal-alias")
+        else:
+            path.chmod(0o640)
+
+    with pytest.raises(LinkageJournalError, match="unsafe metadata"):
+        JsonLinkageJournalStore(path).load()
+
+
+def test_legacy_journal_without_physical_bindings_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "linkage.json"
+    now = datetime.now().astimezone()
+    spec = _spec()
+    legacy = {
+        "version": 1,
+        "operation_id": spec.operation_id,
+        "phase": "active",
+        "spec": spec.model_dump(mode="json"),
+        "snapshots": [
+            {
+                "device_id": device_id,
+                "enabled": True,
+                "power": 45,
+                "mode": "constant",
+                "frequency": 20,
+                "linkage": "independent",
+                "timer_enabled": True,
+            }
+            for device_id in ("master", "slave")
+        ],
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "expires_at": (now + timedelta(seconds=10)).isoformat(),
+    }
+    path.write_text(
+        json.dumps(legacy),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+    with pytest.raises(LinkageJournalError, match="cannot read"):
+        JsonLinkageJournalStore(path).load()

@@ -4,10 +4,11 @@ Local Wavemaker Pro 스키마에는 `independent`, `master`, `sync_slave`, `asyn
 있습니다. Jebao Flow Engine은 이 값을 일반 그룹 패턴으로 계속 덮어쓰지 않고, 시작과
 종료가 명확한 임시 시험 트랜잭션으로 다룹니다.
 
-현재 구현 범위는 Python 서비스 코어, LAN payload 생성, 영속 JSON 저널과 시뮬레이터
-테스트입니다. 실제 장비 write는 한 건도 보내지 않았으며 데몬 actuator, MQTT 명령,
-Home Assistant 버튼에는 아직 연결하지 않았습니다. 실행기가 준비되지 않은 `control`
-설정도 외부에는 Observer로 표시하고 명령을 거부합니다.
+현재 구현 범위는 Python 서비스 코어, LAN payload 생성, 영속 JSON 저널, 현장 전용 one-shot
+CLI와 recovery-only supervisor입니다. 실제 장비 write는 한 건도 보내지 않았으며 데몬
+actuator, MQTT 명령, Home Assistant 버튼에는 아직 연결하지 않았습니다. 일반 `jebao-flowd`는
+계속 Observer로 운용하고, 현장 시험은 공유 `/hardware-safety` 볼륨을 쓰는 별도 컨테이너에서만
+실행합니다.
 
 ## 지원 동작
 
@@ -26,6 +27,10 @@ Home Assistant 버튼에는 아직 연결하지 않았습니다. 실행기가 �
 - 정확한 복구가 끝나지 않으면 `RECOVERY_REQUIRED` 저널을 유지하고 새 시험 차단
 - 비상 정지·정비 safety interlock이 걸리면 저장된 ON 상태보다 안전 정지를 우선하고,
   명시적인 latch 해제 전까지 정확한 복원을 보류
+- 두 장비 각각의 최근 단일 write 자격 영수증이 preflight와 첫 linkage frame 직전에 모두
+  유효해야 시작
+- 프로세스가 비정상 종료되면 시험을 재개하지 않고, 최근 TimerOFF 기록만 30초 유예 안에서
+  supervisor가 복구하며 stale·TimerON·safety 기록은 현장 확인을 요구
 
 ## 사전 조건
 
@@ -36,9 +41,11 @@ Home Assistant 버튼에는 아직 연결하지 않았습니다. 실행기가 �
 - 요청 모드는 첫 실기 범위인 `constant`, `pulse`, `sine` 중 하나이며 Linkage 역할 지원
 - 둘 다 현재 `independent`
 - 둘 다 이미 운전 중이며, 시험 기능이 꺼진 펌프를 임의로 켜지 않음
+- 둘 다 `TimerON=false`; 앱 시간표는 현장 시험 전에 수동으로 중지
 - 현재값과 시험 출력이 설정된 power range/step 안에 있어 정확히 복원 가능
 - 두 product key가 모두 확인됐고 서로 동일
 - 이전 복구 저널이 없음
+- 같은 물리 바인딩으로 24시간 안에 완료한 단일 장비 자격 영수증이 두 대 모두 존재
 - daemon이 명시적으로 만든 fail-closed safety interlock이 허용 상태이며, 이 interlock을
   장비 I/O lock 안에서 control frame 전송 직전에 다시 검사
 
@@ -52,10 +59,10 @@ Home Assistant 버튼에는 아직 연결하지 않았습니다. 실행기가 �
 actual state + schedule structure snapshot
                 │
                 ▼
-        PREPARED journal fsync
+ deployment-wide lease + PREPARED journal fsync
                 │
                 ▼
- TimerOFF + independent + constant + safe-low
+ independent + constant + safe-low (TimerOFF already required)
                 │
                 ▼
  master target ──────> slave target
@@ -65,7 +72,7 @@ actual state + schedule structure snapshot
                 │
       manual stop · timeout · failure
                 ▼
- slave detach → master detach → exact values → TimerON last
+ slave detach → master detach → exact TimerOFF values
 ```
 
 장비 두 대에 대한 네트워크 write는 하나의 원자적 연산이 될 수 없습니다. 그래서 ACK 이후
@@ -78,6 +85,6 @@ slot entries, invalid slots, capacity만 포함하고 장비 시각과 `TimerON`
 1. 현장에서 단일 Pro 펌프의 동일값 write와 read-back을 먼저 검증
 2. `Flow`를 다르게 준 slave가 실제 유량도 독립적으로 유지하는지 관찰
 3. `sync_slave`와 `async_slave`의 물리 파형 및 Frequency 의미 확인
-4. 앱 스케줄 경계에서 `TimerON` 해제·복원 동작 확인
+4. 앱 스케줄은 별도 시험으로 분리하고, 첫 Linkage 시험에서는 계속 `TimerON=false` 유지
 5. 장비 한 대 전원 제거와 데몬 강제 종료 후 복구 확인
-6. 위 결과가 통과한 뒤에만 daemon startup recovery와 MQTT/HA 임시 시험 UI 연결
+6. 위 결과가 통과한 뒤에만 MQTT/HA 임시 시험 UI 연결

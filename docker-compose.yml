@@ -9,9 +9,29 @@ services:
     volumes:
       - ${JEBAO_FLOW_CONFIG:-./config.example.yaml}:/config/config.yaml:ro
       - jebao-flow-data:/data
+      - jebao-flow-hardware-safety:/hardware-safety
     read_only: true
     tmpfs:
       - /tmp
 
+  jebao-flow-recovery:
+    profiles: ["hardware"]
+    build: .
+    container_name: jebao-flow-recovery
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ${JEBAO_FLOW_HARDWARE_CONFIG:-./config.hardware-test.example.yaml}:/config/hardware-test.yaml:ro
+      - jebao-flow-data:/data
+      - jebao-flow-hardware-safety:/hardware-safety
+    read_only: true
+    tmpfs:
+      - /tmp
+    entrypoint: ["jebao-flow-recovery"]
+    command: ["--config", "/config/hardware-test.yaml", "--poll-interval", "0.5"]
+    stop_grace_period: 2m
+
 volumes:
   jebao-flow-data:
+  jebao-flow-hardware-safety:
+    name: jebao-flow-hardware-safety

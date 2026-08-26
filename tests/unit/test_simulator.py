@@ -25,12 +25,26 @@ async def test_simulator_tracks_commands_and_state() -> None:
     assert state.power == 65
     assert state.mode == "wave"
     assert state.frequency == 40
+    assert device.physical_binding is not None
     assert [(command.name, command.value) for command in device.commands] == [
         ("enabled", True),
         ("power", 65),
         ("mode", "wave"),
         ("frequency", 40),
     ]
+
+
+async def test_simulator_keeps_timer_and_decoded_schedule_state_consistent() -> None:
+    device = SimulatedJebaoDevice("left")
+    await device.connect()
+
+    await device.set_timer_enabled(True)
+    state = await device.get_state()
+
+    assert state.timer_enabled is True
+    assert state.schedule is not None
+    assert state.schedule.enabled is True
+    assert state.schedule.invalid_slots == ()
 
 
 async def test_simulator_rejects_io_while_disconnected() -> None:

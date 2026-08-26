@@ -10,4 +10,4 @@ build
 dist
 data
 config.yaml
-
+config.hardware-test.yaml

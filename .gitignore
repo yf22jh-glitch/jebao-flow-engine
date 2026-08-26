@@ -16,5 +16,5 @@ build/
 dist/
 htmlcov/
 config.yaml
+config.hardware-test.yaml
 data/
-

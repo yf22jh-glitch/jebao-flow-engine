@@ -74,6 +74,10 @@ class ScriptedReadOnlyDevice(JebaoDevice):
         return self._device_id
 
     @property
+    def physical_binding(self):
+        return None
+
+    @property
     def connected(self):
         return self._connected
 

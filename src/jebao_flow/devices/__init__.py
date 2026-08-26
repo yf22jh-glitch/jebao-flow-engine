@@ -7,12 +7,19 @@ from jebao_flow.devices.base import (
     UnsupportedCapabilityError,
 )
 from jebao_flow.devices.factory import create_lan_device, create_read_only_lan_device
+from jebao_flow.devices.identity import (
+    PhysicalDeviceBinding,
+    configuration_fingerprint,
+    physical_identity_key,
+)
 from jebao_flow.devices.lan import ControlPlan, LanJebaoDevice
 from jebao_flow.devices.linkage import (
     DeviceControlSnapshot,
     LinkageApplyError,
     LinkageJournalClaimError,
     LinkagePreflightError,
+    LinkageRecoveryAuthority,
+    LinkageRecoveryReason,
     LinkageRollbackError,
     LinkageSafetyInterlock,
     LinkageStopReason,
@@ -27,20 +34,47 @@ from jebao_flow.devices.linkage import (
 from jebao_flow.devices.observer import ReadOnlyObserver
 from jebao_flow.devices.registry import DeviceRegistry
 from jebao_flow.devices.simulator import SimulatedJebaoDevice
+from jebao_flow.devices.verification import (
+    AttendedRestoreAuthority,
+    DeviceVerificationError,
+    DeviceVerificationErrorCode,
+    DeviceVerificationPhase,
+    DeviceVerificationRecord,
+    DeviceVerificationRecoveryReason,
+    DeviceVerificationResult,
+    DeviceVerificationSnapshot,
+    DeviceVerificationSpec,
+    DeviceVerificationStopReason,
+    FirstPhysicalWriteVerifier,
+    JsonDeviceVerificationJournalStore,
+)
 
 __all__ = [
     "DeviceConnectionError",
     "DeviceControlSnapshot",
+    "DeviceVerificationError",
+    "DeviceVerificationErrorCode",
+    "DeviceVerificationPhase",
+    "DeviceVerificationRecord",
+    "DeviceVerificationRecoveryReason",
+    "DeviceVerificationResult",
+    "DeviceVerificationSnapshot",
+    "DeviceVerificationSpec",
+    "DeviceVerificationStopReason",
     "DeviceRegistry",
     "ControlPlan",
     "create_lan_device",
     "create_read_only_lan_device",
     "HardwareWritesDisabledError",
+    "FirstPhysicalWriteVerifier",
     "JebaoDevice",
+    "JsonDeviceVerificationJournalStore",
     "LanJebaoDevice",
     "LinkageApplyError",
     "LinkageJournalClaimError",
     "LinkagePreflightError",
+    "LinkageRecoveryAuthority",
+    "LinkageRecoveryReason",
     "LinkageRollbackError",
     "LinkageSafetyInterlock",
     "LinkageStopReason",
@@ -49,11 +83,15 @@ __all__ = [
     "LinkageTransactionBusyError",
     "LinkageTransactionPhase",
     "LinkageTransactionRecord",
+    "PhysicalDeviceBinding",
     "ReadOnlyObserver",
     "SafetyInterlockError",
     "SimulatedJebaoDevice",
     "StateVerificationError",
     "TemporaryLinkageController",
+    "AttendedRestoreAuthority",
     "UnsupportedCapabilityError",
+    "configuration_fingerprint",
+    "physical_identity_key",
     "schedule_structure_fingerprint",
 ]

@@ -13,12 +13,12 @@ COPY src ./src
 
 RUN python -m pip install --no-cache-dir .
 
-RUN mkdir -p /config /data \
-    && chown -R jebao-flow:jebao-flow /config /data
+RUN mkdir -p /config /data /hardware-safety \
+    && chown -R jebao-flow:jebao-flow /config /data /hardware-safety \
+    && chmod 0700 /hardware-safety
 
 USER jebao-flow
-VOLUME ["/config", "/data"]
+VOLUME ["/data", "/hardware-safety"]
 
 ENTRYPOINT ["jebao-flowd"]
 CMD ["--config", "/config/config.yaml"]
-

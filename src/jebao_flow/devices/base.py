@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
+from jebao_flow.devices.identity import PhysicalDeviceBinding
 from jebao_flow.protocol.models import DeviceCapabilities, DeviceState, DeviceTarget, LinkageRole
 
 
@@ -39,6 +40,10 @@ class JebaoDevice(ABC):
     @property
     @abstractmethod
     def device_id(self) -> str: ...
+
+    @property
+    @abstractmethod
+    def physical_binding(self) -> PhysicalDeviceBinding | None: ...
 
     @property
     @abstractmethod
