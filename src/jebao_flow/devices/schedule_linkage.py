@@ -138,7 +138,7 @@ class ScheduleLinkageRunProgressKind(StrEnum):
 
 
 class ScheduleLinkageRunFailure(StrEnum):
-    """Coarse failure locations safe to persist outside the role transaction."""
+    """Allow-listed failure locations safe to persist outside the role transaction."""
 
     FRESH_CAPTURE = "fresh_capture"
     AUTHORIZATION = "authorization"
@@ -149,16 +149,31 @@ class ScheduleLinkageRunFailure(StrEnum):
     MASTER_INTENT = "master_intent"
     MASTER_ADAPTER_WRITE = "master_adapter_write"
     MASTER_PAIR_VERIFICATION = "master_pair_verification"
+    MASTER_PAIR_SESSION_REFRESH = "master_pair_session_refresh"
+    MASTER_PAIR_STATE_READ = "master_pair_state_read"
+    MASTER_PAIR_DEADLINE = "master_pair_deadline"
+    MASTER_PAIR_CLOCK = "master_pair_clock"
+    MASTER_PAIR_STATE = "master_pair_state"
+    MASTER_PAIR_AUTO = "master_pair_auto"
     SLAVE_INTENT = "slave_intent"
     SLAVE_ADAPTER_WRITE = "slave_adapter_write"
     SLAVE_PAIR_VERIFICATION = "slave_pair_verification"
+    SLAVE_PAIR_SESSION_REFRESH = "slave_pair_session_refresh"
+    SLAVE_PAIR_STATE_READ = "slave_pair_state_read"
+    SLAVE_PAIR_DEADLINE = "slave_pair_deadline"
+    SLAVE_PAIR_CLOCK = "slave_pair_clock"
+    SLAVE_PAIR_STATE = "slave_pair_state"
+    SLAVE_PAIR_AUTO = "slave_pair_auto"
     MONITOR = "monitor"
+    CANCELLED = "cancelled"
 
 
 class ScheduleLinkageDriftDimension(StrEnum):
     """Allow-listed dimensions only; no identity or before/after value is disclosed."""
 
     PHYSICAL_BINDING = "physical_binding"
+    ONLINE = "online"
+    ERROR = "error"
     ENABLED = "enabled"
     POWER = "power"
     MODE = "mode"
@@ -173,6 +188,7 @@ class ScheduleLinkageDriftDimension(StrEnum):
     BEFORE_AUTO_FEED_TIME = "before_auto_feed_time"
     NEXT_AUTO_TUPLE = "next_auto_tuple"
     CONFIRMATION_TOKEN = "confirmation_token"
+    AUTO_EVIDENCE = "auto_evidence"
 
 
 class ScheduleLinkageRunProgressEvent(BaseModel):
@@ -197,9 +213,24 @@ class ScheduleLinkageRunProgressEvent(BaseModel):
                 raise ValueError("failed schedule-linkage progress requires an allow-listed stage")
         elif self.failure is not None:
             raise ValueError("only failed schedule-linkage progress may include a failure")
+        pair_state_failures = {
+            ScheduleLinkageRunFailure.MASTER_PAIR_STATE,
+            ScheduleLinkageRunFailure.SLAVE_PAIR_STATE,
+        }
+        pair_auto_failures = {
+            ScheduleLinkageRunFailure.MASTER_PAIR_AUTO,
+            ScheduleLinkageRunFailure.SLAVE_PAIR_AUTO,
+        }
+        dimensional_failures = {
+            ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH,
+            *pair_state_failures,
+            *pair_auto_failures,
+        }
         if self.drift_dimensions:
-            if self.failure is not ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH:
-                raise ValueError("drift dimensions are restricted to confirmation mismatch")
+            if self.failure not in dimensional_failures:
+                raise ValueError(
+                    "drift dimensions require confirmation or pair state evidence"
+                )
             canonical = tuple(
                 dimension
                 for dimension in ScheduleLinkageDriftDimension
@@ -207,8 +238,52 @@ class ScheduleLinkageRunProgressEvent(BaseModel):
             )
             if self.drift_dimensions != canonical:
                 raise ValueError("drift dimensions must be unique and canonically ordered")
-        elif self.failure is ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH:
-            raise ValueError("confirmation mismatch requires at least one drift dimension")
+        elif self.failure in dimensional_failures:
+            raise ValueError("dimensional failure requires at least one drift dimension")
+        pair_state_dimensions = {
+            ScheduleLinkageDriftDimension.ONLINE,
+            ScheduleLinkageDriftDimension.ERROR,
+            ScheduleLinkageDriftDimension.ENABLED,
+            ScheduleLinkageDriftDimension.POWER,
+            ScheduleLinkageDriftDimension.MODE,
+            ScheduleLinkageDriftDimension.FREQUENCY,
+            ScheduleLinkageDriftDimension.TIMER_ENABLED,
+            ScheduleLinkageDriftDimension.LINKAGE,
+            ScheduleLinkageDriftDimension.SCHEDULE_FINGERPRINT,
+        }
+        confirmation_dimensions = {
+            ScheduleLinkageDriftDimension.PHYSICAL_BINDING,
+            ScheduleLinkageDriftDimension.ENABLED,
+            ScheduleLinkageDriftDimension.POWER,
+            ScheduleLinkageDriftDimension.MODE,
+            ScheduleLinkageDriftDimension.FREQUENCY,
+            ScheduleLinkageDriftDimension.TIMER_ENABLED,
+            ScheduleLinkageDriftDimension.LINKAGE,
+            ScheduleLinkageDriftDimension.SCHEDULE_FINGERPRINT,
+            ScheduleLinkageDriftDimension.BOUNDARY,
+            ScheduleLinkageDriftDimension.BEFORE_AUTO_MODE,
+            ScheduleLinkageDriftDimension.BEFORE_AUTO_FLOW,
+            ScheduleLinkageDriftDimension.BEFORE_AUTO_FREQUENCY,
+            ScheduleLinkageDriftDimension.BEFORE_AUTO_FEED_TIME,
+            ScheduleLinkageDriftDimension.NEXT_AUTO_TUPLE,
+            ScheduleLinkageDriftDimension.CONFIRMATION_TOKEN,
+        }
+        if (
+            self.failure is ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH
+            and any(
+                dimension not in confirmation_dimensions
+                for dimension in self.drift_dimensions
+            )
+        ):
+            raise ValueError("confirmation mismatch contains a non-confirmation dimension")
+        if self.failure in pair_state_failures and any(
+            dimension not in pair_state_dimensions for dimension in self.drift_dimensions
+        ):
+            raise ValueError("pair state failure contains a non-state dimension")
+        if self.failure in pair_auto_failures and self.drift_dimensions != (
+            ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+        ):
+            raise ValueError("pair Auto failure requires only the Auto evidence dimension")
         return self
 
 
@@ -800,6 +875,7 @@ class ScheduleActiveLinkageController:
         self._observation_deadline: float | None = None
         self._run_failure: ScheduleLinkageRunFailure | None = None
         self._run_drift_dimensions: tuple[ScheduleLinkageDriftDimension, ...] = ()
+        self._run_pair_participant: Literal["master", "slave"] | None = None
 
     @property
     def active_operation_id(self) -> str | None:
@@ -1053,6 +1129,10 @@ class ScheduleActiveLinkageController:
                 ScheduleLinkageRunProgressKind.MONITOR_COMPLETED
             )
         except BaseException as operation_error:
+            if isinstance(operation_error, asyncio.CancelledError):
+                self._run_failure = ScheduleLinkageRunFailure.CANCELLED
+                self._run_drift_dimensions = ()
+                self._run_pair_participant = None
             self._emit_failure_best_effort()
             if record is None or not journal_created:
                 raise
@@ -1094,6 +1174,7 @@ class ScheduleActiveLinkageController:
             self._observation_deadline = None
             self._run_failure = None
             self._run_drift_dimensions = ()
+            self._run_pair_participant = None
 
     async def _capture_pair(
         self,
@@ -1255,13 +1336,18 @@ class ScheduleActiveLinkageController:
         )
 
     async def _read_pair(self, spec: ScheduleLinkageSpec) -> dict[str, DeviceState]:
+        result = await self._read_pair_states(spec)
+        self._assert_pair_clock_skew(spec, result)
+        return result
+
+    async def _read_pair_states(self, spec: ScheduleLinkageSpec) -> dict[str, DeviceState]:
+        """Read both states without folding clock validation into transport failure."""
+
         ids = (spec.master_device_id, spec.slave_device_id)
         states = await asyncio.gather(
             *(self._get_device(device_id).get_state() for device_id in ids)
         )
-        result = dict(zip(ids, states, strict=True))
-        self._assert_pair_clock_skew(spec, result)
-        return result
+        return dict(zip(ids, states, strict=True))
 
     async def _assert_first_write_gate(
         self,
@@ -1352,11 +1438,18 @@ class ScheduleActiveLinkageController:
         await self._get_device(device_id).write_linkage(role, guard=self._forward_write_allowed)
         self._emit_progress_best_effort(adapter_completed)
         self._run_failure = pair_failure
+        self._run_pair_participant = "master" if role is LinkageRole.MASTER else "slave"
         self._emit_progress_best_effort(pair_started)
+        self._set_pair_verification_failure("session_refresh")
         await self._refresh_pair_sessions_if_enabled(record.spec)
-        states = await self._read_pair(record.spec)
+        self._set_pair_verification_failure("state_read")
+        states = await self._read_pair_states(record.spec)
+        self._set_pair_verification_failure("clock")
+        self._assert_pair_clock_skew(record.spec, states)
         sampled_at = self._monotonic()
+        self._set_pair_verification_failure("deadline")
         self._assert_observation_deadline(sampled_at)
+        self._set_pair_verification_failure("clock")
         self._assert_clock_continuity(
             record.spec,
             states,
@@ -1375,13 +1468,17 @@ class ScheduleActiveLinkageController:
                 else LinkageRole.INDEPENDENT
             ),
         }
+        self._set_pair_verification_failure("state")
         self._assert_pair_sample(record, states, expected_roles, phase="before")
+        self._run_failure = pair_failure
+        self._run_drift_dimensions = ()
         linked = (*record.linked_device_ids, device_id)
         record = record.model_copy(
             update={"linked_device_ids": linked, "updated_at": self._record_now(record)}
         )
         self._store.save(record)
         self._emit_progress_best_effort(pair_verified)
+        self._run_pair_participant = None
         return record, self._clock_anchor(states, sampled_at)
 
     async def _monitor_boundary(
@@ -1513,9 +1610,14 @@ class ScheduleActiveLinkageController:
         observed: dict[str, ScheduleAutoEvidence] = {}
         for snapshot in record.snapshots:
             state = states[snapshot.device_id]
+            self._set_pair_verification_failure("state")
             self._assert_immutable_snapshot(snapshot, state, expected_roles[snapshot.device_id])
             if phase == "ambiguous":
                 continue
+            self._set_pair_verification_failure(
+                "auto",
+                dimensions=(ScheduleLinkageDriftDimension.AUTO_EVIDENCE,),
+            )
             observed[snapshot.device_id] = _observed_auto(snapshot.device_id, state)
 
         full_linkage_topology = (
@@ -1595,6 +1697,45 @@ class ScheduleActiveLinkageController:
             self._sample_observer(sample)
         except BaseException:
             _LOGGER.warning("schedule-linkage sample evidence could not be persisted")
+
+    def _set_pair_verification_failure(
+        self,
+        substage: Literal[
+            "session_refresh",
+            "state_read",
+            "deadline",
+            "clock",
+            "state",
+            "auto",
+        ],
+        *,
+        dimensions: tuple[ScheduleLinkageDriftDimension, ...] = (),
+    ) -> None:
+        """Set in-memory detail only while a post-write pair checkpoint owns failure."""
+
+        participant = self._run_pair_participant
+        if participant is None:
+            return
+        failure_by_stage = {
+            ("master", "session_refresh"): (
+                ScheduleLinkageRunFailure.MASTER_PAIR_SESSION_REFRESH
+            ),
+            ("master", "state_read"): ScheduleLinkageRunFailure.MASTER_PAIR_STATE_READ,
+            ("master", "deadline"): ScheduleLinkageRunFailure.MASTER_PAIR_DEADLINE,
+            ("master", "clock"): ScheduleLinkageRunFailure.MASTER_PAIR_CLOCK,
+            ("master", "state"): ScheduleLinkageRunFailure.MASTER_PAIR_STATE,
+            ("master", "auto"): ScheduleLinkageRunFailure.MASTER_PAIR_AUTO,
+            ("slave", "session_refresh"): (
+                ScheduleLinkageRunFailure.SLAVE_PAIR_SESSION_REFRESH
+            ),
+            ("slave", "state_read"): ScheduleLinkageRunFailure.SLAVE_PAIR_STATE_READ,
+            ("slave", "deadline"): ScheduleLinkageRunFailure.SLAVE_PAIR_DEADLINE,
+            ("slave", "clock"): ScheduleLinkageRunFailure.SLAVE_PAIR_CLOCK,
+            ("slave", "state"): ScheduleLinkageRunFailure.SLAVE_PAIR_STATE,
+            ("slave", "auto"): ScheduleLinkageRunFailure.SLAVE_PAIR_AUTO,
+        }
+        self._run_failure = failure_by_stage[(participant, substage)]
+        self._run_drift_dimensions = dimensions
 
     async def _refresh_pair_sessions_if_enabled(
         self,
@@ -1919,6 +2060,61 @@ class ScheduleActiveLinkageController:
         state: DeviceState,
         expected_role: LinkageRole,
     ) -> None:
+        dimensions: set[ScheduleLinkageDriftDimension] = set()
+        if not state.online:
+            dimensions.add(ScheduleLinkageDriftDimension.ONLINE)
+        if state.error:
+            dimensions.add(ScheduleLinkageDriftDimension.ERROR)
+        for dimension, actual_value, expected_value in (
+            (
+                ScheduleLinkageDriftDimension.ENABLED,
+                state.enabled,
+                snapshot.enabled,
+            ),
+            (
+                ScheduleLinkageDriftDimension.POWER,
+                state.power,
+                snapshot.power,
+            ),
+            (
+                ScheduleLinkageDriftDimension.MODE,
+                state.mode,
+                snapshot.mode,
+            ),
+            (
+                ScheduleLinkageDriftDimension.FREQUENCY,
+                state.frequency,
+                snapshot.frequency,
+            ),
+            (
+                ScheduleLinkageDriftDimension.TIMER_ENABLED,
+                state.timer_enabled,
+                True,
+            ),
+            (
+                ScheduleLinkageDriftDimension.LINKAGE,
+                state.linkage,
+                expected_role,
+            ),
+        ):
+            if actual_value != expected_value:
+                dimensions.add(dimension)
+        schedule_mismatch = (
+            schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint
+        )
+        if schedule_mismatch:
+            dimensions.add(ScheduleLinkageDriftDimension.SCHEDULE_FINGERPRINT)
+        canonical_dimensions = tuple(
+            dimension
+            for dimension in ScheduleLinkageDriftDimension
+            if dimension in dimensions
+        )
+        if dimensions:
+            self._set_pair_verification_failure(
+                "state",
+                dimensions=canonical_dimensions,
+            )
+
         self._assert_healthy(snapshot.device_id, state)
         actual = (
             state.enabled,
@@ -1940,7 +2136,7 @@ class ScheduleActiveLinkageController:
             raise ScheduleLinkageApplyError(
                 f"device {snapshot.device_id!r} changed outside Linkage"
             )
-        if schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint:
+        if schedule_mismatch:
             raise ScheduleLinkageApplyError(
                 f"device {snapshot.device_id!r} schedule fingerprint changed"
             )

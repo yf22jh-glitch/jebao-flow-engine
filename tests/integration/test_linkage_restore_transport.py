@@ -640,6 +640,10 @@ async def test_schedule_role_activation_refreshes_report_reply_streams_and_detac
         assert store.load() is None
         assert progress[-2].kind is ScheduleLinkageRunProgressKind.MONITOR_STARTED
         assert progress[-1].kind is ScheduleLinkageRunProgressKind.MONITOR_COMPLETED
+        assert all(
+            event.failure is None and event.drift_dimensions == ()
+            for event in progress
+        )
         assert master_server.current_state == master_independent
         assert slave_server.current_state == slave_independent
         assert len(master_server.control_payload_events) == 2

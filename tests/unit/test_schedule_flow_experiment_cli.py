@@ -1248,6 +1248,41 @@ def test_status_prints_durable_role_failure_without_gated_stage_events(capsys) -
     assert "physical_binding" not in output
 
 
+def test_status_prints_sanitized_pair_verification_substage(capsys) -> None:
+    base = _intent(
+        phase=HardwareTestIntentPhase.RECOVERY_REQUIRED,
+        outcome="recovery_required",
+    )
+    role_failure = ScheduleLinkageRunProgressEvent(
+        kind=ScheduleLinkageRunProgressKind.FAILED,
+        occurred_at=base.created_at,
+        failure=ScheduleLinkageRunFailure.SLAVE_PAIR_STATE,
+        drift_dimensions=(
+            ScheduleLinkageDriftDimension.POWER,
+            ScheduleLinkageDriftDimension.LINKAGE,
+        ),
+    )
+    intent = HardwareTestIntent.model_validate(
+        base.model_dump(mode="python")
+        | {"schedule_flow_role_failure": role_failure}
+    )
+    store = SimpleNamespace(load=lambda: intent)
+    empty = SimpleNamespace(load=lambda: None)
+
+    assert cli._status(  # noqa: SLF001
+        SimpleNamespace(instance=SimpleNamespace(id="main")),
+        store,
+        empty,
+        empty,
+        empty,
+    ) == 0
+    output = capsys.readouterr().out
+    assert "Role run failure: slave_pair_state/power,linkage" in output
+    assert "device_id" not in output
+    assert "AutoFlow" not in output
+    assert "private transport detail" not in output
+
+
 def test_status_treats_authentic_terminal_v2_as_no_schedule_flow(capsys) -> None:
     legacy = SimpleNamespace(load=lambda: _legacy_intent())
     empty = SimpleNamespace(load=lambda: None)

@@ -15,6 +15,7 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageRecord,
     ScheduleLinkageRollbackError,
     ScheduleLinkageRunFailure,
+    ScheduleLinkageRunProgressEvent,
     ScheduleLinkageRunProgressKind,
     ScheduleLinkageSpec,
     ScheduleLinkageStopReason,
@@ -97,6 +98,12 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         self.fail_after_connect_numbers: set[int] = set()
         self.fail_after_apply_roles: set[LinkageRole] = set()
         self.fail_before_roles: set[LinkageRole] = set()
+        self.fail_state_reads_for_roles: set[LinkageRole] = set()
+        self.reported_state_updates_by_role: dict[LinkageRole, dict[str, object]] = {}
+        self.reported_auto_updates_by_role: dict[LinkageRole, dict[str, object]] = {}
+        self.reported_schedule_drift_roles: set[LinkageRole] = set()
+        self.clock_offsets_after_role: dict[LinkageRole, float] = {}
+        self.last_written_role = LinkageRole.INDEPENDENT
         self._failed_after: set[LinkageRole] = set()
         self._failed_before: set[LinkageRole] = set()
         self.entries: tuple[ScheduleEntry, ...] = (
@@ -135,6 +142,9 @@ class _ScheduleDevice(SimulatedJebaoDevice):
 
     async def get_state(self):
         state = await super().get_state()
+        if state.linkage in self.fail_state_reads_for_roles:
+            self.fail_state_reads_for_roles.remove(state.linkage)
+            raise RuntimeError("simulated linked state read failure")
         self.clock = self.base_clock + timedelta(
             seconds=self.virtual_time.value + self.clock_offset_seconds
         )
@@ -189,6 +199,30 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         ):
             self._advanced_monotonic_after_read = True
             self.virtual_time.value += self.advance_monotonic_after_read_seconds
+        state_updates = self.reported_state_updates_by_role.pop(state.linkage, None)
+        if state_updates is not None:
+            result = result.model_copy(update=state_updates)
+        if state.linkage in self.reported_schedule_drift_roles:
+            self.reported_schedule_drift_roles.remove(state.linkage)
+            if result.schedule is None:
+                raise AssertionError("simulated schedule drift requires a schedule")
+            result = result.model_copy(
+                update={
+                    "schedule": result.schedule.model_copy(
+                        update={"invalid_slots": (47,)}
+                    )
+                }
+            )
+        auto_updates = self.reported_auto_updates_by_role.pop(state.linkage, None)
+        if auto_updates is not None:
+            result = result.model_copy(
+                update={
+                    "observed_attributes": {
+                        **result.observed_attributes,
+                        **auto_updates,
+                    }
+                }
+            )
         return result
 
     async def set_enabled(self, enabled: bool) -> None:
@@ -221,6 +255,9 @@ class _ScheduleDevice(SimulatedJebaoDevice):
             self._failed_before.add(role)
             raise RuntimeError("simulated linkage failure before apply")
         await super().write_linkage(role, guard=guard)
+        self.last_written_role = role
+        if role in self.clock_offsets_after_role:
+            self.clock_offset_seconds = self.clock_offsets_after_role[role]
         if self.events is not None:
             self.events.append(f"write:{self.device_id}:{role.value}")
         if role in self.fail_after_apply_roles and role not in self._failed_after:
@@ -329,13 +366,14 @@ def _controller(
     sample_observer=None,
     progress_observer=None,
     refresh_sessions_before_critical_reads: bool = False,
+    monotonic_clock=None,
 ) -> ScheduleActiveLinkageController:
     return ScheduleActiveLinkageController(
         {"master": master, "slave": slave},
         store,
         prerequisite_authorizer=authorizer or (lambda _spec, _snapshots: None),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
-        monotonic_clock=master.virtual_time.monotonic,
+        monotonic_clock=monotonic_clock or master.virtual_time.monotonic,
         sleep=master.virtual_time.sleep,
         sample_observer=sample_observer,
         progress_observer=progress_observer,
@@ -373,6 +411,62 @@ def test_run_progress_rank_follows_allowlisted_declaration_order() -> None:
         schedule_linkage_run_progress_rank(kind)
         for kind in ScheduleLinkageRunProgressKind
     ] == list(range(len(ScheduleLinkageRunProgressKind)))
+
+
+def test_legacy_pair_failure_checkpoint_remains_valid_without_dimensions() -> None:
+    event = ScheduleLinkageRunProgressEvent.model_validate(
+        {
+            "kind": "failed",
+            "occurred_at": datetime.now(UTC).isoformat(),
+            "failure": "slave_pair_verification",
+            "drift_dimensions": [],
+        }
+    )
+
+    assert event.failure is ScheduleLinkageRunFailure.SLAVE_PAIR_VERIFICATION
+    assert event.drift_dimensions == ()
+
+
+def test_pair_failure_checkpoint_rejects_noncanonical_or_unscoped_dimensions() -> None:
+    now = datetime.now(UTC)
+    with pytest.raises(ValidationError, match="require confirmation or pair state"):
+        ScheduleLinkageRunProgressEvent(
+            kind=ScheduleLinkageRunProgressKind.FAILED,
+            occurred_at=now,
+            failure=ScheduleLinkageRunFailure.MONITOR,
+            drift_dimensions=(ScheduleLinkageDriftDimension.POWER,),
+        )
+    with pytest.raises(ValidationError, match="canonically ordered"):
+        ScheduleLinkageRunProgressEvent(
+            kind=ScheduleLinkageRunProgressKind.FAILED,
+            occurred_at=now,
+            failure=ScheduleLinkageRunFailure.SLAVE_PAIR_STATE,
+            drift_dimensions=(
+                ScheduleLinkageDriftDimension.POWER,
+                ScheduleLinkageDriftDimension.ENABLED,
+            ),
+        )
+    with pytest.raises(ValidationError, match="non-state dimension"):
+        ScheduleLinkageRunProgressEvent(
+            kind=ScheduleLinkageRunProgressKind.FAILED,
+            occurred_at=now,
+            failure=ScheduleLinkageRunFailure.SLAVE_PAIR_STATE,
+            drift_dimensions=(ScheduleLinkageDriftDimension.AUTO_EVIDENCE,),
+        )
+    with pytest.raises(ValidationError, match="only the Auto evidence"):
+        ScheduleLinkageRunProgressEvent(
+            kind=ScheduleLinkageRunProgressKind.FAILED,
+            occurred_at=now,
+            failure=ScheduleLinkageRunFailure.SLAVE_PAIR_AUTO,
+            drift_dimensions=(ScheduleLinkageDriftDimension.POWER,),
+        )
+    with pytest.raises(ValidationError, match="non-confirmation dimension"):
+        ScheduleLinkageRunProgressEvent(
+            kind=ScheduleLinkageRunProgressKind.FAILED,
+            occurred_at=now,
+            failure=ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH,
+            drift_dimensions=(ScheduleLinkageDriftDimension.ONLINE,),
+        )
 
 
 async def test_feed_to_constant_uses_effective_defaults_and_distant_gap_is_allowed(
@@ -876,7 +970,8 @@ async def test_post_write_session_refresh_failure_detaches_from_durable_intent(
         await controller.run(preflight)
 
     assert progress[-1].kind is ScheduleLinkageRunProgressKind.FAILED
-    assert progress[-1].failure is ScheduleLinkageRunFailure.MASTER_PAIR_VERIFICATION
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MASTER_PAIR_SESSION_REFRESH
+    assert progress[-1].drift_dimensions == ()
     assert store.load() is None
     assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
     assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
@@ -885,6 +980,167 @@ async def test_post_write_session_refresh_failure_detaches_from_durable_intent(
         LinkageRole.INDEPENDENT,
     ]
     assert slave.calls == []
+
+
+async def test_slave_pair_session_refresh_failure_is_precise_and_restored(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair()
+    # Initial capture, first-write gate and master pair verification consume refreshes 1..3.
+    slave.fail_after_connect_numbers.add(4)
+    progress = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "slave-pair-refresh.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_spec()))
+
+    failed = progress[-1]
+    assert failed.failure is ScheduleLinkageRunFailure.SLAVE_PAIR_SESSION_REFRESH
+    assert failed.drift_dimensions == ()
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+
+
+async def test_slave_pair_state_read_failure_is_precise_and_restored(tmp_path: Path) -> None:
+    master, slave = await _ready_pair()
+    slave.fail_state_reads_for_roles.add(LinkageRole.ASYNC_SLAVE)
+    progress = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "slave-pair-read.json")
+    controller = _controller(master, slave, store, progress_observer=progress.append)
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_spec()))
+
+    failed = progress[-1]
+    assert failed.failure is ScheduleLinkageRunFailure.SLAVE_PAIR_STATE_READ
+    assert failed.drift_dimensions == ()
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+
+
+async def test_slave_pair_deadline_failure_is_precise_and_restored(tmp_path: Path) -> None:
+    master, slave = await _ready_pair()
+
+    def deadline_clock() -> float:
+        return 200.0 if slave.last_written_role is LinkageRole.ASYNC_SLAVE else 0.0
+
+    progress = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "slave-pair-deadline.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        monotonic_clock=deadline_clock,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_spec()))
+
+    failed = progress[-1]
+    assert failed.failure is ScheduleLinkageRunFailure.SLAVE_PAIR_DEADLINE
+    assert failed.drift_dimensions == ()
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+
+
+async def test_slave_pair_clock_failure_is_precise_and_restored(tmp_path: Path) -> None:
+    master, slave = await _ready_pair()
+    slave.clock_offsets_after_role = {
+        LinkageRole.ASYNC_SLAVE: 10,
+        LinkageRole.INDEPENDENT: 0,
+    }
+    progress = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "slave-pair-clock.json")
+    controller = _controller(master, slave, store, progress_observer=progress.append)
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_spec()))
+
+    failed = progress[-1]
+    assert failed.failure is ScheduleLinkageRunFailure.SLAVE_PAIR_CLOCK
+    assert failed.drift_dimensions == ()
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+
+
+async def test_slave_pair_immutable_failure_reports_only_allowlisted_dimensions(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair()
+    slave.reported_state_updates_by_role[LinkageRole.ASYNC_SLAVE] = {
+        "online": False,
+        "error": "private transport detail",
+        "enabled": False,
+        "power": 41,
+        "mode": "pulse",
+        "frequency": 6,
+        "timer_enabled": False,
+        "linkage": LinkageRole.INDEPENDENT,
+    }
+    slave.reported_schedule_drift_roles.add(LinkageRole.ASYNC_SLAVE)
+    progress = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "slave-pair-state.json")
+    controller = _controller(master, slave, store, progress_observer=progress.append)
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_spec()))
+
+    failed = progress[-1]
+    assert failed.failure is ScheduleLinkageRunFailure.SLAVE_PAIR_STATE
+    assert failed.drift_dimensions == (
+        ScheduleLinkageDriftDimension.ONLINE,
+        ScheduleLinkageDriftDimension.ERROR,
+        ScheduleLinkageDriftDimension.ENABLED,
+        ScheduleLinkageDriftDimension.POWER,
+        ScheduleLinkageDriftDimension.MODE,
+        ScheduleLinkageDriftDimension.FREQUENCY,
+        ScheduleLinkageDriftDimension.TIMER_ENABLED,
+        ScheduleLinkageDriftDimension.LINKAGE,
+        ScheduleLinkageDriftDimension.SCHEDULE_FINGERPRINT,
+    )
+    checkpoint = failed.model_dump_json()
+    assert set(failed.model_dump(mode="json")) == {
+        "kind",
+        "occurred_at",
+        "failure",
+        "drift_dimensions",
+    }
+    assert "device_id" not in checkpoint
+    assert "private transport detail" not in checkpoint
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+
+
+async def test_slave_pair_auto_failure_is_precise_and_restored(tmp_path: Path) -> None:
+    master, slave = await _ready_pair()
+    slave.reported_auto_updates_by_role[LinkageRole.ASYNC_SLAVE] = {"AutoFlow": 34}
+    progress = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "slave-pair-auto.json")
+    controller = _controller(master, slave, store, progress_observer=progress.append)
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_spec()))
+
+    failed = progress[-1]
+    assert failed.failure is ScheduleLinkageRunFailure.SLAVE_PAIR_AUTO
+    assert failed.drift_dimensions == (ScheduleLinkageDriftDimension.AUTO_EVIDENCE,)
+    assert "AutoFlow" not in failed.model_dump_json()
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
 
 
 async def test_cancel_during_post_master_refresh_reconnects_before_rollback(
@@ -896,11 +1152,13 @@ async def test_cancel_during_post_master_refresh_reconnects_before_rollback(
     # durable MASTER intent and adapter write, while the paired slave reconnect can finish.
     master.pause_before_connect_numbers.add(3)
     store = JsonScheduleLinkageJournalStore(tmp_path / "cancel-post-master-refresh.json")
+    progress: list[ScheduleLinkageRunProgressEvent] = []
     controller = _controller(
         master,
         slave,
         store,
         refresh_sessions_before_critical_reads=True,
+        progress_observer=progress.append,
     )
     task = asyncio.create_task(controller.run(await controller.preflight(_spec())))
     await asyncio.wait_for(master.connect_paused.wait(), timeout=1)
@@ -926,6 +1184,9 @@ async def test_cancel_during_post_master_refresh_reconnects_before_rollback(
     assert "write:slave:async_slave" not in events
     assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
     assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert progress[-1].kind is ScheduleLinkageRunProgressKind.FAILED
+    assert progress[-1].failure is ScheduleLinkageRunFailure.CANCELLED
+    assert progress[-1].drift_dimensions == ()
     _assert_only_linkage_calls(master, slave)
 
 
