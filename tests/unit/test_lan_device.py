@@ -1,9 +1,13 @@
+import asyncio
 from typing import ClassVar
 
 import pytest
 
 from jebao_flow.config import DeviceConfig, DeviceControlConfig, DeviceType, RuntimeConfig
 from jebao_flow.devices import (
+    ControlAcknowledgementError,
+    ControlReadbackError,
+    ControlStateMismatchError,
     HardwareWritesDisabledError,
     LanJebaoDevice,
     PhysicalDeviceBinding,
@@ -42,30 +46,40 @@ class _FakeSession:
     instances: ClassVar[list["_FakeSession"]] = []
     state = _pro_state()
     read_failures_remaining = 0
+    read_failures_disconnect = False
+    send_failure: Exception | None = None
 
     def __init__(self, address: str) -> None:
         self.address = address
         self.connected = False
+        self.connect_calls = 0
+        self.authenticate_calls = 0
         self.sent: list[bytes] = []
         self.__class__.instances.append(self)
 
     async def connect(self) -> None:
+        self.connect_calls += 1
         self.connected = True
 
     async def disconnect(self) -> None:
         self.connected = False
 
     async def authenticate(self) -> bytes:
+        self.authenticate_calls += 1
         return b"never-logged"
 
     async def read_raw_state(self) -> bytes:
         if self.__class__.read_failures_remaining:
             self.__class__.read_failures_remaining -= 1
+            if self.__class__.read_failures_disconnect:
+                self.connected = False
             raise ProtocolTimeoutError("simulated transient read timeout")
         return self.state
 
     async def send_raw_control(self, control_payload: bytes) -> bytes:
         self.sent.append(control_payload)
+        if self.__class__.send_failure is not None:
+            raise self.__class__.send_failure
         return b"ack"
 
 
@@ -74,15 +88,22 @@ def _reset_fake_session() -> None:
     _FakeSession.instances.clear()
     _FakeSession.state = _pro_state()
     _FakeSession.read_failures_remaining = 0
+    _FakeSession.read_failures_disconnect = False
+    _FakeSession.send_failure = None
 
 
-def _device(*, allow_writes: bool = False) -> LanJebaoDevice:
+def _device(
+    *,
+    allow_writes: bool = False,
+    minimum_command_interval_ms: int = 1000,
+) -> LanJebaoDevice:
     return LanJebaoDevice(
         "right",
         "pump.local",
         LOCAL_WAVEMAKER_PRO.product_key,
         power_limits=PowerLimits(min_power=30, max_power=75),
         allow_hardware_writes=allow_writes,
+        minimum_command_interval_ms=minimum_command_interval_ms,
         readback_delay_ms=0,
         session_factory=_FakeSession,
     )
@@ -248,6 +269,35 @@ async def test_safety_guard_blocks_linkage_only_write_before_lan_send() -> None:
     assert _FakeSession.instances[0].sent == []
 
 
+async def test_guarded_power_write_sets_only_the_flow_datapoint_flag() -> None:
+    _FakeSession.state = _pro_state(
+        timer_enabled=False,
+        linkage=LinkageRole.ASYNC_SLAVE,
+        power=38,
+    )
+    device = _device(allow_writes=True)
+    await device.connect()
+
+    await device.write_power(38, guard=lambda: True)
+
+    [payload] = _FakeSession.instances[0].sent
+    assert payload[0] == 0x01
+    assert payload[1:9] == bytes(7) + bytes([0x10])
+    assert payload[9 + 2] == 38
+    assert payload[9 : 9 + 2] == bytes(2)
+    assert payload[9 + 3 :] == bytes(len(payload) - 12)
+
+
+async def test_safety_guard_blocks_power_only_write_before_lan_send() -> None:
+    device = _device(allow_writes=True)
+    await device.connect()
+
+    with pytest.raises(SafetyInterlockError, match="safety interlock"):
+        await device.write_power(38, guard=lambda: False)
+
+    assert _FakeSession.instances[0].sent == []
+
+
 async def test_linkage_only_write_preserves_timer_and_manual_control_fields() -> None:
     _FakeSession.state = _pro_state(
         timer_enabled=True,
@@ -348,7 +398,7 @@ async def test_multi_field_readback_mismatch_is_not_power_specific() -> None:
             )
         )
 
-    assert type(captured.value) is StateVerificationError
+    assert type(captured.value) is ControlStateMismatchError
     assert len(_FakeSession.instances[0].sent) == 1
 
 
@@ -364,18 +414,78 @@ async def test_write_retries_transient_readback_timeout_without_resending_contro
     assert len(_FakeSession.instances[0].sent) == 1
 
 
+async def test_write_reauthenticates_only_for_readback_after_transport_failure() -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.read_failures_remaining = 1
+    _FakeSession.read_failures_disconnect = True
+    device = _device(allow_writes=True)
+    await device.connect()
+
+    await device.write_power(50)
+
+    session = _FakeSession.instances[0]
+    assert session.sent and len(session.sent) == 1
+    assert session.connect_calls == 2
+    assert session.authenticate_calls == 2
+
+
 async def test_write_fails_after_bounded_transient_readback_timeouts() -> None:
     _FakeSession.state = _pro_state(power=50)
     _FakeSession.read_failures_remaining = 3
     device = _device(allow_writes=True)
     await device.connect()
 
-    with pytest.raises(StateVerificationError, match="3 readback attempts") as captured:
+    with pytest.raises(ControlReadbackError, match="3 readback attempts") as captured:
         await device.set_power(50)
 
     assert not isinstance(captured.value, PowerStateVerificationError)
     assert isinstance(captured.value.__cause__, ProtocolTimeoutError)
     assert len(_FakeSession.instances[0].sent) == 1
+
+
+async def test_unconfirmed_ack_is_typed_and_preserves_command_pacing_across_reconnect() -> None:
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+
+    with pytest.raises(ControlAcknowledgementError, match="acknowledgement"):
+        await device.write_power(50)
+
+    attempted_at = device._last_command_at  # noqa: SLF001
+    assert attempted_at is not None
+    await device.disconnect()
+    await device.connect()
+    assert device._last_command_at == attempted_at  # noqa: SLF001
+
+
+async def test_unconfirmed_live_write_spaces_one_compensating_frame_after_reconnect() -> None:
+    _FakeSession.state = _pro_state(power=34)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    session = _FakeSession.instances[0]
+    sent_at: list[float] = []
+    original_send = session.send_raw_control
+
+    async def timed_send(payload: bytes) -> bytes:
+        sent_at.append(asyncio.get_running_loop().time())
+        return await original_send(payload)
+
+    session.send_raw_control = timed_send  # type: ignore[method-assign]
+
+    with pytest.raises(ControlAcknowledgementError):
+        await device.write_power(38)
+
+    _FakeSession.send_failure = None
+    await device.disconnect()
+    await device.connect()
+    await device.write_power(34)
+
+    assert len(session.sent) == 2
+    assert len(sent_at) == 2
+    assert sent_at[1] - sent_at[0] >= 0.09
+    assert session.sent[0][9 + 2] == 38
+    assert session.sent[1][9 + 2] == 34
 
 
 async def test_verified_duplicate_write_is_suppressed() -> None:

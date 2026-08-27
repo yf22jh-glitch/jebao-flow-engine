@@ -29,7 +29,19 @@ class StateVerificationError(DeviceError):
     pass
 
 
-class PowerStateVerificationError(StateVerificationError):
+class ControlAcknowledgementError(DeviceError):
+    """A control request may have been sent, but its matching ACK was not confirmed."""
+
+
+class ControlReadbackError(StateVerificationError):
+    """A control ACK was received, but fresh decoded state could not be read."""
+
+
+class ControlStateMismatchError(StateVerificationError):
+    """Fresh decoded state did not match one or more requested control fields."""
+
+
+class PowerStateVerificationError(ControlStateMismatchError):
     """A decoded control read-back differed only in the requested power field."""
 
 
@@ -86,6 +98,21 @@ class JebaoDevice(ABC):
 
     @abstractmethod
     async def set_power(self, power: int) -> None: ...
+
+    async def write_power(
+        self,
+        power: int,
+        *,
+        guard: WriteGuard | None = None,
+    ) -> None:
+        """Write only the power datapoint under a last-moment safety guard.
+
+        Native linkage diagnostics use this narrower contract so changing a slave's Flow does
+        not re-assert its mode, linkage role, timer authority or power switch in the same frame.
+        """
+
+        del power, guard
+        raise UnsupportedCapabilityError("guarded power-only writes are unsupported")
 
     @abstractmethod
     async def set_mode(self, mode: str) -> None: ...

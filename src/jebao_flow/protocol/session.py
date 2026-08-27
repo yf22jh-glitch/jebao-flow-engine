@@ -54,6 +54,8 @@ class GizwitsSession:
         self.max_skipped_frames = max_skipped_frames
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
+        self._closing_writers: dict[asyncio.StreamWriter, asyncio.Task[None]] = {}
+        self._background_close_tasks: set[asyncio.Task[None]] = set()
         self._io_lock = asyncio.Lock()
         self._sequence = 0
         self._authenticated = False
@@ -69,6 +71,7 @@ class GizwitsSession:
     async def connect(self) -> None:
         if self.connected:
             return
+        await self._reap_closing_writers()
         try:
             async with asyncio.timeout(self.connect_timeout_seconds):
                 self._reader, self._writer = await asyncio.open_connection(self.address, self.port)
@@ -84,13 +87,9 @@ class GizwitsSession:
 
     async def disconnect(self) -> None:
         writer = self._drop_connection()
-        if writer is None:
-            return
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except OSError:
-            pass
+        if writer is not None:
+            self._begin_writer_close(writer)
+        await self._reap_closing_writers()
 
     async def authenticate(self) -> bytes:
         try:
@@ -232,7 +231,62 @@ class GizwitsSession:
 
         writer = self._drop_connection()
         if writer is not None:
-            writer.close()
+            # ``_abort_connection`` is intentionally synchronous so cancellation can quarantine
+            # a partial frame immediately. Keep the closing writer reachable so disconnect or
+            # the next connect can await the FIN instead of racing a scarce device socket slot.
+            self._begin_writer_close(writer)
+
+    def _begin_writer_close(self, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+        if writer not in self._closing_writers:
+            # Keep the task alive across a bounded reap timeout. Cancelling ``wait_closed`` can
+            # cancel asyncio's shared close waiter and make later cleanup permanently impossible.
+            self._closing_writers[writer] = asyncio.create_task(writer.wait_closed())
+
+    async def _reap_closing_writers(self) -> None:
+        """Wait a bounded time for every quarantined transport to actually close."""
+
+        if not self._closing_writers:
+            return
+        done, _ = await asyncio.wait(
+            set(self._closing_writers.values()),
+            timeout=self.connect_timeout_seconds,
+        )
+        for writer, task in tuple(self._closing_writers.items()):
+            if task not in done:
+                continue
+            self._consume_close_task_result(task)
+            self._closing_writers.pop(writer, None)
+        if self._closing_writers:
+            stalled = tuple(self._closing_writers.items())
+            for writer, task in stalled:
+                # ``close()`` already requested a graceful FIN. If its completion waiter stalls,
+                # abort the local transport and remove it from the reconnect gate. Keep consuming
+                # the waiter in the background so a broken close cannot permanently block the
+                # fresh session needed for rollback.
+                transport = getattr(writer, "transport", None)
+                abort = getattr(transport, "abort", None)
+                if callable(abort):
+                    abort()
+                self._closing_writers.pop(writer, None)
+                self._background_close_tasks.add(task)
+                task.add_done_callback(self._finish_background_close)
+            raise ProtocolTimeoutError(
+                f"timed out closing {len(stalled)} quarantined Gizwits connection(s)"
+            )
+
+    def _finish_background_close(self, task: asyncio.Task[None]) -> None:
+        self._background_close_tasks.discard(task)
+        self._consume_close_task_result(task)
+
+    @staticmethod
+    def _consume_close_task_result(task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except OSError:
+            pass
+        except asyncio.CancelledError:
+            pass
 
     def _require_connection(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         if self._reader is None or self._writer is None or self._writer.is_closing():

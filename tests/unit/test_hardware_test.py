@@ -12,6 +12,8 @@ import pytest
 from jebao_flow import hardware_guard, hardware_safety, hardware_test
 from jebao_flow.config import AppConfig
 from jebao_flow.devices import (
+    ControlAcknowledgementError,
+    LinkageForwardFailureCategory,
     LinkageRecoveryReason,
     LinkageRollbackError,
     LinkageRollbackFailure,
@@ -38,7 +40,6 @@ from jebao_flow.protocol.models import (
     DeviceCapabilities,
     DeviceSchedule,
     DeviceState,
-    DeviceTarget,
     DiscoveredDevice,
     LinkageRole,
     ScheduleEntry,
@@ -614,21 +615,22 @@ def test_live_slave_attempt_evidence_precedes_physical_write(
     _install_fakes(monkeypatch, config, devices)
     args = _args("preflight")
     args[args.index("sync_slave")] = "async_slave"
-    args[args.index("0.02")] = "0.08"
+    # Leave enough wall-clock room for the fsynced evidence assertion on loaded CI hosts.
+    args[args.index("0.02")] = "0.30"
     args.extend(("--slave-power-after", "38", "--power-change-after", "0.02"))
     assert hardware_test.main(args) == 0
     token = _token(capsys.readouterr().out)
 
     slave = devices["pro_right"]
-    original_write = slave.write_target
+    original_write = slave.write_power
     observed_attempt = False
 
     async def assert_durable_attempt_before_write(
-        target: DeviceTarget,
+        power: int,
         **kwargs: object,
     ) -> None:
         nonlocal observed_attempt
-        if target.power == 38:
+        if power == 38:
             intent = hardware_test.JsonHardwareTestIntentStore(
                 hardware_test.canonical_intent_path(config)
             ).load()
@@ -637,9 +639,9 @@ def test_live_slave_attempt_evidence_precedes_physical_write(
             assert intent.evidence.live_slave_write_attempted_at is not None
             assert intent.evidence.live_slave_adapter_verified_at is None
             observed_attempt = True
-        await original_write(target, **kwargs)  # type: ignore[arg-type]
+        await original_write(power, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(slave, "write_target", assert_durable_attempt_before_write)
+    monkeypatch.setattr(slave, "write_power", assert_durable_attempt_before_write)
     run_args = [*args]
     run_args[0] = "run-native-linkage"
 
@@ -734,12 +736,12 @@ def test_live_slave_failure_survives_masking_rollback_failure(
     token = _token(capsys.readouterr().out)
 
     slave = devices["pro_right"]
-    original_slave_write = slave.write_target
+    original_slave_write = slave.write_power
 
-    async def discard_live_slave_power(target: DeviceTarget, **kwargs: object) -> None:
+    async def discard_live_slave_power(power: int, **kwargs: object) -> None:
         previous_power = slave._state.power  # noqa: SLF001
-        await original_slave_write(target, **kwargs)  # type: ignore[arg-type]
-        if target.power == 38:
+        await original_slave_write(power, **kwargs)  # type: ignore[arg-type]
+        if power == 38:
             slave._state = slave._state.model_copy(  # noqa: SLF001
                 update={"power": previous_power}
             )
@@ -771,7 +773,7 @@ def test_live_slave_failure_survives_masking_rollback_failure(
         )
         raise LinkageRollbackError("secret-device-id: restore failed")
 
-    monkeypatch.setattr(slave, "write_target", discard_live_slave_power)
+    monkeypatch.setattr(slave, "write_power", discard_live_slave_power)
     monkeypatch.setattr(
         TemporaryLinkageController,
         "_rollback_uninterruptibly",
@@ -842,15 +844,15 @@ def test_driver_live_slave_power_readback_failure_is_persisted(
     token = _token(capsys.readouterr().out)
 
     slave = devices["pro_right"]
-    original_slave_write = slave.write_target
+    original_slave_write = slave.write_power
 
     async def fail_completed_live_power_readback(
-        target: DeviceTarget,
+        power: int,
         **kwargs: object,
     ) -> None:
         previous_power = slave._state.power  # noqa: SLF001
-        await original_slave_write(target, **kwargs)  # type: ignore[arg-type]
-        if target.power == 38:
+        await original_slave_write(power, **kwargs)  # type: ignore[arg-type]
+        if power == 38:
             slave._state = slave._state.model_copy(  # noqa: SLF001
                 update={"power": previous_power}
             )
@@ -858,7 +860,7 @@ def test_driver_live_slave_power_readback_failure_is_persisted(
                 "completed control had a power-only read-back mismatch"
             )
 
-    monkeypatch.setattr(slave, "write_target", fail_completed_live_power_readback)
+    monkeypatch.setattr(slave, "write_power", fail_completed_live_power_readback)
     run_args = [*args]
     run_args[0] = "run-native-linkage"
 
@@ -874,6 +876,12 @@ def test_driver_live_slave_power_readback_failure_is_persisted(
         intent.primary_failure
         is hardware_test.HardwareTestPrimaryFailure.SLAVE_POWER_CHANGE_NOT_VERIFIED
     )
+    assert intent.evidence is not None
+    assert (
+        intent.evidence.forward_failure
+        is LinkageForwardFailureCategory.POWER_STATE_NOT_VERIFIED
+    )
+    assert intent.evidence.rollback_completed_at is not None
 
 
 def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
@@ -1008,6 +1016,7 @@ def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
         "driver_power_error_then_converges",
         "driver_power_error_with_slave_error",
         "driver_power_error_with_schedule_change",
+        "control_ack_unconfirmed",
         "slave_power_and_linkage_mismatch",
         "slave_write_error",
     ),
@@ -1053,21 +1062,23 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
 
     master = devices["pro_left"]
     slave = devices["pro_right"]
-    original_slave_write = slave.write_target
+    original_slave_write = slave.write_power
     original_master_get_state = master.get_state
     original_slave_get_state = slave.get_state
     fail_next_master_read = False
     fail_next_slave_error_read = False
     fail_next_slave_schedule_read = False
 
-    async def fail_after_live_slave_write(target: DeviceTarget, **kwargs: object) -> None:
+    async def fail_after_live_slave_write(power: int, **kwargs: object) -> None:
         nonlocal fail_next_master_read, fail_next_slave_error_read
         nonlocal fail_next_slave_schedule_read
-        if target.power == 38 and failure_kind == "slave_write_error":
+        if power == 38 and failure_kind == "slave_write_error":
             raise RuntimeError("live slave write transport failed")
-        await original_slave_write(target, **kwargs)  # type: ignore[arg-type]
-        if target.power != 38:
+        await original_slave_write(power, **kwargs)  # type: ignore[arg-type]
+        if power != 38:
             return
+        if failure_kind == "control_ack_unconfirmed":
+            raise ControlAcknowledgementError("live slave control ACK was not confirmed")
         if failure_kind == "master_readback_mismatch":
             master._state = master._state.model_copy(update={"power": 34})  # noqa: SLF001
         elif failure_kind == "master_transport_error":
@@ -1120,7 +1131,7 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
             )
         return state
 
-    monkeypatch.setattr(slave, "write_target", fail_after_live_slave_write)
+    monkeypatch.setattr(slave, "write_power", fail_after_live_slave_write)
     monkeypatch.setattr(master, "get_state", fail_one_master_read)
     monkeypatch.setattr(slave, "get_state", fail_one_slave_full_state_read)
     run_args = [*args]
@@ -1144,6 +1155,7 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
             "driver_power_error_then_converges",
             "driver_power_error_with_slave_error",
             "driver_power_error_with_schedule_change",
+            "control_ack_unconfirmed",
             "slave_write_error",
         }
     )
@@ -1155,12 +1167,33 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
     )
     assert evidence.forward_failure is not None
     assert evidence.rollback_completed_at is not None
+    assert (
+        master._state.power,  # noqa: SLF001
+        master._state.mode,  # noqa: SLF001
+        master._state.linkage,  # noqa: SLF001
+        master._state.timer_enabled,  # noqa: SLF001
+    ) == (34, "constant", LinkageRole.INDEPENDENT, bootstrap_schedule)
+    assert (
+        slave._state.power,  # noqa: SLF001
+        slave._state.mode,  # noqa: SLF001
+        slave._state.linkage,  # noqa: SLF001
+        slave._state.timer_enabled,  # noqa: SLF001
+    ) == (36, "constant", LinkageRole.INDEPENDENT, bootstrap_schedule)
+    if failure_kind == "control_ack_unconfirmed":
+        assert (
+            evidence.forward_failure
+            is LinkageForwardFailureCategory.CONTROL_ACK_NOT_CONFIRMED
+        )
+        assert sum(
+            command.name == "power" and command.value == 38 for command in slave.commands
+        ) == 1
     assert hardware_test.main(["status"]) == 0
     status_output = capsys.readouterr().out
     adapter_verified = failure_kind not in {
         "driver_power_error_then_converges",
         "driver_power_error_with_slave_error",
         "driver_power_error_with_schedule_change",
+        "control_ack_unconfirmed",
         "slave_write_error",
     }
     full_state_verified = failure_kind == "driver_power_error_then_converges"

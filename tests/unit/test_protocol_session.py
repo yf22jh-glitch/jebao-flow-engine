@@ -208,8 +208,10 @@ async def test_quarantined_session_reconnects_reauthenticates_and_reads_fresh_st
             await session.read_raw_state()
         assert session.connected is False
         assert session.authenticated is False
+        assert len(session._closing_writers) == 1  # noqa: SLF001
 
         await session.connect()
+        assert not session._closing_writers  # noqa: SLF001
         assert await session.authenticate() == b"abc123"
         assert await session.read_raw_state() == b"fresh-state"
         assert session.connected is True
@@ -229,6 +231,83 @@ async def test_quarantined_session_reconnects_reauthenticates_and_reads_fresh_st
         (2, GizwitsCommand.LOGIN_REQUEST),
         (2, GizwitsCommand.SERIAL_TRANSMIT_REQUEST),
     ]
+
+
+async def test_stalled_transport_close_blocks_reconnect_for_only_a_bounded_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_close = asyncio.Event()
+    open_connection_calls = 0
+
+    class Transport:
+        aborted = False
+
+        def abort(self) -> None:
+            self.aborted = True
+
+    class StalledWriter:
+        def __init__(self) -> None:
+            self.transport = Transport()
+
+        def close(self) -> None:
+            pass
+
+        def is_closing(self) -> bool:
+            return False
+
+        async def wait_closed(self) -> None:
+            await release_close.wait()
+
+    class FreshWriter:
+        def __init__(self) -> None:
+            self.transport = Transport()
+            self.closing = False
+
+        def close(self) -> None:
+            self.closing = True
+
+        def is_closing(self) -> bool:
+            return self.closing
+
+        async def wait_closed(self) -> None:
+            return None
+
+    fresh_writer = FreshWriter()
+
+    async def open_connection(
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[asyncio.StreamReader, FreshWriter]:
+        nonlocal open_connection_calls
+        del args, kwargs
+        open_connection_calls += 1
+        return asyncio.StreamReader(), fresh_writer
+
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    session = GizwitsSession("127.0.0.1", connect_timeout_seconds=0.01)
+    writer = StalledWriter()
+    session._writer = writer  # type: ignore[assignment]  # noqa: SLF001
+    session._abort_connection()  # noqa: SLF001
+
+    with pytest.raises(ProtocolTimeoutError, match="timed out closing"):
+        await session.connect()
+
+    assert open_connection_calls == 0
+    assert session.connected is False
+    assert writer.transport.aborted is True
+    assert not session._closing_writers  # noqa: SLF001
+
+    # A permanently stalled close waiter cannot consume the reconnect gate forever. The first
+    # bounded failure remains visible, while the following explicit retry may open a fresh slot.
+    await session.connect()
+    assert open_connection_calls == 1
+    assert session.connected is True
+
+    release_close.set()
+    await asyncio.gather(*tuple(session._background_close_tasks))  # noqa: SLF001
+    await asyncio.sleep(0)
+    assert not session._background_close_tasks  # noqa: SLF001
+    await session.disconnect()
 
 
 @pytest.mark.parametrize(

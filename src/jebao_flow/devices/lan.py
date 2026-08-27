@@ -9,11 +9,13 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from jebao_flow.devices.base import (
+    ControlAcknowledgementError,
+    ControlReadbackError,
+    ControlStateMismatchError,
     HardwareWritesDisabledError,
     JebaoDevice,
     PowerStateVerificationError,
     SafetyInterlockError,
-    StateVerificationError,
     UnsupportedCapabilityError,
     WriteGuard,
 )
@@ -178,13 +180,11 @@ class LanJebaoDevice(JebaoDevice):
         async with self._io_lock:
             await self._session.connect()
             await self._session.authenticate()
-            self._last_command_at = None
             self._last_sent_values.clear()
 
     async def disconnect(self) -> None:
         async with self._io_lock:
             await self._session.disconnect()
-            self._last_command_at = None
             self._last_sent_values.clear()
 
     async def get_state(self) -> DeviceState:
@@ -203,9 +203,17 @@ class LanJebaoDevice(JebaoDevice):
         await self._apply_changes({attribute: enabled})
 
     async def set_power(self, power: int) -> None:
+        await self.write_power(power)
+
+    async def write_power(
+        self,
+        power: int,
+        *,
+        guard: WriteGuard | None = None,
+    ) -> None:
         self._validate_power(power)
         attribute = self._require_logical_attribute(Capability.POWER)
-        await self._apply_changes({attribute: power})
+        await self._apply_changes({attribute: power}, guard=guard)
 
     async def set_mode(self, mode: str) -> None:
         attribute_name = self._require_logical_attribute(Capability.MODE)
@@ -344,8 +352,15 @@ class LanJebaoDevice(JebaoDevice):
             # before send. An emergency-stop writer that trips the guard while waiting cannot be
             # followed by this stale ON target.
             self._require_write_guard(guard)
-            await self._session.send_raw_control(payload)
+            # Record the physical command boundary before awaiting the ACK. A timeout or lost ACK
+            # leaves the write outcome uncertain, so rollback must still respect command pacing.
             self._last_command_at = asyncio.get_running_loop().time()
+            try:
+                await self._session.send_raw_control(payload)
+            except (ProtocolError, OSError) as error:
+                raise ControlAcknowledgementError(
+                    f"device {self._device_id!r} did not confirm the control acknowledgement"
+                ) from error
             self._require_write_guard(guard)
 
             for attempt in range(self._readback_attempts):
@@ -354,12 +369,23 @@ class LanJebaoDevice(JebaoDevice):
                 self._require_write_guard(guard)
                 try:
                     values = await self._read_values()
-                except (ProtocolError, ValueError) as error:
+                except (ProtocolError, OSError, ValueError) as error:
                     if attempt + 1 == self._readback_attempts:
-                        raise StateVerificationError(
+                        raise ControlReadbackError(
                             f"device {self._device_id!r} could not verify control after "
                             f"{self._readback_attempts} readback attempts"
                         ) from error
+                    # A failed framed exchange quarantines its stream. Re-authenticate only for
+                    # the following readback; the uncertain control frame is never retransmitted.
+                    if not self._session.connected:
+                        try:
+                            await self._session.connect()
+                            await self._session.authenticate()
+                            self._last_sent_values.clear()
+                        except (ProtocolError, OSError):
+                            # The next bounded attempt either establishes a session or produces
+                            # one final typed readback failure. Never turn this into a write retry.
+                            continue
                     continue
                 if all(values.get(name) == expected for name, expected in changes.items()):
                     self._last_sent_values.update(changes)
@@ -374,7 +400,7 @@ class LanJebaoDevice(JebaoDevice):
                         PowerStateVerificationError
                         if self.schema.power_attribute is not None
                         and set(mismatches) == {self.schema.power_attribute}
-                        else StateVerificationError
+                        else ControlStateMismatchError
                     )
                     raise error_type(
                         f"device {self._device_id!r} did not apply control: {mismatches}"

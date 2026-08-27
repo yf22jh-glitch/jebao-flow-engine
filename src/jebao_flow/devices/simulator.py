@@ -133,6 +133,14 @@ class SimulatedJebaoDevice(JebaoDevice):
         await self._write(Capability.ENABLED, "enabled", enabled)
 
     async def set_power(self, power: int) -> None:
+        await self.write_power(power)
+
+    async def write_power(
+        self,
+        power: int,
+        *,
+        guard: WriteGuard | None = None,
+    ) -> None:
         limits = self._capabilities.power_limits
         if not limits.min_power <= power <= limits.max_power:
             raise ValueError(
@@ -141,7 +149,20 @@ class SimulatedJebaoDevice(JebaoDevice):
             )
         if power % self._capabilities.power_step != 0:
             raise ValueError(f"power {power} does not match step {self._capabilities.power_step}")
-        await self._write(Capability.POWER, "power", power)
+        async with self._lock:
+            self._require_connection()
+            if Capability.POWER not in self._capabilities.writable:
+                raise UnsupportedCapabilityError(
+                    f"{self._device_id} does not support writing power"
+                )
+            await self._delay()
+            if guard is not None and guard() is not True:
+                raise SafetyInterlockError(
+                    "simulated device power write was blocked by the safety interlock"
+                )
+            now = datetime.now(UTC)
+            self._state = self._state.model_copy(update={"power": power, "observed_at": now})
+            self.commands.append(SimulatedCommand("power", power, now))
 
     async def set_mode(self, mode: str) -> None:
         if not mode:

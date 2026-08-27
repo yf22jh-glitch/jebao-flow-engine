@@ -28,7 +28,14 @@ from pydantic import (
     model_validator,
 )
 
-from jebao_flow.devices.base import JebaoDevice, PowerStateVerificationError
+from jebao_flow.devices.base import (
+    ControlAcknowledgementError,
+    ControlReadbackError,
+    ControlStateMismatchError,
+    JebaoDevice,
+    PowerStateVerificationError,
+    StateVerificationError,
+)
 from jebao_flow.devices.identity import PhysicalDeviceBinding
 from jebao_flow.protocol.models import (
     Capability,
@@ -135,6 +142,10 @@ class LinkageForwardFailureCategory(StrEnum):
 
     LIVE_SLAVE_POWER_NOT_VERIFIED = "live_slave_power_not_verified"
     POWER_STATE_NOT_VERIFIED = "power_state_not_verified"
+    CONTROL_ACK_NOT_CONFIRMED = "control_ack_not_confirmed"
+    CONTROL_READBACK_UNAVAILABLE = "control_readback_unavailable"
+    CONTROL_STATE_MISMATCH = "control_state_mismatch"
+    STATE_NOT_VERIFIED = "state_not_verified"
     TRANSACTION_FAILED = "transaction_failed"
     CANCELLED = "cancelled"
     UNEXPECTED_FAILURE = "unexpected_failure"
@@ -660,6 +671,14 @@ class TemporaryLinkageController:
             return LinkageForwardFailureCategory.LIVE_SLAVE_POWER_NOT_VERIFIED
         if isinstance(error, PowerStateVerificationError):
             return LinkageForwardFailureCategory.POWER_STATE_NOT_VERIFIED
+        if isinstance(error, ControlAcknowledgementError):
+            return LinkageForwardFailureCategory.CONTROL_ACK_NOT_CONFIRMED
+        if isinstance(error, ControlReadbackError):
+            return LinkageForwardFailureCategory.CONTROL_READBACK_UNAVAILABLE
+        if isinstance(error, ControlStateMismatchError):
+            return LinkageForwardFailureCategory.CONTROL_STATE_MISMATCH
+        if isinstance(error, StateVerificationError):
+            return LinkageForwardFailureCategory.STATE_NOT_VERIFIED
         if isinstance(error, asyncio.CancelledError):
             return LinkageForwardFailureCategory.CANCELLED
         if isinstance(error, LinkageTransactionError):
@@ -1308,18 +1327,16 @@ class TemporaryLinkageController:
                     LinkageDiagnosticEventKind.LIVE_SLAVE_WRITE_ATTEMPTED
                 )
                 try:
-                    await slave.write_target(
-                        DeviceTarget(
-                            enabled=True,
-                            power=expected_slave_power,
-                            mode=record.spec.mode,
-                            frequency=record.spec.frequency,
-                            linkage=record.spec.slave_role,
-                            timer_enabled=False,
-                        ),
+                    await slave.write_power(
+                        expected_slave_power,
                         guard=lambda: self._forward_write_allowed(record),
                     )
-                except PowerStateVerificationError:
+                except PowerStateVerificationError as error:
+                    # Preserve the earliest adapter-stage fact before the following full-state
+                    # check can replace it with a higher-level relationship mismatch. The
+                    # attended evidence store is monotonic, so the outer failure event cannot
+                    # erase this more precise ACK-received/readback-mismatched classification.
+                    self._emit_forward_failure_best_effort(error)
                     # The LAN adapter's decoded mismatch covers only fields in its control frame.
                     # Classify it through a fresh full DeviceState read so master health, device
                     # errors, and the saved schedule fingerprint must also be valid.  If Flow has

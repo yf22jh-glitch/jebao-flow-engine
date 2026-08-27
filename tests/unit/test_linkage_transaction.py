@@ -8,10 +8,14 @@ from pathlib import Path
 import pytest
 
 from jebao_flow.devices import (
+    ControlAcknowledgementError,
+    ControlReadbackError,
+    ControlStateMismatchError,
     DeviceControlSnapshot,
     LinkageApplyError,
     LinkageDiagnosticEvent,
     LinkageDiagnosticEventKind,
+    LinkageForwardFailureCategory,
     LinkageJournalClaimError,
     LinkagePreflightError,
     LinkageRecoveryAuthority,
@@ -24,7 +28,9 @@ from jebao_flow.devices import (
     LinkageTransactionPhase,
     LinkageTransactionRecord,
     PhysicalDeviceBinding,
+    PowerStateVerificationError,
     SimulatedJebaoDevice,
+    StateVerificationError,
     TemporaryLinkageController,
     schedule_structure_fingerprint,
 )
@@ -37,6 +43,38 @@ from jebao_flow.protocol.models import (
     LinkageRole,
     ScheduleEntry,
 )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    (
+        (
+            ControlAcknowledgementError("ack unavailable"),
+            LinkageForwardFailureCategory.CONTROL_ACK_NOT_CONFIRMED,
+        ),
+        (
+            ControlReadbackError("readback unavailable"),
+            LinkageForwardFailureCategory.CONTROL_READBACK_UNAVAILABLE,
+        ),
+        (
+            ControlStateMismatchError("state mismatch"),
+            LinkageForwardFailureCategory.CONTROL_STATE_MISMATCH,
+        ),
+        (
+            PowerStateVerificationError("power mismatch"),
+            LinkageForwardFailureCategory.POWER_STATE_NOT_VERIFIED,
+        ),
+        (
+            StateVerificationError("untyped state verification"),
+            LinkageForwardFailureCategory.STATE_NOT_VERIFIED,
+        ),
+    ),
+)
+def test_forward_failure_categories_preserve_adapter_stage(
+    error: BaseException,
+    expected: LinkageForwardFailureCategory,
+) -> None:
+    assert TemporaryLinkageController._forward_failure_category(error) is expected  # noqa: SLF001
 
 
 class _RecordingStore(JsonLinkageJournalStore):
@@ -1686,6 +1724,18 @@ async def test_schedule_bootstrap_qualifies_changes_async_slave_power_and_restor
     assert master_state.timer_enabled is True
     assert slave_state.timer_enabled is True
     assert any(command.name == "power" and command.value == 38 for command in slave.commands)
+    live_power_times = {
+        command.issued_at
+        for command in slave.commands
+        if command.name == "power" and command.value == 38
+    }
+    assert len(live_power_times) == 1
+    [live_power_time] = live_power_times
+    assert [
+        (command.name, command.value)
+        for command in slave.commands
+        if command.issued_at == live_power_time
+    ] == [("power", 38)]
     timer_values = [
         command.value for command in slave.commands if command.name == "timer_enabled"
     ]
