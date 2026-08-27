@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from jebao_flow.devices.base import JebaoDevice
 from jebao_flow.devices.linkage import (
+    LinkageDiagnosticEvent,
     LinkageJournalStore,
     LinkageRecoveryAuthority,
     LinkageRollbackError,
@@ -226,6 +227,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         safety_interlock: LinkageSafetyInterlock,
         prerequisite_authorizer: PrerequisiteAuthorizer,
         role_sample_observer: Callable[[ScheduleLinkageSample], None] | None = None,
+        diagnostic_event_observer: Callable[[LinkageDiagnosticEvent], None] | None = None,
         schedule_snapshot_authorizer: SnapshotAuthorizer | None = None,
     ) -> None:
         super().__init__(devices, outer_store, safety_interlock=safety_interlock)
@@ -246,6 +248,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             sample_observer=self._observe_role_sample,
         )
         self._external_role_sample_observer = role_sample_observer
+        self._external_diagnostic_event_observer = diagnostic_event_observer
         self._experiment_spec: ScheduleFlowExperimentSpec | None = None
         self._sentinel_result: TemporaryScheduleResult | None = None
         self._temporary_result: TemporaryScheduleResult | None = None
@@ -319,6 +322,12 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         self._last_role_sample = sample
         if self._external_role_sample_observer is not None:
             self._external_role_sample_observer(sample)
+
+    def _on_diagnostic_event(self, event: LinkageDiagnosticEvent) -> None:
+        """Forward only the parent's already-redacted diagnostic event to the harness."""
+
+        if self._external_diagnostic_event_observer is not None:
+            self._external_diagnostic_event_observer(event)
 
     async def _activate_relationship(self, record: LinkageTransactionRecord) -> None:
         """Run the nested experiment while the outer transaction remains safely TimerOFF."""

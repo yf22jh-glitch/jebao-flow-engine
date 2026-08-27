@@ -15,6 +15,9 @@ from jebao_flow import schedule_linkage_cli
 from jebao_flow.devices.identity import PhysicalDeviceBinding
 from jebao_flow.devices.linkage import (
     DeviceControlSnapshot,
+    LinkageDiagnosticEvent,
+    LinkageDiagnosticEventKind,
+    LinkageForwardFailureCategory,
     LinkageTransactionPhase,
     LinkageTransactionRecord,
 )
@@ -302,6 +305,16 @@ def test_v3_intent_requires_full_spec_two_ordered_bound_digests() -> None:
     payload["schedule_image_digests"] = payload["schedule_image_digests"][:1]
 
     with pytest.raises(ValidationError, match="spec and digests"):
+        HardwareTestIntent.model_validate(payload)
+
+
+def test_armed_v3_intent_rejects_outer_diagnostic_progress() -> None:
+    payload = _intent().model_dump(mode="python")
+    payload["evidence"] = HardwareTestEvidence(
+        forward_failure=LinkageForwardFailureCategory.TRANSACTION_FAILED
+    )
+
+    with pytest.raises(ValidationError, match="armed intents cannot contain"):
         HardwareTestIntent.model_validate(payload)
 
 
@@ -834,6 +847,173 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
     output = capsys.readouterr().out
     assert "slave_flow_fixed_at_previous" in output
     assert "Stable observation: 300s" in output
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_failure_durably_records_outer_category_and_completed_restore(
+    monkeypatch,
+) -> None:
+    armed = _intent()
+
+    class FailFirstDiagnosticSave(_MutableIntentStore):
+        failed_once = False
+
+        def save(self, intent) -> None:
+            evidence = intent.evidence
+            if (
+                not self.failed_once
+                and evidence is not None
+                and evidence.forward_failure is not None
+                and evidence.rollback_started_at is None
+            ):
+                self.failed_once = True
+                raise OSError("raw evidence persistence error")
+            super().save(intent)
+
+    intent_store = FailFirstDiagnosticSave(armed)
+    outer_store = _OuterStore()
+    schedule_store = _OuterStore()
+    role_store = _OuterStore()
+    config = SimpleNamespace(instance=SimpleNamespace(id="main"))
+    args = SimpleNamespace(
+        operation_id="scheduled_flow_001",
+        qualification_operation_id="qualified_pair_001",
+        master="master",
+        slave="slave",
+        boundary_time="12:34",
+        confirm=armed.confirmation_token,
+    )
+    monkeypatch.setattr(cli, "_assert_no_verification_conflict", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "_validate_config",
+        lambda _config, _ids: {"master": object(), "slave": object()},
+    )
+    monkeypatch.setattr(cli, "PhysicalDeviceLease", _LeaseFactory)
+    monkeypatch.setattr(cli, "_safety_latch_present", lambda _path: False)
+    monkeypatch.setattr(cli, "_require_receipts", lambda *_args: None)
+    monkeypatch.setattr(cli, "_require_plan_supported", lambda *_args: None)
+
+    async def build(_config, _selected, *, writable):
+        assert writable is True
+        return {"master": object(), "slave": object()}
+
+    async def capture_context(_devices, _device_ids):
+        return armed.schedule_image_digests, (
+            datetime(2026, 8, 27, 12, 31, 1),
+            datetime(2026, 8, 27, 12, 31, 2),
+        )
+
+    monkeypatch.setattr(cli, "_build_devices", build)
+    monkeypatch.setattr(cli, "_connected", _connected)
+    monkeypatch.setattr(cli, "_capture_schedule_context", capture_context)
+
+    class Controller:
+        def __init__(
+            self,
+            _devices,
+            outer,
+            *_args,
+            diagnostic_event_observer,
+            **_kwargs,
+        ):
+            self.outer = outer
+            self.diagnostic_event_observer = diagnostic_event_observer
+            self.last_role_sample = None
+            self.last_role_result = None
+
+        async def run_experiment(self, _spec):
+            now = datetime.now(UTC)
+            try:
+                self.diagnostic_event_observer(
+                    LinkageDiagnosticEvent(
+                        kind=LinkageDiagnosticEventKind.FORWARD_FAILED,
+                        occurred_at=now,
+                        forward_failure=(
+                            LinkageForwardFailureCategory.CONTROL_STATE_MISMATCH
+                        ),
+                    )
+                )
+            except OSError:
+                # The real core's forward diagnostic hook is best-effort so rollback continues.
+                pass
+            self.diagnostic_event_observer(
+                LinkageDiagnosticEvent(
+                    kind=LinkageDiagnosticEventKind.ROLLBACK_STARTED,
+                    occurred_at=now + timedelta(microseconds=1),
+                )
+            )
+            self.outer.clear()
+            raise RuntimeError(
+                "vendor-master-secret 198.51.100.77 raw bootstrap exception"
+            )
+
+    monkeypatch.setattr(cli, "ScheduleFlowExperimentController", Controller)
+
+    with pytest.raises(RuntimeError, match="raw bootstrap exception"):
+        await cli._run(  # noqa: SLF001
+            config,
+            args,
+            intent_store,
+            outer_store,
+            schedule_store,
+            role_store,
+            SimpleNamespace(),
+            _Guard(),
+        )
+
+    terminal = intent_store.load()
+    assert terminal is not None
+    assert terminal.phase is HardwareTestIntentPhase.TERMINAL
+    assert terminal.outcome == "experiment_failed_restored"
+    assert terminal.evidence is not None
+    assert (
+        terminal.evidence.forward_failure
+        is LinkageForwardFailureCategory.CONTROL_STATE_MISMATCH
+    )
+    assert terminal.evidence.rollback_started_at is not None
+    assert terminal.evidence.rollback_completed_at is not None
+    assert intent_store.failed_once is True
+    encoded = terminal.model_dump_json()
+    assert "vendor-master-secret" not in encoded
+    assert "198.51.100.77" not in encoded
+    assert "raw bootstrap exception" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_outer_absent_v3_diagnostics_cannot_be_closed_as_a_no_write_crash(
+    monkeypatch,
+) -> None:
+    started = _intent(phase=HardwareTestIntentPhase.STARTED).model_copy(
+        update={
+            "evidence": HardwareTestEvidence(
+                forward_failure=LinkageForwardFailureCategory.TRANSACTION_FAILED
+            )
+        }
+    )
+    intent_store = _MutableIntentStore(started)
+    empty_stores = (_OuterStore(), _OuterStore(), _OuterStore())
+    token = cli.schedule_flow_recovery_token("main", started, None, None, None)
+    config = SimpleNamespace(instance=SimpleNamespace(id="main"))
+    monkeypatch.setattr(cli, "_assert_no_verification_conflict", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "_validate_config",
+        lambda _config, _ids: {"master": object(), "slave": object()},
+    )
+    monkeypatch.setattr(cli, "PhysicalDeviceLease", _LeaseFactory)
+
+    with pytest.raises(cli.ScheduleFlowCliError, match="diagnostic evidence"):
+        await cli._recover(  # noqa: SLF001
+            config,
+            token,
+            intent_store,
+            *empty_stores,
+            SimpleNamespace(),
+            _Guard(),
+        )
+
+    assert intent_store.load() == started
 
 
 @pytest.mark.asyncio

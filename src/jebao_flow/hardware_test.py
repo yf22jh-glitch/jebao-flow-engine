@@ -394,7 +394,7 @@ class HardwareTestIntent(BaseModel):
             or self.stable_slave_tuple_observed is not None
             or self.stable_observation_seconds is not None
             or (
-                self.version == 2
+                self.version in {2, 3}
                 and self.evidence is not None
                 and self.evidence != HardwareTestEvidence()
             )

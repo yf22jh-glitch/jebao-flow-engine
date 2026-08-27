@@ -9,6 +9,9 @@ import pytest
 from pydantic import ValidationError
 
 from jebao_flow.devices.linkage import (
+    LinkageDiagnosticEvent,
+    LinkageDiagnosticEventKind,
+    LinkageForwardFailureCategory,
     LinkageRollbackError,
     LinkageSafetyInterlock,
     LinkageTransactionBusyError,
@@ -82,6 +85,34 @@ def _after_sample(
         master_linkage=LinkageRole.MASTER,
         slave_linkage=LinkageRole.ASYNC_SLAVE,
     )
+
+
+def test_outer_diagnostic_events_are_forwarded_without_exception_payloads() -> None:
+    events: list[LinkageDiagnosticEvent] = []
+    store = cast(object, _UnusedStore())
+    controller = ScheduleFlowExperimentController(
+        {},
+        cast(object, store),
+        cast(object, store),
+        cast(object, store),
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+        diagnostic_event_observer=events.append,
+    )
+    event = LinkageDiagnosticEvent(
+        kind=LinkageDiagnosticEventKind.FORWARD_FAILED,
+        occurred_at=datetime.now(UTC),
+        forward_failure=LinkageForwardFailureCategory.CONTROL_STATE_MISMATCH,
+    )
+
+    controller._on_diagnostic_event(event)  # noqa: SLF001
+
+    assert events == [event]
+    assert set(event.model_dump(exclude_none=True)) == {
+        "kind",
+        "occurred_at",
+        "forward_failure",
+    }
 
 
 def test_plan_builds_two_distinguishable_segments_and_clears_every_other_slot() -> None:

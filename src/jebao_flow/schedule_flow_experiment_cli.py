@@ -26,6 +26,9 @@ from jebao_flow.config import AppConfig, load_config
 from jebao_flow.devices.base import JebaoDevice
 from jebao_flow.devices.linkage import (
     DeviceControlSnapshot,
+    LinkageDiagnosticEvent,
+    LinkageDiagnosticEventKind,
+    LinkageTransactionPhase,
     LinkageTransactionRecord,
 )
 from jebao_flow.devices.schedule_flow_experiment import (
@@ -74,6 +77,9 @@ from jebao_flow.hardware_test import (
     _build_devices,
     _capture_preview,
     _connected,
+    _evidence_after_event,
+    _evidence_with_rollback_completed,
+    _evidence_with_rollback_failures,
     _safety_latch_present,
     _updated_intent,
     _validate_config,
@@ -613,6 +619,35 @@ async def _run(
                 intent,
                 _updated_intent(intent, HardwareTestIntentPhase.STARTED, None),
             )
+            pending_evidence = intent.evidence
+            if pending_evidence is None:
+                raise ScheduleFlowCliError("diagnostic intent evidence is unavailable")
+
+            def persist_diagnostic_event(event: LinkageDiagnosticEvent) -> None:
+                """Persist the outer controller's allow-listed event without raw errors."""
+
+                nonlocal intent, pending_evidence
+                if pending_evidence is None:
+                    raise ScheduleFlowCliError("diagnostic intent evidence is unavailable")
+                successor_evidence = _evidence_after_event(
+                    pending_evidence,
+                    event,
+                    spec.outer_linkage_spec(),
+                )
+                if successor_evidence == pending_evidence:
+                    return
+                # Retain the sanitized in-memory successor even if persistence fails. The core
+                # treats forward/rollback evidence as best-effort so compensation must continue;
+                # the outer before-clear hook gets one final durable retry before authority is
+                # removed.
+                pending_evidence = successor_evidence
+                successor = intent.model_copy(
+                    update={
+                        "evidence": successor_evidence,
+                        "updated_at": max(datetime.now(UTC), intent.updated_at),
+                    }
+                )
+                intent = _persist_successor(intent_store, intent, successor)
 
             def persist_sample(sample: ScheduleLinkageSample) -> None:
                 nonlocal intent
@@ -642,7 +677,11 @@ async def _run(
                     return
 
             def mark_terminal_before_outer_clear() -> None:
-                nonlocal intent
+                nonlocal intent, pending_evidence
+                if schedule_store.load() is not None or role_store.load() is not None:
+                    raise ScheduleFlowCliError(
+                        "nested schedule recovery remains before outer journal clear"
+                    )
                 latest = controller.last_role_sample
                 role_result = controller.last_role_result
                 result_updates: dict[str, Any] = {}
@@ -662,9 +701,23 @@ async def _run(
                             ),
                         }
                     )
+                outer_record = outer_store.load()
+                if outer_record is not None:
+                    pending_evidence = _evidence_with_rollback_failures(
+                        pending_evidence,
+                        outer_record,
+                    )
+                completed_at = max(
+                    datetime.now(UTC),
+                    pending_evidence.rollback_started_at or intent.updated_at,
+                )
                 current = intent.model_copy(
                     update={
                         **result_updates,
+                        "evidence": _evidence_with_rollback_completed(
+                            pending_evidence,
+                            completed_at=completed_at,
+                        ),
                         "updated_at": max(datetime.now(UTC), intent.updated_at),
                     }
                 )
@@ -694,6 +747,7 @@ async def _run(
                 safety_interlock=guard,
                 prerequisite_authorizer=_qualification_authorizer(qualification_store),
                 role_sample_observer=persist_sample,
+                diagnostic_event_observer=persist_diagnostic_event,
                 schedule_snapshot_authorizer=_snapshot_authorizer(intent_store, intent),
             )
             guard.clear()
@@ -705,10 +759,22 @@ async def _run(
                     task_name="schedule-flow-experiment",
                 )
             except BaseException:
-                pending = any(
-                    store.load() is not None for store in (outer_store, schedule_store, role_store)
+                pending_outer = outer_store.load()
+                pending = pending_outer is not None or any(
+                    store.load() is not None for store in (schedule_store, role_store)
                 )
                 current = intent_store.load() or intent
+                if pending_outer is not None:
+                    pending_evidence = _evidence_with_rollback_failures(
+                        pending_evidence,
+                        pending_outer,
+                    )
+                    current = current.model_copy(
+                        update={
+                            "evidence": pending_evidence,
+                            "updated_at": max(datetime.now(UTC), current.updated_at),
+                        }
+                    )
                 last_sample = controller.last_role_sample
                 if last_sample is not None:
                     current = current.model_copy(
@@ -903,6 +969,22 @@ def _status(
             )
             if intent.stable_observation_seconds is not None:
                 print(f"Stable observation: {intent.stable_observation_seconds:g}s")
+        evidence = intent.evidence
+        if evidence is not None:
+            print(
+                "Outer forward failure: "
+                + (
+                    evidence.forward_failure.value
+                    if evidence.forward_failure is not None
+                    else "none"
+                )
+            )
+            rollback_status = "none"
+            if evidence.rollback_completed_at is not None:
+                rollback_status = "completed"
+            elif evidence.rollback_started_at is not None:
+                rollback_status = "started"
+            print(f"Outer rollback: {rollback_status}")
         _print_sample(intent.schedule_flow_sample)
         if intent.phase is not HardwareTestIntentPhase.TERMINAL or any(
             value is not None for value in (outer, temporary, role)
@@ -977,7 +1059,7 @@ async def _recover(
             print("The schedule-flow operation is already terminal; no frame was sent.")
             return 0
         if outer is None:
-            if intent.schedule_flow_sample is not None:
+            if intent.has_diagnostic_progress:
                 raise ScheduleFlowCliError(
                     "diagnostic evidence exists without a recovery journal; "
                     "manual inspection is required"
@@ -995,8 +1077,25 @@ async def _recover(
         if _safety_latch_present(emergency_stop_latch_path()):
             raise ScheduleFlowCliError("persistent safety latch blocks exact ON-state recovery")
 
+        evidence = intent.evidence
+        if evidence is None:
+            raise ScheduleFlowCliError("diagnostic intent evidence is unavailable")
+        compensation_required = (
+            outer.phase is not LinkageTransactionPhase.PREPARED
+            or temporary is not None
+            or role is not None
+        )
+        if compensation_required:
+            evidence = _evidence_after_event(
+                evidence,
+                LinkageDiagnosticEvent(
+                    kind=LinkageDiagnosticEventKind.ROLLBACK_STARTED,
+                    occurred_at=datetime.now(UTC),
+                ),
+                spec.outer_linkage_spec(),
+            )
         recovery_intent = _updated_intent(
-            intent,
+            intent.model_copy(update={"evidence": evidence}),
             HardwareTestIntentPhase.RECOVERY_REQUIRED,
             "recovery_started",
         )
@@ -1009,8 +1108,29 @@ async def _recover(
 
         def before_clear() -> None:
             nonlocal intent
+            if schedule_store.load() is not None or role_store.load() is not None:
+                raise ScheduleFlowCliError(
+                    "nested schedule recovery remains before outer journal clear"
+                )
+            evidence = intent.evidence
+            if evidence is None:
+                raise ScheduleFlowCliError("diagnostic intent evidence is unavailable")
+            current_outer = outer_store.load()
+            if current_outer is not None:
+                evidence = _evidence_with_rollback_failures(evidence, current_outer)
+            completed_at = max(
+                datetime.now(UTC),
+                evidence.rollback_started_at or intent.updated_at,
+            )
             successor = _updated_intent(
-                intent,
+                intent.model_copy(
+                    update={
+                        "evidence": _evidence_with_rollback_completed(
+                            evidence,
+                            completed_at=completed_at,
+                        )
+                    }
+                ),
                 HardwareTestIntentPhase.TERMINAL,
                 "recovered",
             )
@@ -1047,6 +1167,18 @@ async def _recover(
                 )
             except BaseException:
                 latest = intent_store.load() or intent
+                pending_outer = outer_store.load()
+                latest_evidence = latest.evidence
+                if pending_outer is not None and latest_evidence is not None:
+                    latest = latest.model_copy(
+                        update={
+                            "evidence": _evidence_with_rollback_failures(
+                                latest_evidence,
+                                pending_outer,
+                            ),
+                            "updated_at": max(datetime.now(UTC), latest.updated_at),
+                        }
+                    )
                 intent_store.save(
                     _updated_intent(
                         latest,
