@@ -70,6 +70,10 @@ _ROLE_FREQUENCY_CONVERGENCE_MAX_READS = 4
 _ROLE_FREQUENCY_CONVERGENCE_ADMISSION_WINDOW_SECONDS = 20.0
 _ROLE_FREQUENCY_CONVERGENCE_MAX_INTERVAL_SECONDS = 5.0
 _ROLE_FREQUENCY_CONVERGENCE_REQUIRED_EXACT_READS = 2
+# Read-only field sampling observed Pro NowTime advance in independent 22-25 second batches.
+# Treat 30 seconds as a conservative early-boundary allowance: a larger hidden lag can only make
+# the attended experiment fail closed, never authorize an early Auto transition as schedule-led.
+_STAGED_CLOCK_STALENESS_ALLOWANCE_SECONDS = 30.0
 # One LAN session boundary can spend 5s closing, 5s connecting, 10s authenticating and 5s
 # querying.  Keep a further 5s scheduling margin and do not admit a convergence read unless that
 # whole path fits before the observation deadline, which preserves a separate rollback reserve.
@@ -883,6 +887,7 @@ class ScheduleActiveLinkageController:
         sample_observer: SampleObserver | None = None,
         progress_observer: ScheduleLinkageRunProgressObserver | None = None,
         refresh_sessions_before_critical_reads: bool = False,
+        owned_staged_auto_transition_observation: bool = False,
     ) -> None:
         self._devices = dict(devices)
         self._store = store
@@ -895,12 +900,16 @@ class ScheduleActiveLinkageController:
         self._refresh_sessions_before_critical_reads = (
             refresh_sessions_before_critical_reads
         )
+        self._owned_staged_auto_transition_observation = (
+            owned_staged_auto_transition_observation
+        )
         self._run_lock = asyncio.Lock()
         self._active_operation_id: str | None = None
         self._safety_epoch: int | None = None
         self._stop_event: asyncio.Event | None = None
         self._forward_deadline: float | None = None
         self._observation_deadline: float | None = None
+        self._staged_transition_not_before: float | None = None
         self._run_failure: ScheduleLinkageRunFailure | None = None
         self._run_drift_dimensions: tuple[ScheduleLinkageDriftDimension, ...] = ()
         self._run_pair_participant: Literal["master", "slave"] | None = None
@@ -1200,6 +1209,7 @@ class ScheduleActiveLinkageController:
             self._safety_epoch = None
             self._forward_deadline = None
             self._observation_deadline = None
+            self._staged_transition_not_before = None
             self._run_failure = None
             self._run_drift_dimensions = ()
             self._run_pair_participant = None
@@ -1269,7 +1279,58 @@ class ScheduleActiveLinkageController:
             raise ScheduleLinkagePreflightError(
                 "slave next Auto tuple must differ from master to prove its own schedule"
             )
+        if self._owned_staged_auto_transition_observation:
+            self._assert_staged_auto_transition_preconditions(spec, states, snapshots)
         return snapshots
+
+    def _assert_staged_auto_transition_preconditions(
+        self,
+        spec: ScheduleLinkageSpec,
+        states: Mapping[str, DeviceState],
+        snapshots: tuple[ScheduleLinkageSnapshot, ...],
+    ) -> None:
+        """Restrict clock-free observation to the owned two-entry field schedule."""
+
+        if not self._refresh_sessions_before_critical_reads:
+            raise ScheduleLinkagePreflightError(
+                "staged Auto transition observation requires explicit critical reads"
+            )
+        after_valid_until = {snapshot.expectation.after_valid_until for snapshot in snapshots}
+        if len(after_valid_until) != 1:
+            raise ScheduleLinkagePreflightError(
+                "staged Auto transition entries must share one validity window"
+            )
+        for snapshot in snapshots:
+            schedule = states[snapshot.device_id].schedule
+            if schedule is None:
+                raise ScheduleLinkagePreflightError(
+                    f"device {snapshot.device_id!r} has no staged schedule"
+                )
+            entries = _validated_entries(schedule)
+            expectation = snapshot.expectation
+            if (
+                len(entries) != 2
+                or expectation.current_slot != entries[0].slot
+                or expectation.next_slot != entries[1].slot
+                or _wall_seconds(entries[1].end) <= _wall_seconds(entries[1].start)
+            ):
+                raise ScheduleLinkagePreflightError(
+                    "Auto transition observation requires a non-wrapping two-entry schedule"
+                )
+            if expectation.before.mode == expectation.after_mode:
+                raise ScheduleLinkagePreflightError(
+                    "staged Auto transition must change mode at the observed boundary"
+                )
+            stable_budget = (
+                spec.post_boundary_stability_seconds
+                + 2 * spec.verification_interval_seconds
+            )
+            if (
+                expectation.after_valid_until - expectation.boundary_at
+            ).total_seconds() <= stable_budget:
+                raise ScheduleLinkagePreflightError(
+                    "staged next entry is too short for stable Auto evidence"
+                )
 
     def _snapshot_from_state(
         self,
@@ -1405,6 +1466,7 @@ class ScheduleActiveLinkageController:
             "first-write gate",
             "post-role verification",
             "frequency convergence",
+            "active observation",
         ] = "frequency convergence",
     ) -> dict[str, DeviceState]:
         """Cancel a reply-only read promptly if stop or safety authority changes."""
@@ -1478,6 +1540,20 @@ class ScheduleActiveLinkageController:
         )
         if remaining < record.spec.minimum_lead_seconds:
             raise ScheduleLinkagePreflightError("insufficient lead remains before the boundary")
+        if self._owned_staged_auto_transition_observation:
+            required_early_guard = (
+                _STAGED_CLOCK_STALENESS_ALLOWANCE_SECONDS
+                + 2 * record.spec.verification_interval_seconds
+            )
+            if remaining <= required_early_guard:
+                raise ScheduleLinkagePreflightError(
+                    "insufficient lead remains for staged Auto transition attribution"
+                )
+            self._staged_transition_not_before = (
+                sampled_at
+                + remaining
+                - _STAGED_CLOCK_STALENESS_ALLOWANCE_SECONDS
+            )
         post_write_margin = (
             record.spec.ambiguous_band_seconds
             + 3 * record.spec.verification_interval_seconds
@@ -1552,18 +1628,20 @@ class ScheduleActiveLinkageController:
             record.spec,
             context="post-role verification",
         )
-        self._set_pair_verification_failure("clock_skew")
-        self._assert_pair_clock_skew(record.spec, states)
+        if not self._owned_staged_auto_transition_observation:
+            self._set_pair_verification_failure("clock_skew")
+            self._assert_pair_clock_skew(record.spec, states)
         sampled_at = self._monotonic()
         self._set_pair_verification_failure("deadline")
         self._assert_observation_deadline(sampled_at)
-        self._set_pair_verification_failure("clock_continuity")
-        self._assert_clock_continuity(
-            record.spec,
-            states,
-            previous_clocks=previous_anchor.clocks,
-            elapsed_monotonic=sampled_at - previous_anchor.sampled_at_monotonic,
-        )
+        if not self._owned_staged_auto_transition_observation:
+            self._set_pair_verification_failure("clock_continuity")
+            self._assert_clock_continuity(
+                record.spec,
+                states,
+                previous_clocks=previous_anchor.clocks,
+                elapsed_monotonic=sampled_at - previous_anchor.sampled_at_monotonic,
+            )
         expected_roles = {
             record.spec.master_device_id: (
                 LinkageRole.MASTER
@@ -1585,10 +1663,26 @@ class ScheduleActiveLinkageController:
             states, sampled_at = await self._converge_role_frequency(
                 record,
                 expected_roles,
-                initial_anchor=self._clock_anchor(states, sampled_at),
+                initial_anchor=(
+                    previous_anchor
+                    if self._owned_staged_auto_transition_observation
+                    else self._clock_anchor(states, sampled_at)
+                ),
                 initial_error=error,
                 pair_failure=pair_failure,
             )
+        if self._owned_staged_auto_transition_observation:
+            transition_not_before = self._staged_transition_not_before
+            if transition_not_before is None:
+                self._set_pair_verification_checkpoint()
+                raise ScheduleLinkageApplyError(
+                    "staged role verification has no authorized boundary window"
+                )
+            if sampled_at >= transition_not_before:
+                self._set_pair_verification_checkpoint()
+                raise ScheduleLinkageApplyError(
+                    "staged role verification exceeded the conservative boundary window"
+                )
         self._run_failure = pair_failure
         self._run_drift_dimensions = ()
         linked = (*record.linked_device_ids, device_id)
@@ -1598,7 +1692,12 @@ class ScheduleActiveLinkageController:
         self._store.save(record)
         self._emit_progress_best_effort(pair_verified)
         self._run_pair_participant = None
-        return record, self._clock_anchor(states, sampled_at)
+        next_anchor = (
+            previous_anchor
+            if self._owned_staged_auto_transition_observation
+            else self._clock_anchor(states, sampled_at)
+        )
+        return record, next_anchor
 
     async def _converge_role_frequency(
         self,
@@ -1638,20 +1737,22 @@ class ScheduleActiveLinkageController:
             self._assert_role_frequency_retry_authority(pair_failure)
             self._set_pair_verification_failure("state_read")
             states = await self._read_pair_explicit_states_guarded(spec)
-            self._set_pair_verification_failure("clock_skew")
-            self._assert_pair_clock_skew(spec, states)
+            if not self._owned_staged_auto_transition_observation:
+                self._set_pair_verification_failure("clock_skew")
+                self._assert_pair_clock_skew(spec, states)
             sampled_at = self._monotonic()
             self._set_pair_verification_failure("deadline")
             self._assert_observation_deadline(sampled_at)
-            self._set_pair_verification_failure("clock_continuity")
-            self._assert_clock_continuity(
-                spec,
-                states,
-                previous_clocks=previous_anchor.clocks,
-                elapsed_monotonic=(
-                    sampled_at - previous_anchor.sampled_at_monotonic
-                ),
-            )
+            if not self._owned_staged_auto_transition_observation:
+                self._set_pair_verification_failure("clock_continuity")
+                self._assert_clock_continuity(
+                    spec,
+                    states,
+                    previous_clocks=previous_anchor.clocks,
+                    elapsed_monotonic=(
+                        sampled_at - previous_anchor.sampled_at_monotonic
+                    ),
+                )
             self._assert_role_frequency_retry_authority(pair_failure)
             convergence_expired = sampled_at > convergence_deadline
             self._set_pair_verification_checkpoint()
@@ -1687,7 +1788,8 @@ class ScheduleActiveLinkageController:
                         emit_sample=True,
                     )
                     return states, sampled_at
-            previous_anchor = self._clock_anchor(states, sampled_at)
+            if not self._owned_staged_auto_transition_observation:
+                previous_anchor = self._clock_anchor(states, sampled_at)
             if convergence_expired:
                 break
         self._run_failure = last_frequency_failure
@@ -1782,6 +1884,8 @@ class ScheduleActiveLinkageController:
         activation_anchor: _ClockAnchor,
     ) -> tuple[ScheduleLinkageStopReason, bool]:
         spec = record.spec
+        if self._owned_staged_auto_transition_observation:
+            return await self._monitor_staged_auto_transition(record)
         expected_roles = {
             spec.master_device_id: LinkageRole.MASTER,
             spec.slave_device_id: LinkageRole.ASYNC_SLAVE,
@@ -1893,6 +1997,143 @@ class ScheduleActiveLinkageController:
             "schedule boundary was missed or lacked two consecutive fresh samples"
         )
 
+    async def _monitor_staged_auto_transition(
+        self,
+        record: ScheduleLinkageRecord,
+    ) -> tuple[ScheduleLinkageStopReason, bool]:
+        """Observe an owned two-entry schedule without trusting the batched NowTime DP."""
+
+        spec = record.spec
+        expected_roles = {
+            spec.master_device_id: LinkageRole.MASTER,
+            spec.slave_device_id: LinkageRole.ASYNC_SLAVE,
+        }
+        after_seen: set[str] = set()
+        consecutive_after = 0
+        previous_after: tuple[tuple[str, int, int], ...] | None = None
+        stable_after_started_at: float | None = None
+        transition_not_before = self._staged_transition_not_before
+        if transition_not_before is None:
+            raise ScheduleLinkageApplyError(
+                "staged Auto transition has no authorized monotonic boundary window"
+            )
+        while self._monotonic() <= self._require_observation_deadline():
+            if self._stop_requested():
+                return ScheduleLinkageStopReason.MANUAL, False
+            if not self._active_observation_allowed():
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage safety authority was revoked"
+                )
+            states = await self._read_pair_explicit_states_guarded(
+                spec,
+                context="active observation",
+            )
+            sampled_at = self._monotonic()
+            self._assert_observation_deadline(sampled_at)
+            sides = self._classify_staged_auto_sides(record, states, expected_roles)
+            if (
+                sampled_at < transition_not_before
+                and any(side == "after" for side in sides.values())
+            ):
+                raise ScheduleLinkageApplyError(
+                    "staged Auto evidence changed before the conservative boundary window"
+                )
+            for device_id in after_seen:
+                if sides[device_id] == "before":
+                    raise ScheduleLinkageApplyError(
+                        "staged Auto evidence returned to its prior entry"
+                    )
+            after_seen.update(
+                device_id for device_id, side in sides.items() if side == "after"
+            )
+            master_side = sides[spec.master_device_id]
+            if all(side == "before" for side in sides.values()):
+                self._assert_pair_sample(
+                    record,
+                    states,
+                    expected_roles,
+                    phase="before",
+                )
+                consecutive_after = 0
+                previous_after = None
+                stable_after_started_at = None
+            elif master_side == "after":
+                # The master's exact B tuple proves that the staged boundary has happened.  The
+                # slave may expose its own B Flow, follow the master's Flow, keep A's Flow, or
+                # even retain the exact A tuple; holding that bounded safe candidate stable is the
+                # behavior this experiment is designed to classify.
+                evidence = self._assert_pair_sample(
+                    record,
+                    states,
+                    expected_roles,
+                    phase="after",
+                )
+                if previous_after == evidence:
+                    consecutive_after += 1
+                else:
+                    consecutive_after = 1
+                    previous_after = evidence
+                    stable_after_started_at = sampled_at
+                stable_for = (
+                    0.0
+                    if stable_after_started_at is None
+                    else sampled_at - stable_after_started_at
+                )
+                if (
+                    consecutive_after >= 2
+                    and stable_for >= spec.post_boundary_stability_seconds
+                ):
+                    self._assert_observation_deadline()
+                    return ScheduleLinkageStopReason.BOUNDARY_VERIFIED, True
+            else:
+                # Explicit Auto DPs can refresh independently.  A mixed sample is transitional,
+                # but a participant that has already reached B may never return to A.
+                consecutive_after = 0
+                previous_after = None
+                stable_after_started_at = None
+            await self._sleep(spec.verification_interval_seconds)
+        raise ScheduleLinkageApplyError(
+            "staged Auto transition lacked two consecutive stable after samples"
+        )
+
+    def _classify_staged_auto_sides(
+        self,
+        record: ScheduleLinkageRecord,
+        states: Mapping[str, DeviceState],
+        expected_roles: Mapping[str, LinkageRole],
+    ) -> dict[str, Literal["before", "after"]]:
+        """Reject every Auto tuple except the captured A or guarded B evidence."""
+
+        self._assert_pair_sample(
+            record,
+            states,
+            expected_roles,
+            phase="ambiguous",
+            emit_sample=False,
+        )
+        sides: dict[str, Literal["before", "after"]] = {}
+        for snapshot in record.snapshots:
+            observed_role: Literal["master", "slave"] = (
+                "master"
+                if snapshot.device_id == record.spec.master_device_id
+                else "slave"
+            )
+            self._set_pair_verification_failure(
+                "auto",
+                dimensions=(ScheduleLinkageDriftDimension.AUTO_EVIDENCE,),
+                observed_role=observed_role,
+            )
+            evidence = _observed_auto(snapshot.device_id, states[snapshot.device_id])
+            if evidence == snapshot.expectation.before:
+                sides[snapshot.device_id] = "before"
+            elif self._matches_after_evidence(record, snapshot, evidence):
+                sides[snapshot.device_id] = "after"
+            else:
+                raise ScheduleLinkageApplyError(
+                    f"device {snapshot.device_id!r} reported an unknown staged Auto tuple"
+                )
+        return sides
+
     def _assert_pair_sample(
         self,
         record: ScheduleLinkageRecord,
@@ -1971,42 +2212,62 @@ class ScheduleActiveLinkageController:
                     raise ScheduleLinkageApplyError(
                         f"device {snapshot.device_id!r} pre-boundary Auto evidence drifted"
                     )
-            else:
-                expectation = snapshot.expectation
-                slave_variance = (
-                    record.spec.observe_slave_after_tuple_variance
-                    and snapshot.device_id == record.spec.slave_device_id
+            elif not self._matches_after_evidence(record, snapshot, evidence):
+                raise ScheduleLinkageApplyError(
+                    f"device {snapshot.device_id!r} did not enter its next schedule entry"
                 )
-                if not slave_variance and (
-                    evidence.mode != expectation.after_mode
-                    or evidence.flow != expectation.after_flow
-                ):
-                    raise ScheduleLinkageApplyError(
-                        f"device {snapshot.device_id!r} did not enter its next schedule entry"
-                    )
-                if not slave_variance and (
-                    expectation.after_frequency is not None
-                    and evidence.frequency != expectation.after_frequency
-                ):
-                    raise ScheduleLinkageApplyError(
-                        f"device {snapshot.device_id!r} next AutoFreq did not match"
-                    )
-                if slave_variance:
-                    capabilities = self._get_device(snapshot.device_id).capabilities
-                    limits = capabilities.power_limits
-                    guarded_maximum = min(
-                        limits.max_power,
-                        _SCHEDULE_LINKAGE_TEST_MAX_POWER,
-                    )
-                    if (
-                        not limits.min_power <= evidence.flow <= guarded_maximum
-                        or evidence.flow % capabilities.power_step
-                    ):
-                        raise ScheduleLinkageApplyError(
-                            f"device {snapshot.device_id!r} observed unsafe AutoFlow"
-                        )
             effective.append((evidence.mode, evidence.flow, evidence.frequency))
         return tuple(effective)
+
+    def _matches_after_evidence(
+        self,
+        record: ScheduleLinkageRecord,
+        snapshot: ScheduleLinkageSnapshot,
+        evidence: ScheduleAutoEvidence,
+    ) -> bool:
+        """Match B exactly, except for the experiment's deliberately observed slave Flow."""
+
+        expectation = snapshot.expectation
+        slave_variance = (
+            record.spec.observe_slave_after_tuple_variance
+            and snapshot.device_id == record.spec.slave_device_id
+        )
+        if slave_variance and not self._owned_staged_auto_transition_observation:
+            return self._slave_flow_is_safe(snapshot, evidence)
+        staged_slave_prior = (
+            self._owned_staged_auto_transition_observation
+            and slave_variance
+            and evidence == expectation.before
+        )
+        if staged_slave_prior:
+            return True
+        if evidence.mode != expectation.after_mode:
+            return False
+        if (
+            expectation.after_frequency is not None
+            and evidence.frequency != expectation.after_frequency
+        ):
+            return False
+        if not slave_variance:
+            return evidence.flow == expectation.after_flow
+        return self._slave_flow_is_safe(snapshot, evidence)
+
+    def _slave_flow_is_safe(
+        self,
+        snapshot: ScheduleLinkageSnapshot,
+        evidence: ScheduleAutoEvidence,
+    ) -> bool:
+        capabilities = self._get_device(snapshot.device_id).capabilities
+        limits = capabilities.power_limits
+        guarded_maximum = min(limits.max_power, _SCHEDULE_LINKAGE_TEST_MAX_POWER)
+        if (
+            not limits.min_power <= evidence.flow <= guarded_maximum
+            or evidence.flow % capabilities.power_step
+        ):
+            raise ScheduleLinkageApplyError(
+                f"device {snapshot.device_id!r} observed unsafe AutoFlow"
+            )
+        return True
 
     def _emit_sample_best_effort(self, sample: ScheduleLinkageSample) -> None:
         if self._sample_observer is None:

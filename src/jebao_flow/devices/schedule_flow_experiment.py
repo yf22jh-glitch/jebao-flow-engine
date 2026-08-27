@@ -432,6 +432,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             sample_observer=self._observe_role_sample,
             progress_observer=self._observe_role_progress,
             refresh_sessions_before_critical_reads=True,
+            owned_staged_auto_transition_observation=True,
         )
         self._external_role_sample_observer = role_sample_observer
         self._external_diagnostic_event_observer = diagnostic_event_observer

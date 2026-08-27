@@ -77,6 +77,19 @@ docker compose exec jebao-flow-recovery \
 The result proves controller-register `Auto*` transitions; it does not by itself prove physical
 water flow.
 
+The composed `jebao-flow-schedule-flow-test` uses a narrower observation rule than the standalone
+command above. Read-only field captures showed that Pro `NowTime` is refreshed in device-specific
+batches, so it is retained as a fail-closed admission check during preflight and the final
+pre-write gate, but it is not treated as a continuous clock after Linkage roles are active. The
+composed test accepts this rule only for the exact temporary two-entry schedule that it owns. It
+projects a conservative monotonic not-before window from the final pre-write clock sample and
+rejects any earlier B evidence. It then uses explicit query replies to prove an exact master
+A-to-B `Auto*` transition and holds one unchanged, safe slave result for two consecutive samples
+and the full requested monotonic stability interval. Manual controls, `TimerON`, roles, health,
+and the schedule fingerprint must remain exact on every sample. This can answer whether the slave
+applies its per-slot Flow, keeps the previous Flow, or follows the master; it cannot prove
+subsecond phase alignment or the exact wall-clock instant at which either controller changed.
+
 ## Status and recovery
 
 ```bash
