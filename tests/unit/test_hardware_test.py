@@ -1406,7 +1406,10 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
     )
     args = _args("preflight")
     args[args.index("sync_slave")] = "async_slave"
-    args[args.index("0.02")] = "0.5"
+    # The injected post-change failures still occur after 0.02s, but the transaction deadline
+    # also covers synchronous fsync-backed diagnostic callbacks. Keep enough headroom for a
+    # loaded CI host so this test reaches the intended live-write failure deterministically.
+    args[args.index("0.02")] = "5"
     if bootstrap_schedule:
         args.append("--bootstrap-active-schedule")
     args.extend(
