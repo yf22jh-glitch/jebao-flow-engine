@@ -219,8 +219,11 @@ def test_fixed_plan_is_the_only_audited_field_shape() -> None:
     assert spec.sine_frequency == 30
     assert spec.safe_frequency == 20
     assert spec.post_boundary_stability_seconds == 300
-    assert spec.observation_window_seconds == 600
+    assert spec.observation_window_seconds == 630
     assert spec.sentinel_qualification is True
+    assert spec.role_observation_spec().observation_window_seconds == 630
+    assert spec.outer_linkage_spec().duration_seconds == 870
+    assert spec.temporary_schedule_spec().observation_timeout_seconds == 750
 
 
 def test_sentinel_only_is_cli_parsed_and_confirmation_token_bound() -> None:
@@ -533,7 +536,7 @@ def test_boundary_uses_freshest_device_clock_and_refuses_skew_or_midnight() -> N
     first = datetime(2026, 8, 27, 12, 10, 1)
     second = datetime(2026, 8, 27, 12, 10, 2)
 
-    assert cli._next_boundary((first, second)) == "12:14"  # noqa: SLF001
+    assert cli._next_boundary((first, second)) == "12:15"  # noqa: SLF001
     with pytest.raises(cli.ScheduleFlowCliError, match="two-second skew"):
         cli._next_boundary((first, second + timedelta(seconds=3)))  # noqa: SLF001
     with pytest.raises(cli.ScheduleFlowCliError, match="midnight"):
@@ -645,15 +648,42 @@ async def test_schedule_context_waits_for_the_sibling_read_before_raising() -> N
     assert sibling_completed.is_set()
 
 
-def test_run_boundary_must_still_have_one_to_three_minutes_lead() -> None:
+def test_run_boundary_requires_the_full_four_to_five_minute_lead_window() -> None:
     cli._require_boundary_still_fresh(  # noqa: SLF001
-        "12:14",
-        (datetime(2026, 8, 27, 12, 11, 30), datetime(2026, 8, 27, 12, 11, 31)),
+        "12:15",
+        (datetime(2026, 8, 27, 12, 10), datetime(2026, 8, 27, 12, 11)),
     )
-    with pytest.raises(cli.ScheduleFlowCliError, match="no longer"):
+    for outside in (
+        datetime(2026, 8, 27, 12, 9, 59, 999000),
+        datetime(2026, 8, 27, 12, 11, 0, 1000),
+    ):
+        with pytest.raises(cli.ScheduleFlowCliError, match="no longer"):
+            cli._require_boundary_still_fresh(  # noqa: SLF001
+                "12:15",
+                (outside, outside),
+            )
+
+
+def test_fixed_window_covers_maximum_boundary_stability_and_rollback_budget() -> None:
+    spec = _spec()
+
+    required = (
+        300
+        + spec.post_boundary_stability_seconds
+        + 2 * spec.ambiguous_band_seconds
+        + 4 * spec.verification_interval_seconds
+        + 15
+    )
+
+    assert required == 625
+    assert spec.observation_window_seconds == required + 5
+
+
+def test_run_boundary_rejects_a_missing_pair_clock() -> None:
+    with pytest.raises(cli.ScheduleFlowCliError, match="both fresh"):
         cli._require_boundary_still_fresh(  # noqa: SLF001
-            "12:14",
-            (datetime(2026, 8, 27, 12, 12, 1), datetime(2026, 8, 27, 12, 12, 2)),
+            "12:15",
+            (datetime(2026, 8, 27, 12, 10),),
         )
 
 
@@ -1248,6 +1278,53 @@ def test_status_prints_durable_role_failure_without_gated_stage_events(capsys) -
     assert "physical_binding" not in output
 
 
+def test_terminal_typed_preflight_reason_is_private_and_token_compatible(capsys) -> None:
+    base = _intent(
+        phase=HardwareTestIntentPhase.TERMINAL,
+        outcome="experiment_failed_restored",
+    )
+    checkpoint = ScheduleLinkageRunProgressEvent(
+        kind=ScheduleLinkageRunProgressKind.FAILED,
+        occurred_at=base.created_at,
+        failure=ScheduleLinkageRunFailure.PREFLIGHT_EXPLICIT_STATE_READ,
+    )
+    assert ScheduleLinkageRunProgressEvent.model_validate_json(
+        checkpoint.model_dump_json()
+    ) == checkpoint
+    terminal = HardwareTestIntent.model_validate(
+        base.model_dump(mode="python")
+        | {"schedule_flow_role_failure": checkpoint}
+    )
+
+    assert hardware_test_intent_confirmation_token(terminal) == (
+        hardware_test_intent_confirmation_token(base)
+    )
+    assert cli.schedule_flow_recovery_token("main", terminal, None, None, None) != (
+        cli.schedule_flow_recovery_token("main", base, None, None, None)
+    )
+    encoded = terminal.schedule_flow_role_failure.model_dump_json()
+    assert "device_id" not in encoded
+    assert "physical_binding" not in encoded
+    assert "exception" not in encoded
+
+    store = SimpleNamespace(load=lambda: terminal)
+    empty = SimpleNamespace(load=lambda: None)
+    assert cli._status(  # noqa: SLF001
+        SimpleNamespace(instance=SimpleNamespace(id="main")),
+        store,
+        empty,
+        empty,
+        empty,
+    ) == 0
+    output = capsys.readouterr().out
+    assert "Role failure phase: preflight" in output
+    assert "Role failure reason: preflight_explicit_state_read" in output
+    assert "Recovery confirmation token:" not in output
+    assert "device_id" not in output
+    assert "physical_binding" not in output
+    assert "exception" not in output
+
+
 def test_status_prints_sanitized_pair_verification_substage(capsys) -> None:
     base = _intent(
         phase=HardwareTestIntentPhase.RECOVERY_REQUIRED,
@@ -1278,6 +1355,8 @@ def test_status_prints_sanitized_pair_verification_substage(capsys) -> None:
     ) == 0
     output = capsys.readouterr().out
     assert "Role run failure: slave_pair_state/power,linkage" in output
+    assert "Role failure phase: run" in output
+    assert "Role failure reason: slave_pair_state/power,linkage" in output
     assert "device_id" not in output
     assert "AutoFlow" not in output
     assert "private transport detail" not in output
@@ -1658,7 +1737,7 @@ async def test_preflight_persists_full_v3_intent_without_writes(monkeypatch, cap
     assert saved is not None
     assert saved.version == 3
     assert saved.phase is HardwareTestIntentPhase.ARMED
-    assert saved.schedule_flow_spec.boundary_time == "12:14"
+    assert saved.schedule_flow_spec.boundary_time == "12:15"
     assert saved.schedule_image_digests == _digests()
     output = capsys.readouterr().out
     assert "no control or schedule frame was sent" in output
@@ -1699,8 +1778,8 @@ def _install_run_environment(monkeypatch, armed: HardwareTestIntent):
 
     async def capture_context(_devices, _device_ids):
         return armed.schedule_image_digests, (
-            datetime(2026, 8, 27, 12, 31, 1),
-            datetime(2026, 8, 27, 12, 31, 2),
+            datetime(2026, 8, 27, 12, 29, 59),
+            datetime(2026, 8, 27, 12, 30),
         )
 
     monkeypatch.setattr(cli, "_build_devices", build)
@@ -1758,8 +1837,8 @@ async def test_sentinel_only_terminal_is_durable_before_outer_clear(
 
     async def capture_context(_devices, _device_ids):
         return armed.schedule_image_digests, (
-            datetime(2026, 8, 27, 12, 31, 1),
-            datetime(2026, 8, 27, 12, 31, 2),
+            datetime(2026, 8, 27, 12, 29, 59),
+            datetime(2026, 8, 27, 12, 30),
         )
 
     monkeypatch.setattr(cli, "_build_devices", build)
@@ -1881,8 +1960,8 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
 
     async def capture_context(_devices, _device_ids):
         return armed.schedule_image_digests, (
-            datetime(2026, 8, 27, 12, 31, 1),
-            datetime(2026, 8, 27, 12, 31, 2),
+            datetime(2026, 8, 27, 12, 29, 59),
+            datetime(2026, 8, 27, 12, 30),
         )
 
     monkeypatch.setattr(cli, "_build_devices", build)
@@ -1992,9 +2071,17 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("clear_outer", (True, False))
+@pytest.mark.parametrize(
+    "failure",
+    (
+        ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH,
+        ScheduleLinkageRunFailure.PREFLIGHT_EXPLICIT_STATE_READ,
+    ),
+)
 async def test_run_checkpoints_gated_role_failure_in_existing_terminal_saves(
     monkeypatch,
     clear_outer: bool,
+    failure: ScheduleLinkageRunFailure,
 ) -> None:
     armed = _intent()
 
@@ -2036,7 +2123,15 @@ async def test_run_checkpoints_gated_role_failure_in_existing_terminal_saves(
             assert [saved.phase for saved in intent_store.saved] == [
                 HardwareTestIntentPhase.STARTED
             ]
-            self.last_role_failure = _role_failure(datetime.now(UTC))
+            self.last_role_failure = (
+                _role_failure(datetime.now(UTC))
+                if failure is ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH
+                else ScheduleLinkageRunProgressEvent(
+                    kind=ScheduleLinkageRunProgressKind.FAILED,
+                    occurred_at=datetime.now(UTC),
+                    failure=failure,
+                )
+            )
             # No gated observer callback or intent save happened between role failure capture
             # and either of the existing post-compensation persistence barriers below.
             assert len(intent_store.saved) == 1
@@ -2075,10 +2170,7 @@ async def test_run_checkpoints_gated_role_failure_in_existing_terminal_saves(
         "experiment_failed_restored" if clear_outer else "recovery_required"
     )
     assert terminal.schedule_flow_role_failure is not None
-    assert (
-        terminal.schedule_flow_role_failure.failure
-        is ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH
-    )
+    assert terminal.schedule_flow_role_failure.failure is failure
     assert clear_observations == (
         ["checkpoint-before-outer-clear"] if clear_outer else []
     )
@@ -2207,8 +2299,8 @@ async def test_pause_failure_durably_records_outer_category_and_completed_restor
 
     async def capture_context(_devices, _device_ids):
         return armed.schedule_image_digests, (
-            datetime(2026, 8, 27, 12, 31, 1),
-            datetime(2026, 8, 27, 12, 31, 2),
+            datetime(2026, 8, 27, 12, 29, 59),
+            datetime(2026, 8, 27, 12, 30),
         )
 
     monkeypatch.setattr(cli, "_build_devices", build)

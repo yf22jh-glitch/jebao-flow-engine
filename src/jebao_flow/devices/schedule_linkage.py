@@ -89,6 +89,18 @@ class ScheduleLinkageError(RuntimeError):
 class ScheduleLinkagePreflightError(ScheduleLinkageError):
     """No write was authorized because fresh evidence was unsafe or unsupported."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure: ScheduleLinkageRunFailure | None = None,
+    ) -> None:
+        resolved = failure or ScheduleLinkageRunFailure.PREFLIGHT_UNEXPECTED
+        if not resolved.value.startswith("preflight_"):
+            raise ValueError("preflight errors require an allow-listed preflight failure")
+        self.failure = resolved
+        super().__init__(message)
+
 
 class ScheduleLinkageApplyError(ScheduleLinkageError):
     """The observation failed, but all intended linkage writes were detached."""
@@ -152,6 +164,24 @@ class ScheduleLinkageRunProgressKind(StrEnum):
 class ScheduleLinkageRunFailure(StrEnum):
     """Allow-listed failure locations safe to persist outside the role transaction."""
 
+    PREFLIGHT_STORE = "preflight_store"
+    PREFLIGHT_BUSY = "preflight_busy"
+    PREFLIGHT_SAFETY_INTERLOCK = "preflight_safety_interlock"
+    PREFLIGHT_CAPABILITY = "preflight_capability"
+    PREFLIGHT_SESSION_REFRESH = "preflight_session_refresh"
+    PREFLIGHT_EXPLICIT_STATE_READ = "preflight_explicit_state_read"
+    PREFLIGHT_STATE_READ = "preflight_state_read"
+    PREFLIGHT_CLOCK = "preflight_clock"
+    PREFLIGHT_CONTROL_BASELINE = "preflight_control_baseline"
+    PREFLIGHT_SCHEDULE_STRUCTURE = "preflight_schedule_structure"
+    PREFLIGHT_AUTO_EVIDENCE = "preflight_auto_evidence"
+    PREFLIGHT_TIME_WINDOW = "preflight_time_window"
+    PREFLIGHT_POWER_GUARD = "preflight_power_guard"
+    PREFLIGHT_PAIR_EVIDENCE = "preflight_pair_evidence"
+    PREFLIGHT_STAGED_PLAN = "preflight_staged_plan"
+    PREFLIGHT_AUTHORIZATION = "preflight_authorization"
+    PREFLIGHT_SETTLE = "preflight_settle"
+    PREFLIGHT_UNEXPECTED = "preflight_unexpected"
     FRESH_CAPTURE = "fresh_capture"
     AUTHORIZATION = "authorization"
     CONFIRMATION = "confirmation"
@@ -343,7 +373,7 @@ class ScheduleLinkageSpec(BaseModel):
     )
     master_device_id: DeviceIdentifier
     slave_device_id: DeviceIdentifier
-    observation_window_seconds: float = Field(default=180, gt=0, le=600)
+    observation_window_seconds: float = Field(default=180, gt=0, le=630)
     verification_interval_seconds: float = Field(default=1, gt=0, le=10)
     minimum_lead_seconds: float = Field(default=45, ge=10, le=180)
     ambiguous_band_seconds: float = Field(default=1, ge=0.1, le=5)
@@ -686,56 +716,87 @@ def _schedule_linkage_drift_dimensions(
 
 
 def _wall_seconds(value: str) -> int:
-    hour_text, minute_text = value.split(":", maxsplit=1)
-    hour = int(hour_text)
-    minute = int(minute_text)
+    try:
+        hour_text, minute_text = value.split(":", maxsplit=1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ScheduleLinkagePreflightError(
+            "decoded schedule has an invalid wall time",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
+        ) from error
     if hour == 24 and minute == 0:
         return _DAY_SECONDS
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
-        raise ScheduleLinkagePreflightError("decoded schedule has an invalid wall time")
+        raise ScheduleLinkagePreflightError(
+            "decoded schedule has an invalid wall time",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
+        )
     return hour * 60 * 60 + minute * 60
 
 
 def _decoded_values(entry: ScheduleEntry) -> tuple[str, int, int, int | None]:
     mode = entry.mode
     if mode not in _KNOWN_PRO_MODES:
-        raise ScheduleLinkagePreflightError("decoded schedule has an unknown mode")
+        raise ScheduleLinkagePreflightError(
+            "decoded schedule has an unknown mode",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
+        )
     flow = entry.parameters.get("flow")
     frequency = entry.parameters.get("frequency")
     for label, value in (("flow", flow), ("frequency", frequency)):
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
             raise ScheduleLinkagePreflightError(
-                f"decoded schedule has an invalid {label} value"
+                f"decoded schedule has an invalid {label} value",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
             )
     feed_time: int | None = None
     if mode == "feed":
         value = entry.parameters.get("feed_time")
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 60:
-            raise ScheduleLinkagePreflightError("decoded feed entry has an invalid feed time")
+            raise ScheduleLinkagePreflightError(
+                "decoded feed entry has an invalid feed time",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
+            )
         feed_time = value
     return mode, flow, frequency, feed_time
 
 
 def _validated_entries(schedule: DeviceSchedule) -> tuple[ScheduleEntry, ...]:
     if schedule.invalid_slots:
-        raise ScheduleLinkagePreflightError("decoded schedule contains invalid slots")
+        raise ScheduleLinkagePreflightError(
+            "decoded schedule contains invalid slots",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
+        )
     if len(schedule.entries) < 2:
-        raise ScheduleLinkagePreflightError("at least two decoded schedule entries are required")
+        raise ScheduleLinkagePreflightError(
+            "at least two decoded schedule entries are required",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
+        )
     entries = tuple(sorted(schedule.entries, key=lambda entry: _wall_seconds(entry.start)))
     starts = tuple(_wall_seconds(entry.start) for entry in entries)
     if len(set(starts)) != len(starts):
-        raise ScheduleLinkagePreflightError("decoded schedule has duplicate entry starts")
+        raise ScheduleLinkagePreflightError(
+            "decoded schedule has duplicate entry starts",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
+        )
     for index, entry in enumerate(entries):
         start = starts[index]
         end = _wall_seconds(entry.end) % _DAY_SECONDS
         duration = (end - start) % _DAY_SECONDS
         if duration == 0:
-            raise ScheduleLinkagePreflightError("decoded schedule has a zero-length entry")
+            raise ScheduleLinkagePreflightError(
+                "decoded schedule has a zero-length entry",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
+            )
         next_start = starts[(index + 1) % len(entries)]
         if index + 1 == len(entries):
             next_start += _DAY_SECONDS
         if start + duration > next_start:
-            raise ScheduleLinkagePreflightError("decoded schedule entries overlap")
+            raise ScheduleLinkagePreflightError(
+                "decoded schedule entries overlap",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
+            )
         _decoded_values(entry)
     return entries
 
@@ -744,14 +805,19 @@ def _transition_plan(device_id: str, state: DeviceState) -> _TransitionPlan:
     schedule = state.schedule
     if schedule is None or schedule.device_local_time is None:
         raise ScheduleLinkagePreflightError(
-            f"device {device_id!r} has no decoded device-local schedule clock"
+            f"device {device_id!r} has no decoded device-local schedule clock",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_CLOCK,
         )
     if state.timer_enabled is not True or schedule.enabled is not True:
         raise ScheduleLinkagePreflightError(
-            f"device {device_id!r} schedule-active test requires TimerON"
+            f"device {device_id!r} schedule-active test requires TimerON",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_CONTROL_BASELINE,
         )
     if schedule.device_local_time.tzinfo is not None:
-        raise ScheduleLinkagePreflightError("device-local schedule clock must be timezone-naive")
+        raise ScheduleLinkagePreflightError(
+            "device-local schedule clock must be timezone-naive",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_CLOCK,
+        )
     entries = _validated_entries(schedule)
     clock = schedule.device_local_time
     now_seconds = (
@@ -770,19 +836,22 @@ def _transition_plan(device_id: str, state: DeviceState) -> _TransitionPlan:
             active.append((index, entry, duration - elapsed))
     if len(active) != 1:
         raise ScheduleLinkagePreflightError(
-            f"device {device_id!r} clock does not select exactly one schedule entry"
+            f"device {device_id!r} clock does not select exactly one schedule entry",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
         )
     index, current, remaining = active[0]
     next_entry = entries[(index + 1) % len(entries)]
     if _wall_seconds(current.end) % _DAY_SECONDS != _wall_seconds(next_entry.start):
         raise ScheduleLinkagePreflightError(
-            f"device {device_id!r} current boundary is not contiguous with its next entry"
+            f"device {device_id!r} current boundary is not contiguous with its next entry",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
         )
     current_mode = _decoded_values(current)[0]
     next_mode = _decoded_values(next_entry)[0]
     if current_mode not in _CURRENT_MODES or next_mode not in _NEXT_MODES:
         raise ScheduleLinkagePreflightError(
-            "current/next schedule modes are outside the first audited boundary set"
+            "current/next schedule modes are outside the first audited boundary set",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
         )
     return _TransitionPlan(current=current, next=next_entry, seconds_until_boundary=remaining)
 
@@ -793,18 +862,23 @@ def _observed_auto(device_id: str, state: DeviceState) -> ScheduleAutoEvidence:
     flow = values.get("AutoFlow")
     frequency = values.get("AutoFreq")
     if not isinstance(mode, str) or mode not in _CURRENT_MODES:
-        raise ScheduleLinkagePreflightError(f"device {device_id!r} reported invalid AutoMode")
+        raise ScheduleLinkagePreflightError(
+            f"device {device_id!r} reported invalid AutoMode",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_AUTO_EVIDENCE,
+        )
     for label, value in (("AutoFlow", flow), ("AutoFreq", frequency)):
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
             raise ScheduleLinkagePreflightError(
-                f"device {device_id!r} reported invalid {label}"
+                f"device {device_id!r} reported invalid {label}",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_AUTO_EVIDENCE,
             )
     feed_time: int | None = None
     if mode == "feed":
         value = values.get("AutoFeedTime")
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 60:
             raise ScheduleLinkagePreflightError(
-                f"device {device_id!r} reported invalid AutoFeedTime"
+                f"device {device_id!r} reported invalid AutoFeedTime",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_AUTO_EVIDENCE,
             )
         feed_time = value
     return ScheduleAutoEvidence(
@@ -823,23 +897,27 @@ def _assert_entry_evidence(
     mode, flow, frequency, feed_time = _decoded_values(entry)
     if evidence.mode != mode:
         raise ScheduleLinkagePreflightError(
-            f"device {device_id!r} AutoMode disagrees with its active entry"
+            f"device {device_id!r} AutoMode disagrees with its active entry",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_AUTO_EVIDENCE,
         )
     if mode == "feed":
         # Captured Pro firmware reports effective defaults (30/5) while feed encodes 0/0.
         if evidence.feed_time != feed_time:
             raise ScheduleLinkagePreflightError(
-                f"device {device_id!r} AutoFeedTime disagrees with its feed entry"
+                f"device {device_id!r} AutoFeedTime disagrees with its feed entry",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_AUTO_EVIDENCE,
             )
     elif mode == "constant":
         # Constant frequency is likewise an ignored encoded zero; only Mode+Flow are semantic.
         if evidence.flow != flow:
             raise ScheduleLinkagePreflightError(
-                f"device {device_id!r} AutoFlow disagrees with its constant entry"
+                f"device {device_id!r} AutoFlow disagrees with its constant entry",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_AUTO_EVIDENCE,
             )
     elif evidence.flow != flow or evidence.frequency != frequency:
         raise ScheduleLinkagePreflightError(
-            f"device {device_id!r} AutoFlow/AutoFreq disagree with its active entry"
+            f"device {device_id!r} AutoFlow/AutoFreq disagree with its active entry",
+            failure=ScheduleLinkageRunFailure.PREFLIGHT_AUTO_EVIDENCE,
         )
 
 
@@ -923,12 +1001,30 @@ class ScheduleActiveLinkageController:
     async def preflight(self, spec: ScheduleLinkageSpec) -> ScheduleLinkagePreflight:
         """Capture an attended, write-free authorization bound to an absolute boundary."""
 
-        if self._store.load() is not None:
+        try:
+            pending = self._store.load()
+        except Exception as error:
+            raise ScheduleLinkagePreflightError(
+                "schedule-linkage preflight store could not be inspected",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_STORE,
+            ) from error
+        if pending is not None:
             raise ScheduleLinkageBusyError("unfinished schedule-linkage recovery exists")
         if not self._safety_interlock.permitted:
-            raise ScheduleLinkagePreflightError("schedule-linkage is blocked by the safety latch")
+            raise ScheduleLinkagePreflightError(
+                "schedule-linkage is blocked by the safety latch",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SAFETY_INTERLOCK,
+            )
         snapshots = await self._capture_pair(spec)
-        self._authorize(spec, snapshots)
+        try:
+            self._authorize(spec, snapshots)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            raise ScheduleLinkagePreflightError(
+                "schedule-linkage preflight authorization was rejected",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_AUTHORIZATION,
+            ) from error
         return ScheduleLinkagePreflight(
             spec=spec,
             snapshots=snapshots,
@@ -1075,7 +1171,10 @@ class ScheduleActiveLinkageController:
             self._emit_progress_best_effort(
                 ScheduleLinkageRunProgressKind.FRESH_CAPTURE_STARTED
             )
-            await self._refresh_pair_sessions_if_enabled(spec)
+            # The owned staged capture refreshes internally so standalone opt-in behavior stays
+            # unchanged while both attended preflight and run use the same reply-only contract.
+            if not self._owned_staged_auto_transition_observation:
+                await self._refresh_pair_sessions_if_enabled(spec)
             fresh = await self._capture_pair(spec)
             self._assert_observation_deadline()
             self._emit_progress_best_effort(
@@ -1232,10 +1331,68 @@ class ScheduleActiveLinkageController:
         self._validate_capabilities(slave, LinkageRole.ASYNC_SLAVE)
         if master.capabilities.product_key != slave.capabilities.product_key:
             raise ScheduleLinkagePreflightError(
-                "schedule-linkage requires the same qualified product family"
+                "schedule-linkage requires the same qualified product family",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CAPABILITY,
             )
-        states = await self._read_pair(spec)
-        self._assert_pair_clock_skew(spec, states)
+        if self._owned_staged_auto_transition_observation:
+            if not self._refresh_sessions_before_critical_reads:
+                raise ScheduleLinkagePreflightError(
+                    "staged Auto transition observation requires explicit critical reads",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_CAPABILITY,
+                )
+            # Finish both disconnects and both reconnects before either device can contribute
+            # proof. Cancellation completes that paired boundary, then propagates without a read.
+            try:
+                await self._refresh_pair_sessions_uninterruptibly(spec)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise ScheduleLinkagePreflightError(
+                    "schedule-linkage preflight session refresh failure",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_SESSION_REFRESH,
+                ) from error
+            try:
+                states = await self._read_pair_explicit_states(spec)
+            except BaseException as error:
+                # Explicit reply failure/cancellation retires at least one LAN session. Complete
+                # a paired fresh transport boundary before the composed owner can issue its first
+                # compensating TimerOFF write, while preserving the original failure category.
+                try:
+                    await self._refresh_pair_sessions_uninterruptibly(spec)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as cleanup_error:
+                    del cleanup_error
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                raise ScheduleLinkagePreflightError(
+                    "schedule-linkage explicit preflight state read failed",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_EXPLICIT_STATE_READ,
+                ) from error
+        else:
+            try:
+                states = await self._read_pair_states(spec)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise ScheduleLinkagePreflightError(
+                    "schedule-linkage preflight state read failed",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STATE_READ,
+                ) from error
+        try:
+            self._assert_pair_clock_skew(spec, states)
+        except ScheduleLinkagePreflightError as error:
+            if error.failure is ScheduleLinkageRunFailure.PREFLIGHT_CLOCK:
+                raise
+            raise ScheduleLinkagePreflightError(
+                "schedule-linkage preflight clock evidence is invalid",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CLOCK,
+            ) from error
+        except Exception as error:
+            raise ScheduleLinkagePreflightError(
+                "schedule-linkage preflight clock evidence is invalid",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CLOCK,
+            ) from error
         snapshots = self._snapshots_from_states(spec, states)
         return snapshots
 
@@ -1259,7 +1416,8 @@ class ScheduleActiveLinkageController:
             snapshots[1].physical_binding
         ):
             raise ScheduleLinkagePreflightError(
-                "master and slave physical bindings must be distinct"
+                "master and slave physical bindings must be distinct",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_PAIR_EVIDENCE,
             )
         if (
             master_expectation.boundary_at != slave_expectation.boundary_at
@@ -1267,11 +1425,13 @@ class ScheduleActiveLinkageController:
             or master_expectation.after_mode != slave_expectation.after_mode
         ):
             raise ScheduleLinkagePreflightError(
-                "both devices must authorize the same absolute schedule boundary"
+                "both devices must authorize the same absolute schedule boundary",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_PAIR_EVIDENCE,
             )
         if slave_expectation.before.flow == slave_expectation.after_flow:
             raise ScheduleLinkagePreflightError(
-                "slave boundary must change AutoFlow to prove its own schedule advanced"
+                "slave boundary must change AutoFlow to prove its own schedule advanced",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_PAIR_EVIDENCE,
             )
         master_after = (
             master_expectation.after_mode,
@@ -1285,7 +1445,8 @@ class ScheduleActiveLinkageController:
         )
         if slave_after == master_after:
             raise ScheduleLinkagePreflightError(
-                "slave next Auto tuple must differ from master to prove its own schedule"
+                "slave next Auto tuple must differ from master to prove its own schedule",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_PAIR_EVIDENCE,
             )
         if self._owned_staged_auto_transition_observation:
             self._assert_staged_auto_transition_preconditions(spec, states, snapshots)
@@ -1301,12 +1462,14 @@ class ScheduleActiveLinkageController:
 
         if not self._refresh_sessions_before_critical_reads:
             raise ScheduleLinkagePreflightError(
-                "staged Auto transition observation requires explicit critical reads"
+                "staged Auto transition observation requires explicit critical reads",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
             )
         after_valid_until = {snapshot.expectation.after_valid_until for snapshot in snapshots}
         if len(after_valid_until) != 1:
             raise ScheduleLinkagePreflightError(
-                "staged Auto transition entries must share one validity window"
+                "staged Auto transition entries must share one validity window",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
             )
         frequency_allowlist = {
             snapshot.frequency
@@ -1316,7 +1479,8 @@ class ScheduleActiveLinkageController:
             schedule = states[snapshot.device_id].schedule
             if schedule is None:
                 raise ScheduleLinkagePreflightError(
-                    f"device {snapshot.device_id!r} has no staged schedule"
+                    f"device {snapshot.device_id!r} has no staged schedule",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
                 )
             entries = _validated_entries(schedule)
             expectation = snapshot.expectation
@@ -1327,7 +1491,8 @@ class ScheduleActiveLinkageController:
                 or _wall_seconds(entries[1].end) <= _wall_seconds(entries[1].start)
             ):
                 raise ScheduleLinkagePreflightError(
-                    "Auto transition observation requires a non-wrapping two-entry schedule"
+                    "Auto transition observation requires a non-wrapping two-entry schedule",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
                 )
             if (
                 expectation.before.mode != "constant"
@@ -1336,11 +1501,13 @@ class ScheduleActiveLinkageController:
                 or entries[0].parameters.get("frequency") != 0
             ):
                 raise ScheduleLinkagePreflightError(
-                    "staged Auto transition requires exact Constant(0) to Sine entries"
+                    "staged Auto transition requires exact Constant(0) to Sine entries",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
                 )
             if expectation.before.mode == expectation.after_mode:
                 raise ScheduleLinkagePreflightError(
-                    "staged Auto transition must change mode at the observed boundary"
+                    "staged Auto transition must change mode at the observed boundary",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
                 )
             stable_budget = (
                 spec.post_boundary_stability_seconds
@@ -1350,7 +1517,8 @@ class ScheduleActiveLinkageController:
                 expectation.after_valid_until - expectation.boundary_at
             ).total_seconds() <= stable_budget:
                 raise ScheduleLinkagePreflightError(
-                    "staged next entry is too short for stable Auto evidence"
+                    "staged next entry is too short for stable Auto evidence",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
                 )
             frequency_allowlist.add(expectation.before.frequency)
             if expectation.after_frequency is not None:
@@ -1369,35 +1537,42 @@ class ScheduleActiveLinkageController:
         self._assert_healthy(device.device_id, state)
         if state.enabled is not True:
             raise ScheduleLinkagePreflightError(
-                f"device {device.device_id!r} must be enabled before role-only testing"
+                f"device {device.device_id!r} must be enabled before role-only testing",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CONTROL_BASELINE,
             )
         if state.linkage is not LinkageRole.INDEPENDENT:
             raise ScheduleLinkagePreflightError(
-                f"device {device.device_id!r} must start independent"
+                f"device {device.device_id!r} must start independent",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CONTROL_BASELINE,
             )
         if state.frequency is None:
             raise ScheduleLinkagePreflightError(
-                f"device {device.device_id!r} did not report manual frequency"
+                f"device {device.device_id!r} did not report manual frequency",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CONTROL_BASELINE,
             )
         binding = device.physical_binding
         if binding is None or binding.product_key != device.capabilities.product_key:
             raise ScheduleLinkagePreflightError(
-                f"device {device.device_id!r} has no exact physical binding"
+                f"device {device.device_id!r} has no exact physical binding",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CONTROL_BASELINE,
             )
         fingerprint = schedule_structure_fingerprint(state.schedule)
         if fingerprint is None:
             raise ScheduleLinkagePreflightError(
-                f"device {device.device_id!r} has no decoded schedule fingerprint"
+                f"device {device.device_id!r} has no decoded schedule fingerprint",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE,
             )
         plan, expectation = _expectation_from_state(device.device_id, state)
         remaining = plan.seconds_until_boundary
         if remaining < spec.minimum_lead_seconds:
             raise ScheduleLinkagePreflightError(
-                "schedule boundary is too close for guarded role setup"
+                "schedule boundary is too close for guarded role setup",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW,
             )
         if remaining > spec.observation_window_seconds:
             raise ScheduleLinkagePreflightError(
-                "next schedule boundary is outside the observation window"
+                "next schedule boundary is outside the observation window",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW,
             )
         required_window = (
             remaining
@@ -1408,27 +1583,32 @@ class ScheduleActiveLinkageController:
         )
         if required_window > spec.observation_window_seconds:
             raise ScheduleLinkagePreflightError(
-                "observation window lacks post-boundary verification and rollback reserve"
+                "observation window lacks post-boundary verification and rollback reserve",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW,
             )
         limits = device.capabilities.power_limits
         if not limits.min_power <= state.power <= limits.max_power:
             raise ScheduleLinkagePreflightError(
-                f"device {device.device_id!r} manual fallback Flow is outside limits"
+                f"device {device.device_id!r} manual fallback Flow is outside limits",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_POWER_GUARD,
             )
         current_flow = expectation.before.flow
         if not limits.min_power <= current_flow <= limits.max_power:
             raise ScheduleLinkagePreflightError(
-                f"device {device.device_id!r} current effective AutoFlow is outside limits"
+                f"device {device.device_id!r} current effective AutoFlow is outside limits",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_POWER_GUARD,
             )
         if not limits.min_power <= expectation.after_flow <= limits.max_power:
             raise ScheduleLinkagePreflightError(
-                f"device {device.device_id!r} next AutoFlow is outside limits"
+                f"device {device.device_id!r} next AutoFlow is outside limits",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_POWER_GUARD,
             )
         guarded_maximum = min(limits.max_power, _SCHEDULE_LINKAGE_TEST_MAX_POWER)
         if state.power > guarded_maximum:
             raise ScheduleLinkagePreflightError(
                 f"device {device.device_id!r} manual fallback Flow exceeds "
-                f"the guarded schedule-linkage maximum of {guarded_maximum}"
+                f"the guarded schedule-linkage maximum of {guarded_maximum}",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_POWER_GUARD,
             )
         for boundary_side, flow in (
             ("current", current_flow),
@@ -1437,7 +1617,8 @@ class ScheduleActiveLinkageController:
             if flow > guarded_maximum:
                 raise ScheduleLinkagePreflightError(
                     f"device {device.device_id!r} {boundary_side} AutoFlow exceeds "
-                    f"the guarded schedule-linkage maximum of {guarded_maximum}"
+                    f"the guarded schedule-linkage maximum of {guarded_maximum}",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_POWER_GUARD,
                 )
         return ScheduleLinkageSnapshot(
             device_id=device.device_id,
@@ -2976,7 +3157,10 @@ class ScheduleActiveLinkageController:
     @staticmethod
     def _assert_healthy(device_id: str, state: DeviceState) -> None:
         if not state.online or state.error:
-            raise ScheduleLinkagePreflightError(f"device {device_id!r} is offline or in error")
+            raise ScheduleLinkagePreflightError(
+                f"device {device_id!r} is offline or in error",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CONTROL_BASELINE,
+            )
 
     @staticmethod
     def _state_clock_for(device_id: str, state: DeviceState) -> datetime:
@@ -2994,18 +3178,23 @@ class ScheduleActiveLinkageController:
 
     def _validate_capabilities(self, device: JebaoDevice, role: LinkageRole) -> None:
         if not device.connected:
-            raise ScheduleLinkagePreflightError(f"device {device.device_id!r} is disconnected")
+            raise ScheduleLinkagePreflightError(
+                f"device {device.device_id!r} is disconnected",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CAPABILITY,
+            )
         capabilities = device.capabilities
         if (
             Capability.LINKAGE not in capabilities.writable
             or role not in capabilities.linkage_roles
         ):
             raise ScheduleLinkagePreflightError(
-                f"device {device.device_id!r} lacks guarded role support"
+                f"device {device.device_id!r} lacks guarded role support",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CAPABILITY,
             )
         if capabilities.product_key is None:
             raise ScheduleLinkagePreflightError(
-                f"device {device.device_id!r} has no known product key"
+                f"device {device.device_id!r} has no known product key",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CAPABILITY,
             )
 
     def _validate_recovery_bindings(
@@ -3109,7 +3298,8 @@ class ScheduleActiveLinkageController:
         clocks = [self._state_clock_for(device_id, state) for device_id, state in states.items()]
         if max(clocks) - min(clocks) > timedelta(seconds=spec.maximum_clock_skew_seconds):
             raise ScheduleLinkagePreflightError(
-                "device-local schedule clocks exceed the allowed pair skew"
+                "device-local schedule clocks exceed the allowed pair skew",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CLOCK,
             )
 
     def _assert_clock_continuity(
@@ -3141,7 +3331,8 @@ class ScheduleActiveLinkageController:
             return self._devices[device_id]
         except KeyError as error:
             raise ScheduleLinkagePreflightError(
-                f"device {device_id!r} is not registered"
+                f"device {device_id!r} is not registered",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CAPABILITY,
             ) from error
 
     @staticmethod

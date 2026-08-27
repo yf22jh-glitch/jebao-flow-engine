@@ -6,6 +6,10 @@ import pytest
 from pydantic import ValidationError
 
 from jebao_flow.devices import LinkageSafetyInterlock, SimulatedJebaoDevice
+from jebao_flow.devices.schedule_flow_experiment import (
+    ScheduleFlowExperimentController,
+    ScheduleFlowExperimentSpec,
+)
 from jebao_flow.devices.schedule_linkage import (
     ScheduleActiveLinkageController,
     ScheduleLinkageApplyError,
@@ -27,6 +31,7 @@ from jebao_flow.persistence.schedule_linkage import (
     ScheduleLinkageJournalError,
 )
 from jebao_flow.protocol.models import DeviceSchedule, DeviceTarget, LinkageRole, ScheduleEntry
+from jebao_flow.protocol.schedule_wire import decode_local_wavemaker_pro_slot_wire
 
 
 def _entry(
@@ -113,6 +118,7 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         self.reported_schedule_drift_roles: set[LinkageRole] = set()
         self.clock_offsets_after_role: dict[LinkageRole, float] = {}
         self.last_written_role = LinkageRole.INDEPENDENT
+        self.ordinary_state_read_count = 0
         self.explicit_state_read_count = 0
         self.fail_explicit_state_reads_remaining = 0
         self.fail_explicit_state_read_numbers: set[int] = set()
@@ -159,6 +165,8 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         await super().disconnect()
 
     async def get_state(self):
+        if not self._explicit_state_read_active:
+            self.ordinary_state_read_count += 1
         state = await super().get_state()
         if state.linkage in self.role_frequency_overrides:
             state = state.model_copy(
@@ -434,6 +442,7 @@ async def _ready_pair(
         device.commands.clear()
         device.session_connect_count = 0
         device.session_disconnect_count = 0
+        device.ordinary_state_read_count = 0
     if events is not None:
         events.clear()
     return master, slave
@@ -723,6 +732,30 @@ async def test_feed_to_constant_uses_effective_defaults_and_distant_gap_is_allow
     assert slave_snapshot.expectation.after_frequency is None
     assert master_snapshot.expectation.boundary_at == datetime(2026, 8, 26, 18, 10)
     assert master_snapshot.expectation.after_valid_until == datetime(2026, 8, 26, 18, 11)
+
+
+async def test_preflight_authorization_failure_is_typed_without_raw_text(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair()
+
+    def reject(_spec, _snapshots) -> None:
+        raise RuntimeError("private-device-id qualification receipt detail")
+
+    controller = _controller(
+        master,
+        slave,
+        JsonScheduleLinkageJournalStore(tmp_path / "authorization-rejected.json"),
+        authorizer=reject,
+    )
+
+    with pytest.raises(ScheduleLinkagePreflightError) as captured:
+        await controller.preflight(_spec())
+
+    assert captured.value.failure is ScheduleLinkageRunFailure.PREFLIGHT_AUTHORIZATION
+    assert "private-device-id" not in str(captured.value)
+    assert "receipt detail" not in str(captured.value)
+    assert master.calls == slave.calls == []
 
 
 async def test_constant_default_frequency_and_next_sine_tuple_are_mode_aware(
@@ -2323,6 +2356,239 @@ async def test_staged_auto_observation_requires_explicit_critical_reads(
     assert slave.calls == []
 
 
+async def test_staged_preflight_refreshes_pair_and_uses_explicit_replies(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    master, slave = await _ready_staged_pair(events=events)
+    # An ordinary report would move only the master's clock and fail the two-second skew gate.
+    # The correlated explicit reply deliberately ignores this simulated unsolicited report.
+    master.unsolicited_clock_offsets_by_role[LinkageRole.INDEPENDENT] = [10]
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-explicit-preflight.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    preflight = await controller.preflight(_staged_spec())
+
+    assert len(preflight.snapshots) == 2
+    assert master.unsolicited_clock_offsets_by_role == {}
+    assert master.ordinary_state_read_count == slave.ordinary_state_read_count == 0
+    assert master.explicit_state_read_count == slave.explicit_state_read_count == 1
+    assert master.session_disconnect_count == master.session_connect_count == 1
+    assert slave.session_disconnect_count == slave.session_connect_count == 1
+    disconnects = [
+        events.index(f"session:{device_id}:disconnect")
+        for device_id in ("master", "slave")
+    ]
+    connects = [events.index(f"session:{device_id}:connect") for device_id in ("master", "slave")]
+    assert max(disconnects) < min(connects)
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+    assert store.load() is None
+
+
+async def test_production_flow_builder_decodes_into_real_staged_preflight(
+    tmp_path: Path,
+) -> None:
+    flow_spec = ScheduleFlowExperimentSpec(
+        operation_id="scheduled_flow_production_shape",
+        qualification_operation_id="qualified_async_pair",
+        master_device_id="master",
+        slave_device_id="slave",
+        boundary_time="18:15",
+        observation_window_seconds=630,
+        post_boundary_stability_seconds=300,
+    )
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    for device, constant_flow, sine_flow in (
+        (master, 31, 35),
+        (slave, 32, 40),
+    ):
+        device.constant_flow = constant_flow
+        device.sine_flow = sine_flow
+        device.sine_frequency = 30
+        await device.set_power(constant_flow)
+        await device.set_frequency(20)
+        device.calls.clear()
+        device.commands.clear()
+        patch = next(
+            patch
+            for patch in flow_spec.temporary_schedule_spec().device_patches
+            if patch.device_id == device.device_id
+        )
+        entries: list[ScheduleEntry] = []
+        for slot in patch.slots:
+            entry = decode_local_wavemaker_pro_slot_wire(
+                slot.wire_bytes,
+                slot_index=slot.slot,
+            )
+            if entry is not None:
+                entries.append(entry)
+        device.entries = tuple(entries)
+
+    store = JsonScheduleLinkageJournalStore(tmp_path / "production-flow-preflight.json")
+    composed = ScheduleFlowExperimentController(
+        {"master": master, "slave": slave},
+        store,  # type: ignore[arg-type]
+        store,  # type: ignore[arg-type]
+        store,
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+    )
+
+    preflight = await composed._role_controller.preflight(  # noqa: SLF001
+        flow_spec.role_observation_spec()
+    )
+
+    expectations = {
+        snapshot.device_id: snapshot.expectation for snapshot in preflight.snapshots
+    }
+    assert expectations["master"].before.flow == 31
+    assert expectations["master"].after_flow == 35
+    assert expectations["slave"].before.flow == 32
+    assert expectations["slave"].after_flow == 40
+    assert all(
+        snapshot.expectation.before.mode == "constant"
+        and snapshot.expectation.before.frequency == 5
+        and snapshot.expectation.after_mode == "sine"
+        and snapshot.expectation.after_frequency == 30
+        for snapshot in preflight.snapshots
+    )
+    assert master.entries[0].parameters["frequency"] == 0
+    assert slave.entries[0].parameters["frequency"] == 0
+    assert master.ordinary_state_read_count == slave.ordinary_state_read_count == 0
+    assert master.explicit_state_read_count == slave.explicit_state_read_count == 1
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_staged_preflight_refresh_failure_is_no_read_no_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    master.fail_after_connect_numbers.add(1)
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-preflight-refresh-failure.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(
+        ScheduleLinkagePreflightError,
+        match="session refresh failure",
+    ) as captured:
+        await controller.preflight(_staged_spec())
+
+    assert captured.value.failure is ScheduleLinkageRunFailure.PREFLIGHT_SESSION_REFRESH
+    assert "simulated" not in str(captured.value)
+    assert master.session_disconnect_count == slave.session_disconnect_count == 1
+    assert master.session_connect_count == slave.session_connect_count == 1
+    assert master.explicit_state_read_count == slave.explicit_state_read_count == 0
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+    assert store.load() is None
+
+
+async def test_staged_preflight_explicit_read_failure_has_typed_private_reason(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    slave.fail_explicit_state_read_numbers.add(1)
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-preflight-read-failure.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkagePreflightError) as captured:
+        await controller.preflight(_staged_spec())
+
+    assert captured.value.failure is ScheduleLinkageRunFailure.PREFLIGHT_EXPLICIT_STATE_READ
+    assert "simulated" not in str(captured.value)
+    assert "master" not in str(captured.value)
+    assert "slave" not in str(captured.value)
+    assert master.explicit_state_read_count == slave.explicit_state_read_count == 1
+    assert master.session_disconnect_count == slave.session_disconnect_count == 2
+    assert master.session_connect_count == slave.session_connect_count == 2
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+    assert store.load() is None
+
+
+async def test_staged_preflight_cancellation_completes_paired_refresh_without_read_or_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    master.pause_before_connect_numbers.add(1)
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-preflight-refresh-cancel.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    task = asyncio.create_task(controller.preflight(_staged_spec()))
+    await master.connect_paused.wait()
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    master.resume_connect.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert master.session_disconnect_count == slave.session_disconnect_count == 1
+    assert master.session_connect_count == slave.session_connect_count == 1
+    assert master.explicit_state_read_count == slave.explicit_state_read_count == 0
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+    assert store.load() is None
+
+
+async def test_staged_preflight_explicit_read_cancellation_is_no_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    slave.pause_explicit_state_read_numbers.add(1)
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-preflight-read-cancel.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    task = asyncio.create_task(controller.preflight(_staged_spec()))
+    await slave.explicit_state_read_paused.wait()
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert master.session_disconnect_count == slave.session_disconnect_count == 2
+    assert master.session_connect_count == slave.session_connect_count == 2
+    assert master.explicit_state_read_count == slave.explicit_state_read_count == 1
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+    assert store.load() is None
+
+
 async def test_staged_first_write_gate_requires_lead_beyond_clock_staleness(
     tmp_path: Path,
 ) -> None:
@@ -2496,8 +2762,9 @@ async def test_staged_pins_two_fresh_allowlisted_slave_frequencies_without_writi
     result = await controller.run(await controller.preflight(_staged_spec()))
 
     assert result.schedule_transition_verified is True
-    # Gate, post-master, initial post-slave, then two independent convergence replies.
-    assert reads_when_verified == [5]
+    # Preflight, run-fresh capture, gate, post-master, initial post-slave, then two independent
+    # convergence replies.
+    assert reads_when_verified == [7]
     assert store.load() is None
     assert (await slave.get_state()).frequency == 21
     _assert_only_linkage_calls(master, slave)
@@ -2571,7 +2838,7 @@ async def test_staged_rejects_allowlisted_slave_frequency_that_never_stabilizes(
     assert progress[-1].drift_dimensions == (
         ScheduleLinkageDriftDimension.FREQUENCY,
     )
-    assert slave.explicit_state_read_count == 7
+    assert slave.explicit_state_read_count == 9
     assert store.load() is None
     _assert_only_linkage_calls(master, slave)
 
@@ -2605,7 +2872,7 @@ async def test_staged_rejects_unconfirmed_role_frequency_without_retry(
     assert progress[-1].drift_dimensions == (
         ScheduleLinkageDriftDimension.FREQUENCY,
     )
-    assert slave.explicit_state_read_count == 3
+    assert slave.explicit_state_read_count == 5
     assert store.load() is None
     _assert_only_linkage_calls(master, slave)
 
@@ -2772,10 +3039,11 @@ async def test_staged_monitor_uses_explicit_reads_and_accepts_mixed_auto_refresh
         sample.master.mode == "sine" and sample.slave.mode == "sine"
         for _, sample in after
     )
-    # Three explicit critical reads precede one explicit read per monitor sample. No fresh
-    # session is opened for every observation sample.
+    # Five explicit critical reads (preflight, run-fresh capture, gate and two role checks)
+    # precede one explicit read per monitor sample. No fresh session is opened for every
+    # observation sample.
     assert (
-        master.explicit_state_read_count - 3
+        master.explicit_state_read_count - 5
         == master.virtual_time.sleep_count + 1
     )
     assert slave.explicit_state_read_count == master.explicit_state_read_count
@@ -3725,9 +3993,10 @@ async def test_schedule_structure_defects_fail_closed_before_write(
         JsonScheduleLinkageJournalStore(tmp_path / f"{defect}.json"),
     )
 
-    with pytest.raises(ScheduleLinkagePreflightError):
+    with pytest.raises(ScheduleLinkagePreflightError) as captured:
         await controller.preflight(_spec())
 
+    assert captured.value.failure is ScheduleLinkageRunFailure.PREFLIGHT_SCHEDULE_STRUCTURE
     assert master.calls == []
     assert slave.calls == []
 
@@ -3740,9 +4009,13 @@ async def test_boundary_outside_window_fails_before_write(tmp_path: Path) -> Non
         JsonScheduleLinkageJournalStore(tmp_path / "far.json"),
     )
 
-    with pytest.raises(ScheduleLinkagePreflightError, match="outside the observation window"):
+    with pytest.raises(
+        ScheduleLinkagePreflightError,
+        match="outside the observation window",
+    ) as captured:
         await controller.preflight(_spec())
 
+    assert captured.value.failure is ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW
     assert master.calls == []
     assert slave.calls == []
 
@@ -3757,9 +4030,13 @@ async def test_window_must_include_post_boundary_samples_and_rollback_reserve(
         JsonScheduleLinkageJournalStore(tmp_path / "short-budget.json"),
     )
 
-    with pytest.raises(ScheduleLinkagePreflightError, match="verification and rollback reserve"):
+    with pytest.raises(
+        ScheduleLinkagePreflightError,
+        match="verification and rollback reserve",
+    ) as captured:
         await controller.preflight(_spec(observation_window_seconds=100))
 
+    assert captured.value.failure is ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW
     assert master.calls == []
     assert slave.calls == []
 
@@ -3780,9 +4057,13 @@ async def test_slave_next_tuple_must_differ_from_master(tmp_path: Path) -> None:
         JsonScheduleLinkageJournalStore(tmp_path / "same-next.json"),
     )
 
-    with pytest.raises(ScheduleLinkagePreflightError, match="must differ from master"):
+    with pytest.raises(
+        ScheduleLinkagePreflightError,
+        match="must differ from master",
+    ) as captured:
         await controller.preflight(_spec())
 
+    assert captured.value.failure is ScheduleLinkageRunFailure.PREFLIGHT_PAIR_EVIDENCE
     assert master.calls == []
     assert slave.calls == []
 
@@ -3796,9 +4077,10 @@ async def test_preflight_rejects_device_clock_pair_skew_without_writes(tmp_path:
         JsonScheduleLinkageJournalStore(tmp_path / "clock-skew.json"),
     )
 
-    with pytest.raises(ScheduleLinkagePreflightError, match="pair skew"):
+    with pytest.raises(ScheduleLinkagePreflightError, match="pair skew") as captured:
         await controller.preflight(_spec(maximum_clock_skew_seconds=2))
 
+    assert captured.value.failure is ScheduleLinkageRunFailure.PREFLIGHT_CLOCK
     assert master.calls == []
     assert slave.calls == []
 
@@ -3823,9 +4105,15 @@ async def test_preflight_requires_enabled_distinct_physical_devices(
         JsonScheduleLinkageJournalStore(tmp_path / f"{defect}.json"),
     )
 
-    with pytest.raises(ScheduleLinkagePreflightError):
+    with pytest.raises(ScheduleLinkagePreflightError) as captured:
         await controller.preflight(_spec())
 
+    expected = (
+        ScheduleLinkageRunFailure.PREFLIGHT_CONTROL_BASELINE
+        if defect == "disabled"
+        else ScheduleLinkageRunFailure.PREFLIGHT_PAIR_EVIDENCE
+    )
+    assert captured.value.failure is expected
     assert master.calls == []
     assert slave.calls == []
 

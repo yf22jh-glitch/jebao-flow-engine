@@ -10,8 +10,8 @@ roles -> TimerOFF -> original 48 slots -> original controls.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
@@ -36,9 +36,12 @@ from jebao_flow.devices.linkage import (
 from jebao_flow.devices.schedule_linkage import (
     PrerequisiteAuthorizer,
     ScheduleActiveLinkageController,
+    ScheduleLinkageBusyError,
     ScheduleLinkageJournalStore,
+    ScheduleLinkagePreflightError,
     ScheduleLinkageRecord,
     ScheduleLinkageResult,
+    ScheduleLinkageRunFailure,
     ScheduleLinkageRunProgressEvent,
     ScheduleLinkageRunProgressKind,
     ScheduleLinkageSample,
@@ -61,10 +64,16 @@ from jebao_flow.devices.schedule_transaction import (
     TemporaryScheduleSpec,
     behavior_neutral_unused_slot_patch,
 )
-from jebao_flow.protocol.models import DeviceTarget, LinkageRole, ScheduleEntry
+from jebao_flow.protocol.models import (
+    DeviceState,
+    DeviceTarget,
+    LinkageRole,
+    ScheduleEntry,
+)
 from jebao_flow.protocol.schedule_wire import (
     LOCAL_WAVEMAKER_PRO_SLOT_COUNT,
     LOCAL_WAVEMAKER_PRO_UNUSED_EE,
+    decode_local_wavemaker_pro_slot_wire,
     encode_local_wavemaker_pro_schedule_entry,
 )
 
@@ -76,6 +85,11 @@ WallTime = Annotated[
 _FIELD_SCHEDULE_END = "23:59"
 _FIELD_SCHEDULE_END_SECONDS = 23 * 60 * 60 + 59 * 60
 _ROLE_PREFLIGHT_SETTLE_SECONDS = 1.0
+_TIMER_ARM_MINIMUM_LEAD_SECONDS = 180.0
+_STAGED_A_CONVERGENCE_TIMEOUT_SECONDS = 30.0
+_STAGED_A_CONVERGENCE_RETRY_SECONDS = 1.0
+_STAGED_CURRENT_AUTO_MODES = frozenset({"constant", "pulse", "sine", "feed"})
+_SCHEDULE_FLOW_TEST_MAX_POWER = 45
 
 SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT = 64
 SCHEDULE_FLOW_STAGE_EVENT_LIMIT = SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT + 1
@@ -113,7 +127,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
     slave_after_flow: int = Field(default=40, ge=0, le=100)
     sine_frequency: int = Field(default=30, ge=0, le=100)
     safe_frequency: int = Field(default=20, ge=0, le=100)
-    observation_window_seconds: float = Field(default=600, gt=0, le=600)
+    observation_window_seconds: float = Field(default=600, gt=0, le=630)
     post_boundary_stability_seconds: float = Field(default=300, ge=0, le=300)
     verification_interval_seconds: float = Field(default=2, gt=0, le=10)
     minimum_lead_seconds: float = Field(default=60, ge=10, le=180)
@@ -276,6 +290,10 @@ class ScheduleFlowFailureCategory(StrEnum):
     OUTER_RESTORE = "outer_restore"
     CANCELLED = "cancelled"
     UNEXPECTED = "unexpected"
+
+
+class _StagedAutoAwaitingConvergence(RuntimeError):
+    """A well-formed Auto tuple has not yet adopted the owned current Constant entry."""
 
 
 class ScheduleFlowStageEvent(BaseModel):
@@ -546,6 +564,10 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             expires_at=expires_at,
         )
         experiment = self._require_experiment(record)
+        # This runs after a read-only outer capture but before journal creation or the first
+        # TimerOFF pause write. Keep the private Python API inside the same attended envelope as
+        # the fixed CLI, while retaining broad persisted schema compatibility for recovery.
+        self._assert_experiment_power_guard(experiment)
         self._authorize_pause(experiment, record.snapshots)
         return record
 
@@ -597,6 +619,30 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         self._emit_stage(
             ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
             role_progress=event,
+        )
+
+    def _remember_role_preflight_failure(
+        self,
+        error: BaseException,
+        *,
+        settled: bool,
+    ) -> None:
+        """Retain one allow-listed reason without persisting while TimerON may be active."""
+
+        if self._last_role_failure is not None:
+            return
+        if settled:
+            failure = ScheduleLinkageRunFailure.PREFLIGHT_SETTLE
+        elif isinstance(error, ScheduleLinkagePreflightError):
+            failure = error.failure
+        elif isinstance(error, ScheduleLinkageBusyError):
+            failure = ScheduleLinkageRunFailure.PREFLIGHT_BUSY
+        else:
+            failure = ScheduleLinkageRunFailure.PREFLIGHT_UNEXPECTED
+        self._last_role_failure = ScheduleLinkageRunProgressEvent(
+            kind=ScheduleLinkageRunProgressKind.FAILED,
+            occurred_at=datetime.now(UTC),
+            failure=failure,
         )
 
     def _on_diagnostic_event(self, event: LinkageDiagnosticEvent) -> None:
@@ -875,17 +921,43 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
 
         async def observe(_record: TemporaryScheduleRecord) -> ObservationCompletion:
             role_error: BaseException | None = None
+            timer_on_may_be_armed = False
             try:
                 self._emit_stage(ScheduleFlowStage.TIMER_ON_ARM_STARTED)
                 # This assignment has no suspension point after the externally persisted start
                 # event.  From the first possible TimerON write onward, no filesystem-backed
                 # observer may delay cancellation, disarm, or rollback.
                 self._defer_external_evidence_delivery = True
-                await self._arm_temporary_schedule(record)
+                # Do not arm TimerON unless a fresh reply-only clock leaves the complete setup,
+                # convergence, and guarded role-write reserve.  A refusal here has sent no
+                # TimerON or role frame; the surrounding schedule transaction still restores its
+                # exact staged image in the ordinary inverse order.
+                await self._assert_timer_arm_budget(record)
+                # This assignment has no suspension point between the successful gate and the
+                # first operation that may send TimerON. From here onward inverse TimerOFF is
+                # mandatory even if the first arm attempt has an uncertain outcome.
+                timer_on_deadline = (
+                    asyncio.get_running_loop().time()
+                    + _STAGED_A_CONVERGENCE_TIMEOUT_SECONDS
+                )
+                timer_on_may_be_armed = True
+                await self._run_before_staged_timer_deadline(
+                    record,
+                    self._arm_temporary_schedule(
+                        record,
+                        monotonic_deadline=timer_on_deadline,
+                    ),
+                    monotonic_deadline=timer_on_deadline,
+                )
                 self._emit_stage(ScheduleFlowStage.TIMER_ON_ARMED)
                 self._emit_stage(ScheduleFlowStage.ROLE_PREFLIGHT_STARTED)
-                preflight = await self._role_controller.preflight(
-                    spec.role_observation_spec()
+                await self._await_staged_current_a(
+                    record,
+                    monotonic_deadline=timer_on_deadline,
+                )
+                preflight = await self._run_forward_operation(
+                    record,
+                    self._role_controller.preflight(spec.role_observation_spec()),
                 )
                 self._emit_stage(ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED)
                 if self._role_preflight_settle_seconds:
@@ -909,6 +981,14 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             except BaseException as error:
                 role_error = error
                 current = self._last_schedule_stage
+                if current in {
+                    ScheduleFlowStage.ROLE_PREFLIGHT_STARTED,
+                    ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED,
+                }:
+                    self._remember_role_preflight_failure(
+                        error,
+                        settled=current is ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED,
+                    )
                 category = (
                     ScheduleFlowFailureCategory.TIMER_ON_ARM
                     if current
@@ -935,8 +1015,9 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                     best_effort=True,
                 )
                 try:
-                    await self._disarm_temporary_schedule_uninterruptibly(record)
-                    await self._clear_role_journal_before_schedule_restore(record)
+                    if timer_on_may_be_armed:
+                        await self._disarm_temporary_schedule_uninterruptibly(record)
+                        await self._clear_role_journal_before_schedule_restore(record)
                 except BaseException:
                     self._emit_stage(
                         ScheduleFlowStage.ROLE_DISARM_STARTED,
@@ -1316,7 +1397,379 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             recovery_authority_seconds=1800,
         )
 
-    async def _arm_temporary_schedule(self, record: LinkageTransactionRecord) -> None:
+    async def _assert_timer_arm_budget(self, record: LinkageTransactionRecord) -> None:
+        """Prove the staged TimerOFF pair still has the fixed pre-arm time reserve."""
+
+        spec = self._require_experiment(record)
+        states = await self._read_staged_pair_explicit(record)
+        self._assert_staged_pair_state(
+            record,
+            spec,
+            states,
+            expected_timer=False,
+            minimum_lead_seconds=_TIMER_ARM_MINIMUM_LEAD_SECONDS,
+            require_current_a=False,
+        )
+
+    async def _await_staged_current_a(
+        self,
+        record: LinkageTransactionRecord,
+        *,
+        monotonic_deadline: float,
+    ) -> None:
+        """Wait read-only for the owned TimerON schedule to expose exact current-A evidence."""
+
+        spec = self._require_experiment(record)
+        loop = asyncio.get_running_loop()
+        last_mismatch: _StagedAutoAwaitingConvergence | None = None
+        while True:
+            states = await self._read_staged_pair_explicit(
+                record,
+                monotonic_deadline=monotonic_deadline,
+            )
+            try:
+                self._assert_staged_pair_state(
+                    record,
+                    spec,
+                    states,
+                    expected_timer=True,
+                    minimum_lead_seconds=spec.minimum_lead_seconds,
+                    require_current_a=True,
+                )
+            except _StagedAutoAwaitingConvergence as error:
+                last_mismatch = error
+            else:
+                if loop.time() >= monotonic_deadline:
+                    self._require_forward_write(record)
+                    raise ScheduleLinkagePreflightError(
+                        "staged current-A convergence exceeded its absolute deadline",
+                        failure=ScheduleLinkageRunFailure.PREFLIGHT_SETTLE,
+                    )
+                return
+
+            remaining = monotonic_deadline - loop.time()
+            if remaining <= 0:
+                self._require_forward_write(record)
+                raise ScheduleLinkagePreflightError(
+                    "staged current-A evidence did not converge before its deadline",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_SETTLE,
+                ) from last_mismatch
+            timeout = asyncio.timeout(remaining)
+            try:
+                async with timeout:
+                    await self._run_forward_operation(
+                        record,
+                        asyncio.sleep(
+                            min(_STAGED_A_CONVERGENCE_RETRY_SECONDS, remaining)
+                        ),
+                    )
+            except TimeoutError:
+                if not timeout.expired():
+                    raise
+                self._require_forward_write(record)
+                raise ScheduleLinkagePreflightError(
+                    "staged current-A evidence did not converge before its deadline",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_SETTLE,
+                ) from last_mismatch
+
+    async def _run_before_staged_timer_deadline(
+        self,
+        record: LinkageTransactionRecord,
+        operation: Awaitable[None],
+        *,
+        monotonic_deadline: float,
+    ) -> None:
+        """Bound TimerON setup and convergence to one absolute monotonic window."""
+
+        remaining = monotonic_deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            orphan = asyncio.ensure_future(operation)
+            orphan.cancel()
+            await asyncio.gather(orphan, return_exceptions=True)
+            self._require_forward_write(record)
+            raise ScheduleLinkagePreflightError(
+                "staged TimerON setup exceeded its absolute deadline",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SETTLE,
+            )
+        timeout = asyncio.timeout(remaining)
+        try:
+            async with timeout:
+                return await operation
+        except TimeoutError:
+            if not timeout.expired():
+                raise
+            self._require_forward_write(record)
+            raise ScheduleLinkagePreflightError(
+                "staged TimerON setup exceeded its absolute deadline",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SETTLE,
+            ) from None
+
+    async def _read_staged_pair_explicit(
+        self,
+        record: LinkageTransactionRecord,
+        *,
+        monotonic_deadline: float | None = None,
+    ) -> dict[str, DeviceState]:
+        """Read both complete states from correlated replies on newly authenticated streams."""
+
+        device_ids = (
+            record.spec.master_device_id,
+            record.spec.slave_device_id,
+        )
+
+        async def capture() -> dict[str, DeviceState]:
+            await self._replace_device_sessions(record, device_ids)
+
+            async def read_pair() -> tuple[DeviceState, DeviceState]:
+                tasks = tuple(
+                    asyncio.create_task(
+                        self._get_device(device_id).get_explicit_state()
+                    )
+                    for device_id in device_ids
+                )
+                try:
+                    values = await asyncio.gather(*tasks)
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                return values[0], values[1]
+
+            try:
+                values = await self._run_forward_operation(record, read_pair())
+            except BaseException:
+                # A failed or cancelled explicit read retires the LAN session. Complete one
+                # paired fresh transport boundary before compensation can send TimerOFF or
+                # restore the exact schedule image, then preserve the original failure.
+                devices = tuple(self._get_device(device_id) for device_id in device_ids)
+                try:
+                    await self._refresh_device_sessions_uninterruptibly(devices)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as cleanup_error:
+                    del cleanup_error
+                raise
+            return dict(zip(device_ids, values, strict=True))
+
+        if monotonic_deadline is None:
+            return await capture()
+        remaining = monotonic_deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            self._require_forward_write(record)
+            raise ScheduleLinkagePreflightError(
+                "staged current-A convergence exceeded its absolute deadline",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SETTLE,
+            )
+        timeout = asyncio.timeout(remaining)
+        try:
+            async with timeout:
+                return await capture()
+        except TimeoutError:
+            if not timeout.expired():
+                raise
+            self._require_forward_write(record)
+            raise ScheduleLinkagePreflightError(
+                "staged current-A convergence exceeded its absolute deadline",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SETTLE,
+            ) from None
+
+    def _assert_staged_pair_state(
+        self,
+        record: LinkageTransactionRecord,
+        spec: ScheduleFlowExperimentSpec,
+        states: Mapping[str, DeviceState],
+        *,
+        expected_timer: bool,
+        minimum_lead_seconds: float,
+        require_current_a: bool,
+    ) -> None:
+        """Reject every drift except a well-formed, not-yet-current Auto A tuple."""
+
+        expected_entries = self._expected_staged_entries(spec)
+        clocks: list[datetime] = []
+        leads: list[float] = []
+        awaiting_current_a = False
+        boundary_hour, boundary_minute = (
+            int(value) for value in spec.boundary_time.split(":", maxsplit=1)
+        )
+        expected_powers = {
+            record.spec.master_device_id: record.spec.master_power,
+            record.spec.slave_device_id: record.spec.slave_power,
+        }
+        for device_id in (record.spec.master_device_id, record.spec.slave_device_id):
+            state = states[device_id]
+            if (
+                state.online is not True
+                or state.error is not None
+                or state.enabled is not True
+                or state.power != expected_powers[device_id]
+                or state.mode != record.spec.mode
+                or state.frequency != record.spec.frequency
+                or state.linkage is not LinkageRole.INDEPENDENT
+                or state.timer_enabled is not expected_timer
+            ):
+                raise ScheduleLinkagePreflightError(
+                    "staged control baseline changed before role observation",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_CONTROL_BASELINE,
+                )
+            schedule = state.schedule
+            if (
+                schedule is None
+                or schedule.enabled is not expected_timer
+                or schedule.invalid_slots
+                or tuple(sorted(schedule.entries, key=lambda entry: entry.slot))
+                != expected_entries[device_id]
+            ):
+                raise ScheduleLinkagePreflightError(
+                    "decoded staged schedule no longer matches the owned fixed plan",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
+                )
+            self._assert_guarded_power_value(device_id, state.power)
+            for entry in expected_entries[device_id]:
+                self._assert_guarded_power_value(
+                    device_id,
+                    entry.parameters.get("flow"),
+                )
+            clock = schedule.device_local_time
+            if clock is None or clock.tzinfo is not None:
+                raise ScheduleLinkagePreflightError(
+                    "staged schedule clock is unavailable or invalid",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_CLOCK,
+                )
+            boundary = clock.replace(
+                hour=boundary_hour,
+                minute=boundary_minute,
+                second=0,
+                microsecond=0,
+            )
+            lead = (boundary - clock).total_seconds()
+            if lead <= minimum_lead_seconds:
+                raise ScheduleLinkagePreflightError(
+                    "staged schedule lacks the required pre-boundary reserve",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW,
+                )
+            clocks.append(clock)
+            leads.append(lead)
+
+            if require_current_a:
+                values = state.observed_attributes
+                mode = values.get("AutoMode")
+                flow = values.get("AutoFlow")
+                frequency = values.get("AutoFreq")
+                feed_time = values.get("AutoFeedTime")
+                if (
+                    not isinstance(mode, str)
+                    or mode not in _STAGED_CURRENT_AUTO_MODES
+                    or isinstance(flow, bool)
+                    or not isinstance(flow, int)
+                    or not 0 <= flow <= 100
+                    or isinstance(frequency, bool)
+                    or not isinstance(frequency, int)
+                    or not 0 <= frequency <= 100
+                ):
+                    raise ScheduleLinkagePreflightError(
+                        "staged current-A evidence is malformed",
+                        failure=ScheduleLinkageRunFailure.PREFLIGHT_AUTO_EVIDENCE,
+                    )
+                if mode == "feed" and (
+                    isinstance(feed_time, bool)
+                    or not isinstance(feed_time, int)
+                    or not 1 <= feed_time <= 60
+                ):
+                    raise ScheduleLinkagePreflightError(
+                        "staged current-A feed evidence is malformed",
+                        failure=ScheduleLinkageRunFailure.PREFLIGHT_AUTO_EVIDENCE,
+                    )
+                self._assert_guarded_power_value(device_id, flow)
+                current = expected_entries[device_id][0]
+                if mode != "constant" or flow != current.parameters["flow"]:
+                    awaiting_current_a = True
+
+        if max(clocks) - min(clocks) > timedelta(
+            seconds=spec.maximum_clock_skew_seconds
+        ):
+            raise ScheduleLinkagePreflightError(
+                "staged pair clocks exceed the fixed-plan skew allowance",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CLOCK,
+            )
+        if max(leads) - min(leads) > spec.maximum_clock_skew_seconds:
+            raise ScheduleLinkagePreflightError(
+                "staged pair boundary leads disagree",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_CLOCK,
+            )
+        if awaiting_current_a:
+            raise _StagedAutoAwaitingConvergence(
+                "well-formed Auto evidence has not adopted the staged current A"
+            )
+
+    def _assert_guarded_power_value(
+        self,
+        device_id: str,
+        value: object,
+    ) -> None:
+        """Reject manual, staged, or transient Flow outside the attended safe envelope."""
+
+        capabilities = self._get_device(device_id).capabilities
+        limits = capabilities.power_limits
+        guarded_maximum = min(limits.max_power, _SCHEDULE_FLOW_TEST_MAX_POWER)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not limits.min_power <= value <= guarded_maximum
+            or value % capabilities.power_step
+        ):
+            raise ScheduleLinkagePreflightError(
+                "staged Flow is outside the guarded power range",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_POWER_GUARD,
+            )
+
+    def _assert_experiment_power_guard(
+        self,
+        spec: ScheduleFlowExperimentSpec,
+    ) -> None:
+        """Validate every planned Flow before the outer transaction can write a frame."""
+
+        planned = {
+            spec.master_device_id: (
+                spec.master_before_flow,
+                spec.master_after_flow,
+            ),
+            spec.slave_device_id: (
+                spec.slave_before_flow,
+                spec.slave_after_flow,
+            ),
+        }
+        for device_id, values in planned.items():
+            for value in values:
+                self._assert_guarded_power_value(device_id, value)
+
+    @staticmethod
+    def _expected_staged_entries(
+        spec: ScheduleFlowExperimentSpec,
+    ) -> dict[str, tuple[ScheduleEntry, ...]]:
+        expected: dict[str, tuple[ScheduleEntry, ...]] = {}
+        for patch in spec.temporary_schedule_spec().device_patches:
+            entries = tuple(
+                entry
+                for slot in patch.slots
+                if (
+                    entry := decode_local_wavemaker_pro_slot_wire(
+                        slot.wire_bytes,
+                        slot_index=slot.slot,
+                    )
+                )
+                is not None
+            )
+            expected[patch.device_id] = entries
+        return expected
+
+    async def _arm_temporary_schedule(
+        self,
+        record: LinkageTransactionRecord,
+        *,
+        monotonic_deadline: float,
+    ) -> None:
         targets: list[tuple[str, DeviceTarget]] = []
         for device_id, power in (
             (record.spec.master_device_id, record.spec.master_power),
@@ -1345,13 +1798,12 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         # newly authenticated streams, then replace those streams once more so the role
         # preflight cannot consume either proof read's queued companion frame.
         device_ids = tuple(device_id for device_id, _ in targets)
-        await self._replace_device_sessions(record, device_ids)
+        states = await self._read_staged_pair_explicit(
+            record,
+            monotonic_deadline=monotonic_deadline,
+        )
         for device_id, target in targets:
-            state = await self._run_forward_operation(
-                record,
-                self._get_device(device_id).get_state(),
-            )
-            self._assert_target(device_id, state, target)
+            self._assert_target(device_id, states[device_id], target)
         await self._replace_device_sessions(record, device_ids)
 
     async def _replace_device_sessions(
@@ -1359,18 +1811,110 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         record: LinkageTransactionRecord,
         device_ids: tuple[str, ...],
     ) -> None:
-        """Replace authenticated streams without changing any physical control state."""
+        """Replace paired streams without exposing a half-disconnected rollback state."""
 
-        for device_id in device_ids:
-            await self._run_forward_operation(
-                record,
-                self._get_device(device_id).disconnect(),
+        devices = tuple(self._get_device(device_id) for device_id in device_ids)
+
+        async def replace_pair() -> None:
+            try:
+                disconnect_results = await asyncio.gather(
+                    *(device.disconnect() for device in devices),
+                    return_exceptions=True,
+                )
+                connect_results = await asyncio.gather(
+                    *(device.connect() for device in devices),
+                    return_exceptions=True,
+                )
+                failure = next(
+                    (
+                        result
+                        for result in (*disconnect_results, *connect_results)
+                        if isinstance(result, BaseException)
+                    ),
+                    None,
+                )
+                if failure is not None:
+                    raise failure
+            except BaseException:
+                # Cancellation, deadline, revoked authority, or a failed paired boundary must not
+                # strand the peer disconnected when the enclosing transaction begins exact
+                # TimerOFF compensation. This is read-only transport cleanup, never a control
+                # retry; the original boundary failure remains the forward result.
+                try:
+                    await self._reconnect_device_sessions_uninterruptibly(devices)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as cleanup_error:
+                    del cleanup_error
+                raise
+
+        await self._run_forward_operation(record, replace_pair())
+
+    @staticmethod
+    async def _refresh_device_sessions_uninterruptibly(
+        devices: tuple[JebaoDevice, ...],
+    ) -> None:
+        """Complete a paired disconnect/reconnect before propagating cancellation."""
+
+        async def refresh_pair() -> None:
+            disconnect_results = await asyncio.gather(
+                *(device.disconnect() for device in devices),
+                return_exceptions=True,
             )
-        for device_id in device_ids:
-            await self._run_forward_operation(
-                record,
-                self._get_device(device_id).connect(),
+            connect_results = await asyncio.gather(
+                *(device.connect() for device in devices),
+                return_exceptions=True,
             )
+            failure = next(
+                (
+                    result
+                    for result in (*disconnect_results, *connect_results)
+                    if isinstance(result, BaseException)
+                ),
+                None,
+            )
+            if failure is not None:
+                raise failure
+
+        task = asyncio.create_task(refresh_pair())
+        cancellation_received = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancellation_received = True
+        task.result()
+        if cancellation_received:
+            raise asyncio.CancelledError
+
+    @staticmethod
+    async def _reconnect_device_sessions_uninterruptibly(
+        devices: tuple[JebaoDevice, ...],
+    ) -> None:
+        """Complete paired reconnect cleanup before propagating cancellation or failure."""
+
+        async def reconnect_pair() -> None:
+            results = await asyncio.gather(
+                *(device.connect() for device in devices),
+                return_exceptions=True,
+            )
+            failure = next(
+                (result for result in results if isinstance(result, BaseException)),
+                None,
+            )
+            if failure is not None:
+                raise failure
+
+        task = asyncio.create_task(reconnect_pair())
+        cancellation_received = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancellation_received = True
+        task.result()
+        if cancellation_received:
+            raise asyncio.CancelledError
 
     async def _disarm_temporary_schedule_uninterruptibly(
         self,
@@ -1396,6 +1940,18 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             (record.spec.master_device_id, record.spec.master_power),
         )
         cancellation_received = False
+        devices = tuple(self._get_device(device_id) for device_id, _power in targets)
+        try:
+            # Explicit-reply failure retires the underlying LAN stream. Always establish fresh
+            # paired sessions before the first compensating TimerOFF frame, even when the read
+            # path already attempted cleanup.
+            await self._refresh_device_sessions_uninterruptibly(devices)
+        except asyncio.CancelledError:
+            cancellation_received = True
+        except BaseException:
+            # Still try both TimerOFF writes. Their fresh-state verification below decides
+            # whether exact schedule restoration is authorized or recovery must retain control.
+            pass
         for device_id, power in targets:
             try:
                 await self._get_device(device_id).write_target(

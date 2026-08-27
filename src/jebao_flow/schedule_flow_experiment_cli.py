@@ -102,9 +102,9 @@ from jebao_flow.persistence import (
 
 _TOKEN_VERSION = 1
 _MAX_POWER = 45
-_BOUNDARY_MIN_LEAD_SECONDS = 180
-_BOUNDARY_MAX_LEAD_SECONDS = 240
-_RUN_MIN_LEAD_SECONDS = 120
+_BOUNDARY_MIN_LEAD_SECONDS = 240
+_BOUNDARY_MAX_LEAD_SECONDS = 300
+_RUN_MIN_LEAD_SECONDS = 240
 _LEGACY_TERMINAL_OUTCOMES = frozenset(
     {
         "armed_preview_cancelled",
@@ -143,7 +143,7 @@ def _fixed_spec(
         slave_after_flow=40,
         sine_frequency=30,
         safe_frequency=20,
-        observation_window_seconds=600,
+        observation_window_seconds=630,
         post_boundary_stability_seconds=300,
         verification_interval_seconds=2,
         minimum_lead_seconds=60,
@@ -165,17 +165,17 @@ def _fixed_spec(
 
 
 def _next_boundary(clocks: Sequence[datetime]) -> str:
-    """Choose the next minute boundary 3-4 minutes after the freshest device clock."""
+    """Choose the next minute boundary 4-5 minutes after the freshest device clock."""
 
     if len(clocks) != 2 or any(clock.tzinfo is not None for clock in clocks):
         raise ScheduleFlowCliError("both device-local clocks must be available and timezone-naive")
     earliest, latest = min(clocks), max(clocks)
     if (latest - earliest).total_seconds() > 2:
         raise ScheduleFlowCliError("device-local clocks exceed the audited two-second skew")
-    boundary = latest.replace(second=0, microsecond=0) + timedelta(minutes=4)
+    boundary = latest.replace(second=0, microsecond=0) + timedelta(minutes=5)
     lead = (boundary - latest).total_seconds()
     if not _BOUNDARY_MIN_LEAD_SECONDS <= lead <= _BOUNDARY_MAX_LEAD_SECONDS:
-        raise ScheduleFlowCliError("cannot choose a safe three-to-four-minute boundary")
+        raise ScheduleFlowCliError("cannot choose a safe four-to-five-minute boundary")
     if boundary.date() != latest.date() or (boundary.hour == 0 and boundary.minute == 0):
         raise ScheduleFlowCliError("schedule-flow preflight cannot cross midnight")
     return boundary.strftime("%H:%M")
@@ -533,7 +533,7 @@ async def _preflight(
         print("Plan: sparse unused-slot wire qualification only; no field or role activation.")
     else:
         print("Plan: Constant master 31% / slave 32% -> Sine master 35% / slave 40%.")
-        print("Observation: 300s stable evidence inside a 600s bounded window.")
+        print("Observation: 300s stable evidence inside a 630s bounded window.")
     print(f"Confirmation token: {token}")
     return 0
 
@@ -1269,14 +1269,22 @@ def _status(
             None,
         )
         role_failure_text = "none"
+        role_failure_phase = "none"
         if latest_role_failure is not None and latest_role_failure.failure is not None:
             role_failure_text = latest_role_failure.failure.value
+            role_failure_phase = (
+                "preflight"
+                if role_failure_text.startswith("preflight_")
+                else "run"
+            )
             if latest_role_failure.drift_dimensions:
                 role_failure_text += "/" + ",".join(
                     dimension.value
                     for dimension in latest_role_failure.drift_dimensions
                 )
         print(f"Role run failure: {role_failure_text}")
+        print(f"Role failure phase: {role_failure_phase}")
+        print(f"Role failure reason: {role_failure_text}")
         _print_sample(intent.schedule_flow_sample)
         if intent.phase is not HardwareTestIntentPhase.TERMINAL or any(
             value is not None for value in (outer, temporary, role)
