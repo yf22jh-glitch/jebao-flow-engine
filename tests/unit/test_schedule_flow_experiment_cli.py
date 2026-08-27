@@ -48,6 +48,10 @@ from jebao_flow.hardware_test import (
     preview_confirmation_token,
     schedule_flow_confirmation_token,
 )
+from jebao_flow.persistence.qualification import (
+    DeviceQualificationReceipt,
+    JsonQualificationStore,
+)
 from jebao_flow.protocol.models import LinkageRole
 
 
@@ -196,6 +200,41 @@ def test_fixed_plan_is_the_only_audited_field_shape() -> None:
     assert spec.sentinel_qualification is True
 
 
+def test_pause_authorizer_requires_current_receipts_from_named_qualification(tmp_path) -> None:
+    store = JsonQualificationStore(tmp_path / "qualifications")
+    now = datetime.now(UTC)
+    for snapshot in _snapshots():
+        store.save(
+            DeviceQualificationReceipt(
+                operation_id="qualified_pair_001",
+                device_id=snapshot.device_id,
+                physical_binding=snapshot.physical_binding,
+                original_power=40,
+                step_power=35,
+                completed_at=now - timedelta(minutes=1),
+                valid_until=now + timedelta(hours=1),
+            )
+        )
+    authorize = cli._pause_authorizer(store)  # noqa: SLF001
+
+    authorize(_spec(), _snapshots())
+
+    invalid = _snapshots()[1]
+    store.save(
+        DeviceQualificationReceipt(
+            operation_id="another_qualification",
+            device_id=invalid.device_id,
+            physical_binding=invalid.physical_binding,
+            original_power=40,
+            step_power=35,
+            completed_at=now - timedelta(minutes=1),
+            valid_until=now + timedelta(hours=1),
+        )
+    )
+    with pytest.raises(cli.ScheduleFlowCliError, match="named qualification"):
+        authorize(_spec(), _snapshots())
+
+
 def test_boundary_uses_freshest_device_clock_and_refuses_skew_or_midnight() -> None:
     first = datetime(2026, 8, 27, 12, 10, 1)
     second = datetime(2026, 8, 27, 12, 10, 2)
@@ -327,7 +366,7 @@ def test_armed_v3_intent_rejects_outer_diagnostic_progress() -> None:
 def test_v3_stage_events_are_monotonic_bounded_and_identity_free() -> None:
     intent = _intent(phase=HardwareTestIntentPhase.STARTED)
     started = ScheduleFlowStageEvent(
-        stage=ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
+        stage=ScheduleFlowStage.OUTER_PAUSE_STARTED,
         occurred_at=intent.created_at,
     )
     first_write = ScheduleFlowStageEvent(
@@ -954,8 +993,8 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
             now = datetime.now(UTC)
             for index, stage in enumerate(
                 (
-                    ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
-                    ScheduleFlowStage.OUTER_BOOTSTRAP_COMPLETED,
+                    ScheduleFlowStage.OUTER_PAUSE_STARTED,
+                    ScheduleFlowStage.OUTER_PAUSE_COMPLETED,
                     ScheduleFlowStage.SENTINEL_SNAPSHOT_STARTED,
                     ScheduleFlowStage.SENTINEL_SNAPSHOT_COMPLETED,
                     ScheduleFlowStage.SENTINEL_WRITE_STARTED,
@@ -1023,7 +1062,7 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
     assert terminal.schedule_flow_stage_events[-1].stage is ScheduleFlowStage.OUTER_RESTORED
     retained_stages = {event.stage for event in terminal.schedule_flow_stage_events}
     assert {
-        ScheduleFlowStage.OUTER_BOOTSTRAP_COMPLETED,
+        ScheduleFlowStage.OUTER_PAUSE_COMPLETED,
         ScheduleFlowStage.TIMER_ON_ARMED,
         ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED,
         ScheduleFlowStage.ROLE_OBSERVATION_COMPLETED,
@@ -1035,7 +1074,7 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_failure_durably_records_outer_category_and_completed_restore(
+async def test_pause_failure_durably_records_outer_category_and_completed_restore(
     monkeypatch,
 ) -> None:
     armed = _intent()
@@ -1113,9 +1152,9 @@ async def test_bootstrap_failure_durably_records_outer_category_and_completed_re
             now = datetime.now(UTC)
             self.stage_event_observer(
                 ScheduleFlowStageEvent(
-                    stage=ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
+                    stage=ScheduleFlowStage.OUTER_PAUSE_STARTED,
                     occurred_at=now,
-                    failure_category=ScheduleFlowFailureCategory.OUTER_BOOTSTRAP,
+                    failure_category=ScheduleFlowFailureCategory.OUTER_PAUSE,
                 )
             )
             try:
@@ -1139,12 +1178,12 @@ async def test_bootstrap_failure_durably_records_outer_category_and_completed_re
             )
             self.outer.clear()
             raise RuntimeError(
-                "vendor-master-secret 198.51.100.77 raw bootstrap exception"
+                "vendor-master-secret 198.51.100.77 raw pause exception"
             )
 
     monkeypatch.setattr(cli, "ScheduleFlowExperimentController", Controller)
 
-    with pytest.raises(RuntimeError, match="raw bootstrap exception"):
+    with pytest.raises(RuntimeError, match="raw pause exception"):
         await cli._run(  # noqa: SLF001
             config,
             args,
@@ -1169,14 +1208,14 @@ async def test_bootstrap_failure_durably_records_outer_category_and_completed_re
     assert terminal.evidence.rollback_completed_at is not None
     assert terminal.schedule_flow_stage_events[-1].stage is ScheduleFlowStage.OUTER_RESTORED
     assert any(
-        event.failure_category is ScheduleFlowFailureCategory.OUTER_BOOTSTRAP
+        event.failure_category is ScheduleFlowFailureCategory.OUTER_PAUSE
         for event in terminal.schedule_flow_stage_events
     )
     assert intent_store.failed_once is True
     encoded = terminal.model_dump_json()
     assert "vendor-master-secret" not in encoded
     assert "198.51.100.77" not in encoded
-    assert "raw bootstrap exception" not in encoded
+    assert "raw pause exception" not in encoded
 
 
 @pytest.mark.asyncio

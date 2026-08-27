@@ -304,6 +304,16 @@ def _qualification_authorizer(
     return authorize
 
 
+def _pause_authorizer(store: JsonQualificationStore):
+    def authorize(
+        spec: ScheduleFlowExperimentSpec,
+        snapshots: tuple[DeviceControlSnapshot, ...],
+    ) -> None:
+        _require_receipts(store, spec.qualification_operation_id, snapshots)
+
+    return authorize
+
+
 def _assert_intent_authentic(intent: HardwareTestIntent, instance_id: str) -> None:
     if intent.version != 3 or intent.schedule_flow_spec is None:
         raise ScheduleFlowCliError("native intent is not a schedule-flow preflight")
@@ -837,6 +847,7 @@ async def _run(
                 schedule_store,
                 role_store,
                 safety_interlock=guard,
+                pause_authorizer=_pause_authorizer(qualification_store),
                 prerequisite_authorizer=_qualification_authorizer(qualification_store),
                 role_sample_observer=persist_sample,
                 diagnostic_event_observer=persist_diagnostic_event,
@@ -1311,6 +1322,7 @@ async def _recover(
             schedule_store,
             role_store,
             safety_interlock=guard,
+            pause_authorizer=_pause_authorizer(qualification_store),
             prerequisite_authorizer=_qualification_authorizer(qualification_store),
             stage_event_observer=persist_stage_event,
         )

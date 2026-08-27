@@ -80,8 +80,11 @@ def _active_wire(
     mode: int = 2,
     start_hour: int = 0,
     end_hour: int = 24,
+    end_minute: int = 0,
 ) -> bytes:
-    return bytes((start_hour, 0, end_hour, 0, mode, flow, 20 if mode == 1 else 0, 0, 0))
+    return bytes(
+        (start_hour, 0, end_hour, end_minute, mode, flow, 20 if mode == 1 else 0, 0, 0)
+    )
 
 
 def _field_slots(
@@ -96,7 +99,8 @@ def _field_slots(
             flow=after_flow,
             mode=1,
             start_hour=boundary_hour,
-            end_hour=24,
+            end_hour=23,
+            end_minute=59,
         ),
         *(LOCAL_WAVEMAKER_PRO_UNUSED_EE for _ in range(46)),
     )
@@ -319,13 +323,15 @@ async def test_stages_selected_slots_then_restores_all_48_exactly() -> None:
             flow=35,
             mode=1,
             start_hour=12,
-            end_hour=24,
+            end_hour=23,
+            end_minute=59,
         )
         assert get_local_wavemaker_pro_slot_wire(right.image, 1) == _active_wire(
             flow=40,
             mode=1,
             start_hour=12,
-            end_hour=24,
+            end_hour=23,
+            end_minute=59,
         )
         return ObservationCompletion.DISARM_VERIFIED
 

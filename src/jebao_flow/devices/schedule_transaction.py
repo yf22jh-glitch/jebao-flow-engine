@@ -1221,7 +1221,10 @@ class TemporaryScheduleController:
                 raise TemporarySchedulePreflightError(
                     TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE
                 )
-        if cursor != 24 * 60:
+        # Local Wavemaker Pro app schedules observed in the field terminate at 23:59. Keep
+        # accepting the protocol-level 24:00 form for decoded fixtures, but do not require it
+        # for a field image generated with the controller's real-device convention.
+        if cursor not in {23 * 60 + 59, 24 * 60}:
             raise TemporarySchedulePreflightError(TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE)
         topology = tuple((entry.start, entry.end, entry.mode) for entry in ordered)
         flows = tuple(entry.parameters["flow"] for entry in ordered)

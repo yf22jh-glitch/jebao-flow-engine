@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
 
@@ -17,10 +17,12 @@ from jebao_flow.devices.linkage import (
     LinkageTransactionBusyError,
     LinkageTransactionRecord,
     TemporaryLinkageController,
+    schedule_structure_fingerprint,
 )
 from jebao_flow.devices.schedule_flow_experiment import (
     ScheduleFlowExperimentController,
     ScheduleFlowExperimentSpec,
+    ScheduleFlowFailureCategory,
     ScheduleFlowOutcome,
     ScheduleFlowStage,
     ScheduleFlowStageEvent,
@@ -40,7 +42,7 @@ from jebao_flow.devices.schedule_transaction import (
     TemporaryScheduleResult,
     TemporaryScheduleSpec,
 )
-from jebao_flow.protocol.models import LinkageRole
+from jebao_flow.protocol.models import DeviceSchedule, DeviceState, DeviceTarget, LinkageRole
 from jebao_flow.protocol.schedule_wire import (
     LOCAL_WAVEMAKER_PRO_UNUSED_EE,
     decode_local_wavemaker_pro_slot_wire,
@@ -98,6 +100,7 @@ def test_outer_diagnostic_events_are_forwarded_without_exception_payloads() -> N
         cast(object, store),
         cast(object, store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
         diagnostic_event_observer=events.append,
     )
@@ -138,7 +141,7 @@ def test_plan_builds_two_distinguishable_segments_and_clears_every_other_slot() 
     )
     assert (master_after.start, master_after.end, master_after.mode) == (
         "12:34",
-        "24:00",
+        "23:59",
         "sine",
     )
     assert (
@@ -165,6 +168,277 @@ def test_plan_binds_five_minute_stability_to_role_observation() -> None:
     assert outer.duration_seconds == 840
     assert temporary.observation_timeout_seconds == 720
     assert temporary.recovery_authority_seconds == 2100
+
+
+def test_plan_requires_stable_evidence_to_finish_before_2359() -> None:
+    assert _spec(boundary_time="23:53").boundary_time == "23:53"
+
+    with pytest.raises(ValidationError, match="before the 23:59 field end"):
+        _spec(boundary_time="23:54")
+
+
+def test_pause_stage_names_keep_the_deployed_v3_wire_values() -> None:
+    assert ScheduleFlowStage("outer_bootstrap_started") is ScheduleFlowStage.OUTER_PAUSE_STARTED
+    assert (
+        ScheduleFlowStage("outer_bootstrap_completed")
+        is ScheduleFlowStage.OUTER_PAUSE_COMPLETED
+    )
+    assert (
+        ScheduleFlowFailureCategory("outer_bootstrap")
+        is ScheduleFlowFailureCategory.OUTER_PAUSE
+    )
+
+
+class _PauseDevice:
+    def __init__(self, device_id: str, *, power: int, events: list[str]) -> None:
+        self.device_id = device_id
+        self.events = events
+        self.targets: list[DeviceTarget] = []
+        self.schedule = DeviceSchedule(enabled=True)
+        self.state = DeviceState(
+            online=True,
+            enabled=True,
+            power=power,
+            mode="constant",
+            frequency=20,
+            linkage=LinkageRole.INDEPENDENT,
+            timer_enabled=True,
+            schedule=self.schedule,
+        )
+
+    async def get_state(self) -> DeviceState:
+        self.events.append(f"{self.device_id}:read")
+        return self.state
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        assert guard is None or guard() is True
+        self.events.append(f"{self.device_id}:write:{target.power}")
+        self.targets.append(target)
+        self.state = DeviceState(
+            online=True,
+            enabled=target.enabled,
+            power=target.power,
+            mode=target.mode or self.state.mode,
+            frequency=target.frequency,
+            linkage=target.linkage,
+            timer_enabled=target.timer_enabled,
+            schedule=self.schedule,
+        )
+
+    async def disconnect(self) -> None:
+        self.events.append(f"{self.device_id}:disconnect")
+
+    async def connect(self) -> None:
+        self.events.append(f"{self.device_id}:connect")
+
+
+def _pause_record(
+    spec: ScheduleFlowExperimentSpec,
+    master: _PauseDevice,
+    slave: _PauseDevice,
+) -> LinkageTransactionRecord:
+    fingerprint = schedule_structure_fingerprint(master.schedule)
+    snapshots = tuple(
+        SimpleNamespace(
+            device_id=device.device_id,
+            enabled=True,
+            power=device.state.power,
+            mode="constant",
+            frequency=20,
+            linkage=LinkageRole.INDEPENDENT,
+            timer_enabled=True,
+            schedule_fingerprint=fingerprint,
+        )
+        for device in (master, slave)
+    )
+    return cast(
+        LinkageTransactionRecord,
+        SimpleNamespace(
+            operation_id=spec.operation_id,
+            spec=spec.outer_linkage_spec(),
+            snapshots=snapshots,
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        ),
+    )
+
+
+def _arm_pause_controller(
+    controller: ScheduleFlowExperimentController,
+    spec: ScheduleFlowExperimentSpec,
+) -> None:
+    controller._experiment_spec = spec  # noqa: SLF001
+    controller._safety_epoch = controller._safety_interlock.epoch  # noqa: SLF001
+    controller._stop_event = asyncio.Event()  # noqa: SLF001
+    controller._operation_monotonic_deadline = (  # noqa: SLF001
+        asyncio.get_running_loop().time() + 60
+    )
+
+
+async def test_prequalified_pause_writes_one_safe_frame_and_verifies_fresh_sessions() -> None:
+    events: list[str] = []
+    authorizations: list[tuple[object, ...]] = []
+    master = _PauseDevice("master", power=44, events=events)
+    slave = _PauseDevice("slave", power=43, events=events)
+    store = cast(object, _UnusedStore())
+
+    def authorize(_spec, snapshots) -> None:
+        events.append("authorize")
+        authorizations.append(snapshots)
+
+    controller = ScheduleFlowExperimentController(
+        {"master": cast(object, master), "slave": cast(object, slave)},
+        cast(object, store),
+        cast(object, store),
+        cast(object, store),
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=authorize,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+    )
+    spec = _spec()
+    record = _pause_record(spec, master, slave)
+    _arm_pause_controller(controller, spec)
+
+    staged = await controller._stage_devices(record)  # noqa: SLF001
+
+    assert staged is record
+    assert len(authorizations) == 5
+    assert [target.power for target in master.targets] == [31]
+    assert [target.power for target in slave.targets] == [32]
+    assert all(
+        target.mode == "constant"
+        and target.frequency == 20
+        and target.linkage is LinkageRole.INDEPENDENT
+        and target.timer_enabled is False
+        for target in (*master.targets, *slave.targets)
+    )
+    assert events == [
+        "master:read",
+        "slave:read",
+        "authorize",
+        "authorize",
+        "authorize",
+        "master:write:31",
+        "master:disconnect",
+        "master:connect",
+        "master:read",
+        "authorize",
+        "authorize",
+        "slave:write:32",
+        "slave:disconnect",
+        "slave:connect",
+        "slave:read",
+    ]
+
+
+async def test_pause_receipt_expiry_before_slave_frame_fails_without_requalification() -> None:
+    events: list[str] = []
+    authorization_count = 0
+    master = _PauseDevice("master", power=44, events=events)
+    slave = _PauseDevice("slave", power=43, events=events)
+    store = cast(object, _UnusedStore())
+
+    def authorize(_spec, _snapshots) -> None:
+        nonlocal authorization_count
+        authorization_count += 1
+        if authorization_count == 4:
+            raise RuntimeError("receipt expired")
+
+    controller = ScheduleFlowExperimentController(
+        {"master": cast(object, master), "slave": cast(object, slave)},
+        cast(object, store),
+        cast(object, store),
+        cast(object, store),
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=authorize,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+    )
+    spec = _spec()
+    record = _pause_record(spec, master, slave)
+    _arm_pause_controller(controller, spec)
+
+    with pytest.raises(RuntimeError, match="receipt expired"):
+        await controller._stage_devices(record)  # noqa: SLF001
+
+    assert [target.power for target in master.targets] == [31]
+    assert slave.targets == []
+    assert all(target.power != 30 for target in master.targets)
+
+
+async def test_pause_receipt_expiry_in_last_moment_guard_prevents_frame_send() -> None:
+    events: list[str] = []
+    authorization_count = 0
+    master = _PauseDevice("master", power=44, events=events)
+    slave = _PauseDevice("slave", power=43, events=events)
+    store = cast(object, _UnusedStore())
+
+    def authorize(_spec, _snapshots) -> None:
+        nonlocal authorization_count
+        authorization_count += 1
+        if authorization_count == 3:
+            raise RuntimeError("receipt expired while queued")
+
+    controller = ScheduleFlowExperimentController(
+        {"master": cast(object, master), "slave": cast(object, slave)},
+        cast(object, store),
+        cast(object, store),
+        cast(object, store),
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=authorize,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+    )
+    spec = _spec()
+    record = _pause_record(spec, master, slave)
+    _arm_pause_controller(controller, spec)
+
+    with pytest.raises(RuntimeError, match="expired while queued"):
+        await controller._stage_devices(record)  # noqa: SLF001
+
+    assert master.targets == []
+    assert slave.targets == []
+
+
+async def test_pause_authorizer_failure_precedes_outer_journal_create(monkeypatch) -> None:
+    events: list[str] = []
+    master = _PauseDevice("master", power=44, events=events)
+    slave = _PauseDevice("slave", power=43, events=events)
+    spec = _spec()
+    record = _pause_record(spec, master, slave)
+
+    class Store:
+        create_calls = 0
+
+        def load(self):
+            return None
+
+        def create(self, _record) -> None:
+            self.create_calls += 1
+
+    store = Store()
+
+    async def capture_only(self, outer_spec, *, created_at, expires_at):
+        del self, outer_spec, created_at, expires_at
+        return record
+
+    monkeypatch.setattr(TemporaryLinkageController, "_prepare", capture_only)
+
+    def reject(_spec, _snapshots) -> None:
+        raise RuntimeError("qualification receipt unavailable")
+
+    controller = ScheduleFlowExperimentController(
+        {"master": cast(object, master), "slave": cast(object, slave)},
+        cast(object, store),
+        cast(object, _UnusedStore()),
+        cast(object, _UnusedStore()),
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=reject,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+    )
+    controller._experiment_spec = spec  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="qualification receipt unavailable"):
+        await controller._run_owned(spec.outer_linkage_spec())  # noqa: SLF001
+
+    assert store.create_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -292,6 +566,7 @@ class _SequenceController(ScheduleFlowExperimentController):
             cast(object, store),
             cast(object, store),
             safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+            pause_authorizer=lambda _spec, _snapshots: None,
             prerequisite_authorizer=lambda _spec, _snapshots: None,
         )
         self.events = events
@@ -399,6 +674,7 @@ async def test_real_sentinel_spec_is_explicitly_behavior_neutral() -> None:
         cast(object, store),
         cast(object, store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
     )
 
@@ -434,6 +710,7 @@ async def test_concurrent_call_cannot_replace_active_experiment_state(monkeypatc
         cast(object, store),
         cast(object, store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
     )
     first = _spec(operation_id="first", sentinel_qualification=False)
@@ -490,6 +767,7 @@ async def test_completed_experiment_returns_each_stable_slave_outcome(
         cast(object, store),
         cast(object, store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
     )
 
@@ -518,6 +796,7 @@ async def test_last_actual_sample_survives_a_later_experiment_failure(monkeypatc
         cast(object, store),
         cast(object, store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
     )
 
@@ -596,6 +875,7 @@ async def test_disarm_attempts_both_devices_and_accepts_verified_ack_loss() -> N
         cast(object, store),
         cast(object, store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
     )
     controller._active_operation_id = "scheduled_slave_flow"  # noqa: SLF001
@@ -634,6 +914,7 @@ async def test_unproven_timer_off_blocks_schedule_restore() -> None:
         cast(object, store),
         cast(object, store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
     )
     controller._active_operation_id = "scheduled_slave_flow"  # noqa: SLF001
@@ -703,13 +984,18 @@ async def test_attended_recovery_orders_roles_timer_schedule_then_outer(monkeypa
     outer_store = _MutableStore(outer_record)
     schedule_store = _MutableStore(object())
     role_store = _MutableStore(SimpleNamespace(operation_id="recover_order_roles"))
+
+    def reject_requalification(_spec, _snapshots) -> None:
+        raise AssertionError("recovery must not require a fresh qualification receipt")
+
     controller = ScheduleFlowExperimentController(
         {},
         cast(object, outer_store),
         cast(object, schedule_store),
         cast(object, role_store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
-        prerequisite_authorizer=lambda _spec, _snapshots: None,
+        pause_authorizer=reject_requalification,
+        prerequisite_authorizer=reject_requalification,
     )
     controller._role_controller = _RecoverRoles(  # type: ignore[assignment]  # noqa: SLF001
         events,
@@ -761,6 +1047,7 @@ async def test_schedule_only_recovery_reports_its_actual_disarm(monkeypatch) -> 
         cast(object, schedule_store),
         cast(object, role_store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
         stage_event_observer=stage_events.append,
     )
@@ -808,6 +1095,7 @@ async def test_failed_role_journal_close_retains_the_temporary_schedule_authorit
         cast(object, schedule_store),
         cast(object, role_store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
     )
     controller._role_controller = _FailFinalizeRoles()  # type: ignore[assignment]  # noqa: SLF001
@@ -839,6 +1127,7 @@ async def test_pending_schedule_failure_uses_outer_safe_stop_not_timer_on_rollba
         cast(object, schedule_store),
         cast(object, store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
     )
 
@@ -873,6 +1162,7 @@ async def test_repeated_cancellation_cannot_interrupt_composed_safe_stop(monkeyp
         cast(object, schedule_store),
         cast(object, store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
     )
 
@@ -947,6 +1237,7 @@ async def test_mismatched_nested_journal_is_rejected_before_any_recovery_write()
         cast(object, schedule_store),
         cast(object, role_store),
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
     )
     controller._role_controller = _RecoverRoles(  # type: ignore[assignment]  # noqa: SLF001

@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from jebao_flow.devices.base import JebaoDevice
 from jebao_flow.devices.linkage import (
+    DeviceControlSnapshot,
     LinkageDiagnosticEvent,
     LinkageJournalStore,
     LinkageRecoveryAuthority,
@@ -69,6 +70,9 @@ WallTime = Annotated[
     str,
     StringConstraints(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"),
 ]
+
+_FIELD_SCHEDULE_END = "23:59"
+_FIELD_SCHEDULE_END_SECONDS = 23 * 60 * 60 + 59 * 60
 
 SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT = 64
 SCHEDULE_FLOW_STAGE_EVENT_LIMIT = SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT + 1
@@ -134,6 +138,14 @@ class ScheduleFlowExperimentSpec(BaseModel):
         )
         if self.observation_window_seconds <= self.minimum_lead_seconds + required_after:
             raise ValueError("the observation window cannot contain setup and stable evidence")
+        boundary_hour, boundary_minute = (
+            int(part) for part in self.boundary_time.split(":", maxsplit=1)
+        )
+        boundary_seconds = boundary_hour * 60 * 60 + boundary_minute * 60
+        if boundary_seconds + required_after >= _FIELD_SCHEDULE_END_SECONDS:
+            raise ValueError(
+                "stable schedule-flow evidence must complete before the 23:59 field end"
+            )
         return self
 
     def outer_linkage_spec(self) -> LinkageTestSpec:
@@ -207,8 +219,12 @@ class ScheduleFlowOutcome(StrEnum):
 class ScheduleFlowStage(StrEnum):
     """Totally ordered, identity-free milestones for one composed field run."""
 
-    OUTER_BOOTSTRAP_STARTED = "outer_bootstrap_started"
-    OUTER_BOOTSTRAP_COMPLETED = "outer_bootstrap_completed"
+    # Keep the original persisted values readable across an in-place upgrade.  The first v3
+    # diagnostic build called this interval a bootstrap even though it was already the outer
+    # control transaction.  The implementation now performs a prequalified pause, but changing
+    # these wire values would make an unfinished v3 intent impossible to load for recovery.
+    OUTER_PAUSE_STARTED = "outer_bootstrap_started"
+    OUTER_PAUSE_COMPLETED = "outer_bootstrap_completed"
     SENTINEL_SNAPSHOT_STARTED = "sentinel_snapshot_started"
     SENTINEL_SNAPSHOT_COMPLETED = "sentinel_snapshot_completed"
     SENTINEL_WRITE_STARTED = "sentinel_write_started"
@@ -245,7 +261,8 @@ def schedule_flow_stage_rank(stage: ScheduleFlowStage) -> int:
 class ScheduleFlowFailureCategory(StrEnum):
     """Allow-listed non-schedule failure intervals safe for durable operator output."""
 
-    OUTER_BOOTSTRAP = "outer_bootstrap"
+    # Legacy v3 wire value retained for crash-recovery compatibility; see ScheduleFlowStage.
+    OUTER_PAUSE = "outer_bootstrap"
     TIMER_ON_ARM = "timer_on_arm"
     ROLE_PREFLIGHT = "role_preflight"
     ROLE_OBSERVATION = "role_observation"
@@ -342,6 +359,12 @@ class ScheduleFlowExperimentResult(BaseModel):
     completed_at: datetime
 
 
+PauseAuthorizer = Callable[
+    [ScheduleFlowExperimentSpec, tuple[DeviceControlSnapshot, ...]],
+    None,
+]
+
+
 class ScheduleFlowExperimentController(TemporaryLinkageController):
     """Compose three existing recovery domains under one deployment-wide caller lease."""
 
@@ -353,6 +376,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         role_store: ScheduleLinkageJournalStore,
         *,
         safety_interlock: LinkageSafetyInterlock,
+        pause_authorizer: PauseAuthorizer,
         prerequisite_authorizer: PrerequisiteAuthorizer,
         role_sample_observer: Callable[[ScheduleLinkageSample], None] | None = None,
         diagnostic_event_observer: Callable[[LinkageDiagnosticEvent], None] | None = None,
@@ -380,6 +404,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         self._external_role_sample_observer = role_sample_observer
         self._external_diagnostic_event_observer = diagnostic_event_observer
         self._external_stage_event_observer = stage_event_observer
+        self._authorize_pause = pause_authorizer
         self._experiment_spec: ScheduleFlowExperimentSpec | None = None
         self._sentinel_result: TemporaryScheduleResult | None = None
         self._temporary_result: TemporaryScheduleResult | None = None
@@ -390,6 +415,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         self._schedule_restore_blocked = False
         self._last_schedule_stage: ScheduleFlowStage | None = None
         self._schedule_failure_recorded = False
+        self._outer_pause_completed = 0
 
     async def run_experiment(
         self,
@@ -415,6 +441,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             self._schedule_restore_blocked = False
             self._last_schedule_stage = None
             self._schedule_failure_recorded = False
+            self._outer_pause_completed = 0
             try:
                 outer_result = await super().run(spec.outer_linkage_spec())
                 if self._temporary_result is None or self._role_result is None:
@@ -442,6 +469,24 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 )
             finally:
                 self._experiment_spec = None
+
+    async def _prepare(
+        self,
+        spec: LinkageTestSpec,
+        *,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> LinkageTransactionRecord:
+        """Authorize the prequalified pause before creating any recovery journal."""
+
+        record = await super()._prepare(
+            spec,
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+        experiment = self._require_experiment(record)
+        self._authorize_pause(experiment, record.snapshots)
+        return record
 
     @property
     def last_role_sample(self) -> ScheduleLinkageSample | None:
@@ -556,39 +601,98 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         record: LinkageTransactionRecord,
     ) -> LinkageTransactionRecord:
         self._emit_stage(
-            ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
+            ScheduleFlowStage.OUTER_PAUSE_STARTED,
             completed_participants=0,
         )
         try:
-            staged = await super()._stage_devices(record)
+            experiment = self._require_experiment(record)
+            for snapshot in record.snapshots:
+                state = await self._run_forward_operation(
+                    record,
+                    self._get_device(snapshot.device_id).get_state(),
+                )
+                self._assert_snapshot_control(
+                    snapshot,
+                    state,
+                    expected_timer=True,
+                )
+                self._assert_schedule_unchanged(snapshot, state)
+
+            # Recheck receipt validity against the same fresh snapshots immediately before the
+            # first control write. There is deliberately no fallback bootstrap/requalification.
+            self._authorize_pause(experiment, record.snapshots)
+            target_powers = {
+                record.spec.master_device_id: experiment.master_before_flow,
+                record.spec.slave_device_id: experiment.slave_before_flow,
+            }
+            for snapshot in record.snapshots:
+                device = self._get_device(snapshot.device_id)
+                self._authorize_pause(experiment, record.snapshots)
+                target = DeviceTarget(
+                    enabled=True,
+                    power=target_powers[snapshot.device_id],
+                    mode="constant",
+                    frequency=experiment.safe_frequency,
+                    linkage=LinkageRole.INDEPENDENT,
+                    timer_enabled=False,
+                )
+                self._require_forward_write(record)
+                await self._run_forward_operation(
+                    record,
+                    device.write_target(
+                        target,
+                        # The LAN implementation can wait for its device lock and command-rate
+                        # interval after entering write_target().  Revalidate the receipt in the
+                        # transport's last-moment guard as well as immediately before the call,
+                        # so an expired qualification cannot cross that queue into a frame send.
+                        guard=lambda current_record=record, current_experiment=experiment: (
+                            self._pause_write_allowed(current_experiment, current_record)
+                        ),
+                    ),
+                )
+                # A successful write can leave an older 0x03/0x04 frame queued on the write
+                # stream. Prove the complete TimerOFF control and unchanged schedule only after
+                # a new authenticated session.
+                await self._run_forward_operation(record, device.disconnect())
+                await self._run_forward_operation(record, device.connect())
+                paused = await self._run_forward_operation(record, device.get_state())
+                self._assert_target(device.device_id, paused, target)
+                self._assert_schedule_unchanged(snapshot, paused)
+                self._outer_pause_completed += 1
+                if self._outer_pause_completed < len(record.snapshots):
+                    self._emit_stage(
+                        ScheduleFlowStage.OUTER_PAUSE_STARTED,
+                        completed_participants=self._outer_pause_completed,
+                    )
         except asyncio.CancelledError:
             self._emit_stage(
-                self._last_schedule_stage or ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
-                completed_participants=self._outer_bootstrap_completed_participants(),
+                self._last_schedule_stage or ScheduleFlowStage.OUTER_PAUSE_STARTED,
+                completed_participants=self._outer_pause_completed,
                 failure_category=ScheduleFlowFailureCategory.CANCELLED,
                 best_effort=True,
             )
             raise
         except BaseException:
             self._emit_stage(
-                self._last_schedule_stage or ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
-                completed_participants=self._outer_bootstrap_completed_participants(),
-                failure_category=ScheduleFlowFailureCategory.OUTER_BOOTSTRAP,
+                self._last_schedule_stage or ScheduleFlowStage.OUTER_PAUSE_STARTED,
+                completed_participants=self._outer_pause_completed,
+                failure_category=ScheduleFlowFailureCategory.OUTER_PAUSE,
                 best_effort=True,
             )
             raise
         self._emit_stage(
-            ScheduleFlowStage.OUTER_BOOTSTRAP_COMPLETED,
-            completed_participants=len(staged.bootstrap_qualified_device_ids),
+            ScheduleFlowStage.OUTER_PAUSE_COMPLETED,
+            completed_participants=self._outer_pause_completed,
         )
-        return staged
+        return record
 
-    def _outer_bootstrap_completed_participants(self) -> int | None:
-        try:
-            durable = self._store.load()
-        except Exception:
-            return None
-        return len(durable.bootstrap_qualified_device_ids) if durable is not None else 0
+    def _pause_write_allowed(
+        self,
+        experiment: ScheduleFlowExperimentSpec,
+        record: LinkageTransactionRecord,
+    ) -> bool:
+        self._authorize_pause(experiment, record.snapshots)
+        return self._forward_write_allowed(record)
 
     async def _activate_relationship(self, record: LinkageTransactionRecord) -> None:
         """Run the nested experiment while the outer transaction remains safely TimerOFF."""
@@ -1178,7 +1282,7 @@ def _two_segment_patch(
     after = ScheduleEntry(
         slot=1,
         start=boundary_time,
-        end="24:00",
+        end=_FIELD_SCHEDULE_END,
         mode="sine",
         mode_code=1,
         parameters={
@@ -1236,6 +1340,7 @@ def classify_schedule_flow_sample(
 __all__ = [
     "SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT",
     "SCHEDULE_FLOW_STAGE_EVENT_LIMIT",
+    "PauseAuthorizer",
     "ScheduleFlowExperimentController",
     "ScheduleFlowExperimentResult",
     "ScheduleFlowExperimentSpec",
