@@ -369,6 +369,12 @@ class LanJebaoDevice(JebaoDevice):
         await self._apply_changes({attribute_name: role}, guard=guard)
 
     async def read_schedule_image(self) -> bytes:
+        return await self._read_schedule_image(accept_reports=None)
+
+    async def read_schedule_image_explicit(self) -> bytes:
+        return await self._read_schedule_image(accept_reports=False)
+
+    async def _read_schedule_image(self, *, accept_reports: bool | None) -> bytes:
         self._require_local_wavemaker_pro_schedule()
         async with self._io_lock:
             if self._session_retired:
@@ -376,7 +382,11 @@ class LanJebaoDevice(JebaoDevice):
                     f"retired session for {self._device_id!r} must be replaced before reading"
                 )
             try:
-                raw = await self._session.read_raw_state()
+                raw = (
+                    await self._session.read_raw_state()
+                    if accept_reports is None
+                    else await self._session.read_raw_state(accept_reports=accept_reports)
+                )
                 snapshot = LocalWavemakerProScheduleSnapshot.from_status(raw)
             except asyncio.CancelledError:
                 self._session_retired = True

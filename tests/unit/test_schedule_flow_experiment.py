@@ -1062,7 +1062,7 @@ class _ScheduleReader:
     def __init__(self, device_id: str) -> None:
         self.device_id = device_id
 
-    async def read_schedule_image(self) -> bytes:
+    async def read_schedule_image_explicit(self) -> bytes:
         return bytes(48 * 9)
 
 

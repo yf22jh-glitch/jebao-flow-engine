@@ -267,7 +267,7 @@ async def _capture_schedule_context(
             raise ScheduleFlowCliError(
                 "both controllers require fresh TimerON schedule state and device clocks"
             )
-        image = await device.read_schedule_image()
+        image = await device.read_schedule_image_explicit()
         return (
             _schedule_digest(device_id, device, image),
             schedule.device_local_time,

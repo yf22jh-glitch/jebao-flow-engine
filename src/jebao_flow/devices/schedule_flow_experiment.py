@@ -1301,7 +1301,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
     ) -> TemporaryScheduleSpec:
         patches: list[DeviceSchedulePatch] = []
         for device_id in (spec.master_device_id, spec.slave_device_id):
-            image = await self._get_device(device_id).read_schedule_image()
+            image = await self._get_device(device_id).read_schedule_image_explicit()
             patches.append(
                 DeviceSchedulePatch(
                     device_id=device_id,

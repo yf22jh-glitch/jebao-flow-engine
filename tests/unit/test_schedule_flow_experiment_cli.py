@@ -571,7 +571,7 @@ async def test_schedule_context_starts_both_device_reads_concurrently() -> None:
                 ),
             )
 
-        async def read_schedule_image(self) -> bytes:
+        async def read_schedule_image_explicit(self) -> bytes:
             return bytes(48 * 9)
 
     digests, clocks = await asyncio.wait_for(
@@ -615,7 +615,7 @@ async def test_schedule_context_waits_for_the_sibling_read_before_raising() -> N
             await sibling_started.wait()
             raise cli.ScheduleFlowCliError("simulated read failure")
 
-        async def read_schedule_image(self) -> bytes:
+        async def read_schedule_image_explicit(self) -> bytes:
             raise AssertionError("failed state must not continue to schedule read")
 
     class CompletingDevice:
@@ -631,7 +631,7 @@ async def test_schedule_context_waits_for_the_sibling_read_before_raising() -> N
                 schedule=SimpleNamespace(enabled=True, device_local_time=clock),
             )
 
-        async def read_schedule_image(self) -> bytes:
+        async def read_schedule_image_explicit(self) -> bytes:
             await asyncio.sleep(0)
             sibling_completed.set()
             return bytes(48 * 9)

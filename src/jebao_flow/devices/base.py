@@ -222,6 +222,16 @@ class JebaoDevice(ABC):
 
         raise UnsupportedCapabilityError("byte-exact schedule reads are unsupported")
 
+    async def read_schedule_image_explicit(self) -> bytes:
+        """Return a schedule image from an explicit state reply.
+
+        Safety-critical callers use this narrower contract to reject unsolicited state reports.
+        Drivers that cannot distinguish an explicit reply must fail closed instead of falling back
+        to :meth:`read_schedule_image`.
+        """
+
+        raise UnsupportedCapabilityError("explicit byte-exact schedule reads are unsupported")
+
     async def write_schedule_slots(
         self,
         slots: Mapping[int, bytes],

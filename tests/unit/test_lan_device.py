@@ -1432,6 +1432,21 @@ async def test_pro_schedule_read_returns_exact_image_without_device_clock() -> N
     assert image[:9] == first
     assert image[-9:] == last
     assert clock not in image
+    assert _FakeSession.instances[0].read_accept_reports == [True]
+    assert _FakeSession.instances[0].sent == []
+
+
+async def test_pro_explicit_schedule_read_rejects_unsolicited_reports() -> None:
+    _FakeSession.state = _pro_schedule_state(
+        {4: _schedule_slot(flow=39, start_hour=8, end_hour=12)}
+    )
+    device = _device()
+    await device.connect()
+
+    image = await device.read_schedule_image_explicit()
+
+    assert image == extract_local_wavemaker_pro_schedule_image(_FakeSession.state)
+    assert _FakeSession.instances[0].read_accept_reports == [False]
     assert _FakeSession.instances[0].sent == []
 
 
@@ -1697,6 +1712,8 @@ async def test_non_pro_product_rejects_schedule_read_and_write_without_io() -> N
 
     with pytest.raises(UnsupportedCapabilityError, match="writable schedule image"):
         await device.read_schedule_image()
+    with pytest.raises(UnsupportedCapabilityError, match="writable schedule image"):
+        await device.read_schedule_image_explicit()
     with pytest.raises(UnsupportedCapabilityError, match="writable schedule image"):
         await device.write_schedule_slots({0: slot}, guard=lambda: True)
     with pytest.raises(UnsupportedCapabilityError, match="writable schedule image"):

@@ -184,6 +184,9 @@ class _ScheduleDevice(SimulatedJebaoDevice):
             return self.image[:-1] + bytes((self.image[-1] ^ 1,))
         return self.image
 
+    async def read_schedule_image_explicit(self) -> bytes:
+        return await self.read_schedule_image()
+
     async def write_schedule_slots(
         self,
         slots: Mapping[int, bytes],

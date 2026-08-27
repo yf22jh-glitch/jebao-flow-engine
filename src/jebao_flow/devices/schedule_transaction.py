@@ -690,7 +690,7 @@ class TemporaryScheduleController:
                     ) from None
                 try:
                     actual = await asyncio.wait_for(
-                        device.read_schedule_image(),
+                        device.read_schedule_image_explicit(),
                         timeout=self._forward_remaining(),
                     )
                     self._require_forward_write()
@@ -1119,7 +1119,7 @@ class TemporaryScheduleController:
         await device.disconnect()
         await device.connect()
         state = await device.get_state()
-        image = await device.read_schedule_image()
+        image = await device.read_schedule_image_explicit()
         return state, bytes(image)
 
     async def _verify_disarmed_controls(self, record: TemporaryScheduleRecord) -> None:
@@ -1303,7 +1303,7 @@ class TemporaryScheduleController:
             except BaseException:
                 try:
                     actual = await asyncio.wait_for(
-                        device.read_schedule_image(),
+                        device.read_schedule_image_explicit(),
                         timeout=record.spec.restore_timeout_seconds,
                     )
                 except BaseException:
@@ -1325,7 +1325,7 @@ class TemporaryScheduleController:
 
             try:
                 actual = await asyncio.wait_for(
-                    device.read_schedule_image(),
+                    device.read_schedule_image_explicit(),
                     timeout=record.spec.restore_timeout_seconds,
                 )
             except BaseException:
@@ -1415,7 +1415,7 @@ class TemporaryScheduleController:
             snapshot = self._snapshot(record, device_id)
             try:
                 actual = await asyncio.wait_for(
-                    self._device(device_id).read_schedule_image(),
+                    self._device(device_id).read_schedule_image_explicit(),
                     timeout=record.spec.restore_timeout_seconds,
                 )
             except BaseException:
