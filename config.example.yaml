@@ -112,6 +112,9 @@ groups:
   - id: main_flow
     name: 메인 수류
     enabled: true
+    # Default: flowd controls every member independently, so gain/phase remain meaningful.
+    # Native linkage is reserved and fail-closed until the two-Pro hardware gate passes.
+    execution_strategy: software_independent
     members:
       - device: wavemaker_left
         role: left

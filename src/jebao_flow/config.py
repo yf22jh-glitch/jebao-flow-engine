@@ -17,7 +17,12 @@ from pydantic import (
     model_validator,
 )
 
-from jebao_flow.groups.models import GroupConfig, Identifier, PatternKind
+from jebao_flow.groups.models import (
+    GroupConfig,
+    GroupExecutionStrategy,
+    Identifier,
+    PatternKind,
+)
 from jebao_flow.safety.limits import PowerLimits
 
 NonEmptyString = Annotated[str, StringConstraints(min_length=1)]
@@ -202,11 +207,40 @@ class AppConfig(BaseModel):
             raise ValueError("group ids must be unique")
 
         known_devices = set(device_ids)
+        group_memberships: dict[str, list[str]] = {}
         for group in self.groups:
             missing = {member.device for member in group.members} - known_devices
             if missing:
                 missing_list = ", ".join(sorted(missing))
                 raise ValueError(f"group {group.id!r} references unknown devices: {missing_list}")
+            for member in group.members:
+                group_memberships.setdefault(member.device, []).append(group.id)
+
+        repeated_memberships = {
+            device_id: group_ids
+            for device_id, group_ids in group_memberships.items()
+            if len(group_ids) > 1
+        }
+        if repeated_memberships:
+            device_id, memberships = next(iter(sorted(repeated_memberships.items())))
+            raise ValueError(
+                f"device {device_id!r} belongs to multiple groups: "
+                + ", ".join(sorted(memberships))
+            )
+
+        devices_by_id = {device.id: device for device in self.devices}
+        for group in self.groups:
+            pair = group.native_pair
+            if pair is None:
+                continue
+            pair_devices = (devices_by_id[pair.master], devices_by_id[pair.slave])
+            if any(device.type is not DeviceType.WAVEMAKER for device in pair_devices):
+                raise ValueError(f"group {group.id!r} native pair must contain only wavemakers")
+            product_keys = {device.product_key for device in pair_devices}
+            if None not in product_keys and len(product_keys) != 1:
+                raise ValueError(
+                    f"group {group.id!r} native pair must use the same product family"
+                )
 
         vendor_ids = [
             device.identity.device_id
@@ -224,6 +258,16 @@ class AppConfig(BaseModel):
             raise ValueError("device identity mac_addresses must be unique")
 
         if self.runtime.mode is RuntimeMode.CONTROL:
+            native_groups = [
+                group.id
+                for group in self.groups
+                if group.execution_strategy is GroupExecutionStrategy.NATIVE_LINKED
+            ]
+            if native_groups:
+                raise ValueError(
+                    "control mode cannot enable unqualified native-linked groups: "
+                    + ", ".join(native_groups)
+                )
             # Future pattern names remain part of the public model, but a control-mode
             # deployment must never start with a calculator that does not exist yet.
             from jebao_flow.groups.calculator import PatternCalculator

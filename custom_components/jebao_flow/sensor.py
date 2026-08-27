@@ -179,6 +179,11 @@ class JebaoFlowStatusSensor(JebaoFlowGroupEntity, SensorEntity):
                     "hardware_writes_locked",
                     True,
                 ),
+                "execution_strategy": self.state_payload.get(
+                    "execution_strategy",
+                    "software_independent",
+                ),
+                "native_pair": self.state_payload.get("native_pair"),
                 "members": self.state_payload.get("members", {}),
                 "actual_enabled": self.state_payload.get("actual_enabled"),
                 "online_member_count": self.state_payload.get("online_member_count", 0),
@@ -241,13 +246,20 @@ class JebaoFlowDeviceStatusSensor(JebaoFlowDeviceEntity, SensorEntity):
 
 
 class JebaoFlowActualPowerSensor(JebaoFlowDeviceEntity, SensorEntity):
-    _attr_name = "실제 출력"
     _attr_icon = "mdi:gauge"
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(self, runtime, device: dict[str, Any]) -> None:
         super().__init__(runtime, device, "actual_power")
+
+    @property
+    def name(self) -> str:
+        return (
+            "장비 보고 Flow"
+            if self.power_semantics == "reported_flow"
+            else "장비 보고 출력"
+        )
 
     @property
     def available(self) -> bool:

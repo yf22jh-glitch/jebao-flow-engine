@@ -5,20 +5,23 @@ Local Wavemaker Pro 스키마에는 `independent`, `master`, `sync_slave`, `asyn
 종료가 명확한 임시 시험 트랜잭션으로 다룹니다.
 
 현재 구현 범위는 Python 서비스 코어, LAN payload 생성, 영속 JSON 저널, 현장 전용 one-shot
-CLI와 recovery-only supervisor입니다. 2026-08-26 Pro 두 대에서 제한된 저출력
-TimerOFF/Constant/Linkage 레지스터 write와 반복 read-back을 수행했지만, 실행 종료 시 최초 자동
-원복 확인은 실패해 recovery journal이 남았습니다. 이후 새 확인 토큰을 사용한 attended recovery에서
-원래 TimerON 시간표 상태의 exact recovery가 성공했습니다. 이는 최초 시험이나 qualification의
-성공을 뜻하지 않으며 두 장비의 재qualification은 아직 대기 중입니다. `async_slave`의 Flow를
-별도로 바꾸려 한 값은 유지되지 않았으므로 독립 출력 지원으로 판정하지 않았고, 물리 유량과
-파형도 아직 검증하지 않았습니다. 데몬 actuator, MQTT 명령, Home Assistant 버튼에는 이 경로를
-연결하지 않았습니다. 일반 `jebao-flowd`는 계속 Observer로 운용하고, 현장 시험은 공유
-`/hardware-safety` 볼륨을 쓰는 별도 컨테이너에서만 실행합니다.
+CLI와 recovery-only supervisor입니다. 2026-08-27에는 활성 TimerON 시간표를 snapshot한 뒤
+35%/33% Async를 최대 150초로 시작하고 60초 시점에 slave 38% 변경을 요청했습니다. 실행은 그
+구간 직후 안전 실패했고 자동 exact restore가 완료되지 않아 qualification 영수증은 0/2였습니다.
+같은 실행을 반복하지 않고 새 확인 토큰의 attended recovery를 수행해 두 snapshot을 복원했으며,
+재시작한 읽기 전용 Observer도 시험 전 TimerON 상태를 다시 확인했습니다.
+
+이 결과는 이전 짧은 실행에서 관찰한 native Linkage 레지스터 관계와 read-back 자체를 부정하지
+않지만, `async_slave`의 개별 `Flow` 유지나 물리 유량·파형을 입증하지도 않습니다. 따라서
+slave별 gain/출력이 필요한 운영은 모든 펌프를 `independent`로 둔 소프트웨어 그룹을
+사용합니다. 네이티브 페어는
+`experimental / unavailable / hardware_not_qualified`로 남기며 데몬 actuator, MQTT 명령,
+Home Assistant 버튼에는 연결하지 않습니다. 일반 `jebao-flowd`도 계속 Observer로 운용합니다.
 
 ## 지원 동작
 
 - Pro 두 대 중 한 대를 `master`, 다른 한 대를 `sync_slave` 또는 `async_slave`로 지정
-- 마스터와 슬레이브에 서로 다른 `Flow` 적용
+- 마스터와 슬레이브에 서로 다른 `Flow`를 진단용으로 요청 가능하나 slave 독립 유지로 판정하지 않음
 - 각 장비의 `TimerON + Linkage + Mode + Frequency + Flow`를 한 control frame으로 적용
 - 설정된 절대 만료 시각 또는 수동 중지 후 자동 원복
 - ACTIVE 동안 실제 `Flow/Linkage/Mode/Frequency/TimerON`을 주기적으로 확인하고, 마스터
@@ -109,10 +112,11 @@ snapshot과 일치해야 exact recovery로 인정합니다. 어느 단계에서�
 표시합니다. `PREPARED`는 첫 frame 전 상태라 자동 정리할 수 있지만, 그 밖의 record에 blocker가
 하나라도 있으면 `--recovery-first` 대신 새 토큰을 사용한 attended recovery가 필요합니다.
 
-## 남은 실기 게이트
+## 현재 판정과 남은 실기 게이트
 
-1. `Flow`를 다르게 준 slave가 실제 유량도 독립적으로 유지하는지 현장에서 관찰
-2. `sync_slave`와 `async_slave`의 물리 파형 및 Frequency 의미 확인
-3. 별도 TimerON schedule-linkage 진단으로 각 장비의 `Auto*` 레지스터 전환 확인
-4. 장비 한 대 전원 제거와 프로세스 강제 종료 후 복구 확인
-5. 위 결과가 통과한 뒤에만 MQTT/HA 임시 시험 UI 연결
+1. 2026-08-27 실패 operation은 재실행하지 않으며, 후속 시험에는 새 operation ID를 사용
+2. 진단 primary failure가 rollback 실패에 가려지지 않는 영속 상태와 45% 스케줄 게이트 검증
+3. 새 qualification 영수증 2/2 확보 전에는 schedule-linkage를 실행하지 않음
+4. `sync_slave`와 `async_slave`의 물리 파형 및 Frequency 의미를 현장에서 별도 확인
+5. 장비 한 대 전원 제거와 프로세스 강제 종료 후 복구 확인
+6. 모든 결과가 통과한 뒤에만 MQTT/HA 네이티브 시험 UI 승격 검토

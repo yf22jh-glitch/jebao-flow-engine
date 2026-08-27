@@ -16,6 +16,7 @@ from jebao_flow.mqtt.models import (
     DeviceControlMode,
     GroupAction,
     GroupCommand,
+    SystemConfigPayload,
 )
 from jebao_flow.mqtt.service import GroupControlService
 from jebao_flow.mqtt.topics import MqttTopics
@@ -67,6 +68,21 @@ def service() -> GroupControlService:
 @pytest.fixture
 def observer_service() -> GroupControlService:
     raw = yaml.safe_load(open("config.example.yaml", encoding="utf-8"))
+    return GroupControlService(AppConfig.model_validate(raw))
+
+
+@pytest.fixture
+def native_observer_service() -> GroupControlService:
+    raw = yaml.safe_load(open("config.example.yaml", encoding="utf-8"))
+    group = raw["groups"][0]
+    group["execution_strategy"] = "native_linked"
+    group["default"]["pattern"] = "native"
+    group["native_pair"] = {
+        "master": "wavemaker_left",
+        "slave": "wavemaker_right",
+        "relation": "async",
+    }
+    group["members"][1].update(gain=1.0, phase=0)
     return GroupControlService(AppConfig.model_validate(raw))
 
 
@@ -210,6 +226,7 @@ def test_control_mode_without_executor_rejects_and_does_not_advertise_control() 
     assert service.snapshot("main_flow") == before
     assert service.system_config.runtime_mode == "observer"
     assert service.system_config.features == ("observer", "hardware_write_lock")
+    assert all(not group.controls for group in service.system_config.groups)
     assert all(not device.controls for device in service.system_config.devices)
     assert all(state.hardware_writes_locked for state in service.device_snapshots())
 
@@ -247,6 +264,7 @@ def test_runtime_and_device_write_locks_reject_control_commands() -> None:
         if device.id == "wavemaker_left"
     )
     assert descriptor.controls == ()
+    assert service.system_config.groups[0].controls == ()
     assert "feed" not in service.system_config.features
     assert "emergency_stop" not in service.system_config.features
 
@@ -269,6 +287,7 @@ def test_dry_run_rejects_and_does_not_advertise_control() -> None:
     assert result.accepted is False
     assert result.reason == "hardware_writes_locked"
     assert service.system_config.runtime_mode == "observer"
+    assert all(not group.controls for group in service.system_config.groups)
     assert all(not device.controls for device in service.system_config.devices)
 
 
@@ -289,7 +308,25 @@ def test_contract_serializes_as_plain_json(service: GroupControlService) -> None
 
     assert payload["instance_id"] == "main"
     assert payload["runtime_mode"] == "control"
-    assert payload["groups"] == [{"id": "main_flow", "name": "메인 수류"}]
+    assert payload["groups"][0]["id"] == "main_flow"
+    assert payload["groups"][0]["name"] == "메인 수류"
+    assert payload["groups"][0]["execution_strategy"] == "software_independent"
+    assert payload["groups"][0]["native_pair"] is None
+    assert "anti_phase" in payload["groups"][0]["patterns"]
+    assert payload["groups"][0]["controls"] == [
+        "enabled",
+        "pattern",
+        "power",
+        "min_power",
+        "max_power",
+        "period",
+        "transition",
+        "start_feed",
+        "stop_feed",
+        "emergency_stop",
+        "clear_emergency",
+        "resume_all_members",
+    ]
     assert [device["type"] for device in payload["devices"]] == [
         "wavemaker",
         "wavemaker",
@@ -299,9 +336,58 @@ def test_contract_serializes_as_plain_json(service: GroupControlService) -> None
         "dosing_pump",
     ]
     assert "reef_crest" in payload["patterns"]
+    assert all(device["power_semantics"] == "output" for device in payload["devices"])
     dosing = next(device for device in payload["devices"] if device["id"] == "dosing_main")
     assert "schedule" in dosing["observables"]
     assert "power" not in dosing["observables"]
+
+
+def test_native_pair_is_additive_unavailable_and_keeps_crossflow_independent(
+    native_observer_service: GroupControlService,
+) -> None:
+    descriptor = native_observer_service.system_config.groups[0]
+    state = native_observer_service.snapshot("main_flow")
+    devices = {
+        device.id: device for device in native_observer_service.system_config.devices
+    }
+
+    assert descriptor.execution_strategy == "native_linked"
+    assert descriptor.patterns == ()
+    assert descriptor.controls == ()
+    assert descriptor.native_pair is not None
+    assert descriptor.native_pair.available is False
+    assert descriptor.native_pair.maturity == "experimental"
+    assert descriptor.native_pair.reason == "hardware_not_qualified"
+    assert state.execution_strategy == "native_linked"
+    assert state.members["wavemaker_left"].actuation == "native_master"
+    assert state.members["wavemaker_left"].individual_controls == ()
+    assert state.members["wavemaker_right"].actuation == "native_async_slave"
+    assert state.members["wavemaker_right"].individual_controls == ()
+    assert state.members["wavemaker_bar"].actuation == "software_independent"
+    assert state.members["wavemaker_bar"].individual_controls == (
+        "enabled",
+        "power",
+        "manual_override",
+    )
+    assert devices["wavemaker_left"].power_semantics == "output"
+    assert devices["wavemaker_right"].power_semantics == "reported_flow"
+    assert devices["wavemaker_bar"].power_semantics == "output"
+    assert "anti_phase" in native_observer_service.system_config.patterns
+
+
+def test_additive_system_config_fields_accept_old_schema_v1_payload(
+    service: GroupControlService,
+) -> None:
+    payload = json.loads(service.system_config.model_dump_json())
+    for group in payload["groups"]:
+        group.pop("controls")
+    for device in payload["devices"]:
+        device.pop("power_semantics")
+
+    parsed = SystemConfigPayload.model_validate(payload)
+
+    assert all(group.controls == () for group in parsed.groups)
+    assert all(device.power_semantics == "output" for device in parsed.devices)
 
 
 def test_individual_command_enters_manual_override(service: GroupControlService) -> None:

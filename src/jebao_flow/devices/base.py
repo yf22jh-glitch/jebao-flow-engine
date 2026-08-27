@@ -29,6 +29,10 @@ class StateVerificationError(DeviceError):
     pass
 
 
+class PowerStateVerificationError(StateVerificationError):
+    """A decoded control read-back differed only in the requested power field."""
+
+
 class SafetyInterlockError(DeviceError):
     pass
 

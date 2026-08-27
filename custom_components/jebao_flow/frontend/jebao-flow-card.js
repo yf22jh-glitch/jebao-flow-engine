@@ -29,6 +29,18 @@ const STATUS_LABELS = {
   emergency_stop: "비상 정지",
 };
 
+const EXECUTION_STRATEGY_LABELS = {
+  software_independent: "소프트웨어 독립 제어",
+  native_linked: "네이티브 페어 + 독립 보조",
+};
+
+const ACTUATION_LABELS = {
+  software_independent: "독립 소프트웨어 제어",
+  native_master: "네이티브 마스터",
+  native_sync_slave: "네이티브 Sync 종속",
+  native_async_slave: "네이티브 Async 종속",
+};
+
 const SCHEDULE_MODE_LABELS = {
   stopped: "정지",
   constant: "고정",
@@ -188,6 +200,15 @@ function numericState(entity, fallback = 0) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function isUsableEntity(reference) {
+  const state = isPlainObject(reference?.state) ? reference.state : reference;
+  return Boolean(
+    state
+    && typeof state.state === "string"
+    && state.state !== "unavailable",
+  );
+}
+
 function formatTimestamp(value) {
   if (!value) return "—";
   const timestamp = new Date(value);
@@ -317,10 +338,22 @@ class JebaoFlowCard extends HTMLElement {
     const members = statusEntity.attributes.members || {};
     const locked = Boolean(statusEntity.attributes.hardware_writes_locked);
     const observerMode = statusEntity.attributes.jebao_flow_runtime_mode === "observer";
+    const executionStrategy = statusEntity.attributes.execution_strategy || "software_independent";
+    const nativePair = isPlainObject(statusEntity.attributes.native_pair)
+      ? statusEntity.attributes.native_pair
+      : null;
     const available = entities.availability?.state?.state === "on";
+    const canUseGroupControl = (control) => (
+      available && !locked && isUsableEntity(entities[control])
+    );
+    const canTogglePower = canUseGroupControl("enabled");
+    const canSetPower = canUseGroupControl("power");
+    const canSelectPattern = canUseGroupControl("pattern");
     const desiredEnabled = entities.enabled?.state?.state === "on";
     const actualEnabled = statusEntity.attributes.actual_enabled;
-    const enabled = observerMode ? actualEnabled === true : desiredEnabled;
+    const enabled = observerMode || !canTogglePower
+      ? actualEnabled === true
+      : desiredEnabled;
     const power = numericState(entities.power?.state, 0);
     const minPower = numericState(entities.min_power?.state, 0);
     const maxPower = numericState(entities.max_power?.state, 100);
@@ -329,6 +362,20 @@ class JebaoFlowCard extends HTMLElement {
     const selectedPattern = entities.pattern?.state?.state || "constant";
     const patternOptions = entities.pattern?.state?.attributes.options || Object.keys(PATTERNS);
     const title = this._config.title || statusEntity.attributes.friendly_name?.replace(/ 상태$/, "") || "메인 수류";
+    const tuningControls = [
+      ["min_power", "최소 출력", minPower, 0, 100, 1, "%"],
+      ["max_power", "최대 출력", maxPower, 0, 100, 1, "%"],
+      ["period", "패턴 주기", period, 1, 3600, 1, "초"],
+      ["transition", "전환 시간", transition, 0, 600, 1, "초"],
+    ].filter(([control]) => canUseGroupControl(control));
+    const actionDefinitions = [
+      ["start_feed", "feed", "mdi:fishbowl-outline", "급여 시작"],
+      ["stop_feed", "", "mdi:play-circle-outline", "급여 종료"],
+      ["resume_all_members", "", "mdi:source-merge", "전체 그룹 복귀"],
+      status === "emergency_stop"
+        ? ["clear_emergency", "warning", "mdi:lock-open-check-outline", "잠금 해제"]
+        : ["emergency_stop", "danger", "mdi:alert-octagon", "비상 정지"],
+    ].filter(([control]) => canUseGroupControl(control));
 
     this.shadowRoot.innerHTML = `
       ${this._styles()}
@@ -342,12 +389,14 @@ class JebaoFlowCard extends HTMLElement {
               <span>${escapeHtml(available ? (STATUS_LABELS[status] || status) : "서버 연결 끊김")}</span>
               <span class="divider">·</span>
               <span>${escapeHtml(observerMode ? "외부 또는 장비 스케줄" : (PATTERNS[selectedPattern]?.[0] || selectedPattern))}</span>
+              <span class="divider">·</span>
+              <span>${escapeHtml(EXECUTION_STRATEGY_LABELS[executionStrategy] || executionStrategy)}</span>
             </div>
           </div>
-          ${observerMode ? `<span class="observer-chip"><ha-icon icon="mdi:eye-outline"></ha-icon>LAN 관찰</span>` : `<button class="power-button ${enabled ? "on" : ""}" data-toggle-power
-            aria-label="그룹 운전 전환" ${entities.enabled ? "" : "disabled"}>
+          ${observerMode ? `<span class="observer-chip"><ha-icon icon="mdi:eye-outline"></ha-icon>LAN 관찰</span>` : canTogglePower ? `<button class="power-button ${enabled ? "on" : ""}" data-toggle-power
+            aria-label="그룹 운전 전환">
             <ha-icon icon="mdi:power"></ha-icon>
-          </button>`}
+          </button>` : `<span class="observer-chip"><ha-icon icon="mdi:lock-outline"></ha-icon>그룹 제어 잠금</span>`}
         </div>
 
         ${locked ? `
@@ -356,20 +405,26 @@ class JebaoFlowCard extends HTMLElement {
             <div><strong>${observerMode ? "읽기 전용 관찰 모드" : "하드웨어 쓰기 잠금"}</strong><span>${observerMode ? "기존 앱·장비 스케줄의 결과만 읽으며 제어 명령은 모두 거부합니다." : "화면과 패턴 계산만 동작하며 실제 펌프에는 명령을 보내지 않습니다."}</span></div>
           </div>` : ""}
 
+        ${executionStrategy === "native_linked" ? `
+          <div class="safety-banner native-linkage-banner">
+            <ha-icon icon="mdi:lan-pending"></ha-icon>
+            <div><strong>네이티브 Linkage 실험 기능 잠금</strong><span>${escapeHtml(nativePair?.relation || "unknown")} 관계는 현장 qualification 전까지 제어할 수 없으며, slave 개별 출력은 지원되는 것으로 간주하지 않습니다.</span></div>
+          </div>` : ""}
+
         ${observerMode ? `<section class="observer-summary">
           <div><span>연결된 펌프</span><strong>${Number(statusEntity.attributes.online_member_count || 0)} / ${Number(statusEntity.attributes.member_count || 0)}</strong></div>
           <div><span>마지막 실제 변화</span><strong>${escapeHtml(formatTimestamp(statusEntity.attributes.last_changed_at))}</strong></div>
           <div><span>마지막 설정 단서 변화</span><strong>${escapeHtml(formatTimestamp(statusEntity.attributes.last_configuration_changed_at))}</strong></div>
-        </section>` : `<section class="hero-power">
+        </section>` : canSetPower ? `<section class="hero-power">
           <div class="power-readout">
             <span>기준 출력</span>
             <strong data-power-readout>${Math.round(power)}<small>%</small></strong>
           </div>
           ${this._slider("power", power, minPower, maxPower, 1, "%", true)}
           <div class="range-labels"><span>MIN ${Math.round(minPower)}%</span><span>MAX ${Math.round(maxPower)}%</span></div>
-        </section>`}
+        </section>` : ""}
 
-        ${observerMode ? "" : `<section>
+        ${observerMode || !canSelectPattern || !patternOptions.length ? "" : `<section>
           <div class="section-title"><span>FLOW MODE</span><small>빠른 파형은 펌프 내장 모드, 긴 흐름은 서버 패턴으로 제어합니다.</small></div>
           <div class="mode-grid">
             ${patternOptions.map((pattern) => {
@@ -382,27 +437,21 @@ class JebaoFlowCard extends HTMLElement {
         </section>`}
 
         <section>
-          <div class="section-title"><span>THREE-PUMP FLOW</span><small>${observerMode ? "두 메인 펌프와 바형 크로스플로우의 실제 LAN 관찰값입니다." : "두 메인 펌프와 바형 크로스플로우의 현재 계산값입니다."}</small></div>
+          <div class="section-title"><span>THREE-PUMP FLOW</span><small>${executionStrategy === "native_linked" ? "동일 Pro 두 대는 네이티브 페어, 바형 펌프는 독립 보조로 표현합니다." : observerMode ? "두 메인 펌프와 바형 크로스플로우의 실제 LAN 관찰값입니다." : "세 펌프를 독립 제어하며 gain/phase를 적용한 현재 계산값입니다."}</small></div>
           <div class="pump-grid">${this._memberCards(members, deviceEntities, observerMode)}</div>
         </section>
 
-        ${observerMode ? "" : `<section class="tuning">
+        ${observerMode || !tuningControls.length ? "" : `<section class="tuning">
           <div class="section-title"><span>FINE TUNING</span></div>
           <div class="tuning-grid">
-            ${this._compactSlider("min_power", "최소 출력", minPower, 0, 100, 1, "%")}
-            ${this._compactSlider("max_power", "최대 출력", maxPower, 0, 100, 1, "%")}
-            ${this._compactSlider("period", "패턴 주기", period, 1, 3600, 1, "초")}
-            ${this._compactSlider("transition", "전환 시간", transition, 0, 600, 1, "초")}
+            ${tuningControls.map((control) => this._compactSlider(...control)).join("")}
           </div>
         </section>`}
 
-        ${observerMode ? "" : `<div class="actions">
-          <button class="action feed" data-button-control="start_feed"><ha-icon icon="mdi:fishbowl-outline"></ha-icon>급여 시작</button>
-          <button class="action" data-button-control="stop_feed"><ha-icon icon="mdi:play-circle-outline"></ha-icon>급여 종료</button>
-          <button class="action" data-button-control="resume_all_members"><ha-icon icon="mdi:source-merge"></ha-icon>전체 그룹 복귀</button>
-          ${status === "emergency_stop"
-            ? `<button class="action warning" data-button-control="clear_emergency"><ha-icon icon="mdi:lock-open-check-outline"></ha-icon>잠금 해제</button>`
-            : `<button class="action danger" data-button-control="emergency_stop"><ha-icon icon="mdi:alert-octagon"></ha-icon>비상 정지</button>`}
+        ${observerMode || !actionDefinitions.length ? "" : `<div class="actions">
+          ${actionDefinitions.map(([control, style, icon, label]) => (
+            `<button class="action ${style}" data-button-control="${control}"><ha-icon icon="${icon}"></ha-icon>${label}</button>`
+          )).join("")}
         </div>`}
       </ha-card>`;
 
@@ -428,30 +477,40 @@ class JebaoFlowCard extends HTMLElement {
       const scheduleState = deviceEntities[deviceId]?.schedule?.state;
       const displayPower = observerMode ? Number(actual ?? 0) : target;
       const manual = member.control_mode === "manual_override";
-      const devicePower = deviceEntities[deviceId]?.device_power?.state;
-      const deviceEnabled = deviceEntities[deviceId]?.device_enabled?.state;
+      const actuation = member.actuation || "software_independent";
+      const individualControls = Array.isArray(member.individual_controls)
+        ? member.individual_controls
+        : ["enabled", "power", "manual_override"];
+      const nativeFollower = actuation === "native_sync_slave" || actuation === "native_async_slave";
+      const devicePowerEntity = deviceEntities[deviceId]?.device_power;
+      const deviceEnabledEntity = deviceEntities[deviceId]?.device_enabled;
+      const resumeGroupEntity = deviceEntities[deviceId]?.resume_group;
+      const devicePower = devicePowerEntity?.state;
+      const deviceEnabled = deviceEnabledEntity?.state;
       const minimum = Number(devicePower?.attributes.min ?? 0);
       const maximum = Number(devicePower?.attributes.max ?? 100);
       return `<article class="pump ${escapeHtml(member.role)}">
         <div class="pump-head">
           <ha-icon icon="${member.role === "crossflow" ? "mdi:arrow-expand-horizontal" : "mdi:fan"}"></ha-icon>
           <div><strong>${escapeHtml(member.name || deviceId)}</strong><span>${escapeHtml(ROLE_LABELS[member.role] || member.role)}</span></div>
-          ${!observerMode && deviceEnabled ? `<button class="member-power ${deviceEnabled.state === "on" ? "on" : ""}" data-device-toggle="${escapeHtml(deviceId)}" aria-label="${escapeHtml(member.name || deviceId)} 개별 전원"><ha-icon icon="mdi:power"></ha-icon></button>`
+          ${!observerMode && isUsableEntity(deviceEnabledEntity) && individualControls.includes("enabled") ? `<button class="member-power ${deviceEnabled.state === "on" ? "on" : ""}" data-device-toggle="${escapeHtml(deviceId)}" aria-label="${escapeHtml(member.name || deviceId)} 개별 전원"><ha-icon icon="mdi:power"></ha-icon></button>`
             : `<span class="member-dot ${online === false ? "offline" : online === true ? "online" : "unknown"}"></span>`}
         </div>
-        <div class="pump-output"><strong>${actual == null && observerMode ? "—" : `${Math.round(displayPower)}%`}</strong><span>${observerMode ? "실제 출력" : "목표 출력"}</span></div>
+        <div class="pump-output"><strong>${actual == null && observerMode ? "—" : `${Math.round(displayPower)}%`}</strong><span>${nativeFollower ? "장비 보고 Flow" : observerMode ? "장비 보고 출력" : "목표 출력"}</span></div>
         <div class="meter"><i style="width:${Math.max(0, Math.min(100, displayPower))}%"></i></div>
-        ${!observerMode && devicePower ? `<div class="individual-control">
+        ${!observerMode && isUsableEntity(devicePowerEntity) && individualControls.includes("power") ? `<div class="individual-control">
           <span>${manual ? "개별 제어 중" : "개별 출력 조정"}</span>
           <input type="range" min="${minimum}" max="${maximum}" step="1" value="${numericState(devicePower, target)}" data-device-power="${escapeHtml(deviceId)}">
-          ${manual && deviceEntities[deviceId]?.resume_group
+          ${manual && isUsableEntity(resumeGroupEntity)
             ? `<button data-resume-device="${escapeHtml(deviceId)}">그룹 복귀</button>`
             : ""}
         </div>` : ""}
-        <div class="pump-meta">
+        <div class="pump-meta">${actuation === "software_independent" ? `
           <span>GAIN ${Number(member.gain ?? 1).toFixed(2)}</span>
-          <span>PHASE ${Math.round(Number(member.phase ?? 0))}°</span>
-          <span>ACTUAL ${actual == null ? "—" : `${Math.round(Number(actual))}%`}</span>
+          <span>PHASE ${Math.round(Number(member.phase ?? 0))}°</span>` : `
+          <span>${escapeHtml(ACTUATION_LABELS[actuation] || actuation)}</span>
+          <span>개별 제어 잠금</span>`}
+          <span>REPORTED ${actual == null ? "—" : `${Math.round(Number(actual))}%`}</span>
         </div>
         ${observerMode ? `<div class="observation-meta">
           <span>${online === true ? (actualEnabled === true ? "운전 중" : "정지") : online === false ? "연결 끊김" : "매핑 대기"}</span>
@@ -498,7 +557,7 @@ class JebaoFlowCard extends HTMLElement {
   _attachHandlers(entities, deviceEntities) {
     this.shadowRoot.querySelector("[data-toggle-power]")?.addEventListener("click", () => {
       const target = entities.enabled;
-      if (!target) return;
+      if (!isUsableEntity(target)) return;
       this._hass.callService("switch", target.state.state === "on" ? "turn_off" : "turn_on", {
         entity_id: target.entityId,
       });
@@ -506,7 +565,7 @@ class JebaoFlowCard extends HTMLElement {
 
     this.shadowRoot.querySelectorAll("[data-pattern]").forEach((button) => {
       button.addEventListener("click", () => {
-        if (!entities.pattern) return;
+        if (!isUsableEntity(entities.pattern)) return;
         this._hass.callService("select", "select_option", {
           entity_id: entities.pattern.entityId,
           option: button.dataset.pattern,
@@ -527,7 +586,7 @@ class JebaoFlowCard extends HTMLElement {
       });
       slider.addEventListener("change", () => {
         const target = entities[slider.dataset.numberControl];
-        if (!target) return;
+        if (!isUsableEntity(target)) return;
         this._hass.callService("number", "set_value", {
           entity_id: target.entityId,
           value: Number(slider.value),
@@ -539,7 +598,7 @@ class JebaoFlowCard extends HTMLElement {
       button.addEventListener("click", () => {
         const control = button.dataset.buttonControl;
         const target = entities[control];
-        if (!target) return;
+        if (!isUsableEntity(target)) return;
         if (control === "emergency_stop" && !window.confirm("메인 수류를 비상 정지할까요? 자동으로 해제되지 않습니다.")) return;
         this._hass.callService("button", "press", { entity_id: target.entityId });
       });
@@ -548,7 +607,7 @@ class JebaoFlowCard extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-device-power]").forEach((slider) => {
       slider.addEventListener("change", () => {
         const target = deviceEntities[slider.dataset.devicePower]?.device_power;
-        if (!target) return;
+        if (!isUsableEntity(target)) return;
         this._hass.callService("number", "set_value", {
           entity_id: target.entityId,
           value: Number(slider.value),
@@ -559,7 +618,7 @@ class JebaoFlowCard extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-device-toggle]").forEach((button) => {
       button.addEventListener("click", () => {
         const target = deviceEntities[button.dataset.deviceToggle]?.device_enabled;
-        if (!target) return;
+        if (!isUsableEntity(target)) return;
         this._hass.callService("switch", target.state.state === "on" ? "turn_off" : "turn_on", {
           entity_id: target.entityId,
         });
@@ -569,7 +628,9 @@ class JebaoFlowCard extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-resume-device]").forEach((button) => {
       button.addEventListener("click", () => {
         const target = deviceEntities[button.dataset.resumeDevice]?.resume_group;
-        if (target) this._hass.callService("button", "press", { entity_id: target.entityId });
+        if (isUsableEntity(target)) {
+          this._hass.callService("button", "press", { entity_id: target.entityId });
+        }
       });
     });
   }
@@ -584,7 +645,7 @@ class JebaoFlowCard extends HTMLElement {
       .header { display:flex; justify-content:space-between; align-items:center; gap:16px; }
       .eyebrow { color:var(--flow-cyan); font:700 10px/1.2 sans-serif; letter-spacing:.18em; }
       h2 { margin:5px 0 7px; color:#f5fbff; font-size:25px; }
-      .status-line { display:flex; align-items:center; gap:6px; color:#9fb4c3; font-size:12px; }
+      .status-line { display:flex; flex-wrap:wrap; align-items:center; gap:6px; color:#9fb4c3; font-size:12px; }
       .status-dot,.member-dot { width:8px; height:8px; border-radius:50%; background:#70818d; box-shadow:0 0 0 3px rgba(112,129,141,.12); }
       .status-dot.online,.member-dot.online { background:#4be3aa; box-shadow:0 0 10px rgba(75,227,170,.7); }
       .status-dot.offline,.member-dot.offline { background:#ff6477; }
@@ -599,6 +660,8 @@ class JebaoFlowCard extends HTMLElement {
       .safety-banner div { display:flex; flex-direction:column; gap:2px; }
       .safety-banner strong { font-size:12px; }
       .safety-banner span { color:#d4b978; font-size:11px; }
+      .native-linkage-banner { color:#c8b7ff; background:rgba(125,88,255,.1); border-color:rgba(151,120,255,.35); }
+      .native-linkage-banner span { color:#aa9bd6; }
       section { margin-top:22px; }
       .observer-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
       .observer-summary div { display:flex; flex-direction:column; gap:5px; min-width:0; padding:13px; border-radius:11px; background:rgba(7,18,28,.62); border:1px solid rgba(148,199,220,.13); }
@@ -728,7 +791,7 @@ class JebaoEquipmentCard extends HTMLElement {
       const control = attributes.jebao_flow_control;
       if (attributes.jebao_flow_entry_id !== selectedEntry) return;
       discovered[deviceId] = discovered[deviceId] || {
-        name: attributes.friendly_name?.replace(/ (개별 운전|개별 출력|개별 상태|개별 연결|실제 출력|실제 모드|실제 운전|장비 오류|장비 시간표)$/, "") || deviceId,
+        name: attributes.friendly_name?.replace(/ (개별 운전|개별 출력|개별 상태|개별 연결|실제 출력|장비 보고 출력|장비 보고 Flow|실제 모드|실제 운전|장비 오류|장비 시간표)$/, "") || deviceId,
         type: type === "dosing_pump" ? "dosing" : "return",
         observerMode: false,
       };
@@ -767,9 +830,9 @@ class JebaoEquipmentCard extends HTMLElement {
       return `<article class="equipment-row">
         <ha-icon icon="${isDosing ? "mdi:test-tube" : "mdi:pump"}"></ha-icon>
         <div class="equipment-main"><strong>${escapeHtml(device.name || (isDosing ? "도징펌프" : "리턴펌프"))}</strong><span>${escapeHtml(observerMode ? (online ? (attributes.error ? "오류" : actualEnabled === true ? "운전 중" : "정지") : "연결 끊김") : (statusState?.state || (enabledState?.state === "on" ? "운전 중" : "정지")))}</span>${observerMode ? `<small>확인 ${escapeHtml(formatTimestamp(attributes.last_seen_at))}</small>` : ""}</div>
-        ${observerMode && actualPower != null ? `<div class="actual-output"><b>${Math.round(Number(actualPower))}%</b><span>실제 출력</span></div>` : ""}
-        ${!observerMode && powerState ? `<label><input type="range" min="0" max="100" step="1" value="${numericState(powerState)}" data-equipment-power="${index}"><b>${Math.round(numericState(powerState))}%</b></label>` : ""}
-        ${!observerMode && enabledState ? `<button class="toggle ${enabledState.state === "on" ? "on" : ""}" data-equipment-toggle="${index}"><ha-icon icon="mdi:power"></ha-icon></button>` : `<span class="member-dot ${online ? "online" : "offline"}"></span>`}
+        ${observerMode && actualPower != null ? `<div class="actual-output"><b>${Math.round(Number(actualPower))}%</b><span>장비 보고 출력</span></div>` : ""}
+        ${!observerMode && isUsableEntity(powerState) ? `<label><input type="range" min="0" max="100" step="1" value="${numericState(powerState)}" data-equipment-power="${index}"><b>${Math.round(numericState(powerState))}%</b></label>` : ""}
+        ${!observerMode && isUsableEntity(enabledState) ? `<button class="toggle ${enabledState.state === "on" ? "on" : ""}" data-equipment-toggle="${index}"><ha-icon icon="mdi:power"></ha-icon></button>` : `<span class="member-dot ${online ? "online" : "offline"}"></span>`}
         ${renderScheduleDetails(scheduleState)}
       </article>`;
     }).join("") || `<div class="empty-equipment">리턴·도징 장비 상태를 기다리는 중입니다.</div>`;
@@ -785,11 +848,12 @@ class JebaoEquipmentCard extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-equipment-toggle]").forEach((button) => button.addEventListener("click", () => {
       const device = devices[Number(button.dataset.equipmentToggle)];
       const state = this._hass.states[device.enabled];
-      if (!state) return;
+      if (!isUsableEntity(state)) return;
       this._hass.callService("switch", state.state === "on" ? "turn_off" : "turn_on", { entity_id: device.enabled });
     }));
     this.shadowRoot.querySelectorAll("[data-equipment-power]").forEach((slider) => slider.addEventListener("change", () => {
       const device = devices[Number(slider.dataset.equipmentPower)];
+      if (!isUsableEntity(this._hass.states[device.power])) return;
       this._hass.callService("number", "set_value", { entity_id: device.power, value: Number(slider.value) });
     }));
   }

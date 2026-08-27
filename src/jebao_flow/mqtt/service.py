@@ -11,7 +11,13 @@ from dataclasses import dataclass
 from jebao_flow.config import AppConfig, RuntimeMode
 from jebao_flow.devices.observer import ObserverEvent, ObserverStatus
 from jebao_flow.groups.calculator import PatternCalculator
-from jebao_flow.groups.models import GroupRuntime, GroupState, PatternKind
+from jebao_flow.groups.models import (
+    GroupExecutionStrategy,
+    GroupRuntime,
+    GroupState,
+    NativeLinkageRelation,
+    PatternKind,
+)
 from jebao_flow.mqtt.models import (
     ChangeSource,
     DeviceAction,
@@ -19,13 +25,16 @@ from jebao_flow.mqtt.models import (
     DeviceCommandResult,
     DeviceControlMode,
     DeviceDescriptor,
+    DevicePowerSemantics,
     DeviceStatePayload,
     GroupAction,
     GroupCommand,
     GroupCommandResult,
     GroupDescriptor,
+    GroupMemberActuation,
     GroupMemberState,
     GroupStatePayload,
+    NativePairDescriptor,
     ObservationSource,
     SystemConfigPayload,
 )
@@ -107,7 +116,14 @@ class GroupControlService:
                 else RuntimeMode.OBSERVER
             ),
             groups=tuple(
-                GroupDescriptor(id=group.id, name=group.name)
+                GroupDescriptor(
+                    id=group.id,
+                    name=group.name,
+                    execution_strategy=group.execution_strategy,
+                    native_pair=self._native_pair_descriptor(group.id),
+                    patterns=self._group_patterns(group.id),
+                    controls=self._group_controls(group.id),
+                )
                 for group in self._config.groups
             ),
             devices=tuple(
@@ -127,6 +143,11 @@ class GroupControlService:
                     ),
                     controls=self._device_controls(device.id),
                     observables=self._device_observables(device.id),
+                    power_semantics=(
+                        DevicePowerSemantics.REPORTED_FLOW
+                        if self._native_pair_role(device.id) == "slave"
+                        else DevicePowerSemantics.OUTPUT
+                    ),
                     min_power=device.limits.min_power,
                     max_power=device.limits.max_power,
                 )
@@ -467,6 +488,9 @@ class GroupControlService:
         if self._config.runtime.mode is RuntimeMode.OBSERVER:
             return self._reject_device(current, command, "observer_mode_read_only")
 
+        if self._native_pair_role(device_id) is not None:
+            return self._reject_device(current, command, "native_linkage_member_locked")
+
         rejection_reason = self._device_control_rejection_reason(device_id)
         if rejection_reason is not None:
             return self._reject_device(current, command, rejection_reason)
@@ -539,17 +563,13 @@ class GroupControlService:
 
     def _initial_state(self, group_id: str) -> GroupStatePayload:
         group = self._groups[group_id]
-        hardware_writes_locked = (
-            self._runtime_control_rejection_reason() is not None
-            or any(
-                not self._device_config(member.device).control.allow_hardware_writes
-                for member in group.members
-            )
-        )
+        hardware_writes_locked = self._group_control_rejection_reason(group.id) is not None
         state = GroupStatePayload(
             revision=0,
             group_id=group.id,
             name=group.name,
+            execution_strategy=group.execution_strategy,
+            native_pair=self._native_pair_descriptor(group.id),
             status=(
                 GroupState.STARTING
                 if self._config.runtime.mode is RuntimeMode.OBSERVER
@@ -581,11 +601,17 @@ class GroupControlService:
                 device_state is not None
                 and device_state.control_mode is DeviceControlMode.MANUAL_OVERRIDE
             )
+            actuation, individual_controls = self._member_control_contract(
+                group.id,
+                member.device,
+            )
             calculated[member.device] = GroupMemberState(
                 name=self._device_config(member.device).name,
                 role=member.role,
                 gain=member.gain,
                 phase=member.phase,
+                actuation=actuation,
+                individual_controls=individual_controls,
                 control_mode=(
                     DeviceControlMode.MANUAL_OVERRIDE if manual else DeviceControlMode.GROUP
                 ),
@@ -618,6 +644,16 @@ class GroupControlService:
 
     def _calculate_targets(self, state: GroupStatePayload):
         group = self._groups[state.group_id]
+        calculation_group = group
+        if group.execution_strategy is GroupExecutionStrategy.NATIVE_LINKED:
+            # Native execution is unavailable. Observer targets remain informational only and
+            # must never route the reserved pair through the ordinary group actuator.
+            calculation_group = group.model_copy(
+                update={
+                    "execution_strategy": GroupExecutionStrategy.SOFTWARE_INDEPENDENT,
+                    "native_pair": None,
+                }
+            )
         pattern = state.pattern
         if (
             self._config.runtime.mode is RuntimeMode.OBSERVER
@@ -636,7 +672,7 @@ class GroupControlService:
             period_seconds=state.period_seconds,
             started_at=0,
         )
-        return self._calculator.calculate(time.monotonic(), group, runtime)
+        return self._calculator.calculate(time.monotonic(), calculation_group, runtime)
 
     def _initial_device_state(self, device_id: str) -> DeviceStatePayload:
         device = self._device_config(device_id)
@@ -685,6 +721,73 @@ class GroupControlService:
             controls.append("resume_group")
         return tuple(controls)
 
+    def _group_patterns(self, group_id: str) -> tuple[PatternKind, ...]:
+        group = self._groups[group_id]
+        if group.execution_strategy is GroupExecutionStrategy.NATIVE_LINKED:
+            return ()
+        return tuple(sorted(self._calculator.supported_patterns(), key=str))
+
+    def _group_controls(self, group_id: str) -> tuple[str, ...]:
+        if self._group_control_rejection_reason(group_id) is not None:
+            return ()
+        return (
+            "enabled",
+            "pattern",
+            "power",
+            "min_power",
+            "max_power",
+            "period",
+            "transition",
+            "start_feed",
+            "stop_feed",
+            "emergency_stop",
+            "clear_emergency",
+            "resume_all_members",
+        )
+
+    def _native_pair_descriptor(self, group_id: str) -> NativePairDescriptor | None:
+        pair = self._groups[group_id].native_pair
+        if pair is None:
+            return None
+        return NativePairDescriptor(
+            master=pair.master,
+            slave=pair.slave,
+            relation=pair.relation,
+            available=False,
+            reason="hardware_not_qualified",
+        )
+
+    def _native_pair_role(self, device_id: str) -> str | None:
+        for group in self._groups.values():
+            pair = group.native_pair
+            if pair is None:
+                continue
+            if device_id == pair.master:
+                return "master"
+            if device_id == pair.slave:
+                return "slave"
+        return None
+
+    def _member_control_contract(
+        self,
+        group_id: str,
+        device_id: str,
+    ) -> tuple[GroupMemberActuation, tuple[str, ...]]:
+        pair = self._groups[group_id].native_pair
+        if pair is None or device_id not in {pair.master, pair.slave}:
+            return (
+                GroupMemberActuation.SOFTWARE_INDEPENDENT,
+                ("enabled", "power", "manual_override"),
+            )
+        if device_id == pair.master:
+            return GroupMemberActuation.NATIVE_MASTER, ()
+        slave_actuation = (
+            GroupMemberActuation.NATIVE_SYNC_SLAVE
+            if pair.relation is NativeLinkageRelation.SYNC
+            else GroupMemberActuation.NATIVE_ASYNC_SLAVE
+        )
+        return slave_actuation, ()
+
     def _runtime_control_rejection_reason(self) -> str | None:
         if self._config.runtime.mode is RuntimeMode.OBSERVER:
             return "observer_mode_read_only"
@@ -698,6 +801,8 @@ class GroupControlService:
         runtime_reason = self._runtime_control_rejection_reason()
         if runtime_reason is not None:
             return runtime_reason
+        if self._native_pair_role(device_id) is not None:
+            return "native_linkage_member_locked"
         if not self._device_config(device_id).control.allow_hardware_writes:
             return "hardware_writes_locked"
         return None
@@ -706,6 +811,8 @@ class GroupControlService:
         runtime_reason = self._runtime_control_rejection_reason()
         if runtime_reason is not None:
             return runtime_reason
+        if self._groups[group_id].execution_strategy is GroupExecutionStrategy.NATIVE_LINKED:
+            return "native_linkage_not_qualified"
         if any(
             not self._device_config(member.device).control.allow_hardware_writes
             for member in self._groups[group_id].members

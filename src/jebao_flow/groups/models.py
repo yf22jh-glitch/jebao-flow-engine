@@ -52,6 +52,18 @@ class OfflinePolicy(StrEnum):
     FALLBACK_CONSTANT = "fallback_constant"
 
 
+class GroupExecutionStrategy(StrEnum):
+    """How a logical group delegates timing to physical controllers."""
+
+    SOFTWARE_INDEPENDENT = "software_independent"
+    NATIVE_LINKED = "native_linked"
+
+
+class NativeLinkageRelation(StrEnum):
+    SYNC = "sync"
+    ASYNC = "async"
+
+
 class GroupMemberRole(StrEnum):
     """Installation role used for diagnostics and operator-facing UIs."""
 
@@ -93,12 +105,30 @@ class FailurePolicy(BaseModel):
     remaining_member_max_power: int = Field(default=50, ge=0, le=100)
 
 
+class NativePairConfig(BaseModel):
+    """Reserved native pair inside a group that may also contain independent helpers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    master: Identifier
+    slave: Identifier
+    relation: NativeLinkageRelation
+
+    @model_validator(mode="after")
+    def validate_distinct_members(self) -> Self:
+        if self.master == self.slave:
+            raise ValueError("native pair master and slave must be distinct")
+        return self
+
+
 class GroupConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: Identifier
     name: str = Field(min_length=1)
     enabled: bool = True
+    execution_strategy: GroupExecutionStrategy = GroupExecutionStrategy.SOFTWARE_INDEPENDENT
+    native_pair: NativePairConfig | None = None
     members: tuple[GroupMember, ...] = Field(min_length=1)
     default: GroupDefaults = Field(default_factory=GroupDefaults)
     failure_policy: FailurePolicy = Field(default_factory=FailurePolicy)
@@ -108,6 +138,23 @@ class GroupConfig(BaseModel):
         member_ids = [member.device for member in self.members]
         if len(member_ids) != len(set(member_ids)):
             raise ValueError(f"group {self.id!r} contains duplicate device members")
+        if self.execution_strategy is GroupExecutionStrategy.SOFTWARE_INDEPENDENT:
+            if self.native_pair is not None:
+                raise ValueError("software-independent groups must not define a native pair")
+            return self
+        if self.native_pair is None:
+            raise ValueError("native-linked groups require a native pair")
+        if self.default.pattern is not PatternKind.NATIVE:
+            raise ValueError("native-linked groups must use the reserved native pattern")
+        pair_ids = {self.native_pair.master, self.native_pair.slave}
+        if not pair_ids <= set(member_ids):
+            raise ValueError("native pair master and slave must both be group members")
+        members = {member.device: member for member in self.members}
+        if any(not members[device_id].enabled for device_id in pair_ids):
+            raise ValueError("native pair members must be enabled")
+        slave = members[self.native_pair.slave]
+        if slave.gain != 1.0 or slave.phase != 0 or slave.invert:
+            raise ValueError("native slave cannot use software gain, phase, or invert")
         return self
 
 

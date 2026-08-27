@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 import stat
@@ -18,6 +19,7 @@ from jebao_flow.devices import (
     LinkageTestSpec,
     LinkageTransactionPhase,
     LinkageTransactionRecord,
+    PowerStateVerificationError,
     SimulatedJebaoDevice,
     TemporaryLinkageController,
     schedule_structure_fingerprint,
@@ -32,8 +34,10 @@ from jebao_flow.protocol.models import (
     DeviceCapabilities,
     DeviceSchedule,
     DeviceState,
+    DeviceTarget,
     DiscoveredDevice,
     LinkageRole,
+    ScheduleEntry,
 )
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
 from jebao_flow.safety.limits import PowerLimits
@@ -531,6 +535,310 @@ def test_schedule_bootstrap_early_stop_restores_but_issues_no_receipts(
     assert intent is not None
     assert intent.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
     assert intent.outcome == "restored"
+    assert (
+        intent.primary_failure
+        is hardware_test.HardwareTestPrimaryFailure.SLAVE_POWER_CHANGE_NOT_VERIFIED
+    )
+
+
+def test_live_slave_failure_survives_masking_rollback_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    args = _args("preflight")
+    args[args.index("sync_slave")] = "async_slave"
+    args[args.index("0.02")] = "0.08"
+    args.extend(
+        (
+            "--slave-power-after",
+            "38",
+            "--power-change-after",
+            "0.02",
+        )
+    )
+    assert hardware_test.main(args) == 0
+    token = _token(capsys.readouterr().out)
+
+    slave = devices["pro_right"]
+    original_slave_write = slave.write_target
+
+    async def discard_live_slave_power(target: DeviceTarget, **kwargs: object) -> None:
+        previous_power = slave._state.power  # noqa: SLF001
+        await original_slave_write(target, **kwargs)  # type: ignore[arg-type]
+        if target.power == 38:
+            slave._state = slave._state.model_copy(  # noqa: SLF001
+                update={"power": previous_power}
+            )
+
+    async def fail_rollback(
+        self: TemporaryLinkageController,
+        record: LinkageTransactionRecord,
+    ) -> None:
+        pending = self._store.load() or record  # noqa: SLF001
+        self._store.save(  # noqa: SLF001
+            pending.model_copy(
+                update={
+                    "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+                    "recovery_reason": LinkageRecoveryReason.RESTORE_FAILED,
+                    "updated_at": datetime.now(UTC),
+                    "error": "restore_failed",
+                    "failed_device_ids": ("pro_left", "pro_right"),
+                    "restored_device_ids": (),
+                }
+            )
+        )
+        raise LinkageRollbackError("secret-device-id: restore failed")
+
+    monkeypatch.setattr(slave, "write_target", discard_live_slave_power)
+    monkeypatch.setattr(
+        TemporaryLinkageController,
+        "_rollback_uninterruptibly",
+        fail_rollback,
+    )
+    run_args = [*args]
+    run_args[0] = "run-native-linkage"
+
+    assert hardware_test.main([*run_args, "--confirm", token]) == 2
+
+    error_output = capsys.readouterr().err
+    assert "LinkageRollbackError" in error_output
+    assert "secret-device-id" not in error_output
+    intent = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    ).load()
+    assert intent is not None
+    assert intent.phase is hardware_test.HardwareTestIntentPhase.RECOVERY_REQUIRED
+    assert intent.outcome == "recovery_required"
+    assert (
+        intent.primary_failure
+        is hardware_test.HardwareTestPrimaryFailure.SLAVE_POWER_CHANGE_NOT_VERIFIED
+    )
+
+    assert hardware_test.main(["status"]) == 0
+    status_output = capsys.readouterr().out
+    assert "Primary failure: slave_power_change_not_verified" in status_output
+    assert "secret-device-id" not in status_output
+
+
+def test_driver_live_slave_power_readback_failure_is_persisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    args = _args("preflight")
+    args[args.index("sync_slave")] = "async_slave"
+    args[args.index("0.02")] = "0.08"
+    args.extend(
+        (
+            "--slave-power-after",
+            "38",
+            "--power-change-after",
+            "0.02",
+        )
+    )
+    assert hardware_test.main(args) == 0
+    token = _token(capsys.readouterr().out)
+
+    slave = devices["pro_right"]
+    original_slave_write = slave.write_target
+
+    async def fail_completed_live_power_readback(
+        target: DeviceTarget,
+        **kwargs: object,
+    ) -> None:
+        previous_power = slave._state.power  # noqa: SLF001
+        await original_slave_write(target, **kwargs)  # type: ignore[arg-type]
+        if target.power == 38:
+            slave._state = slave._state.model_copy(  # noqa: SLF001
+                update={"power": previous_power}
+            )
+            raise PowerStateVerificationError(
+                "completed control had a power-only read-back mismatch"
+            )
+
+    monkeypatch.setattr(slave, "write_target", fail_completed_live_power_readback)
+    run_args = [*args]
+    run_args[0] = "run-native-linkage"
+
+    assert hardware_test.main([*run_args, "--confirm", token]) == 2
+
+    intent = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    ).load()
+    assert intent is not None
+    assert intent.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
+    assert intent.outcome == "restored"
+    assert (
+        intent.primary_failure
+        is hardware_test.HardwareTestPrimaryFailure.SLAVE_POWER_CHANGE_NOT_VERIFIED
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    (
+        "master_readback_mismatch",
+        "master_transport_error",
+        "driver_power_error_then_converges",
+        "driver_power_error_with_slave_error",
+        "driver_power_error_with_schedule_change",
+        "slave_power_and_linkage_mismatch",
+        "slave_write_error",
+    ),
+)
+def test_unrelated_post_change_failure_does_not_set_primary_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_kind: str,
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    bootstrap_schedule = failure_kind == "driver_power_error_with_schedule_change"
+    if bootstrap_schedule:
+        for device in devices.values():
+            device._state = device._state.model_copy(  # noqa: SLF001
+                update={
+                    "timer_enabled": True,
+                    "schedule": DeviceSchedule(enabled=True),
+                }
+            )
+    _install_fakes(
+        monkeypatch,
+        config,
+        devices,
+        seed_qualifications=not bootstrap_schedule,
+    )
+    args = _args("preflight")
+    args[args.index("sync_slave")] = "async_slave"
+    args[args.index("0.02")] = "0.08"
+    if bootstrap_schedule:
+        args.append("--bootstrap-active-schedule")
+    args.extend(
+        (
+            "--slave-power-after",
+            "38",
+            "--power-change-after",
+            "0.02",
+        )
+    )
+    assert hardware_test.main(args) == 0
+    token = _token(capsys.readouterr().out)
+
+    master = devices["pro_left"]
+    slave = devices["pro_right"]
+    original_slave_write = slave.write_target
+    original_master_get_state = master.get_state
+    original_slave_get_state = slave.get_state
+    fail_next_master_read = False
+    fail_next_slave_error_read = False
+    fail_next_slave_schedule_read = False
+
+    async def fail_after_live_slave_write(target: DeviceTarget, **kwargs: object) -> None:
+        nonlocal fail_next_master_read, fail_next_slave_error_read
+        nonlocal fail_next_slave_schedule_read
+        if target.power == 38 and failure_kind == "slave_write_error":
+            raise RuntimeError("live slave write transport failed")
+        await original_slave_write(target, **kwargs)  # type: ignore[arg-type]
+        if target.power != 38:
+            return
+        if failure_kind == "master_readback_mismatch":
+            master._state = master._state.model_copy(update={"power": 34})  # noqa: SLF001
+        elif failure_kind == "master_transport_error":
+            fail_next_master_read = True
+        elif failure_kind == "driver_power_error_then_converges":
+            raise PowerStateVerificationError("transient power-only driver mismatch")
+        elif failure_kind == "driver_power_error_with_slave_error":
+            fail_next_slave_error_read = True
+            raise PowerStateVerificationError("power-only driver read-back mismatch")
+        elif failure_kind == "driver_power_error_with_schedule_change":
+            fail_next_slave_schedule_read = True
+            raise PowerStateVerificationError("power-only driver read-back mismatch")
+        elif failure_kind == "slave_power_and_linkage_mismatch":
+            slave._state = slave._state.model_copy(  # noqa: SLF001
+                update={"power": 33, "linkage": LinkageRole.INDEPENDENT}
+            )
+
+    async def fail_one_master_read() -> DeviceState:
+        nonlocal fail_next_master_read
+        if fail_next_master_read:
+            fail_next_master_read = False
+            raise RuntimeError("master read transport failed")
+        return await original_master_get_state()
+
+    async def fail_one_slave_full_state_read() -> DeviceState:
+        nonlocal fail_next_slave_error_read, fail_next_slave_schedule_read
+        state = await original_slave_get_state()
+        if fail_next_slave_error_read:
+            fail_next_slave_error_read = False
+            return state.model_copy(update={"power": 33, "error": "Fault_UART"})
+        if fail_next_slave_schedule_read:
+            fail_next_slave_schedule_read = False
+            return state.model_copy(
+                update={
+                    "power": 33,
+                    "schedule": DeviceSchedule(
+                        enabled=False,
+                        entries=(
+                            ScheduleEntry(
+                                slot=0,
+                                start="08:00",
+                                end="09:00",
+                                mode="constant",
+                                mode_code=0,
+                                parameters={"flow": 33},
+                            ),
+                        ),
+                    ),
+                }
+            )
+        return state
+
+    monkeypatch.setattr(slave, "write_target", fail_after_live_slave_write)
+    monkeypatch.setattr(master, "get_state", fail_one_master_read)
+    monkeypatch.setattr(slave, "get_state", fail_one_slave_full_state_read)
+    run_args = [*args]
+    run_args[0] = "run-native-linkage"
+
+    assert hardware_test.main([*run_args, "--confirm", token]) == 2
+
+    intent = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    ).load()
+    assert intent is not None
+    assert intent.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
+    assert intent.outcome == "restored"
+    assert intent.primary_failure is None
+
+
+def test_native_intent_loads_version_one_without_primary_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    path = hardware_test.canonical_intent_path(config)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("primary_failure")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
+
+    intent = hardware_test.JsonHardwareTestIntentStore(path).load()
+
+    assert intent is not None
+    assert intent.version == 1
+    assert intent.primary_failure is None
 
 
 @pytest.mark.parametrize("unsafe_kind", ["fifo", "hardlink", "mode"])

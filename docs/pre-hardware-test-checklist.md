@@ -1,11 +1,11 @@
 # 실기 제어 안전 체크리스트
 
 이 문서는 실제 펌프의 제한된 control/write 검증을 반복하거나 다음 실기 단계를 진행하기 전에
-확인할 중단 지점입니다. 2026-08-26 Pro 두 대의 저출력 레지스터 write/read-back을 수행했지만
-최초 자동 원복 확인은 실패해 recovery journal이 남았고, 이후 새 확인 토큰을 사용한 attended
-recovery에서 원래 TimerON 시간표 상태의 exact recovery가 성공했습니다. 이 실행은 시험 또는
-qualification 성공으로 처리하지 않았으며 두 Pro 모두 재qualification 대기 중입니다. 물리
-유량·파형과 TimerON 시간표 경계 동작은 사용자가 수조를 직접 볼 수 있을 때 별도로 검증합니다.
+확인할 중단 지점입니다. 2026-08-27 Pro 두 대의 TimerON Async 장기 시험은 slave 출력 변경 구간
+직후 안전 실패했고 자동 exact restore가 완료되지 않았습니다. 새 확인 토큰의 attended recovery와
+Observer 교차 확인으로 시험 전 상태는 복원했지만, qualification 영수증은 0/2이며 schedule-linkage
+진입 조건도 충족하지 못했습니다. 같은 실행은 반복하지 않습니다. 물리 유량·파형과 TimerON
+시간표 경계 동작은 새 사전 조건을 모두 충족하고 사용자가 수조를 직접 볼 수 있을 때만 검증합니다.
 
 ## 완료된 사전 검증
 
@@ -19,8 +19,10 @@ qualification 성공으로 처리하지 않았으며 두 Pro 모두 재qualifica
 - 전역 `runtime.dry_run`이 장비별 write 허용보다 우선하도록 적용
 - Pro 두 대의 제한된 TimerOFF/Constant/Linkage 레지스터 write와 반복 read-back 수행,
   최초 자동 원복 확인 실패 뒤 attended exact recovery 성공
-- 위 실행에는 qualification 영수증을 발급하지 않았으며 두 Pro 모두 재qualification 대기
-- `async_slave` Flow 별도 변경은 유지되지 않음을 확인했으며 물리 유량은 미검증
+- TimerON Async 장기 실행은 slave 출력 변경 구간 직후 실패했고 qualification 영수증 0/2
+- 자동 exact restore 미완료 뒤 새 토큰의 attended recovery 및 Observer 원상태 교차 확인
+- `async_slave` Flow 개별 유지 기능은 지원 기능으로 인정하지 않으며, 독립 유지와 물리 유량 모두 미검증
+- `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 동작은 미실행·미검증
 - 네이티브 Linkage의 Pro 4역할과 `TimerON` encode/decode 단위 테스트
 - Sync/Async 개별 출력, timeout·수동 종료·취소·부분 실패·재시작 원복 시뮬레이터 테스트
 
@@ -182,6 +184,10 @@ TimerOFF fallback을 우선합니다.
 Async 슬레이브 출력 변경이 실제로 독립 유지되는지 확인하는 2분 예시는 다음과 같습니다. 전체
 bootstrap 실행은 최대 180초이고 임시 시험·qualification target은 45% 이하로 제한됩니다. 마지막
 atomic 원복 frame만 journal에 저장된 원래 수동 fallback 값을 그대로 사용합니다.
+
+> 아래는 실행 형식을 보존한 예시입니다. 2026-08-27에 사용한 operation ID와 확인 토큰은 폐기됐고
+> 같은 시험을 그대로 반복하지 않습니다. 새 시험은 코드·상태·현장 중단 조건을 다시 검토한 뒤
+> 새 operation ID로만 진행합니다.
 
 ```bash
 docker compose exec jebao-flow-recovery \

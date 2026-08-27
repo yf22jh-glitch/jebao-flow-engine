@@ -58,6 +58,16 @@ title: 메인 수류
 `그룹 복귀` 또는 카드의 `전체 그룹 복귀`로 다시 패턴에 합류시킵니다. 그룹 전원 ON/OFF와
 비상 정지는 명시적인 전체 명령이므로 모든 멤버에 적용됩니다.
 
+그룹의 기본 `execution_strategy`는 `software_independent`입니다. 이때 세 펌프는 장비 Linkage를
+`independent`로 유지하고 서버가 각 멤버의 gain/phase/출력을 계산하므로 그룹 제어와 개별
+`manual_override`를 함께 사용할 수 있습니다.
+
+예약된 `native_linked` 전략은 동일 Pro 두 대만 master/slave 페어로 두고 바형 펌프는 독립 보조로
+남기는 하이브리드 구조입니다. 현재 서버는 이를 `experimental`, `available=false`,
+`hardware_not_qualified`로만 게시합니다. HA 패턴 선택지와 제어 엔티티에는 노출하지 않으며,
+pair 멤버의 개별 전원·출력도 잠급니다. 특히 native slave의 `Flow`는 물리적인 개별 출력으로
+보장되지 않으므로 카드와 진단 센서 모두 `장비 보고 Flow`로 표시합니다.
+
 ## 리턴·도징 간단 카드
 
 ```yaml
@@ -79,7 +89,7 @@ title: 리턴 및 도징
 
 `runtime.mode: observer`에서는 잠금 배너만 표시하는 것이 아니라 그룹·장비의 모든 제어
 엔티티를 생성하지 않습니다. 카드는 목표값 대신 실제 LAN 관찰값, 마지막 확인 시각,
-`TimerON`과 Auto 설정 단서를 표시합니다. 장비별 실제 출력 sensor는 Home Assistant Recorder의
+`TimerON`과 Auto 설정 단서를 표시합니다. 장비별 장비 보고 출력 sensor는 Home Assistant Recorder의
 이력 그래프에서 기존 스케줄의 출력 변화를 확인하는 데 사용할 수 있습니다.
 
 장비가 로컬 시간표를 제공하면 별도 `장비 시간표` sensor가 만들어집니다. sensor 상태는

@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from jebao_flow.devices.base import (
     HardwareWritesDisabledError,
     JebaoDevice,
+    PowerStateVerificationError,
     SafetyInterlockError,
     StateVerificationError,
     UnsupportedCapabilityError,
@@ -369,7 +370,13 @@ class LanJebaoDevice(JebaoDevice):
                         for name, expected in changes.items()
                         if values.get(name) != expected
                     }
-                    raise StateVerificationError(
+                    error_type = (
+                        PowerStateVerificationError
+                        if self.schema.power_attribute is not None
+                        and set(mismatches) == {self.schema.power_attribute}
+                        else StateVerificationError
+                    )
+                    raise error_type(
                         f"device {self._device_id!r} did not apply control: {mismatches}"
                     )
 

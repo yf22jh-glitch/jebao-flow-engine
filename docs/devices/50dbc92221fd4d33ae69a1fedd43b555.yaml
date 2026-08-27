@@ -24,6 +24,8 @@ validation:
   status_push_observed: false
   control_write_tested: true
   control_frames_sent: true
+  native_linkage_qualified: false
+  schedule_linkage_qualified: false
 
 power:
   attribute: Flow
@@ -41,10 +43,14 @@ capabilities:
   faults_present: [overcurrent, overvoltage, overtemperature, undervoltage, locked_rotor, no_live_load, UART]
 
 evidence:
-  captured_at: 2026-08-26
+  captured_at: 2026-08-27
   capture_environment: isolated IoT VLAN through home server and router
   notes:
     - Two devices returned complete 452-byte status payloads.
     - Both live reads decoded as powered on and independent linkage.
     - Bounded low-power register writes and exact restoration were read back on both devices.
     - An async-slave-only Flow change did not persist; physical water flow was not validated.
+    - An up-to-150-second TimerON Async run stopped safely shortly after the planned slave Flow change.
+    - The run issued zero of two qualification receipts and did not authorize schedule-linkage.
+    - Automatic exact restore remained incomplete; a fresh attended recovery restored both snapshots.
+    - A restarted read-only observer reconfirmed the pre-test TimerON states.

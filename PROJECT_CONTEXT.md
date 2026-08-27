@@ -49,6 +49,12 @@ Home Assistant 엔티티와 데몬의 MQTT 계약만 사용합니다.
 - 그룹 소속 펌프를 개별 조작하면 `manual_override`로 전환하고 명시적으로 그룹에 복귀시킵니다.
 - 네이티브 master/slave 시험은 일반 그룹 패턴과 분리한 bounded transaction으로 실행하고,
   첫 write 전 snapshot journal을 저장하며 모든 종료 경로에서 원복합니다.
+- 운영 그룹은 각 펌프를 `independent`로 두고 소프트웨어가 멤버별 `gain`/`phase`를 계산하는
+  방식을 기본으로 합니다. 네이티브 Sync/Async는 동일 Pro 두 대의 장비 내부 Linkage를 나타내는
+  별도 페어이며, 바형 펌프는 독립 보조 멤버로 남습니다.
+- 네이티브 slave의 개별 `Flow`는 지원되는 것으로 가정하지 않습니다. 이를 사용하는 UI와
+  명령 계약은 현장 qualification 전까지 잠그고, 개별 출력이 필요하면 독립 소프트웨어 그룹을
+  사용합니다.
 
 ## 현재 안전 단계: Observer
 
@@ -62,10 +68,14 @@ Observer는 5초 기본 주기로 실제 전원·출력·모드·주파수와 �
 시간표 슬롯의 시각·모드·파라미터 변화는 추적하지만, 명령 출처는 프로토콜에 없으므로
 앱·클라우드·장비 자체 중 하나로 단정하지 않고 `external_or_native`로 기록합니다.
 
-네이티브 Linkage 트랜잭션 코어는 오프라인 구현과 시뮬레이터 검증까지만 완료됐습니다.
+네이티브 Linkage 트랜잭션 코어와 제한된 현장 실행·attended recovery까지 완료됐습니다.
 현재 데몬에는 실제 actuator가 없으므로 `control`로 설정해도 MQTT 명령을 fail-closed로
 거부하며, Sync/Async 시험 API를 Home Assistant에 광고하지 않습니다. 실기 write 검증과
 startup recovery wiring이 끝나기 전에는 이 경계를 해제하지 않습니다.
+2026-08-27 Async 장기 시험은 슬레이브 출력 변경 시점 직후 안전 실패했고 자동 exact restore가
+완료되지 않아 영수증 0/2 상태로 끝났습니다. 새 토큰의 attended recovery는 성공했으며 Observer가
+시험 전 TimerON 상태를 다시 확인했습니다. 이 결과는 Linkage 레지스터 관계 자체를 부정하지 않지만,
+slave별 gain/출력 지원을 입증하지도 않습니다.
 실제 wiring에서는 fail-closed Linkage safety interlock을 비상정지·정비 latch와 공유해야
 하며, journal lease를 획득하지 못한 다른 daemon은 시험이나 startup recovery를 실행하지
 않습니다.

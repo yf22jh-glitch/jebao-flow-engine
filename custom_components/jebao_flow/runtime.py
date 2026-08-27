@@ -13,6 +13,12 @@ from homeassistant.components.mqtt.models import ReceiveMessage
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
+from .contract import (
+    POWER_SEMANTICS_OUTPUT,
+    resolve_device_power_semantics,
+    resolve_group_controls,
+)
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -61,10 +67,43 @@ class JebaoFlowRuntime:
         patterns = self.system_config.get("patterns", ())
         return tuple(str(pattern) for pattern in patterns)
 
+    def group_patterns(self, group_id: str) -> tuple[str, ...]:
+        for group in self.groups:
+            if str(group.get("id", "")) != group_id:
+                continue
+            patterns = group.get("patterns")
+            if isinstance(patterns, list):
+                return tuple(str(pattern) for pattern in patterns)
+            break
+        return self.patterns
+
+    def group_controls(self, group_id: str) -> tuple[str, ...]:
+        for group in self.groups:
+            if str(group.get("id", "")) != group_id:
+                continue
+            return resolve_group_controls(group, observer_mode=self.observer_mode)
+        return ()
+
     @property
     def devices(self) -> tuple[dict[str, Any], ...]:
         devices = self.system_config.get("devices", ())
         return tuple(device for device in devices if isinstance(device, dict))
+
+    def device_controls(self, device_id: str) -> tuple[str, ...]:
+        for device in self.devices:
+            if str(device.get("id", "")) != device_id:
+                continue
+            controls = device.get("controls")
+            if isinstance(controls, list):
+                return tuple(str(control) for control in controls)
+            break
+        return ()
+
+    def device_power_semantics(self, device_id: str) -> str:
+        for device in self.devices:
+            if str(device.get("id", "")) == device_id:
+                return resolve_device_power_semantics(device)
+        return POWER_SEMANTICS_OUTPUT
 
     async def async_start(self) -> None:
         subscriptions = (

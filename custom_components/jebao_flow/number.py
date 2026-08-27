@@ -93,6 +93,8 @@ async def async_setup_entry(
             else [
                 JebaoFlowNumber(runtime, group, description)
                 for description in DESCRIPTIONS
+                if description.key
+                in runtime.group_controls(str(group.get("id", "")))
             ]
         ),
     )
@@ -122,7 +124,7 @@ class JebaoFlowNumber(JebaoFlowGroupEntity, NumberEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and not self.runtime.observer_mode
+        return self.group_control_available(self.entity_description.key)
 
     @property
     def native_value(self) -> float | None:
@@ -155,7 +157,11 @@ class JebaoFlowDevicePowerNumber(JebaoFlowDeviceEntity, NumberEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and not self.runtime.observer_mode
+        return (
+            super().available
+            and not self.runtime.observer_mode
+            and self.advertises_control("power")
+        )
 
     @property
     def native_value(self) -> float | None:

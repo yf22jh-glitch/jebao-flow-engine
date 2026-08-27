@@ -27,7 +27,10 @@ async def async_setup_entry(
         entry,
         async_add_entities,
         lambda runtime, group: (
-            [] if runtime.observer_mode else [JebaoFlowGroupSwitch(runtime, group)]
+            [JebaoFlowGroupSwitch(runtime, group)]
+            if not runtime.observer_mode
+            and "enabled" in runtime.group_controls(str(group.get("id", "")))
+            else []
         ),
     )
     async_setup_device_entities(
@@ -51,7 +54,7 @@ class JebaoFlowGroupSwitch(JebaoFlowGroupEntity, SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and not self.runtime.observer_mode
+        return self.group_control_available("enabled")
 
     @property
     def is_on(self) -> bool | None:
@@ -75,7 +78,11 @@ class JebaoFlowDeviceSwitch(JebaoFlowDeviceEntity, SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and not self.runtime.observer_mode
+        return (
+            super().available
+            and not self.runtime.observer_mode
+            and self.advertises_control("enabled")
+        )
 
     @property
     def is_on(self) -> bool | None:

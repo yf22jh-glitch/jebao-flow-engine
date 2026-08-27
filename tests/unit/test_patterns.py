@@ -1,9 +1,15 @@
+import pytest
+
+from jebao_flow.groups.calculator import PatternCalculator
 from jebao_flow.groups.models import (
     GroupConfig,
     GroupDefaults,
+    GroupExecutionStrategy,
     GroupMember,
     GroupRuntime,
     GroupState,
+    NativeLinkageRelation,
+    NativePairConfig,
     PatternKind,
 )
 from jebao_flow.patterns import (
@@ -143,3 +149,19 @@ def test_nutrient_transport_moves_from_opposed_wave_to_group_surge() -> None:
     assert suspension["left"].power > suspension["right"].power
     assert transport["left"].power > 35
     assert transport["right"].power > 35
+
+
+def test_native_linked_group_never_enters_ordinary_pattern_calculator() -> None:
+    group = make_group().model_copy(
+        update={
+            "execution_strategy": GroupExecutionStrategy.NATIVE_LINKED,
+            "native_pair": NativePairConfig(
+                master="left",
+                slave="right",
+                relation=NativeLinkageRelation.ASYNC,
+            ),
+        }
+    )
+
+    with pytest.raises(ValueError, match="guarded native actuator"):
+        PatternCalculator().calculate(0, group, GroupRuntime())

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from jebao_flow.groups.models import GroupConfig, GroupRuntime, PatternKind
+from jebao_flow.groups.models import (
+    GroupConfig,
+    GroupExecutionStrategy,
+    GroupRuntime,
+    PatternKind,
+)
 from jebao_flow.patterns import create_pattern
 from jebao_flow.protocol.models import DeviceTarget
 
@@ -14,6 +19,8 @@ class PatternCalculator:
         group: GroupConfig,
         runtime: GroupRuntime,
     ) -> dict[str, DeviceTarget]:
+        if group.execution_strategy is GroupExecutionStrategy.NATIVE_LINKED:
+            raise ValueError("native-linked groups require the guarded native actuator")
         kind = runtime.pattern or group.default.pattern
         pattern = create_pattern(kind)
         return pattern.calculate(timestamp, group, runtime)

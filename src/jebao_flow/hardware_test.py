@@ -38,10 +38,13 @@ from jebao_flow.devices.identity import (
 from jebao_flow.devices.linkage import (
     DeviceControlSnapshot,
     LinkageJournalClaimError,
+    LinkageJournalStore,
+    LinkageLiveSlavePowerVerificationError,
     LinkageRecoveryAuthority,
     LinkageRecoveryReason,
     LinkageRollbackError,
     LinkageSafetyInterlock,
+    LinkageStopReason,
     LinkageTestSpec,
     LinkageTransactionPhase,
     LinkageTransactionRecord,
@@ -160,6 +163,12 @@ class HardwareTestIntentPhase(StrEnum):
     TERMINAL = "terminal"
 
 
+class HardwareTestPrimaryFailure(StrEnum):
+    """Redacted forward-test failures that must survive a later restore failure."""
+
+    SLAVE_POWER_CHANGE_NOT_VERIFIED = "slave_power_change_not_verified"
+
+
 class HardwareTestIntent(BaseModel):
     """Durable one-shot intent that prevents a service restart from replaying a test."""
 
@@ -175,6 +184,7 @@ class HardwareTestIntent(BaseModel):
     created_at: datetime
     updated_at: datetime
     outcome: str | None = None
+    primary_failure: HardwareTestPrimaryFailure | None = None
 
 
 class JsonHardwareTestIntentStore:
@@ -292,6 +302,40 @@ class JsonHardwareTestIntentStore:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+
+class _DiagnosticTemporaryLinkageController(TemporaryLinkageController):
+    """Persist a typed live-change failure before the controller enters rollback.
+
+    The core controller deliberately gives rollback failure precedence because an exact restore is
+    the immediate safety concern.  The attended harness still needs a durable, redacted record of
+    the forward diagnostic that triggered that rollback.  Recording it at the monitor boundary
+    avoids depending on exception text or on a rollback exception chain that intentionally omits
+    the earlier failure.
+    """
+
+    def __init__(
+        self,
+        devices: Mapping[str, JebaoDevice],
+        store: LinkageJournalStore,
+        *,
+        safety_interlock: LinkageSafetyInterlock,
+        on_primary_failure: Callable[[HardwareTestPrimaryFailure], None],
+    ) -> None:
+        super().__init__(devices, store, safety_interlock=safety_interlock)
+        self._on_primary_failure = on_primary_failure
+
+    async def _monitor_until_stop(
+        self,
+        record: LinkageTransactionRecord,
+    ) -> tuple[LinkageStopReason, bool]:
+        try:
+            return await super()._monitor_until_stop(record)
+        except LinkageLiveSlavePowerVerificationError:
+            self._on_primary_failure(
+                HardwareTestPrimaryFailure.SLAVE_POWER_CHANGE_NOT_VERIFIED
+            )
+            raise
 
 
 class PhysicalDeviceLease:
@@ -728,6 +772,11 @@ def recovery_confirmation_token(
             "created_at": revision.created_at.isoformat(),
             "updated_at": revision.updated_at.isoformat(),
             "outcome": revision.outcome,
+            "primary_failure": (
+                revision.primary_failure.value
+                if revision.primary_failure is not None
+                else None
+            ),
         }
     canonical = json.dumps(revision_data, sort_keys=True, separators=(",", ":"))
     encoded = f"recover:{preview}:{canonical}".encode()
@@ -1317,8 +1366,26 @@ async def _run_native_linkage(
         intent = _updated_intent(intent, HardwareTestIntentPhase.STARTED, None)
         intent_store.save(intent)
 
+        def persist_primary_failure(failure: HardwareTestPrimaryFailure) -> None:
+            nonlocal intent
+            if intent.primary_failure is not None:
+                return
+            intent = intent.model_copy(
+                update={
+                    "primary_failure": failure,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            intent_store.save(intent)
+
         def mark_terminal_before_clear() -> None:
-            intent_store.save(_updated_intent(intent, HardwareTestIntentPhase.TERMINAL, "restored"))
+            nonlocal intent
+            intent = _updated_intent(
+                intent,
+                HardwareTestIntentPhase.TERMINAL,
+                "restored",
+            )
+            intent_store.save(intent)
 
         confirming_store = ConfirmingLinkageJournalStore(
             journal_store,
@@ -1329,10 +1396,11 @@ async def _run_native_linkage(
             ),
             before_clear=mark_terminal_before_clear,
         )
-        controller = TemporaryLinkageController(
+        controller = _DiagnosticTemporaryLinkageController(
             devices,
             confirming_store,
             safety_interlock=interlock,
+            on_primary_failure=persist_primary_failure,
         )
         fallback_now = datetime.now(UTC)
         fallback_record = LinkageTransactionRecord(
@@ -1410,6 +1478,9 @@ async def _run_native_linkage(
                 spec.slave_power_after is not None
                 and result.slave_power_change_verified is not True
             ):
+                persist_primary_failure(
+                    HardwareTestPrimaryFailure.SLAVE_POWER_CHANGE_NOT_VERIFIED
+                )
                 raise HardwareTestError(
                     "async slave live power change was not verified; "
                     "no qualification receipts were issued"
@@ -1531,6 +1602,11 @@ def _status(
         if record is not None and record.recovery_reason is not None
         else "none"
     )
+    primary_failure = (
+        intent.primary_failure.value
+        if intent is not None and intent.primary_failure is not None
+        else "none"
+    )
     automatic_blockers = _automatic_recovery_blockers(record) if record is not None else ()
     latch_active = _safety_latch_present(canonical_safety_latch_path(config))
     if record is not None and record.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK:
@@ -1566,6 +1642,7 @@ def _status(
     print(f"One-shot intent: {intent_status}")
     print(f"Recovery journal: {journal_status}")
     print(f"Recovery reason: {recovery_reason}")
+    print(f"Primary failure: {primary_failure}")
     print(
         "Automatic recovery blockers: "
         + (", ".join(automatic_blockers) if automatic_blockers else "none")

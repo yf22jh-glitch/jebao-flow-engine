@@ -252,8 +252,8 @@ async def _ready_pair(
     )
     slave = _ScheduleDevice(
         "slave",
-        constant_flow=50,
-        sine_flow=65,
+        constant_flow=35,
+        sine_flow=45,
         sine_frequency=80,
         clock=clock,
         virtual_time=virtual_time,
@@ -365,7 +365,7 @@ async def test_feed_to_constant_uses_effective_defaults_and_distant_gap_is_allow
         "feed_time": 15,
     }
     assert master_snapshot.expectation.after_flow == 30
-    assert slave_snapshot.expectation.after_flow == 50
+    assert slave_snapshot.expectation.after_flow == 35
     assert master_snapshot.expectation.after_frequency is None
     assert slave_snapshot.expectation.after_frequency is None
     assert master_snapshot.expectation.boundary_at == datetime(2026, 8, 26, 18, 10)
@@ -393,7 +393,7 @@ async def test_constant_default_frequency_and_next_sine_tuple_are_mode_aware(
     assert slave_snapshot.expectation.after_frequency == 80
     assert (master_snapshot.expectation.after_flow, slave_snapshot.expectation.after_flow) == (
         45,
-        65,
+        45,
     )
 
 
@@ -406,8 +406,8 @@ async def test_sine_to_sine_boundary_binds_overnight_next_slot(
     )
     boundary = datetime(2026, 8, 26, 18, 12)
     for device, next_flow, next_frequency in (
-        (master, 50, 45),
-        (slave, 70, 85),
+        (master, 42, 45),
+        (slave, 44, 85),
     ):
         device.second_sine_boundary = boundary
         device.next_sine_flow = next_flow
@@ -446,7 +446,7 @@ async def test_sine_to_sine_boundary_binds_overnight_next_slot(
         "frequency": 40,
         "feed_time": None,
     }
-    assert preflight.snapshots[1].expectation.after_flow == 70
+    assert preflight.snapshots[1].expectation.after_flow == 44
     assert preflight.snapshots[1].expectation.after_frequency == 85
     assert preflight.snapshots[0].expectation.after_valid_until == datetime(
         2026, 8, 27, 2
@@ -499,6 +499,115 @@ async def test_normal_run_persists_intent_before_each_write_and_detaches_slave_f
         record.linkage_write_intent_device_ids == ("master", "slave")
         for record in store.records
     )
+
+
+@pytest.mark.parametrize(
+    ("device_id", "boundary_side"),
+    (
+        ("master", "current"),
+        ("slave", "current"),
+        ("master", "next"),
+        ("slave", "next"),
+    ),
+)
+async def test_preflight_rejects_schedule_flow_above_guarded_maximum_without_writes(
+    tmp_path: Path,
+    device_id: str,
+    boundary_side: str,
+) -> None:
+    master, slave = await _ready_pair()
+    device = master if device_id == "master" else slave
+    if boundary_side == "current":
+        device.feed_flow = 46
+    else:
+        device.constant_flow = 46
+        device.entries = tuple(
+            entry.model_copy(update={"parameters": {**entry.parameters, "flow": 46}})
+            if entry.slot == 2
+            else entry
+            for entry in device.entries
+        )
+    store = JsonScheduleLinkageJournalStore(tmp_path / f"{device_id}-{boundary_side}.json")
+    controller = _controller(master, slave, store)
+
+    with pytest.raises(
+        ScheduleLinkagePreflightError,
+        match=rf"{device_id!r} {boundary_side} AutoFlow exceeds .* maximum of 45",
+    ):
+        await controller.preflight(_spec())
+
+    assert master.calls == []
+    assert slave.calls == []
+    assert master.commands == []
+    assert slave.commands == []
+    assert store.load() is None
+
+
+@pytest.mark.parametrize("device_id", ("master", "slave"))
+async def test_preflight_rejects_high_manual_fallback_power_without_writes(
+    tmp_path: Path,
+    device_id: str,
+) -> None:
+    master, slave = await _ready_pair()
+    device = master if device_id == "master" else slave
+    await device.set_power(46)
+    device.calls.clear()
+    device.commands.clear()
+    authorizations: list[str] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / f"{device_id}-fallback.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        authorizer=lambda _spec, _snapshots: authorizations.append("authorized"),
+    )
+
+    with pytest.raises(
+        ScheduleLinkagePreflightError,
+        match=rf"{device_id!r} manual fallback Flow exceeds .* maximum of 45",
+    ):
+        await controller.preflight(_spec())
+
+    assert authorizations == []
+    assert master.calls == []
+    assert slave.calls == []
+    assert master.commands == []
+    assert slave.commands == []
+    assert store.load() is None
+
+
+@pytest.mark.parametrize("device_id", ("master", "slave"))
+async def test_fresh_capture_rejects_high_manual_fallback_power_without_writes(
+    tmp_path: Path,
+    device_id: str,
+) -> None:
+    master, slave = await _ready_pair()
+    authorizations: list[str] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / f"{device_id}-fresh-fallback.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        authorizer=lambda _spec, _snapshots: authorizations.append("authorized"),
+    )
+    preflight = await controller.preflight(_spec())
+    device = master if device_id == "master" else slave
+    await device.set_power(46)
+    device.calls.clear()
+    device.commands.clear()
+
+    with pytest.raises(
+        ScheduleLinkagePreflightError,
+        match=rf"{device_id!r} manual fallback Flow exceeds .* maximum of 45",
+    ):
+        await controller.run(preflight)
+
+    assert authorizations == ["authorized"]
+    assert master.calls == []
+    assert slave.calls == []
+    assert master.commands == []
+    assert slave.commands == []
+    assert store.load() is None
 
 
 class _AdvanceClockOnApplyingStore(_RecordingStore):
@@ -566,12 +675,12 @@ async def test_ack_loss_after_apply_reloads_latest_intent_and_detaches(
 
 async def test_bad_after_tuple_fails_restored_without_non_linkage_writes(tmp_path: Path) -> None:
     master, slave = await _ready_pair()
-    # The decoded slave next slot remains 50, but the effective post-boundary read lies.
-    slave.constant_flow = 51
-    # Preserve the decoded value so preflight still binds 50 and the live mismatch appears only
+    # The decoded slave next slot remains 35, but the effective post-boundary read lies.
+    slave.constant_flow = 36
+    # Preserve the decoded value so preflight still binds 35 and the live mismatch appears only
     # after the role setup reaches the boundary.
     slave.entries = tuple(
-        entry.model_copy(update={"parameters": {**entry.parameters, "flow": 50}})
+        entry.model_copy(update={"parameters": {**entry.parameters, "flow": 35}})
         if entry.slot == 2
         else entry
         for entry in slave.entries
@@ -723,7 +832,7 @@ async def test_schedule_change_between_preflight_and_run_fails_before_write(
     controller = _controller(master, slave, store)
     preflight = await controller.preflight(_spec())
     slave.entries = tuple(
-        entry.model_copy(update={"parameters": {**entry.parameters, "flow": 51}})
+        entry.model_copy(update={"parameters": {**entry.parameters, "flow": 36}})
         if entry.slot == 2
         else entry
         for entry in slave.entries

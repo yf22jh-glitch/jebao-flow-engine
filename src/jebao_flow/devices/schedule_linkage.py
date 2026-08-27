@@ -2,7 +2,9 @@
 
 This transaction is intentionally separate from the TimerOFF native-linkage diagnostic.  It
 never writes TimerON, Flow, Mode, Frequency, power, or schedule slots.  Its only mutation is the
-native ``Linkage`` datapoint, and every exit path detaches the slave before the master.
+native ``Linkage`` datapoint, and every exit path detaches the slave before the master.  Because
+a role change can expose the latent manual Flow, preflight caps that fallback and both boundary
+AutoFlow values at the same guarded test maximum.
 """
 
 from __future__ import annotations
@@ -63,6 +65,7 @@ _KNOWN_PRO_MODES = frozenset(
 )
 _DAY_SECONDS = 24 * 60 * 60
 _ROLE_ONLY_ROLLBACK_RESERVE_SECONDS = 15.0
+_SCHEDULE_LINKAGE_TEST_MAX_POWER = 45
 
 
 class ScheduleLinkageError(RuntimeError):
@@ -857,6 +860,10 @@ class ScheduleActiveLinkageController:
                 "observation window lacks post-boundary verification and rollback reserve"
             )
         limits = device.capabilities.power_limits
+        if not limits.min_power <= state.power <= limits.max_power:
+            raise ScheduleLinkagePreflightError(
+                f"device {device.device_id!r} manual fallback Flow is outside limits"
+            )
         current_flow = expectation.before.flow
         if not limits.min_power <= current_flow <= limits.max_power:
             raise ScheduleLinkagePreflightError(
@@ -866,6 +873,21 @@ class ScheduleActiveLinkageController:
             raise ScheduleLinkagePreflightError(
                 f"device {device.device_id!r} next AutoFlow is outside limits"
             )
+        guarded_maximum = min(limits.max_power, _SCHEDULE_LINKAGE_TEST_MAX_POWER)
+        if state.power > guarded_maximum:
+            raise ScheduleLinkagePreflightError(
+                f"device {device.device_id!r} manual fallback Flow exceeds "
+                f"the guarded schedule-linkage maximum of {guarded_maximum}"
+            )
+        for boundary_side, flow in (
+            ("current", current_flow),
+            ("next", expectation.after_flow),
+        ):
+            if flow > guarded_maximum:
+                raise ScheduleLinkagePreflightError(
+                    f"device {device.device_id!r} {boundary_side} AutoFlow exceeds "
+                    f"the guarded schedule-linkage maximum of {guarded_maximum}"
+                )
         return ScheduleLinkageSnapshot(
             device_id=device.device_id,
             physical_binding=binding,

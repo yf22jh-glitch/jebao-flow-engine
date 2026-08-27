@@ -7,6 +7,7 @@ from jebao_flow.devices import (
     HardwareWritesDisabledError,
     LanJebaoDevice,
     PhysicalDeviceBinding,
+    PowerStateVerificationError,
     SafetyInterlockError,
     StateVerificationError,
     UnsupportedCapabilityError,
@@ -325,9 +326,29 @@ async def test_write_requires_readback_match() -> None:
     device = _device(allow_writes=True)
     await device.connect()
 
-    with pytest.raises(StateVerificationError, match="did not apply control"):
+    with pytest.raises(PowerStateVerificationError, match="did not apply control"):
         await device.set_power(50)
 
+    assert len(_FakeSession.instances[0].sent) == 1
+
+
+async def test_multi_field_readback_mismatch_is_not_power_specific() -> None:
+    device = _device(allow_writes=True)
+    await device.connect()
+
+    with pytest.raises(StateVerificationError, match="did not apply control") as captured:
+        await device.write_target(
+            DeviceTarget(
+                enabled=True,
+                power=50,
+                mode="sine",
+                frequency=20,
+                linkage=LinkageRole.ASYNC_SLAVE,
+                timer_enabled=False,
+            )
+        )
+
+    assert type(captured.value) is StateVerificationError
     assert len(_FakeSession.instances[0].sent) == 1
 
 
@@ -352,6 +373,7 @@ async def test_write_fails_after_bounded_transient_readback_timeouts() -> None:
     with pytest.raises(StateVerificationError, match="3 readback attempts") as captured:
         await device.set_power(50)
 
+    assert not isinstance(captured.value, PowerStateVerificationError)
     assert isinstance(captured.value.__cause__, ProtocolTimeoutError)
     assert len(_FakeSession.instances[0].sent) == 1
 

@@ -46,6 +46,21 @@ class JebaoFlowGroupEntity(Entity):
     def available(self) -> bool:
         return self.runtime.online and self.state_payload is not None
 
+    def advertises_control(self, control: str) -> bool:
+        return control in self.runtime.group_controls(self.group_id)
+
+    def group_control_available(self, control: str) -> bool:
+        """Return whether one group command is both advertised and safe now."""
+
+        state_payload = self.state_payload
+        return (
+            self.runtime.online
+            and not self.runtime.observer_mode
+            and state_payload is not None
+            and state_payload.get("hardware_writes_locked", True) is False
+            and self.advertises_control(control)
+        )
+
     @property
     def device_info(self) -> DeviceInfo:
         return DeviceInfo(
@@ -123,6 +138,13 @@ class JebaoFlowDeviceEntity(Entity):
     def available(self) -> bool:
         return self.runtime.online and self.state_payload is not None
 
+    def advertises_control(self, control: str) -> bool:
+        return control in self.runtime.device_controls(self.device_id)
+
+    @property
+    def power_semantics(self) -> str:
+        return self.runtime.device_power_semantics(self.device_id)
+
     @property
     def device_info(self) -> DeviceInfo:
         models = {
@@ -146,6 +168,7 @@ class JebaoFlowDeviceEntity(Entity):
             ATTR_DEVICE_ID: self.device_id,
             ATTR_DEVICE_TYPE: self.device_type,
             ATTR_CONTROL: self.control,
+            "power_semantics": self.power_semantics,
             "jebao_flow_runtime_mode": self.runtime.runtime_mode,
         }
 

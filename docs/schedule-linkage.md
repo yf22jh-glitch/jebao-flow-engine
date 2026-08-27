@@ -11,6 +11,8 @@ It is intentionally narrower than `jebao-flow-hwtest`:
   audited boundary checks;
 - both exact physical bindings need unexpired qualification receipts from the same explicitly
   named qualification operation;
+- each device's manual fallback `Flow` and current/next effective `AutoFlow` must be at or below
+  both its configured power limit and the fixed 45% attended-test ceiling;
 - the only writable datapoint is `Linkage`;
 - exit and recovery always detach the slave before the master;
 - no qualification receipt is issued by this diagnostic.
@@ -27,6 +29,14 @@ children of the private `0700` `/hardware-safety` mount:
 The first audited boundary set supports current `constant`, `pulse`, `sine`, or `feed` followed
 by `constant`, `pulse`, or `sine`. Other native modes remain read-only until their effective
 `Auto*` semantics have separate hardware evidence.
+
+The 45% ceiling is checked against the decoded manual fallback `Flow` and schedule data during
+preflight, before authorization, journal creation, or any Linkage write. A high fallback value,
+current slot, or next slot therefore fails read-only.
+The diagnostic also remains unavailable until both qualification receipts exist; the 2026-08-27
+field run produced zero of two receipts, so no schedule-boundary write was attempted. Whether an
+`async_slave` applies its own `AutoMode` and `AutoFlow` together at a slot boundary therefore
+remains unverified on hardware.
 
 ## Attended flow
 

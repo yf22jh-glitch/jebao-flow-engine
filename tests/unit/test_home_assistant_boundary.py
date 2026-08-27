@@ -1,4 +1,5 @@
 import json
+import runpy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +40,100 @@ def test_lovelace_card_calls_entities_and_never_mqtt_directly() -> None:
     assert "jebao_flow_topic_prefix" in card
     assert "escapeHtml(available ? (STATUS_LABELS[status] || status)" in card
     assert "읽기 전용 관찰 모드" in card
+    assert "네이티브 Linkage 실험 기능 잠금" in card
+    assert 'individualControls.includes("power")' in card
+    assert 'individualControls.includes("enabled")' in card
+    assert 'actuation === "native_sync_slave"' in card
+    assert 'actuation === "native_async_slave"' in card
+    assert "장비 보고 Flow" in card
+    assert (
+        "const state = isPlainObject(reference?.state) ? reference.state : reference;"
+        in card
+    )
+    assert "available && !locked && isUsableEntity(entities[control])" in card
+    assert "isUsableEntity(devicePowerEntity)" in card
+    assert "isUsableEntity(deviceEnabledEntity)" in card
+    assert "isUsableEntity(resumeGroupEntity)" in card
+    assert "!observerMode && isUsableEntity(powerState)" in card
+    assert "!observerMode && isUsableEntity(enabledState)" in card
+    assert "그룹 제어 잠금" in card
+
+
+def test_pattern_select_uses_group_specific_server_contract() -> None:
+    source = (COMPONENT / "select.py").read_text(encoding="utf-8")
+    runtime = (COMPONENT / "runtime.py").read_text(encoding="utf-8")
+
+    assert "self.runtime.group_patterns(self.group_id)" in source
+    assert "def group_patterns(self, group_id: str)" in runtime
+    assert "return self.patterns" in runtime
+
+
+def test_dynamic_group_and_device_control_locks_are_scoped_to_their_entities() -> None:
+    number = (COMPONENT / "number.py").read_text(encoding="utf-8")
+    switch = (COMPONENT / "switch.py").read_text(encoding="utf-8")
+    number_group, number_device = number.split("class JebaoFlowDevicePowerNumber", 1)
+    switch_group, switch_device = switch.split("class JebaoFlowDeviceSwitch", 1)
+
+    assert "self.group_control_available(self.entity_description.key)" in number_group
+    assert 'advertises_control("power")' in number_device
+    assert 'self.group_control_available("enabled")' in switch_group
+    assert 'advertises_control("enabled")' in switch_device
+
+
+def test_group_factories_and_entities_follow_per_group_control_contract() -> None:
+    number = (COMPONENT / "number.py").read_text(encoding="utf-8")
+    switch = (COMPONENT / "switch.py").read_text(encoding="utf-8")
+    select = (COMPONENT / "select.py").read_text(encoding="utf-8")
+    button = (COMPONENT / "button.py").read_text(encoding="utf-8")
+    entity = (COMPONENT / "entity.py").read_text(encoding="utf-8")
+
+    assert "in runtime.group_controls" in number
+    assert '"enabled" in runtime.group_controls' in switch
+    assert '"pattern" in runtime.group_controls' in select
+    assert "in runtime.group_controls" in button
+    assert 'state_payload.get("hardware_writes_locked", True) is False' in entity
+    assert "self.advertises_control(control)" in entity
+
+
+def test_old_v1_daemon_json_keeps_legacy_group_controls_and_power_semantics() -> None:
+    contract = runpy.run_path(str(COMPONENT / "contract.py"))
+    resolve_controls = contract["resolve_group_controls"]
+    resolve_power_semantics = contract["resolve_device_power_semantics"]
+    legacy_controls = contract["LEGACY_V1_GROUP_CONTROLS"]
+    payload = json.loads(
+        """
+        {
+          "schema_version": 1,
+          "runtime_mode": "control",
+          "groups": [{"id": "main_flow", "name": "Main Flow"}],
+          "devices": [{"id": "left", "name": "Left", "type": "wavemaker"}]
+        }
+        """
+    )
+
+    assert resolve_controls(payload["groups"][0], observer_mode=False) == legacy_controls
+    assert resolve_controls(payload["groups"][0], observer_mode=True) == ()
+    assert resolve_power_semantics(payload["devices"][0]) == "output"
+
+    payload["groups"][0]["controls"] = []
+    payload["devices"][0]["power_semantics"] = "reported_flow"
+    assert resolve_controls(payload["groups"][0], observer_mode=False) == ()
+    assert resolve_power_semantics(payload["devices"][0]) == "reported_flow"
+
+
+def test_actual_power_sensor_labels_reported_flow_without_breaking_old_v1() -> None:
+    source = (COMPONENT / "sensor.py").read_text(encoding="utf-8")
+    entity = (COMPONENT / "entity.py").read_text(encoding="utf-8")
+    contract = (COMPONENT / "contract.py").read_text(encoding="utf-8")
+    runtime = (COMPONENT / "runtime.py").read_text(encoding="utf-8")
+
+    assert 'if self.power_semantics == "reported_flow"' in source
+    assert '"장비 보고 Flow"' in source
+    assert 'else "장비 보고 출력"' in source
+    assert '"power_semantics": self.power_semantics' in entity
+    assert "self.runtime.device_power_semantics(self.device_id)" in entity
+    assert "def device_power_semantics(self, device_id: str)" in runtime
+    assert 'device.get("power_semantics", POWER_SEMANTICS_OUTPUT)' in contract
 
 
 def test_schedule_sensor_is_separate_and_excludes_device_clock() -> None:

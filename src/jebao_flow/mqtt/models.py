@@ -9,7 +9,13 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from jebao_flow.config import DeviceType, RuntimeMode
-from jebao_flow.groups.models import GroupMemberRole, GroupState, PatternKind
+from jebao_flow.groups.models import (
+    GroupExecutionStrategy,
+    GroupMemberRole,
+    GroupState,
+    NativeLinkageRelation,
+    PatternKind,
+)
 from jebao_flow.protocol.models import DeviceSchedule
 
 
@@ -29,6 +35,34 @@ class DeviceControlMode(StrEnum):
     GROUP = "group"
     MANUAL_OVERRIDE = "manual_override"
     STANDALONE = "standalone"
+
+
+class DevicePowerSemantics(StrEnum):
+    OUTPUT = "output"
+    REPORTED_FLOW = "reported_flow"
+
+
+class GroupMemberActuation(StrEnum):
+    SOFTWARE_INDEPENDENT = "software_independent"
+    NATIVE_MASTER = "native_master"
+    NATIVE_SYNC_SLAVE = "native_sync_slave"
+    NATIVE_ASYNC_SLAVE = "native_async_slave"
+
+
+class NativeLinkageMaturity(StrEnum):
+    EXPERIMENTAL = "experimental"
+    QUALIFIED = "qualified"
+
+
+class NativePairDescriptor(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    master: str
+    slave: str
+    relation: NativeLinkageRelation
+    available: bool = False
+    maturity: NativeLinkageMaturity = NativeLinkageMaturity.EXPERIMENTAL
+    reason: str | None = "hardware_not_qualified"
 
 
 class ObservationSource(StrEnum):
@@ -76,6 +110,8 @@ class GroupMemberState(BaseModel):
     role: GroupMemberRole
     gain: float = Field(gt=0, le=10)
     phase: float = Field(ge=0, lt=360)
+    actuation: GroupMemberActuation = GroupMemberActuation.SOFTWARE_INDEPENDENT
+    individual_controls: tuple[str, ...] = ("enabled", "power", "manual_override")
     control_mode: DeviceControlMode = DeviceControlMode.GROUP
     enabled: bool
     target_power: int = Field(ge=0, le=100)
@@ -100,6 +136,8 @@ class GroupStatePayload(BaseModel):
     revision: int = Field(ge=0)
     group_id: str
     name: str
+    execution_strategy: GroupExecutionStrategy = GroupExecutionStrategy.SOFTWARE_INDEPENDENT
+    native_pair: NativePairDescriptor | None = None
     status: GroupState
     enabled: bool
     pattern: PatternKind
@@ -194,6 +232,10 @@ class GroupDescriptor(BaseModel):
 
     id: str
     name: str
+    execution_strategy: GroupExecutionStrategy = GroupExecutionStrategy.SOFTWARE_INDEPENDENT
+    native_pair: NativePairDescriptor | None = None
+    patterns: tuple[PatternKind, ...] = ()
+    controls: tuple[str, ...] = ()
 
 
 class DeviceDescriptor(BaseModel):
@@ -206,6 +248,7 @@ class DeviceDescriptor(BaseModel):
     ui: str
     controls: tuple[str, ...]
     observables: tuple[str, ...] = ()
+    power_semantics: DevicePowerSemantics = DevicePowerSemantics.OUTPUT
     min_power: int = Field(ge=0, le=100)
     max_power: int = Field(ge=0, le=100)
 

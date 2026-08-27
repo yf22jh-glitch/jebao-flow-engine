@@ -6,9 +6,10 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 
 > 현재 상태: 실제 장비의 읽기 전용 검증과 지속 Observer, 오프라인 control 프레임 생성,
 > MQTT 상태 계약과 Home Assistant 커스텀 통합 뼈대까지 구현했습니다. 기본 실행 모드는
-> `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 현장 전용 경로에서는 Pro 두 대에
-> 제한된 저출력 레지스터 write/read-back과 정확 복원을 완료했지만, 물리 유량과 파형은 아직
-> 검증하지 않았습니다. 일반 데몬·MQTT·HA에는 이 시험 기능을 노출하지 않습니다.
+> `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 현장 전용 경로에서는 Pro 두 대의
+> 제한된 저출력 Linkage 시험 뒤 attended exact recovery까지 완료했습니다. 다만 Async 슬레이브의
+> 개별 출력 변경은 검증되지 않았고 qualification 영수증도 발급되지 않아, 네이티브 Linkage는
+> 운영 기능으로 승격하지 않았습니다. 일반 데몬·MQTT·HA에는 이 시험 기능을 노출하지 않습니다.
 
 ## 구조
 
@@ -23,6 +24,12 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 명령 속도 제한과 장애 처리를 담당합니다. 장비를 직접 제어하는 주체는 `jebao-flowd`
 하나로 제한합니다.
 
+기본 그룹 전략은 세 펌프를 모두 장비 `independent` 상태로 두는
+`software_independent`입니다. 그래서 두 Pro와 바형 보조에 각각 gain/phase/출력을 적용할 수
+있습니다. 장비의 native Sync/Async는 동일 Pro 두 대의 장비 내부 Linkage용 별도 페어이며,
+소프트웨어 `Sync`/`Anti Phase` 패턴과 같은 기능으로 취급하지 않습니다. 현재 native 페어는
+실기 자격 미충족으로 잠겨 있습니다.
+
 ## 현재 포함된 것
 
 - Pydantic 기반 YAML 설정 모델과 교차 검증
@@ -36,7 +43,7 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 - 전역·장비별 이중 잠금, 출력 제한, 명령 간격과 read-back 검증을 갖춘 LAN 어댑터
 - Pro 수류모터의 `master`/`sync_slave`/`async_slave`, `TimerON` typed read/write와
   장비당 원자적 목표 프레임 생성
-- 첫 write 전 영속 저널, 서로 다른 마스터/슬레이브 출력, 수동·시간초과·오류·취소 원복,
+- 첫 write 전 영속 저널, 별도 마스터/슬레이브 출력 요청, 수동·시간초과·오류·취소 원복,
   재시작 복구를 갖춘 임시 네이티브 Linkage 트랜잭션 코어
 - 한 대씩 `동일값 → 1~5%p 하향 → 정확한 원복`을 검증하는 최초 write 자격 절차와 24시간
   물리 장비 바인딩 영수증

@@ -117,7 +117,7 @@ IoT SSID와 비밀번호를 안정적으로 유지하고 DHCP 예약을 사용�
 
 Observer 모드의 커스텀 통합은 장비별로 다음을 제공합니다.
 
-- 실제 출력 sensor
+- 장비 보고 출력 sensor
 - 실제 모드 sensor
 - 실제 운전 binary sensor
 - 연결 binary sensor
@@ -125,7 +125,7 @@ Observer 모드의 커스텀 통합은 장비별로 다음을 제공합니다.
 - 장비 시간표 sensor: 활성 슬롯 수와 전체 `entries`, `invalid_slots`
 - 상태 sensor의 마지막 확인·실제 변경·설정 단서 변경 시각
 
-전용 카드는 실제 출력과 연결 상태를 우선 표시하고 모든 조작 컨트롤을 제거합니다. 여러
+전용 카드는 장비가 보고한 출력과 연결 상태를 우선 표시하고 모든 조작 컨트롤을 제거합니다. 여러
 `jebao-flowd` 인스턴스가 있으면 카드 설정에 `instance`를 지정할 수 있습니다.
 
 ```yaml

@@ -28,7 +28,7 @@ from pydantic import (
     model_validator,
 )
 
-from jebao_flow.devices.base import JebaoDevice
+from jebao_flow.devices.base import JebaoDevice, PowerStateVerificationError
 from jebao_flow.devices.identity import PhysicalDeviceBinding
 from jebao_flow.protocol.models import (
     Capability,
@@ -60,6 +60,10 @@ class LinkageTransactionBusyError(LinkageTransactionError):
 
 class LinkageApplyError(LinkageTransactionError):
     """Applying or verifying the temporary relationship failed, but restore succeeded."""
+
+
+class LinkageLiveSlavePowerVerificationError(LinkageTransactionError):
+    """A completed live slave-power write did not match its subsequent read-back."""
 
 
 class LinkageRollbackError(LinkageTransactionError):
@@ -1014,6 +1018,7 @@ class TemporaryLinkageController:
         record: LinkageTransactionRecord,
         *,
         slave_power: int | None = None,
+        live_slave_power_change: bool = False,
     ) -> None:
         self._require_safety_interlock()
         spec = record.spec
@@ -1040,6 +1045,25 @@ class TemporaryLinkageController:
         observed: dict[str, DeviceState] = {}
         for device_id, target in expected.items():
             state = await self._get_device(device_id).get_state()
+            if (
+                live_slave_power_change
+                and device_id == spec.slave_device_id
+                and state.power != target.power
+            ):
+                # Classify only the exact diagnostic result: the state frame is otherwise the
+                # requested slave target, but its Flow did not survive the live write.  Offline,
+                # error, linkage, mode, frequency, timer, and schedule failures remain generic
+                # transaction failures and must not be persisted as this primary diagnosis.
+                self._assert_target(
+                    device_id,
+                    state,
+                    target.model_copy(update={"power": state.power}),
+                )
+                if spec.bootstrap_active_schedule:
+                    self._assert_schedule_unchanged(snapshots[device_id], state)
+                raise LinkageLiveSlavePowerVerificationError(
+                    "live slave power read-back did not match the requested target"
+                )
             self._assert_target(device_id, state, target)
             if spec.bootstrap_active_schedule:
                 self._assert_schedule_unchanged(snapshots[device_id], state)
@@ -1124,17 +1148,29 @@ class TemporaryLinkageController:
                 self._require_forward_write(record)
                 expected_slave_power = record.spec.slave_power_after
                 slave = self._get_device(record.spec.slave_device_id)
-                await slave.write_target(
-                    DeviceTarget(
-                        enabled=True,
-                        power=expected_slave_power,
-                        mode=record.spec.mode,
-                        frequency=record.spec.frequency,
-                        linkage=record.spec.slave_role,
-                        timer_enabled=False,
-                    ),
-                    guard=lambda: self._forward_write_allowed(record),
-                )
+                try:
+                    await slave.write_target(
+                        DeviceTarget(
+                            enabled=True,
+                            power=expected_slave_power,
+                            mode=record.spec.mode,
+                            frequency=record.spec.frequency,
+                            linkage=record.spec.slave_role,
+                            timer_enabled=False,
+                        ),
+                        guard=lambda: self._forward_write_allowed(record),
+                    )
+                except PowerStateVerificationError:
+                    # The LAN adapter's decoded mismatch covers only fields in its control frame.
+                    # Classify it through a fresh full DeviceState read so master health, device
+                    # errors, and the saved schedule fingerprint must also be valid.  If Flow has
+                    # since converged this returns and the original driver error remains generic.
+                    await self._verify_active_relationship(
+                        record,
+                        slave_power=expected_slave_power,
+                        live_slave_power_change=True,
+                    )
+                    raise
                 power_change_sent = True
                 _LOGGER.info(
                     "native-linkage requested live slave power change power=%s",
@@ -1142,7 +1178,11 @@ class TemporaryLinkageController:
                 )
             # Detect the exact behavior this diagnostic is intended to measure: a native master
             # broadcast must not silently replace the requested per-slave Flow.
-            await self._verify_active_relationship(record, slave_power=expected_slave_power)
+            await self._verify_active_relationship(
+                record,
+                slave_power=expected_slave_power,
+                live_slave_power_change=power_changed or power_change_sent,
+            )
             if power_change_sent:
                 power_changed = True
 
