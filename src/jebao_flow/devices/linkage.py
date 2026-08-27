@@ -30,8 +30,12 @@ from pydantic import (
 
 from jebao_flow.devices.base import (
     ControlAcknowledgementError,
+    ControlAckPowerMismatchError,
+    ControlAckReadbackError,
+    ControlAckStateMismatchError,
     ControlReadbackError,
     ControlStateMismatchError,
+    ControlVerificationOutcome,
     JebaoDevice,
     PowerStateVerificationError,
     StateVerificationError,
@@ -130,7 +134,9 @@ class LinkageDiagnosticEventKind(StrEnum):
 
     ACTIVE_ENTERED = "active_entered"
     LIVE_SLAVE_WRITE_ATTEMPTED = "live_slave_write_attempted"
+    LIVE_SLAVE_ACK_UNCONFIRMED = "live_slave_ack_unconfirmed"
     LIVE_SLAVE_ADAPTER_VERIFIED = "live_slave_adapter_verified"
+    LIVE_SLAVE_STATE_VERIFIED_WITHOUT_ACK = "live_slave_state_verified_without_ack"
     LIVE_SLAVE_FULL_STATE_VERIFIED = "live_slave_full_state_verified"
     LIVE_SLAVE_SAMPLE_VERIFIED = "live_slave_sample_verified"
     FORWARD_FAILED = "forward_failed"
@@ -143,6 +149,9 @@ class LinkageForwardFailureCategory(StrEnum):
     LIVE_SLAVE_POWER_NOT_VERIFIED = "live_slave_power_not_verified"
     POWER_STATE_NOT_VERIFIED = "power_state_not_verified"
     CONTROL_ACK_NOT_CONFIRMED = "control_ack_not_confirmed"
+    CONTROL_ACK_READBACK_UNAVAILABLE = "control_ack_readback_unavailable"
+    CONTROL_ACK_STATE_MISMATCH = "control_ack_state_mismatch"
+    CONTROL_ACK_POWER_MISMATCH = "control_ack_power_mismatch"
     CONTROL_READBACK_UNAVAILABLE = "control_readback_unavailable"
     CONTROL_STATE_MISMATCH = "control_state_mismatch"
     STATE_NOT_VERIFIED = "state_not_verified"
@@ -669,6 +678,12 @@ class TemporaryLinkageController:
     def _forward_failure_category(error: BaseException) -> LinkageForwardFailureCategory:
         if isinstance(error, LinkageLiveSlavePowerVerificationError):
             return LinkageForwardFailureCategory.LIVE_SLAVE_POWER_NOT_VERIFIED
+        if isinstance(error, ControlAckPowerMismatchError):
+            return LinkageForwardFailureCategory.CONTROL_ACK_POWER_MISMATCH
+        if isinstance(error, ControlAckReadbackError):
+            return LinkageForwardFailureCategory.CONTROL_ACK_READBACK_UNAVAILABLE
+        if isinstance(error, ControlAckStateMismatchError):
+            return LinkageForwardFailureCategory.CONTROL_ACK_STATE_MISMATCH
         if isinstance(error, PowerStateVerificationError):
             return LinkageForwardFailureCategory.POWER_STATE_NOT_VERIFIED
         if isinstance(error, ControlAcknowledgementError):
@@ -1327,9 +1342,12 @@ class TemporaryLinkageController:
                     LinkageDiagnosticEventKind.LIVE_SLAVE_WRITE_ATTEMPTED
                 )
                 try:
-                    await slave.write_power(
+                    verification = await slave.write_power(
                         expected_slave_power,
                         guard=lambda: self._forward_write_allowed(record),
+                        on_ack_unconfirmed=lambda: self._emit_diagnostic_event(
+                            LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED
+                        ),
                     )
                 except PowerStateVerificationError as error:
                     # Preserve the earliest adapter-stage fact before the following full-state
@@ -1353,9 +1371,21 @@ class TemporaryLinkageController:
                         LinkageDiagnosticEventKind.LIVE_SLAVE_FULL_STATE_VERIFIED
                     )
                     raise
-                self._emit_diagnostic_event(
-                    LinkageDiagnosticEventKind.LIVE_SLAVE_ADAPTER_VERIFIED
-                )
+                if verification is ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK:
+                    verified_event = (
+                        LinkageDiagnosticEventKind.LIVE_SLAVE_STATE_VERIFIED_WITHOUT_ACK
+                    )
+                elif verification is ControlVerificationOutcome.STATE_VERIFIED:
+                    verified_event = LinkageDiagnosticEventKind.LIVE_SLAVE_ADAPTER_VERIFIED
+                else:
+                    raise LinkageTransactionError(
+                        "live slave power write returned no verification outcome"
+                    )
+                # The adapter may have spent several seconds closing, authenticating, and
+                # reading. A stop, deadline, or safety trip during that interval must win before
+                # this result is persisted as forward progress.
+                self._require_forward_write(record)
+                self._emit_diagnostic_event(verified_event)
                 power_change_sent = True
                 _LOGGER.info(
                     "native-linkage requested live slave power change power=%s",

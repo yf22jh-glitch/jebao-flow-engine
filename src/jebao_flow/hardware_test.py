@@ -191,7 +191,9 @@ class HardwareTestEvidence(BaseModel):
 
     active_entered_at: datetime | None = None
     live_slave_write_attempted_at: datetime | None = None
+    live_slave_ack_unconfirmed_at: datetime | None = None
     live_slave_adapter_verified_at: datetime | None = None
+    live_slave_state_verified_without_ack_at: datetime | None = None
     live_slave_full_state_verified_at: datetime | None = None
     verified_sample_count: int = Field(default=0, ge=0)
     first_verified_sample: HardwareTestVerifiedSample | None = None
@@ -205,7 +207,9 @@ class HardwareTestEvidence(BaseModel):
     @model_validator(mode="after")
     def validate_progress(self) -> HardwareTestEvidence:
         attempted = self.live_slave_write_attempted_at
+        ack_unconfirmed = self.live_slave_ack_unconfirmed_at
         adapter = self.live_slave_adapter_verified_at
+        without_ack = self.live_slave_state_verified_without_ack_at
         full_state = self.live_slave_full_state_verified_at
         if attempted is not None and (
             self.active_entered_at is None or attempted < self.active_entered_at
@@ -213,10 +217,32 @@ class HardwareTestEvidence(BaseModel):
             raise ValueError("live slave write attempt must follow ACTIVE entry")
         if adapter is not None and (attempted is None or adapter < attempted):
             raise ValueError("adapter verification must follow a live slave write attempt")
+        if ack_unconfirmed is not None and (
+            attempted is None or ack_unconfirmed < attempted
+        ):
+            raise ValueError("ACK loss must follow a live slave write attempt")
+        if adapter is not None and ack_unconfirmed is not None:
+            raise ValueError("a live slave write cannot both confirm and lose its ACK")
+        if without_ack is not None and (
+            ack_unconfirmed is None or without_ack < ack_unconfirmed
+        ):
+            raise ValueError("ACK-less state verification must follow recorded ACK loss")
+        ack_terminal_failures = {
+            LinkageForwardFailureCategory.CONTROL_ACK_NOT_CONFIRMED,
+            LinkageForwardFailureCategory.CONTROL_ACK_READBACK_UNAVAILABLE,
+            LinkageForwardFailureCategory.CONTROL_ACK_STATE_MISMATCH,
+            LinkageForwardFailureCategory.CONTROL_ACK_POWER_MISMATCH,
+        }
+        if (
+            adapter is not None or without_ack is not None
+        ) and self.forward_failure in ack_terminal_failures:
+            raise ValueError("verified live state cannot also have a terminal ACK failure")
         if full_state is not None and (attempted is None or full_state < attempted):
             raise ValueError("full-state verification must follow a live slave write attempt")
         if adapter is not None and full_state is not None and full_state < adapter:
             raise ValueError("full-state verification cannot precede adapter verification")
+        if without_ack is not None and full_state is not None and full_state < without_ack:
+            raise ValueError("full-state verification cannot precede ACK-less state verification")
         if self.verified_sample_count == 0:
             if self.first_verified_sample is not None or self.last_verified_sample is not None:
                 raise ValueError("zero verified samples cannot include sample evidence")
@@ -295,7 +321,9 @@ class HardwareTestIntent(BaseModel):
             value is not None
             for value in (
                 evidence.live_slave_write_attempted_at,
+                evidence.live_slave_ack_unconfirmed_at,
                 evidence.live_slave_adapter_verified_at,
+                evidence.live_slave_state_verified_without_ack_at,
                 evidence.live_slave_full_state_verified_at,
                 evidence.first_verified_sample,
                 evidence.last_verified_sample,
@@ -1328,9 +1356,15 @@ def _evidence_after_event(
     elif event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_WRITE_ATTEMPTED:
         if evidence.live_slave_write_attempted_at is None:
             update["live_slave_write_attempted_at"] = event.occurred_at
+    elif event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED:
+        if evidence.live_slave_ack_unconfirmed_at is None:
+            update["live_slave_ack_unconfirmed_at"] = event.occurred_at
     elif event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_ADAPTER_VERIFIED:
         if evidence.live_slave_adapter_verified_at is None:
             update["live_slave_adapter_verified_at"] = event.occurred_at
+    elif event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_STATE_VERIFIED_WITHOUT_ACK:
+        if evidence.live_slave_state_verified_without_ack_at is None:
+            update["live_slave_state_verified_without_ack_at"] = event.occurred_at
     elif event.kind in {
         LinkageDiagnosticEventKind.LIVE_SLAVE_FULL_STATE_VERIFIED,
         LinkageDiagnosticEventKind.LIVE_SLAVE_SAMPLE_VERIFIED,
@@ -1985,6 +2019,10 @@ def _status(
             f"{'yes' if evidence.live_slave_write_attempted_at is not None else 'no'}, "
             "adapter_verified="
             f"{'yes' if evidence.live_slave_adapter_verified_at is not None else 'no'}, "
+            "ack_unconfirmed="
+            f"{'yes' if evidence.live_slave_ack_unconfirmed_at is not None else 'no'}, "
+            "state_verified_without_ack="
+            f"{'yes' if evidence.live_slave_state_verified_without_ack_at is not None else 'no'}, "
             "full_state_verified="
             f"{'yes' if evidence.live_slave_full_state_verified_at is not None else 'no'}, "
             f"samples={evidence.verified_sample_count}, "

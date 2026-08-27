@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import struct
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 
 from jebao_flow.protocol.codec import GizwitsCommand, GizwitsFrame, encode_frame, read_frame
 from jebao_flow.protocol.errors import (
@@ -130,12 +130,22 @@ class GizwitsSession:
             expected={GizwitsCommand.HEARTBEAT_RESPONSE},
         )
 
-    async def read_raw_state(self) -> bytes:
+    async def read_raw_state(self, *, accept_reports: bool = True) -> bytes:
         self._require_authenticated()
+
+        response_predicate: Callable[[GizwitsFrame], bool] | None = None
+        if not accept_reports:
+
+            def is_explicit_state_reply(frame: GizwitsFrame) -> bool:
+                return bool(frame.payload) and frame.payload[0] == STATE_REPLY_ACTION
+
+            response_predicate = is_explicit_state_reply
+
         response = await self._exchange(
             GizwitsCommand.SERIAL_TRANSMIT_REQUEST,
             bytes([READ_STATE_ACTION]),
             expected={GizwitsCommand.SERIAL_TRANSMIT_RESPONSE},
+            response_predicate=response_predicate,
         )
         if not response.payload:
             raise UnexpectedResponseError("device returned an empty state payload")
@@ -178,6 +188,7 @@ class GizwitsSession:
         payload: bytes = b"",
         *,
         expected: Collection[int | GizwitsCommand],
+        response_predicate: Callable[[GizwitsFrame], bool] | None = None,
     ) -> GizwitsFrame:
         reader, writer = self._require_connection()
         expected_values = {int(value) for value in expected}
@@ -189,7 +200,9 @@ class GizwitsSession:
                     await writer.drain()
                     for _ in range(self.max_skipped_frames + 1):
                         frame = await read_frame(reader)
-                        if frame.command in expected_values:
+                        if frame.command in expected_values and (
+                            response_predicate is None or response_predicate(frame)
+                        ):
                             return frame
                         _LOGGER.debug(
                             "skipped_unsolicited_frame",

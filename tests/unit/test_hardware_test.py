@@ -13,6 +13,7 @@ from jebao_flow import hardware_guard, hardware_safety, hardware_test
 from jebao_flow.config import AppConfig
 from jebao_flow.devices import (
     ControlAcknowledgementError,
+    ControlVerificationOutcome,
     LinkageForwardFailureCategory,
     LinkageRecoveryReason,
     LinkageRollbackError,
@@ -493,6 +494,158 @@ def test_schedule_bootstrap_skips_prior_receipts_steps_async_slave_and_restores(
     assert evidence.rollback_failures == ()
 
 
+def test_ack_lost_but_fresh_state_verified_is_durable_success_and_exact_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 89), "pro_right": _device("pro_right", 30)}
+    left = devices["pro_left"]
+    left._capabilities = left.capabilities.model_copy(  # noqa: SLF001
+        update={
+            "native_modes": left.capabilities.native_modes | {"random"},
+            "power_limits": PowerLimits(min_power=30, max_power=100),
+        }
+    )
+    left._state = left._state.model_copy(  # noqa: SLF001
+        update={
+            "mode": "random",
+            "frequency": 34,
+            "timer_enabled": True,
+            "schedule": DeviceSchedule(enabled=True),
+        }
+    )
+    right = devices["pro_right"]
+    right._state = right._state.model_copy(  # noqa: SLF001
+        update={
+            "frequency": 32,
+            "timer_enabled": True,
+            "schedule": DeviceSchedule(enabled=True),
+        }
+    )
+    _install_fakes(monkeypatch, config, devices, seed_qualifications=False)
+    args = _args("preflight")
+    args[args.index("sync_slave")] = "async_slave"
+    args[args.index("sine")] = "constant"
+    args[args.index("0.02")] = "0.08"
+    args.extend(
+        (
+            "--bootstrap-active-schedule",
+            "--slave-power-after",
+            "38",
+            "--power-change-after",
+            "0.02",
+        )
+    )
+
+    assert hardware_test.main(args) == 0
+    token = _token(capsys.readouterr().out)
+    original_write_power = right.write_power
+
+    async def apply_then_verify_without_ack(power: int, **kwargs: object):
+        outcome = await original_write_power(
+            power,
+            guard=kwargs.get("guard"),  # type: ignore[arg-type]
+        )
+        if power != 38:
+            return outcome
+        on_ack_unconfirmed = kwargs.get("on_ack_unconfirmed")
+        assert callable(on_ack_unconfirmed)
+        on_ack_unconfirmed()
+        return ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+
+    monkeypatch.setattr(right, "write_power", apply_then_verify_without_ack)
+    run_args = [*args]
+    run_args[0] = "run-native-linkage"
+
+    assert hardware_test.main([*run_args, "--confirm", token]) == 0
+
+    intent = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    ).load()
+    assert intent is not None
+    assert intent.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
+    assert intent.outcome == "restored"
+    evidence = intent.evidence
+    assert evidence is not None
+    assert evidence.live_slave_write_attempted_at is not None
+    assert evidence.live_slave_ack_unconfirmed_at is not None
+    assert evidence.live_slave_adapter_verified_at is None
+    assert evidence.live_slave_state_verified_without_ack_at is not None
+    assert evidence.live_slave_full_state_verified_at is not None
+    assert evidence.verified_sample_count >= 1
+    assert evidence.first_verified_sample is not None
+    assert evidence.last_verified_sample is not None
+    assert evidence.first_verified_sample.slave_power == 38
+    assert evidence.last_verified_sample.slave_power == 38
+    assert evidence.last_verified_sample.slave_linkage is LinkageRole.ASYNC_SLAVE
+    assert evidence.forward_failure is None
+    assert evidence.rollback_started_at is not None
+    assert evidence.rollback_completed_at is not None
+    assert (
+        evidence.live_slave_write_attempted_at
+        <= evidence.live_slave_ack_unconfirmed_at
+        <= evidence.live_slave_state_verified_without_ack_at
+        <= evidence.live_slave_full_state_verified_at
+        <= evidence.rollback_started_at
+        <= evidence.rollback_completed_at
+    )
+    assert evidence.rollback_failures == ()
+    assert sum(
+        command.name == "power" and command.value == 38 for command in right.commands
+    ) == 1
+    assert hardware_test.canonical_journal_path(config).exists() is False
+    assert (
+        left._state.enabled,  # noqa: SLF001
+        left._state.power,  # noqa: SLF001
+        left._state.mode,  # noqa: SLF001
+        left._state.frequency,  # noqa: SLF001
+        left._state.linkage,  # noqa: SLF001
+        left._state.timer_enabled,  # noqa: SLF001
+    ) == (True, 89, "random", 34, LinkageRole.INDEPENDENT, True)
+    assert (
+        right._state.enabled,  # noqa: SLF001
+        right._state.power,  # noqa: SLF001
+        right._state.mode,  # noqa: SLF001
+        right._state.frequency,  # noqa: SLF001
+        right._state.linkage,  # noqa: SLF001
+        right._state.timer_enabled,  # noqa: SLF001
+    ) == (True, 30, "constant", 32, LinkageRole.INDEPENDENT, True)
+
+    assert hardware_test.main(["status"]) == 0
+    status_output = capsys.readouterr().out
+    assert "ack_unconfirmed=yes" in status_output
+    assert "adapter_verified=no" in status_output
+    assert "state_verified_without_ack=yes" in status_output
+    assert "full_state_verified=yes" in status_output
+    assert "forward_failure=none" in status_output
+
+
+@pytest.mark.parametrize(
+    "terminal_failure",
+    (
+        LinkageForwardFailureCategory.CONTROL_ACK_NOT_CONFIRMED,
+        LinkageForwardFailureCategory.CONTROL_ACK_READBACK_UNAVAILABLE,
+        LinkageForwardFailureCategory.CONTROL_ACK_STATE_MISMATCH,
+        LinkageForwardFailureCategory.CONTROL_ACK_POWER_MISMATCH,
+    ),
+)
+def test_verified_live_state_rejects_contradictory_terminal_ack_failure(
+    terminal_failure: LinkageForwardFailureCategory,
+) -> None:
+    now = datetime.now(UTC)
+
+    with pytest.raises(ValueError, match="terminal ACK failure"):
+        hardware_test.HardwareTestEvidence(
+            active_entered_at=now,
+            live_slave_write_attempted_at=now,
+            live_slave_ack_unconfirmed_at=now,
+            live_slave_state_verified_without_ack_at=now,
+            forward_failure=terminal_failure,
+        )
+
+
 def test_schedule_bootstrap_early_stop_restores_but_issues_no_receipts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -628,7 +781,7 @@ def test_live_slave_attempt_evidence_precedes_physical_write(
     async def assert_durable_attempt_before_write(
         power: int,
         **kwargs: object,
-    ) -> None:
+    ) -> ControlVerificationOutcome:
         nonlocal observed_attempt
         if power == 38:
             intent = hardware_test.JsonHardwareTestIntentStore(
@@ -639,7 +792,7 @@ def test_live_slave_attempt_evidence_precedes_physical_write(
             assert intent.evidence.live_slave_write_attempted_at is not None
             assert intent.evidence.live_slave_adapter_verified_at is None
             observed_attempt = True
-        await original_write(power, **kwargs)  # type: ignore[arg-type]
+        return await original_write(power, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(slave, "write_power", assert_durable_attempt_before_write)
     run_args = [*args]
@@ -738,13 +891,17 @@ def test_live_slave_failure_survives_masking_rollback_failure(
     slave = devices["pro_right"]
     original_slave_write = slave.write_power
 
-    async def discard_live_slave_power(power: int, **kwargs: object) -> None:
+    async def discard_live_slave_power(
+        power: int,
+        **kwargs: object,
+    ) -> ControlVerificationOutcome:
         previous_power = slave._state.power  # noqa: SLF001
-        await original_slave_write(power, **kwargs)  # type: ignore[arg-type]
+        outcome = await original_slave_write(power, **kwargs)  # type: ignore[arg-type]
         if power == 38:
             slave._state = slave._state.model_copy(  # noqa: SLF001
                 update={"power": previous_power}
             )
+        return outcome
 
     async def fail_rollback(
         self: TemporaryLinkageController,
@@ -917,6 +1074,28 @@ def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
     assert hardware_test.main(args) == 0
     token = _token(capsys.readouterr().out)
 
+    slave = devices["pro_right"]
+    original_write_power = slave.write_power
+
+    async def apply_then_verify_without_ack_for_recovery(
+        power: int, **kwargs: object
+    ) -> ControlVerificationOutcome:
+        outcome = await original_write_power(
+            power,
+            guard=kwargs.get("guard"),  # type: ignore[arg-type]
+        )
+        if power != 38:
+            return outcome
+        on_ack_unconfirmed = kwargs.get("on_ack_unconfirmed")
+        assert callable(on_ack_unconfirmed)
+        on_ack_unconfirmed()
+        return ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+
+    monkeypatch.setattr(
+        slave,
+        "write_power",
+        apply_then_verify_without_ack_for_recovery,
+    )
     original_rollback = TemporaryLinkageController._rollback_uninterruptibly
 
     async def fail_automatic_rollback(
@@ -961,7 +1140,9 @@ def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
     failed_evidence = failed_intent.evidence
     assert failed_evidence is not None
     assert failed_intent.primary_failure is None
-    assert failed_evidence.live_slave_adapter_verified_at is not None
+    assert failed_evidence.live_slave_ack_unconfirmed_at is not None
+    assert failed_evidence.live_slave_adapter_verified_at is None
+    assert failed_evidence.live_slave_state_verified_without_ack_at is not None
     assert failed_evidence.live_slave_full_state_verified_at is not None
     assert failed_evidence.verified_sample_count >= 1
     assert failed_evidence.forward_failure is None
@@ -999,6 +1180,12 @@ def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
     assert recovered_intent.outcome == "recovered"
     recovered_evidence = recovered_intent.evidence
     assert recovered_evidence is not None
+    assert recovered_evidence.live_slave_ack_unconfirmed_at == (
+        failed_evidence.live_slave_ack_unconfirmed_at
+    )
+    assert recovered_evidence.live_slave_state_verified_without_ack_at == (
+        failed_evidence.live_slave_state_verified_without_ack_at
+    )
     assert recovered_evidence.live_slave_full_state_verified_at == (
         failed_evidence.live_slave_full_state_verified_at
     )
@@ -1069,14 +1256,17 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
     fail_next_slave_error_read = False
     fail_next_slave_schedule_read = False
 
-    async def fail_after_live_slave_write(power: int, **kwargs: object) -> None:
+    async def fail_after_live_slave_write(
+        power: int,
+        **kwargs: object,
+    ) -> ControlVerificationOutcome:
         nonlocal fail_next_master_read, fail_next_slave_error_read
         nonlocal fail_next_slave_schedule_read
         if power == 38 and failure_kind == "slave_write_error":
             raise RuntimeError("live slave write transport failed")
-        await original_slave_write(power, **kwargs)  # type: ignore[arg-type]
+        outcome = await original_slave_write(power, **kwargs)  # type: ignore[arg-type]
         if power != 38:
-            return
+            return outcome
         if failure_kind == "control_ack_unconfirmed":
             raise ControlAcknowledgementError("live slave control ACK was not confirmed")
         if failure_kind == "master_readback_mismatch":
@@ -1095,6 +1285,7 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
             slave._state = slave._state.model_copy(  # noqa: SLF001
                 update={"power": 33, "linkage": LinkageRole.INDEPENDENT}
             )
+        return outcome
 
     async def fail_one_master_read() -> DeviceState:
         nonlocal fail_next_master_read

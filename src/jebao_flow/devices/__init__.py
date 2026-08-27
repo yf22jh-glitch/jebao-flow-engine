@@ -1,7 +1,11 @@
 from jebao_flow.devices.base import (
     ControlAcknowledgementError,
+    ControlAckPowerMismatchError,
+    ControlAckReadbackError,
+    ControlAckStateMismatchError,
     ControlReadbackError,
     ControlStateMismatchError,
+    ControlVerificationOutcome,
     DeviceConnectionError,
     HardwareWritesDisabledError,
     JebaoDevice,
@@ -81,9 +85,13 @@ from jebao_flow.devices.verification import (
 )
 
 __all__ = [
+    "ControlAckPowerMismatchError",
+    "ControlAckReadbackError",
+    "ControlAckStateMismatchError",
     "ControlAcknowledgementError",
     "ControlReadbackError",
     "ControlStateMismatchError",
+    "ControlVerificationOutcome",
     "DeviceConnectionError",
     "DeviceControlSnapshot",
     "DeviceVerificationError",

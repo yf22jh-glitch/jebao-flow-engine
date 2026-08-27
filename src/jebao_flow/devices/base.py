@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from enum import StrEnum
 
 from jebao_flow.devices.identity import PhysicalDeviceBinding
 from jebao_flow.protocol.models import DeviceCapabilities, DeviceState, DeviceTarget, LinkageRole
@@ -45,11 +46,31 @@ class PowerStateVerificationError(ControlStateMismatchError):
     """A decoded control read-back differed only in the requested power field."""
 
 
+class ControlAckReadbackError(ControlAcknowledgementError, ControlReadbackError):
+    """Neither a control ACK nor a fresh decoded state could confirm the write."""
+
+
+class ControlAckStateMismatchError(ControlAcknowledgementError, ControlStateMismatchError):
+    """The control ACK was absent and fresh decoded state differed from the request."""
+
+
+class ControlAckPowerMismatchError(ControlAcknowledgementError, PowerStateVerificationError):
+    """The control ACK was absent and fresh decoded power differed from the request."""
+
+
 class SafetyInterlockError(DeviceError):
     pass
 
 
 WriteGuard = Callable[[], bool]
+AckUnconfirmedHook = Callable[[], None]
+
+
+class ControlVerificationOutcome(StrEnum):
+    """How a control write was proven without implying that its ACK means applied."""
+
+    STATE_VERIFIED = "state_verified"
+    STATE_VERIFIED_WITHOUT_ACK = "state_verified_without_ack"
 
 
 class JebaoDevice(ABC):
@@ -104,14 +125,15 @@ class JebaoDevice(ABC):
         power: int,
         *,
         guard: WriteGuard | None = None,
-    ) -> None:
+        on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+    ) -> ControlVerificationOutcome:
         """Write only the power datapoint under a last-moment safety guard.
 
         Native linkage diagnostics use this narrower contract so changing a slave's Flow does
         not re-assert its mode, linkage role, timer authority or power switch in the same frame.
         """
 
-        del power, guard
+        del power, guard, on_ack_unconfirmed
         raise UnsupportedCapabilityError("guarded power-only writes are unsupported")
 
     @abstractmethod

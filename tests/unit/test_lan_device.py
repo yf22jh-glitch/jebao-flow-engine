@@ -6,8 +6,11 @@ import pytest
 from jebao_flow.config import DeviceConfig, DeviceControlConfig, DeviceType, RuntimeConfig
 from jebao_flow.devices import (
     ControlAcknowledgementError,
+    ControlAckPowerMismatchError,
+    ControlAckReadbackError,
     ControlReadbackError,
     ControlStateMismatchError,
+    ControlVerificationOutcome,
     HardwareWritesDisabledError,
     LanJebaoDevice,
     PhysicalDeviceBinding,
@@ -55,20 +58,27 @@ class _FakeSession:
         self.connect_calls = 0
         self.authenticate_calls = 0
         self.sent: list[bytes] = []
+        self.read_accept_reports: list[bool] = []
+        self.events: list[str] = []
         self.__class__.instances.append(self)
 
     async def connect(self) -> None:
         self.connect_calls += 1
+        self.events.append("connect")
         self.connected = True
 
     async def disconnect(self) -> None:
+        self.events.append("disconnect")
         self.connected = False
 
     async def authenticate(self) -> bytes:
         self.authenticate_calls += 1
+        self.events.append("authenticate")
         return b"never-logged"
 
-    async def read_raw_state(self) -> bytes:
+    async def read_raw_state(self, *, accept_reports: bool = True) -> bytes:
+        self.read_accept_reports.append(accept_reports)
+        self.events.append(f"read:{'reports' if accept_reports else 'reply-only'}")
         if self.__class__.read_failures_remaining:
             self.__class__.read_failures_remaining -= 1
             if self.__class__.read_failures_disconnect:
@@ -77,6 +87,7 @@ class _FakeSession:
         return self.state
 
     async def send_raw_control(self, control_payload: bytes) -> bytes:
+        self.events.append("send-control")
         self.sent.append(control_payload)
         if self.__class__.send_failure is not None:
             raise self.__class__.send_failure
@@ -443,12 +454,191 @@ async def test_write_fails_after_bounded_transient_readback_timeouts() -> None:
     assert len(_FakeSession.instances[0].sent) == 1
 
 
-async def test_unconfirmed_ack_is_typed_and_preserves_command_pacing_across_reconnect() -> None:
+async def test_unconfirmed_ack_hook_precedes_strict_fresh_read_and_returns_verified_outcome(
+) -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    session = _FakeSession.instances[0]
+    hook_calls = 0
+
+    def persist_ack_unconfirmed() -> None:
+        nonlocal hook_calls
+        hook_calls += 1
+        session.events.append("ack-unconfirmed-hook")
+
+    outcome = await device.write_power(
+        50,
+        on_ack_unconfirmed=persist_ack_unconfirmed,
+    )
+
+    assert outcome is ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+    assert hook_calls == 1
+    assert len(session.sent) == 1
+    assert session.connect_calls == 2
+    assert session.authenticate_calls == 2
+    assert session.read_accept_reports == [False]
+    hook_index = session.events.index("ack-unconfirmed-hook")
+    assert hook_index > session.events.index("send-control")
+    assert hook_index < session.events.index("connect", 1)
+    assert hook_index < session.events.index("read:reply-only")
+
+
+async def test_unconfirmed_ack_fresh_mismatch_is_typed_without_resending() -> None:
+    _FakeSession.state = _pro_state(power=34)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    session = _FakeSession.instances[0]
+    hook_calls = 0
+
+    def persist_ack_unconfirmed() -> None:
+        nonlocal hook_calls
+        hook_calls += 1
+        session.events.append("ack-unconfirmed-hook")
+
+    with pytest.raises(ControlAckPowerMismatchError, match="did not apply control"):
+        await device.write_power(
+            50,
+            on_ack_unconfirmed=persist_ack_unconfirmed,
+        )
+
+    assert hook_calls == 1
+    assert len(session.sent) == 1
+    assert session.connect_calls == 2
+    assert session.authenticate_calls == 2
+    assert session.read_accept_reports == [False, False, False]
+    assert session.events.index("ack-unconfirmed-hook") < session.events.index(
+        "read:reply-only"
+    )
+
+
+async def test_unconfirmed_ack_fresh_read_unavailable_is_typed_without_resending() -> None:
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    _FakeSession.read_failures_remaining = 3
+    _FakeSession.read_failures_disconnect = True
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    session = _FakeSession.instances[0]
+    hook_calls = 0
+
+    def persist_ack_unconfirmed() -> None:
+        nonlocal hook_calls
+        hook_calls += 1
+        session.events.append("ack-unconfirmed-hook")
+
+    with pytest.raises(ControlAckReadbackError, match="3 readback attempts"):
+        await device.write_power(
+            50,
+            on_ack_unconfirmed=persist_ack_unconfirmed,
+        )
+
+    assert hook_calls == 1
+    assert len(session.sent) == 1
+    assert session.connect_calls == 4
+    assert session.authenticate_calls == 4
+    assert session.read_accept_reports == [False, False, False]
+    assert session.events.index("ack-unconfirmed-hook") < session.events.index(
+        "read:reply-only"
+    )
+
+
+async def test_unconfirmed_ack_hook_failure_prevents_fresh_read_and_reconnect() -> None:
+    class EvidencePersistenceError(RuntimeError):
+        pass
+
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    session = _FakeSession.instances[0]
+    hook_calls = 0
+
+    def fail_to_persist_ack_unconfirmed() -> None:
+        nonlocal hook_calls
+        hook_calls += 1
+        session.events.append("ack-unconfirmed-hook")
+        raise EvidencePersistenceError("simulated durable evidence failure")
+
+    with pytest.raises(EvidencePersistenceError, match="durable evidence failure"):
+        await device.write_power(
+            50,
+            on_ack_unconfirmed=fail_to_persist_ack_unconfirmed,
+        )
+
+    assert hook_calls == 1
+    assert len(session.sent) == 1
+    assert session.connect_calls == 1
+    assert session.authenticate_calls == 1
+    assert session.read_accept_reports == []
+    assert "read:reply-only" not in session.events
+
+
+async def test_unconfirmed_ack_safety_trip_during_reconnect_prevents_resolution_read() -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    session = _FakeSession.instances[0]
+    original_connect = session.connect
+    allowed = True
+
+    async def reconnect_then_trip_guard() -> None:
+        nonlocal allowed
+        await original_connect()
+        if session.connect_calls == 2:
+            allowed = False
+
+    session.connect = reconnect_then_trip_guard  # type: ignore[method-assign]
+
+    with pytest.raises(SafetyInterlockError, match="safety interlock"):
+        await device.write_power(
+            50,
+            guard=lambda: allowed,
+            on_ack_unconfirmed=lambda: None,
+        )
+
+    assert len(session.sent) == 1
+    assert session.connect_calls == 2
+    assert session.authenticate_calls == 1
+    assert session.read_accept_reports == []
+
+
+async def test_unconfirmed_ack_safety_trip_during_read_cannot_become_success() -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    session = _FakeSession.instances[0]
+    original_read = session.read_raw_state
+    allowed = True
+
+    async def read_then_trip_guard(*, accept_reports: bool = True) -> bytes:
+        nonlocal allowed
+        raw = await original_read(accept_reports=accept_reports)
+        allowed = False
+        return raw
+
+    session.read_raw_state = read_then_trip_guard  # type: ignore[method-assign]
+
+    with pytest.raises(SafetyInterlockError, match="safety interlock"):
+        await device.write_power(
+            50,
+            guard=lambda: allowed,
+            on_ack_unconfirmed=lambda: None,
+        )
+
+    assert len(session.sent) == 1
+    assert session.read_accept_reports == [False]
+
+
+async def test_unconfirmed_ack_mismatch_preserves_command_pacing_across_reconnect() -> None:
     _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
     device = _device(allow_writes=True, minimum_command_interval_ms=100)
     await device.connect()
 
-    with pytest.raises(ControlAcknowledgementError, match="acknowledgement"):
+    with pytest.raises(ControlAckPowerMismatchError, match="did not apply control"):
         await device.write_power(50)
 
     attempted_at = device._last_command_at  # noqa: SLF001

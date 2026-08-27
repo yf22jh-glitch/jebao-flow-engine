@@ -4,8 +4,12 @@ import struct
 import pytest
 
 from jebao_flow.protocol.codec import MAGIC, GizwitsCommand, encode_frame, read_frame
-from jebao_flow.protocol.errors import AuthenticationError, ProtocolTimeoutError
-from jebao_flow.protocol.session import STATE_REPLY_ACTION, GizwitsSession
+from jebao_flow.protocol.errors import (
+    AuthenticationError,
+    ProtocolTimeoutError,
+    UnexpectedResponseError,
+)
+from jebao_flow.protocol.session import STATE_REPLY_ACTION, STATE_REPORT_ACTION, GizwitsSession
 
 
 async def test_session_authenticates_skips_unsolicited_and_reads_state() -> None:
@@ -79,6 +83,124 @@ async def test_session_authenticates_skips_unsolicited_and_reads_state() -> None
         (GizwitsCommand.SERIAL_TRANSMIT_REQUEST, b"\x02"),
         (GizwitsCommand.HEARTBEAT_REQUEST, b""),
         (GizwitsCommand.SERIAL_CONTROL_REQUEST, b"\x00\x00\x00\x01\x01\x80\x00"),
+    ]
+
+
+async def test_explicit_state_read_skips_reports_and_empty_payload_without_requery() -> None:
+    received: list[tuple[int, bytes]] = []
+
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            passcode = b"abc123"
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.PASSCODE_RESPONSE,
+                    struct.pack(">H", len(passcode)) + passcode,
+                )
+            )
+            await writer.drain()
+
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            writer.write(encode_frame(GizwitsCommand.LOGIN_RESPONSE, b"\x00"))
+            await writer.drain()
+
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            writer.write(encode_frame(GizwitsCommand.SERIAL_TRANSMIT_RESPONSE, b""))
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+                    bytes([STATE_REPORT_ACTION]) + b"reported-state",
+                )
+            )
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+                    bytes([STATE_REPLY_ACTION]) + b"explicit-state",
+                )
+            )
+            await writer.drain()
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    session = GizwitsSession("127.0.0.1", port=port, max_skipped_frames=2)
+    try:
+        await session.connect()
+        await session.authenticate()
+        state = await session.read_raw_state(accept_reports=False)
+    finally:
+        await session.disconnect()
+        server.close()
+        await server.wait_closed()
+
+    assert state == b"explicit-state"
+    assert received == [
+        (GizwitsCommand.PASSCODE_REQUEST, b""),
+        (GizwitsCommand.LOGIN_REQUEST, b"\x00\x06abc123"),
+        (GizwitsCommand.SERIAL_TRANSMIT_REQUEST, b"\x02"),
+    ]
+
+
+async def test_explicit_state_read_exhausts_skip_budget_without_requery() -> None:
+    received: list[tuple[int, bytes]] = []
+
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            passcode = b"abc123"
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.PASSCODE_RESPONSE,
+                    struct.pack(">H", len(passcode)) + passcode,
+                )
+            )
+            await writer.drain()
+
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            writer.write(encode_frame(GizwitsCommand.LOGIN_RESPONSE, b"\x00"))
+            await writer.drain()
+
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            for state in (b"first-report", b"second-report"):
+                writer.write(
+                    encode_frame(
+                        GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+                        bytes([STATE_REPORT_ACTION]) + state,
+                    )
+                )
+            await writer.drain()
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    session = GizwitsSession("127.0.0.1", port=port, max_skipped_frames=1)
+    try:
+        await session.connect()
+        await session.authenticate()
+        with pytest.raises(UnexpectedResponseError, match="no expected response"):
+            await session.read_raw_state(accept_reports=False)
+    finally:
+        await session.disconnect()
+        server.close()
+        await server.wait_closed()
+
+    assert received == [
+        (GizwitsCommand.PASSCODE_REQUEST, b""),
+        (GizwitsCommand.LOGIN_REQUEST, b"\x00\x06abc123"),
+        (GizwitsCommand.SERIAL_TRANSMIT_REQUEST, b"\x02"),
     ]
 
 

@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from jebao_flow.devices.base import (
+    AckUnconfirmedHook,
+    ControlVerificationOutcome,
     DeviceConnectionError,
     JebaoDevice,
     SafetyInterlockError,
@@ -140,7 +142,9 @@ class SimulatedJebaoDevice(JebaoDevice):
         power: int,
         *,
         guard: WriteGuard | None = None,
-    ) -> None:
+        on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+    ) -> ControlVerificationOutcome:
+        del on_ack_unconfirmed
         limits = self._capabilities.power_limits
         if not limits.min_power <= power <= limits.max_power:
             raise ValueError(
@@ -163,6 +167,7 @@ class SimulatedJebaoDevice(JebaoDevice):
             now = datetime.now(UTC)
             self._state = self._state.model_copy(update={"power": power, "observed_at": now})
             self.commands.append(SimulatedCommand("power", power, now))
+            return ControlVerificationOutcome.STATE_VERIFIED
 
     async def set_mode(self, mode: str) -> None:
         if not mode:

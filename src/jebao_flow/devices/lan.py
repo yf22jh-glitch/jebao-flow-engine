@@ -9,9 +9,13 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from jebao_flow.devices.base import (
-    ControlAcknowledgementError,
+    AckUnconfirmedHook,
+    ControlAckPowerMismatchError,
+    ControlAckReadbackError,
+    ControlAckStateMismatchError,
     ControlReadbackError,
     ControlStateMismatchError,
+    ControlVerificationOutcome,
     HardwareWritesDisabledError,
     JebaoDevice,
     PowerStateVerificationError,
@@ -47,7 +51,7 @@ class RawSession(Protocol):
 
     async def authenticate(self) -> bytes: ...
 
-    async def read_raw_state(self) -> bytes: ...
+    async def read_raw_state(self, *, accept_reports: bool = True) -> bytes: ...
 
     async def send_raw_control(self, control_payload: bytes) -> bytes: ...
 
@@ -210,10 +214,15 @@ class LanJebaoDevice(JebaoDevice):
         power: int,
         *,
         guard: WriteGuard | None = None,
-    ) -> None:
+        on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+    ) -> ControlVerificationOutcome:
         self._validate_power(power)
         attribute = self._require_logical_attribute(Capability.POWER)
-        await self._apply_changes({attribute: power}, guard=guard)
+        return await self._apply_changes(
+            {attribute: power},
+            guard=guard,
+            on_ack_unconfirmed=on_ack_unconfirmed,
+        )
 
     async def set_mode(self, mode: str) -> None:
         attribute_name = self._require_logical_attribute(Capability.MODE)
@@ -330,7 +339,8 @@ class LanJebaoDevice(JebaoDevice):
         changes: dict[str, Any],
         *,
         guard: WriteGuard | None = None,
-    ) -> None:
+        on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+    ) -> ControlVerificationOutcome:
         if not self._allow_hardware_writes:
             raise HardwareWritesDisabledError(
                 f"hardware writes are locked for {self._device_id}; review preview_target first"
@@ -346,7 +356,7 @@ class LanJebaoDevice(JebaoDevice):
                 values = await self._read_values()
                 if all(values.get(name) == expected for name, expected in changes.items()):
                     self._require_write_guard(guard)
-                    return
+                    return ControlVerificationOutcome.STATE_VERIFIED
             await self._respect_command_interval()
             # The guard is intentionally checked under the same device I/O lock and immediately
             # before send. An emergency-stop writer that trips the guard while waiting cannot be
@@ -355,12 +365,36 @@ class LanJebaoDevice(JebaoDevice):
             # Record the physical command boundary before awaiting the ACK. A timeout or lost ACK
             # leaves the write outcome uncertain, so rollback must still respect command pacing.
             self._last_command_at = asyncio.get_running_loop().time()
+            acknowledgement_confirmed = True
             try:
                 await self._session.send_raw_control(payload)
-            except (ProtocolError, OSError) as error:
-                raise ControlAcknowledgementError(
-                    f"device {self._device_id!r} did not confirm the control acknowledgement"
-                ) from error
+            except (ProtocolError, OSError) as acknowledgement_error:
+                acknowledgement_confirmed = False
+                # The frame may already have reached the pump. Quarantine this response stream,
+                # never retransmit the control, and use only a fresh authenticated state read to
+                # decide whether the requested datapoint was applied.
+                try:
+                    await self._session.disconnect()
+                except (ProtocolError, OSError) as disconnect_error:
+                    if self._session.connected:
+                        if on_ack_unconfirmed is not None:
+                            on_ack_unconfirmed()
+                        raise ControlAckReadbackError(
+                            f"device {self._device_id!r} could not quarantine the "
+                            "unacknowledged control session"
+                        ) from disconnect_error
+                self._last_sent_values.clear()
+                if self._session.connected:
+                    if on_ack_unconfirmed is not None:
+                        on_ack_unconfirmed()
+                    raise ControlAckReadbackError(
+                        f"device {self._device_id!r} retained an unacknowledged control session"
+                    ) from acknowledgement_error
+                # This synchronous hook is the crash boundary: attended hardware tests fsync the
+                # non-terminal ACK-loss fact before any reconnect or read-only resolution query.
+                # If persistence fails, no further forward work is allowed and rollback begins.
+                if on_ack_unconfirmed is not None:
+                    on_ack_unconfirmed()
             self._require_write_guard(guard)
 
             for attempt in range(self._readback_attempts):
@@ -368,40 +402,62 @@ class LanJebaoDevice(JebaoDevice):
                     await asyncio.sleep(self._readback_delay)
                 self._require_write_guard(guard)
                 try:
-                    values = await self._read_values()
+                    if not self._session.connected:
+                        await self._session.connect()
+                        self._require_write_guard(guard)
+                        await self._session.authenticate()
+                        self._last_sent_values.clear()
+                    # Connecting and authenticating may take several seconds. Re-check the
+                    # attended operation deadline/interlock before issuing even a read-only
+                    # query, and again before accepting its result as forward progress.
+                    self._require_write_guard(guard)
+                    values = await self._read_values(
+                        accept_reports=acknowledgement_confirmed
+                    )
+                    self._require_write_guard(guard)
                 except (ProtocolError, OSError, ValueError) as error:
                     if attempt + 1 == self._readback_attempts:
-                        raise ControlReadbackError(
+                        error_type = (
+                            ControlReadbackError
+                            if acknowledgement_confirmed
+                            else ControlAckReadbackError
+                        )
+                        raise error_type(
                             f"device {self._device_id!r} could not verify control after "
                             f"{self._readback_attempts} readback attempts"
                         ) from error
-                    # A failed framed exchange quarantines its stream. Re-authenticate only for
-                    # the following readback; the uncertain control frame is never retransmitted.
-                    if not self._session.connected:
-                        try:
-                            await self._session.connect()
-                            await self._session.authenticate()
-                            self._last_sent_values.clear()
-                        except (ProtocolError, OSError):
-                            # The next bounded attempt either establishes a session or produces
-                            # one final typed readback failure. Never turn this into a write retry.
-                            continue
+                    # A failed framed exchange quarantines its stream. The following bounded
+                    # attempt may re-authenticate for readback only; control is never retransmitted.
                     continue
                 if all(values.get(name) == expected for name, expected in changes.items()):
                     self._last_sent_values.update(changes)
-                    return
+                    return (
+                        ControlVerificationOutcome.STATE_VERIFIED
+                        if acknowledgement_confirmed
+                        else ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+                    )
                 if attempt + 1 == self._readback_attempts:
                     mismatches = {
                         name: {"expected": expected, "actual": values.get(name)}
                         for name, expected in changes.items()
                         if values.get(name) != expected
                     }
-                    error_type = (
-                        PowerStateVerificationError
-                        if self.schema.power_attribute is not None
+                    power_only = (
+                        self.schema.power_attribute is not None
                         and set(mismatches) == {self.schema.power_attribute}
-                        else ControlStateMismatchError
                     )
+                    if acknowledgement_confirmed:
+                        error_type = (
+                            PowerStateVerificationError
+                            if power_only
+                            else ControlStateMismatchError
+                        )
+                    else:
+                        error_type = (
+                            ControlAckPowerMismatchError
+                            if power_only
+                            else ControlAckStateMismatchError
+                        )
                     raise error_type(
                         f"device {self._device_id!r} did not apply control: {mismatches}"
                     )
@@ -411,8 +467,8 @@ class LanJebaoDevice(JebaoDevice):
         if guard is not None and guard() is not True:
             raise SafetyInterlockError("device write was blocked by the safety interlock")
 
-    async def _read_values(self) -> dict[str, Any]:
-        raw = await self._session.read_raw_state()
+    async def _read_values(self, *, accept_reports: bool = True) -> dict[str, Any]:
+        raw = await self._session.read_raw_state(accept_reports=accept_reports)
         return self.schema.decode_status(raw)
 
     async def _respect_command_interval(self) -> None:

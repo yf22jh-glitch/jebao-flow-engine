@@ -9,8 +9,12 @@ import pytest
 
 from jebao_flow.devices import (
     ControlAcknowledgementError,
+    ControlAckPowerMismatchError,
+    ControlAckReadbackError,
+    ControlAckStateMismatchError,
     ControlReadbackError,
     ControlStateMismatchError,
+    ControlVerificationOutcome,
     DeviceControlSnapshot,
     LinkageApplyError,
     LinkageDiagnosticEvent,
@@ -51,6 +55,18 @@ from jebao_flow.protocol.models import (
         (
             ControlAcknowledgementError("ack unavailable"),
             LinkageForwardFailureCategory.CONTROL_ACK_NOT_CONFIRMED,
+        ),
+        (
+            ControlAckReadbackError("ACK lost and readback unavailable"),
+            LinkageForwardFailureCategory.CONTROL_ACK_READBACK_UNAVAILABLE,
+        ),
+        (
+            ControlAckStateMismatchError("ACK lost and state mismatched"),
+            LinkageForwardFailureCategory.CONTROL_ACK_STATE_MISMATCH,
+        ),
+        (
+            ControlAckPowerMismatchError("ACK lost and power mismatched"),
+            LinkageForwardFailureCategory.CONTROL_ACK_POWER_MISMATCH,
         ),
         (
             ControlReadbackError("readback unavailable"),
@@ -136,6 +152,33 @@ class _RecordingDevice(SimulatedJebaoDevice):
                 f"write-complete:{self.device_id}:{target.linkage}:"
                 f"{target.timer_enabled}:{target.power}"
             )
+
+
+class _AckLostStateVerifiedDevice(_RecordingDevice):
+    """Apply the live Flow once, record its missing ACK, then prove fresh state."""
+
+    async def write_power(
+        self,
+        power: int,
+        *,
+        guard=None,
+        on_ack_unconfirmed=None,
+    ) -> ControlVerificationOutcome:
+        outcome = await super().write_power(power, guard=guard)
+        if power != 38:
+            return outcome
+        assert on_ack_unconfirmed is not None
+        on_ack_unconfirmed()
+        return ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+
+
+class _DiagnosticRecordingController(TemporaryLinkageController):
+    def __init__(self, *args, diagnostic_events: list[LinkageDiagnosticEvent], **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.diagnostic_events = diagnostic_events
+
+    def _on_diagnostic_event(self, event: LinkageDiagnosticEvent) -> None:
+        self.diagnostic_events.append(event)
 
 
 class _FailOnceOnRelationshipDevice(_RecordingDevice):
@@ -1769,6 +1812,92 @@ async def test_schedule_bootstrap_qualifies_changes_async_slave_power_and_restor
             "frequency": 34,
         }
     ]
+
+
+async def test_live_slave_ack_loss_is_recorded_before_state_resolution_and_exact_restore(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=89, frequency=34)
+    slave = await _ready_device(
+        "slave",
+        device_class=_AckLostStateVerifiedDevice,
+        power=30,
+        frequency=32,
+    )
+    master._capabilities = master.capabilities.model_copy(  # noqa: SLF001
+        update={"native_modes": master.capabilities.native_modes | {"random"}}
+    )
+    await master.set_mode("random")
+    master.commands.clear()
+    slave.commands.clear()
+
+    original_snapshots = {}
+    for device in (master, slave):
+        binding = device.physical_binding
+        assert binding is not None
+        original_snapshots[device.device_id] = DeviceControlSnapshot.from_state(
+            device.device_id,
+            await device.get_state(),
+            physical_binding=binding,
+        )
+
+    store = JsonLinkageJournalStore(tmp_path / "ack-lost-state-verified.json")
+    diagnostic_events: list[LinkageDiagnosticEvent] = []
+    controller = _DiagnosticRecordingController(
+        {"master": master, "slave": slave},
+        store,
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        restore_verification_backoff_seconds=0,
+        restore_verification_read_timeout_seconds=0.1,
+        restore_verification_total_timeout_seconds=0.3,
+        diagnostic_events=diagnostic_events,
+    )
+    spec = LinkageTestSpec(
+        operation_id="ack_lost_state_verified",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=0.08,
+        verification_interval_seconds=0.005,
+        bootstrap_active_schedule=True,
+        slave_power_after=38,
+        power_change_after_seconds=0.02,
+    )
+
+    result = await controller.run(spec)
+
+    assert result.stop_reason is LinkageStopReason.TIMEOUT
+    assert result.slave_power_change_verified is True
+    kinds = [event.kind for event in diagnostic_events]
+    assert kinds.count(LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED) == 1
+    assert (
+        kinds.index(LinkageDiagnosticEventKind.LIVE_SLAVE_WRITE_ATTEMPTED)
+        < kinds.index(LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED)
+        < kinds.index(LinkageDiagnosticEventKind.LIVE_SLAVE_STATE_VERIFIED_WITHOUT_ACK)
+        < kinds.index(LinkageDiagnosticEventKind.LIVE_SLAVE_FULL_STATE_VERIFIED)
+        < kinds.index(LinkageDiagnosticEventKind.ROLLBACK_STARTED)
+    )
+    assert LinkageDiagnosticEventKind.LIVE_SLAVE_ADAPTER_VERIFIED not in kinds
+    assert LinkageDiagnosticEventKind.FORWARD_FAILED not in kinds
+    assert sum(
+        command.name == "power" and command.value == 38 for command in slave.commands
+    ) == 1
+    assert store.load() is None
+
+    restored_snapshots = {}
+    for device in (master, slave):
+        binding = device.physical_binding
+        assert binding is not None
+        restored_snapshots[device.device_id] = DeviceControlSnapshot.from_state(
+            device.device_id,
+            await device.get_state(),
+            physical_binding=binding,
+        )
+    assert restored_snapshots == original_snapshots
 
 
 async def test_schedule_bootstrap_requires_timer_on_before_any_write(tmp_path: Path) -> None:
