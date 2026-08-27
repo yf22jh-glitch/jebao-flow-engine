@@ -1054,6 +1054,104 @@ async def test_externally_disarmed_roles_can_close_the_exact_journal_without_a_w
     assert slave.calls == []
 
 
+async def test_external_disarm_closure_refreshes_both_sessions_before_proof(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair()
+    store = JsonScheduleLinkageJournalStore(tmp_path / "external-disarm-refresh.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+    )
+    preflight = await controller.preflight(_spec())
+    now = datetime.now(UTC)
+    record = ScheduleLinkageRecord(
+        operation_id=preflight.spec.operation_id,
+        phase=ScheduleLinkagePhase.APPLYING,
+        spec=preflight.spec,
+        snapshots=preflight.snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=preflight.spec.observation_window_seconds),
+        linkage_write_intent_device_ids=("master", "slave"),
+        linked_device_ids=("master",),
+    )
+    with store.lease():
+        store.create(record)
+    for device, snapshot in zip((master, slave), preflight.snapshots, strict=True):
+        await device.write_target(
+            DeviceTarget(
+                enabled=snapshot.enabled,
+                power=snapshot.power,
+                mode=snapshot.mode,
+                frequency=snapshot.frequency,
+                linkage=LinkageRole.INDEPENDENT,
+                timer_enabled=False,
+            )
+        )
+        device.calls.clear()
+        device.commands.clear()
+
+    assert await controller.finalize_externally_disarmed(record.operation_id) is True
+
+    assert store.load() is None
+    assert master.session_disconnect_count == master.session_connect_count == 1
+    assert slave.session_disconnect_count == slave.session_connect_count == 1
+    assert master.calls == []
+    assert slave.calls == []
+
+
+async def test_external_disarm_refresh_failure_keeps_the_role_journal(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair()
+    store = JsonScheduleLinkageJournalStore(tmp_path / "external-disarm-refresh-failure.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+    )
+    preflight = await controller.preflight(_spec())
+    now = datetime.now(UTC)
+    record = ScheduleLinkageRecord(
+        operation_id=preflight.spec.operation_id,
+        phase=ScheduleLinkagePhase.APPLYING,
+        spec=preflight.spec,
+        snapshots=preflight.snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=preflight.spec.observation_window_seconds),
+        linkage_write_intent_device_ids=("master", "slave"),
+        linked_device_ids=("master",),
+    )
+    with store.lease():
+        store.create(record)
+    for device, snapshot in zip((master, slave), preflight.snapshots, strict=True):
+        await device.write_target(
+            DeviceTarget(
+                enabled=snapshot.enabled,
+                power=snapshot.power,
+                mode=snapshot.mode,
+                frequency=snapshot.frequency,
+                linkage=LinkageRole.INDEPENDENT,
+                timer_enabled=False,
+            )
+        )
+        device.calls.clear()
+        device.commands.clear()
+    master.fail_after_connect_numbers.add(1)
+
+    with pytest.raises(ScheduleLinkageRollbackError, match="could not be proven"):
+        await controller.finalize_externally_disarmed(record.operation_id)
+
+    assert store.load() == record
+    assert master.calls == []
+    assert slave.calls == []
+
+
 @pytest.mark.parametrize(
     ("device_id", "boundary_side"),
     (

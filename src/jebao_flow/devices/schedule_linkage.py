@@ -906,6 +906,14 @@ class ScheduleActiveLinkageController:
                         raise ScheduleLinkageRollbackError(
                             "external disarm does not own this schedule-linkage journal"
                         )
+                    self._validate_recovery_bindings(
+                        record,
+                        permit_disconnected=self._refresh_sessions_before_critical_reads,
+                    )
+                    # The composed disarm proof may have consumed a paired 0x04 report while
+                    # leaving its older 0x03 reply queued.  Close the role journal only from a
+                    # newly authenticated stream, just like every other critical role read.
+                    await self._refresh_pair_sessions_if_enabled(record.spec)
                     self._validate_recovery_bindings(record)
                     states = await self._read_pair(record.spec)
                     for snapshot in record.snapshots:
