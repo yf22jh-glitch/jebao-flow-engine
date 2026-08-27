@@ -161,6 +161,8 @@ class ScheduleLinkageRunFailure(StrEnum):
     MASTER_PAIR_STATE_READ = "master_pair_state_read"
     MASTER_PAIR_DEADLINE = "master_pair_deadline"
     MASTER_PAIR_CLOCK = "master_pair_clock"
+    MASTER_PAIR_CLOCK_SKEW = "master_pair_clock_skew"
+    MASTER_PAIR_CLOCK_CONTINUITY = "master_pair_clock_continuity"
     MASTER_PAIR_STATE = "master_pair_state"
     MASTER_PAIR_MASTER_STATE = "master_pair_master_state"
     MASTER_PAIR_SLAVE_STATE = "master_pair_slave_state"
@@ -174,6 +176,8 @@ class ScheduleLinkageRunFailure(StrEnum):
     SLAVE_PAIR_STATE_READ = "slave_pair_state_read"
     SLAVE_PAIR_DEADLINE = "slave_pair_deadline"
     SLAVE_PAIR_CLOCK = "slave_pair_clock"
+    SLAVE_PAIR_CLOCK_SKEW = "slave_pair_clock_skew"
+    SLAVE_PAIR_CLOCK_CONTINUITY = "slave_pair_clock_continuity"
     SLAVE_PAIR_STATE = "slave_pair_state"
     SLAVE_PAIR_MASTER_STATE = "slave_pair_master_state"
     SLAVE_PAIR_SLAVE_STATE = "slave_pair_slave_state"
@@ -1380,16 +1384,30 @@ class ScheduleActiveLinkageController:
         """Read correlated replies only when a driver can distinguish them from reports."""
 
         ids = (spec.master_device_id, spec.slave_device_id)
-        states = await asyncio.gather(
-            *(self._get_device(device_id).get_explicit_state() for device_id in ids)
+        read_tasks = tuple(
+            asyncio.create_task(self._get_device(device_id).get_explicit_state())
+            for device_id in ids
         )
+        try:
+            states = await asyncio.gather(*read_tasks)
+        finally:
+            for task in read_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*read_tasks, return_exceptions=True)
         return dict(zip(ids, states, strict=True))
 
     async def _read_pair_explicit_states_guarded(
         self,
         spec: ScheduleLinkageSpec,
+        *,
+        context: Literal[
+            "first-write gate",
+            "post-role verification",
+            "frequency convergence",
+        ] = "frequency convergence",
     ) -> dict[str, DeviceState]:
-        """Cancel a read promptly if stop or safety authority changes after refresh."""
+        """Cancel a reply-only read promptly if stop or safety authority changes."""
 
         stop_event = self._stop_event
         if stop_event is None:
@@ -1406,7 +1424,7 @@ class ScheduleActiveLinkageController:
             if stop_task in done:
                 self._set_pair_verification_checkpoint()
                 raise ScheduleLinkageApplyError(
-                    "schedule-linkage stop was requested during frequency convergence"
+                    f"schedule-linkage stop was requested during {context}"
                 )
             if safety_task in done:
                 self._set_pair_verification_checkpoint()
@@ -1420,12 +1438,28 @@ class ScheduleActiveLinkageController:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def _read_critical_pair_states(
+        self,
+        spec: ScheduleLinkageSpec,
+        *,
+        context: Literal["first-write gate", "post-role verification"],
+    ) -> dict[str, DeviceState]:
+        """Use reply-only reads only when the caller has opened fresh sessions."""
+
+        if not self._refresh_sessions_before_critical_reads:
+            return await self._read_pair_states(spec)
+        return await self._read_pair_explicit_states_guarded(spec, context=context)
+
     async def _assert_first_write_gate(
         self,
         record: ScheduleLinkageRecord,
     ) -> _ClockAnchor:
         await self._refresh_pair_sessions_if_enabled(record.spec)
-        states = await self._read_pair(record.spec)
+        states = await self._read_critical_pair_states(
+            record.spec,
+            context="first-write gate",
+        )
+        self._assert_pair_clock_skew(record.spec, states)
         sampled_at = self._monotonic()
         self._assert_observation_deadline(sampled_at)
         fresh = self._snapshots_from_states(record.spec, states)
@@ -1514,13 +1548,16 @@ class ScheduleActiveLinkageController:
         self._set_pair_verification_failure("session_refresh")
         await self._refresh_pair_sessions_if_enabled(record.spec)
         self._set_pair_verification_failure("state_read")
-        states = await self._read_pair_states(record.spec)
-        self._set_pair_verification_failure("clock")
+        states = await self._read_critical_pair_states(
+            record.spec,
+            context="post-role verification",
+        )
+        self._set_pair_verification_failure("clock_skew")
         self._assert_pair_clock_skew(record.spec, states)
         sampled_at = self._monotonic()
         self._set_pair_verification_failure("deadline")
         self._assert_observation_deadline(sampled_at)
-        self._set_pair_verification_failure("clock")
+        self._set_pair_verification_failure("clock_continuity")
         self._assert_clock_continuity(
             record.spec,
             states,
@@ -1601,12 +1638,12 @@ class ScheduleActiveLinkageController:
             self._assert_role_frequency_retry_authority(pair_failure)
             self._set_pair_verification_failure("state_read")
             states = await self._read_pair_explicit_states_guarded(spec)
-            self._set_pair_verification_failure("clock")
+            self._set_pair_verification_failure("clock_skew")
             self._assert_pair_clock_skew(spec, states)
             sampled_at = self._monotonic()
             self._set_pair_verification_failure("deadline")
             self._assert_observation_deadline(sampled_at)
-            self._set_pair_verification_failure("clock")
+            self._set_pair_verification_failure("clock_continuity")
             self._assert_clock_continuity(
                 spec,
                 states,
@@ -1986,6 +2023,8 @@ class ScheduleActiveLinkageController:
             "state_read",
             "deadline",
             "clock",
+            "clock_skew",
+            "clock_continuity",
             "state",
             "auto",
         ],
@@ -2005,6 +2044,12 @@ class ScheduleActiveLinkageController:
             ("master", "state_read"): ScheduleLinkageRunFailure.MASTER_PAIR_STATE_READ,
             ("master", "deadline"): ScheduleLinkageRunFailure.MASTER_PAIR_DEADLINE,
             ("master", "clock"): ScheduleLinkageRunFailure.MASTER_PAIR_CLOCK,
+            ("master", "clock_skew"): (
+                ScheduleLinkageRunFailure.MASTER_PAIR_CLOCK_SKEW
+            ),
+            ("master", "clock_continuity"): (
+                ScheduleLinkageRunFailure.MASTER_PAIR_CLOCK_CONTINUITY
+            ),
             ("master", "state"): ScheduleLinkageRunFailure.MASTER_PAIR_STATE,
             ("master", "auto"): ScheduleLinkageRunFailure.MASTER_PAIR_AUTO,
             ("slave", "session_refresh"): (
@@ -2013,6 +2058,12 @@ class ScheduleActiveLinkageController:
             ("slave", "state_read"): ScheduleLinkageRunFailure.SLAVE_PAIR_STATE_READ,
             ("slave", "deadline"): ScheduleLinkageRunFailure.SLAVE_PAIR_DEADLINE,
             ("slave", "clock"): ScheduleLinkageRunFailure.SLAVE_PAIR_CLOCK,
+            ("slave", "clock_skew"): (
+                ScheduleLinkageRunFailure.SLAVE_PAIR_CLOCK_SKEW
+            ),
+            ("slave", "clock_continuity"): (
+                ScheduleLinkageRunFailure.SLAVE_PAIR_CLOCK_CONTINUITY
+            ),
             ("slave", "state"): ScheduleLinkageRunFailure.SLAVE_PAIR_STATE,
             ("slave", "auto"): ScheduleLinkageRunFailure.SLAVE_PAIR_AUTO,
         }
