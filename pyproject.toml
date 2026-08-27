@@ -38,6 +38,7 @@ jebao-flow-hwtest = "jebao_flow.hardware_test:main"
 jebao-flow-device-verify = "jebao_flow.device_verification_cli:main"
 jebao-flow-recovery = "jebao_flow.recovery_supervisor:main"
 jebao-flow-schedule-test = "jebao_flow.schedule_linkage_cli:main"
+jebao-flow-schedule-flow-test = "jebao_flow.schedule_flow_experiment_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/yf22jh-glitch/jebao-flow-engine"

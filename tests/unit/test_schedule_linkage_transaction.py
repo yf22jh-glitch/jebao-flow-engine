@@ -79,6 +79,7 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         self.second_sine_boundary: datetime | None = None
         self.next_sine_flow = sine_flow
         self.next_sine_frequency = sine_frequency
+        self.observed_sine_mode = "sine"
         self.base_clock = clock or datetime(2026, 8, 26, 18, 9)
         self.virtual_time = virtual_time
         self.clock_offset_seconds = 0.0
@@ -135,7 +136,7 @@ class _ScheduleDevice(SimulatedJebaoDevice):
                 and self.clock >= self.second_sine_boundary
             )
             observed = {
-                "AutoMode": "sine",
+                "AutoMode": self.observed_sine_mode,
                 "AutoFlow": self.next_sine_flow if use_next_sine else self.sine_flow,
                 "AutoFreq": (
                     self.next_sine_frequency if use_next_sine else self.sine_frequency
@@ -295,6 +296,7 @@ def _controller(
     store: JsonScheduleLinkageJournalStore,
     *,
     authorizer=None,
+    sample_observer=None,
 ) -> ScheduleActiveLinkageController:
     return ScheduleActiveLinkageController(
         {"master": master, "slave": slave},
@@ -303,6 +305,7 @@ def _controller(
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
         monotonic_clock=master.virtual_time.monotonic,
         sleep=master.virtual_time.sleep,
+        sample_observer=sample_observer,
     )
 
 
@@ -499,6 +502,190 @@ async def test_normal_run_persists_intent_before_each_write_and_detaches_slave_f
         record.linkage_write_intent_device_ids == ("master", "slave")
         for record in store.records
     )
+
+
+async def test_sample_observer_receives_effective_before_and_after_slave_flow(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair()
+    samples = []
+    topology_ready: list[bool] = []
+
+    def observe(sample) -> None:
+        # A durable sample claims master/async-slave topology, so it must never be emitted after
+        # only the first (master) role write has completed.
+        topology_ready.append(
+            ("write_linkage", LinkageRole.MASTER) in master.calls
+            and ("write_linkage", LinkageRole.ASYNC_SLAVE) in slave.calls
+        )
+        samples.append(sample)
+
+    controller = _controller(
+        master,
+        slave,
+        JsonScheduleLinkageJournalStore(tmp_path / "sample-evidence.json"),
+        sample_observer=observe,
+    )
+
+    result = await controller.run(await controller.preflight(_spec()))
+
+    assert result.schedule_transition_verified is True
+    assert {sample.phase for sample in samples} == {"before", "after"}
+    after = next(sample for sample in reversed(samples) if sample.phase == "after")
+    assert (after.master.mode, after.master.flow) == ("constant", 30)
+    assert (after.slave.mode, after.slave.flow) == ("constant", 35)
+    assert after.master_linkage is LinkageRole.MASTER
+    assert after.slave_linkage is LinkageRole.ASYNC_SLAVE
+    assert topology_ready and all(topology_ready)
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_sample_observer_failure_is_best_effort_and_does_not_change_role_run(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair()
+
+    def fail_sample_sink(_sample) -> None:
+        raise RuntimeError("simulated evidence sink failure")
+
+    store = JsonScheduleLinkageJournalStore(tmp_path / "failed-sample-sink.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        sample_observer=fail_sample_sink,
+    )
+
+    result = await controller.run(await controller.preflight(_spec()))
+
+    assert result.schedule_transition_verified is True
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_opt_in_slave_tuple_variance_is_observed_for_the_full_stability_window(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    # The staged schedule still declares Sine 45%, but the simulated slave remains on its prior
+    # Constant 35% tuple. This is one firmware behavior the field experiment must preserve.
+    slave.observed_sine_mode = "constant"
+    slave.sine_flow = 35
+    slave.sine_frequency = 5
+    samples = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "slave-tuple-variance.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        sample_observer=samples.append,
+    )
+    preflight = await controller.preflight(
+        _spec(
+            observation_window_seconds=130,
+            verification_interval_seconds=1,
+            minimum_lead_seconds=10,
+            post_boundary_stability_seconds=30,
+            observe_slave_after_tuple_variance=True,
+        )
+    )
+
+    result = await controller.run(preflight)
+
+    assert result.schedule_transition_verified is True
+    assert master.virtual_time.value >= 70
+    after = next(sample for sample in reversed(samples) if sample.phase == "after")
+    assert (after.master.mode, after.master.flow) == ("sine", 45)
+    assert (after.slave.mode, after.slave.flow, after.slave.frequency) == (
+        "constant",
+        35,
+        5,
+    )
+    assert store.load() is None
+
+
+async def test_post_boundary_stability_window_keeps_roles_linked_until_evidence_is_stable(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = JsonScheduleLinkageJournalStore(tmp_path / "stable-boundary.json")
+    controller = _controller(master, slave, store)
+    preflight = await controller.preflight(
+        _spec(
+            observation_window_seconds=130,
+            verification_interval_seconds=1,
+            minimum_lead_seconds=10,
+            post_boundary_stability_seconds=30,
+        )
+    )
+
+    result = await controller.run(preflight)
+
+    assert result.schedule_transition_verified is True
+    # A 40-second lead plus the requested 30 stable seconds cannot complete before t=70.
+    assert master.virtual_time.value >= 70
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert store.load() is None
+
+
+def test_post_boundary_stability_must_fit_inside_observation_window() -> None:
+    with pytest.raises(ValidationError, match="observation window"):
+        _spec(
+            observation_window_seconds=60,
+            verification_interval_seconds=1,
+            minimum_lead_seconds=10,
+            post_boundary_stability_seconds=58,
+        )
+
+
+async def test_externally_disarmed_roles_can_close_the_exact_journal_without_a_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair()
+    store = JsonScheduleLinkageJournalStore(tmp_path / "external-disarm.json")
+    controller = _controller(master, slave, store)
+    preflight = await controller.preflight(_spec())
+    now = datetime.now(UTC)
+    record = ScheduleLinkageRecord(
+        operation_id=preflight.spec.operation_id,
+        phase=ScheduleLinkagePhase.RECOVERY_REQUIRED,
+        spec=preflight.spec,
+        snapshots=preflight.snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=preflight.spec.observation_window_seconds),
+        linkage_write_intent_device_ids=("master", "slave"),
+        linked_device_ids=("master", "slave"),
+        error="simulated prior detach uncertainty",
+    )
+    with store.lease():
+        store.create(record)
+    for device in (slave, master):
+        await device.write_target(
+            DeviceTarget(
+                enabled=True,
+                power=40,
+                mode="constant",
+                frequency=5,
+                linkage=LinkageRole.INDEPENDENT,
+                timer_enabled=False,
+            )
+        )
+        device.calls.clear()
+        device.commands.clear()
+
+    assert await controller.finalize_externally_disarmed(record.operation_id) is True
+
+    assert store.load() is None
+    assert master.calls == []
+    assert slave.calls == []
 
 
 @pytest.mark.parametrize(

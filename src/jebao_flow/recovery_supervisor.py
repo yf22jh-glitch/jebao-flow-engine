@@ -43,6 +43,7 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageJournalClaimError,
     ScheduleLinkageRecord,
 )
+from jebao_flow.devices.schedule_transaction import TemporaryScheduleRecord
 from jebao_flow.devices.verification import (
     DeviceVerificationBusyError,
     DeviceVerificationRecord,
@@ -54,6 +55,7 @@ from jebao_flow.hardware_safety import (
     native_linkage_journal_path,
     schedule_linkage_intent_path,
     schedule_linkage_journal_path,
+    temporary_schedule_journal_path,
     validate_hardware_safety_root,
     verification_intent_path,
     verification_journal_path,
@@ -103,7 +105,7 @@ class RecoveryDispatchBusyError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class RecoveryArtifacts:
-    """One consistent-enough read of the six durable workflow artifacts.
+    """One consistent-enough read of the durable workflow artifacts.
 
     The dispatchers re-read and lease their stores before connection, so this scan is only a
     fail-closed eligibility decision and never an authority for a physical write.
@@ -115,6 +117,7 @@ class RecoveryArtifacts:
     verification_journal: DeviceVerificationRecord | None = None
     schedule_intent: ScheduleLinkageIntent | None = None
     schedule_journal: ScheduleLinkageRecord | None = None
+    temporary_schedule_journal: TemporaryScheduleRecord | None = None
 
 
 ArtifactScanner = Callable[[], RecoveryArtifacts]
@@ -205,6 +208,10 @@ def _default_scan_artifacts() -> RecoveryArtifacts:
         schedule_journal=_load_fixed_artifact(
             schedule_linkage_journal_path(),
             ScheduleLinkageRecord,
+        ),
+        temporary_schedule_journal=_load_fixed_artifact(
+            temporary_schedule_journal_path(),
+            TemporaryScheduleRecord,
         ),
     )
 
@@ -308,6 +315,7 @@ def _artifact_fingerprint(artifacts: RecoveryArtifacts) -> str:
         artifacts.verification_journal,
         artifacts.schedule_intent,
         artifacts.schedule_journal,
+        artifacts.temporary_schedule_journal,
     ):
         if artifact is None:
             encoded = b"none"
@@ -437,6 +445,13 @@ class RecoverySupervisor:
                 return self._status
 
             fingerprint = _artifact_fingerprint(artifacts)
+            # Temporary schedule bytes must be restored before any outer control-state journal
+            # can safely re-enable TimerON.  This supervisor intentionally has no authority to
+            # guess that cross-journal order; the attended schedule recovery command owns it.
+            if artifacts.temporary_schedule_journal is not None:
+                self._blocked_fingerprint = None
+                self._set_status(RecoverySupervisorStatus.ATTENDED_REQUIRED)
+                return self._status
             native_pending = artifacts.native_journal is not None or _phase_needs_recovery(
                 artifacts.native_intent
             )
@@ -571,6 +586,11 @@ class RecoverySupervisor:
             return RecoverySupervisorStatus.ERROR
         if not _intent_matches_record(intent, record):
             return RecoverySupervisorStatus.ERROR
+        if getattr(intent, "version", None) == 3:
+            # Version three owns nested role and byte-exact schedule recovery domains. The
+            # generic native dispatcher cannot safely infer their inverse order, even if only
+            # the outer journal remains visible at this instant.
+            return RecoverySupervisorStatus.ATTENDED_REQUIRED
         if record is None:
             return (
                 None

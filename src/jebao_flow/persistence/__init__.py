@@ -10,6 +10,7 @@ from jebao_flow.persistence.schedule_linkage import (
     JsonScheduleLinkageJournalStore,
     ScheduleLinkageJournalError,
 )
+from jebao_flow.persistence.schedule_transaction import JsonTemporaryScheduleJournalStore
 
 __all__ = [
     "DeviceQualificationReceipt",
@@ -17,6 +18,7 @@ __all__ = [
     "JsonQualificationStore",
     "LinkageJournalError",
     "JsonScheduleLinkageJournalStore",
+    "JsonTemporaryScheduleJournalStore",
     "QualificationStoreError",
     "ScheduleLinkageJournalError",
 ]

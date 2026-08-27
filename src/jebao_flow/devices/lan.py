@@ -48,6 +48,17 @@ from jebao_flow.protocol.models import (
 )
 from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.schedule import decode_schedule
+from jebao_flow.protocol.schedule_wire import (
+    LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+    LOCAL_WAVEMAKER_PRO_SLOT_COUNT,
+    LocalWavemakerProScheduleSnapshot,
+    build_local_wavemaker_pro_schedule_control_payload,
+    decode_local_wavemaker_pro_slot_wire,
+    get_local_wavemaker_pro_slot_wire,
+    local_wavemaker_pro_schedule_datapoint_id,
+    validate_local_wavemaker_pro_schedule_image,
+    validate_local_wavemaker_pro_slot_wire,
+)
 from jebao_flow.protocol.schema import DataType
 from jebao_flow.protocol.session import GizwitsSession
 from jebao_flow.safety.limits import PowerLimits
@@ -78,6 +89,7 @@ class ControlPlan:
 
 
 SessionFactory = Callable[[str], RawSession]
+StateDecoder = Callable[[bytes], dict[str, Any]]
 _LINKAGE_ROLES_BY_VALUE = {role.value: role for role in LinkageRole}
 _ACK_LOSS_RESOLUTION_TIMEOUT_SECONDS = 55.0
 _ACK_LOSS_RESOLUTION_ATTEMPTS = 8
@@ -346,6 +358,121 @@ class LanJebaoDevice(JebaoDevice):
             )
         await self._apply_changes({attribute_name: role}, guard=guard)
 
+    async def read_schedule_image(self) -> bytes:
+        self._require_local_wavemaker_pro_schedule()
+        async with self._io_lock:
+            if self._session_retired:
+                raise DeviceConnectionError(
+                    f"retired session for {self._device_id!r} must be replaced before reading"
+                )
+            try:
+                raw = await self._session.read_raw_state()
+                snapshot = LocalWavemakerProScheduleSnapshot.from_status(raw)
+            except asyncio.CancelledError:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            except Exception:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            return snapshot.image
+
+    async def write_schedule_slots(
+        self,
+        slots: Mapping[int, bytes],
+        *,
+        guard: WriteGuard | None = None,
+        on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+        on_ack_resolution: AckResolutionHook | None = None,
+    ) -> ControlVerificationOutcome:
+        """Write one or more Pro AutoTime slots in one guarded control frame."""
+
+        self._require_local_wavemaker_pro_schedule()
+        if not isinstance(slots, Mapping):
+            raise TypeError("schedule slots must be a mapping")
+        changes: dict[str, bytes] = {}
+        normalized: dict[int, bytes] = {}
+        names_by_index: dict[int, str] = {}
+        for slot_index, slot_wire in slots.items():
+            datapoint_id = local_wavemaker_pro_schedule_datapoint_id(slot_index)
+            # DP 13 is AutoTime00 and the range is contiguous through DP 60.
+            attribute_name = f"AutoTime{datapoint_id - 13:02d}"
+            wire = validate_local_wavemaker_pro_slot_wire(
+                slot_wire,
+                slot_index=slot_index,
+            )
+            entry = decode_local_wavemaker_pro_slot_wire(wire, slot_index=slot_index)
+            if entry is not None:
+                flow = entry.parameters["flow"]
+                # A feed slot may deliberately stop the pump, so zero is the sole exception to
+                # the configured operating minimum.  Every non-zero value still passes the same
+                # min/max/step gate as another scheduled mode; otherwise a nominal feed slot
+                # carrying (for example) 100 could bypass a device's 75% safety ceiling.
+                if entry.mode != "feed" or flow != 0:
+                    self._validate_power(flow)
+            normalized[slot_index] = wire
+            names_by_index[slot_index] = attribute_name
+            changes[attribute_name] = wire
+
+        payload = build_local_wavemaker_pro_schedule_control_payload(normalized)
+
+        def decode_selected_schedule_slots(raw_status: bytes) -> dict[str, Any]:
+            image = LocalWavemakerProScheduleSnapshot.from_status(raw_status).image
+            return {
+                names_by_index[index]: get_local_wavemaker_pro_slot_wire(image, index)
+                for index in normalized
+            }
+
+        return await self._apply_changes(
+            changes,
+            guard=guard,
+            on_ack_unconfirmed=on_ack_unconfirmed,
+            on_ack_resolution=on_ack_resolution,
+            payload=payload,
+            decoder=decode_selected_schedule_slots,
+        )
+
+    async def restore_schedule_image(
+        self,
+        image: bytes,
+        *,
+        guard: WriteGuard | None = None,
+        on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+        on_ack_resolution: AckResolutionHook | None = None,
+    ) -> ControlVerificationOutcome:
+        """Restore all 48 Pro AutoTime slots from one exact recovery snapshot."""
+
+        self._require_local_wavemaker_pro_schedule()
+        exact = validate_local_wavemaker_pro_schedule_image(image)
+        slots = {
+            slot_index: get_local_wavemaker_pro_slot_wire(exact, slot_index)
+            for slot_index in range(LOCAL_WAVEMAKER_PRO_SLOT_COUNT)
+        }
+        payload = build_local_wavemaker_pro_schedule_control_payload(slots)
+
+        def decode_schedule_image(raw_status: bytes) -> dict[str, Any]:
+            return {
+                "ScheduleImage": LocalWavemakerProScheduleSnapshot.from_status(raw_status).image
+            }
+
+        # Recovery can begin after an uncertain forward exchange retired its transport. Establish
+        # a clean authenticated boundary before entering the guarded write path; no control frame
+        # is emitted by ``connect`` and the guard is checked on both sides of that await.
+        self._require_hardware_writes_enabled()
+        self._require_write_guard(guard)
+        if not self.connected:
+            await self.connect()
+        self._require_write_guard(guard)
+        return await self._apply_changes(
+            {"ScheduleImage": exact},
+            guard=guard,
+            on_ack_unconfirmed=on_ack_unconfirmed,
+            on_ack_resolution=on_ack_resolution,
+            payload=payload,
+            decoder=decode_schedule_image,
+        )
+
     async def set_timer_enabled(self, enabled: bool) -> None:
         if not isinstance(enabled, bool):
             raise TypeError("timer enabled must be a boolean")
@@ -429,12 +556,13 @@ class LanJebaoDevice(JebaoDevice):
         guard: WriteGuard | None = None,
         on_ack_unconfirmed: AckUnconfirmedHook | None = None,
         on_ack_resolution: AckResolutionHook | None = None,
+        payload: bytes | None = None,
+        decoder: StateDecoder | None = None,
     ) -> ControlVerificationOutcome:
-        if not self._allow_hardware_writes:
-            raise HardwareWritesDisabledError(
-                f"hardware writes are locked for {self._device_id}; review preview_target first"
-            )
-        payload = build_control_payload(self.schema, changes)
+        self._require_hardware_writes_enabled()
+        payload = build_control_payload(self.schema, changes) if payload is None else bytes(payload)
+        if not payload or payload[0] != 0x01:
+            raise ValueError("control payload must begin with action 0x01")
 
         async with self._io_lock:
             if self._session_retired:
@@ -446,7 +574,7 @@ class LanJebaoDevice(JebaoDevice):
                 # The app, native schedules or master broadcasts may have changed the device
                 # after our last verified write. Never let the duplicate cache hide that drift,
                 # especially while a linkage transaction is being rolled back.
-                values = await self._read_values()
+                values = await self._read_values(decoder=decoder)
                 if all(values.get(name) == expected for name, expected in changes.items()):
                     self._require_write_guard(guard)
                     return ControlVerificationOutcome.STATE_VERIFIED
@@ -460,6 +588,13 @@ class LanJebaoDevice(JebaoDevice):
             self._last_command_at = asyncio.get_running_loop().time()
             try:
                 await self._session.send_raw_control(payload)
+            except asyncio.CancelledError:
+                # Cancellation after the physical send boundary leaves both the write outcome and
+                # stream framing uncertain. Recovery must replace this session object before its
+                # compensating exact-image write.
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
             except (ProtocolError, OSError) as acknowledgement_error:
                 return await self._resolve_unacknowledged_control(
                     changes,
@@ -467,6 +602,7 @@ class LanJebaoDevice(JebaoDevice):
                     guard=guard,
                     on_ack_unconfirmed=on_ack_unconfirmed,
                     on_ack_resolution=on_ack_resolution,
+                    decoder=decoder,
                 )
             self._require_write_guard(guard)
 
@@ -476,15 +612,20 @@ class LanJebaoDevice(JebaoDevice):
                 self._require_write_guard(guard)
                 try:
                     if not self._session.connected:
-                        await self._session.connect()
-                        self._require_write_guard(guard)
-                        await self._session.authenticate()
+                        try:
+                            await self._session.connect()
+                            self._require_write_guard(guard)
+                            await self._session.authenticate()
+                        except asyncio.CancelledError:
+                            self._session_retired = True
+                            self._quarantine_session_now(self._session)
+                            raise
                         self._last_sent_values.clear()
                     # Connecting and authenticating may take several seconds. Re-check the
                     # attended operation deadline/interlock before issuing even a read-only
                     # query, and again before accepting its result as forward progress.
                     self._require_write_guard(guard)
-                    values = await self._read_values()
+                    values = await self._read_values(decoder=decoder)
                     self._require_write_guard(guard)
                 except (ProtocolError, OSError, ValueError) as error:
                     if attempt + 1 == self._readback_attempts:
@@ -499,11 +640,7 @@ class LanJebaoDevice(JebaoDevice):
                     self._last_sent_values.update(changes)
                     return ControlVerificationOutcome.STATE_VERIFIED
                 if attempt + 1 == self._readback_attempts:
-                    mismatches = {
-                        name: {"expected": expected, "actual": values.get(name)}
-                        for name, expected in changes.items()
-                        if values.get(name) != expected
-                    }
+                    mismatches = self._control_mismatches(changes, values)
                     power_only = (
                         self.schema.power_attribute is not None
                         and set(mismatches) == {self.schema.power_attribute}
@@ -525,13 +662,15 @@ class LanJebaoDevice(JebaoDevice):
         guard: WriteGuard | None,
         on_ack_unconfirmed: AckUnconfirmedHook | None,
         on_ack_resolution: AckResolutionHook | None,
+        decoder: StateDecoder | None = None,
     ) -> ControlVerificationOutcome:
         """Resolve one uncertain control frame using fresh, read-only sessions only.
 
         A missing or malformed 0x94 response does not prove whether the MCU applied the frame.
         Retrying that frame could double-apply a non-idempotent control, so this path creates a
-        new authenticated session object for every explicit 0x03 state query. The adapter and
-        its command timestamp remain intact for correctly paced rollback.
+        new authenticated session object for every read-only state query. A 0x03 reply or 0x04
+        report received on that fresh session is actual-state evidence, never an acknowledgement;
+        the adapter and its command timestamp remain intact for correctly paced rollback.
         """
 
         loop = asyncio.get_running_loop()
@@ -635,7 +774,7 @@ class LanJebaoDevice(JebaoDevice):
                     self._last_sent_values.clear()
                     self._require_write_guard(guard)
                     raw = await self._run_ack_resolution_stage(
-                        lambda session=session: session.read_raw_state(accept_reports=False),
+                        lambda session=session: session.read_raw_state(accept_reports=True),
                         stage=ControlAckResolutionStage.QUERY,
                         deadline=deadline,
                         attempts=attempt,
@@ -649,7 +788,7 @@ class LanJebaoDevice(JebaoDevice):
                         state=ControlAckResolutionState.STARTED,
                     )
                     try:
-                        values = self.schema.decode_status(raw)
+                        values = (decoder or self.schema.decode_status)(raw)
                     except Exception as error:
                         self._emit_ack_resolution_update(
                             on_ack_resolution,
@@ -685,11 +824,7 @@ class LanJebaoDevice(JebaoDevice):
                         break
                     continue
 
-                mismatches = {
-                    name: {"expected": expected, "actual": values.get(name)}
-                    for name, expected in changes.items()
-                    if values.get(name) != expected
-                }
+                mismatches = self._control_mismatches(changes, values)
                 if not mismatches:
                     self._emit_ack_resolution_update(
                         on_ack_resolution,
@@ -697,8 +832,20 @@ class LanJebaoDevice(JebaoDevice):
                         attempt=attempt,
                         state=ControlAckResolutionState.SUCCEEDED,
                     )
+                    try:
+                        await self._replace_verified_ack_resolution_session(
+                            session,
+                            retired_sessions=retired_sessions,
+                            deadline=deadline,
+                            attempt=attempt,
+                            guard=guard,
+                            on_ack_resolution=on_ack_resolution,
+                        )
+                    except ControlAckReadbackError as error:
+                        last_failure = error
+                        last_mismatches = None
+                        break
                     self._last_sent_values.update(changes)
-                    self._session_retired = False
                     return ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
 
                 last_failure = None
@@ -758,6 +905,91 @@ class LanJebaoDevice(JebaoDevice):
                 attempts=attempts_completed,
             )
         raise last_failure from acknowledgement_error
+
+    async def _replace_verified_ack_resolution_session(
+        self,
+        verified_session: RawSession,
+        *,
+        retired_sessions: list[RawSession],
+        deadline: float,
+        attempt: int,
+        guard: WriteGuard | None,
+        on_ack_resolution: AckResolutionHook | None,
+    ) -> None:
+        """Retire state-evidence transport and install one empty authenticated stream.
+
+        A GAgent may emit a 0x04 report immediately before the 0x03 response to our explicit
+        query. Once the report proves state, that paired response can remain unread. Reusing the
+        stream would let a later request consume stale state, so every successful ACK-loss evidence
+        session is closed and replaced without issuing another control or state query.
+        """
+
+        self._session_retired = True
+        cleanup_failure = await self._quarantine_ack_session(
+            verified_session,
+            deadline=deadline,
+            attempts=attempt,
+            on_ack_resolution=on_ack_resolution,
+            emit_progress=True,
+        )
+        if cleanup_failure is not None:
+            raise cleanup_failure
+        self._require_write_guard(guard)
+
+        self._emit_ack_resolution_update(
+            on_ack_resolution,
+            stage=ControlAckResolutionStage.CONNECT,
+            attempt=attempt,
+            state=ControlAckResolutionState.STARTED,
+        )
+        try:
+            replacement = self._new_session(exclude=retired_sessions)
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._emit_ack_resolution_update(
+                on_ack_resolution,
+                stage=ControlAckResolutionStage.CONNECT,
+                attempt=attempt,
+                state=ControlAckResolutionState.FAILED,
+            )
+            raise ControlAckReadbackError(
+                f"device {self._device_id!r} could not create a clean post-verification "
+                "session",
+                stage=ControlAckResolutionStage.CONNECT,
+                attempts=attempt,
+            ) from error
+
+        retired_sessions.append(replacement)
+        self._session = replacement
+        try:
+            await self._run_ack_resolution_stage(
+                replacement.connect,
+                stage=ControlAckResolutionStage.CONNECT,
+                deadline=deadline,
+                attempts=attempt,
+                on_ack_resolution=on_ack_resolution,
+                emit_started=False,
+            )
+            self._require_write_guard(guard)
+            await self._run_ack_resolution_stage(
+                replacement.authenticate,
+                stage=ControlAckResolutionStage.AUTHENTICATE,
+                deadline=deadline,
+                attempts=attempt,
+                on_ack_resolution=on_ack_resolution,
+            )
+            self._require_ack_resolution_time(
+                deadline,
+                stage=ControlAckResolutionStage.AUTHENTICATE,
+                attempts=attempt,
+            )
+            self._require_write_guard(guard)
+        except BaseException:
+            self._session_retired = True
+            self._quarantine_session_now(replacement)
+            raise
+
+        self._last_sent_values.clear()
+        self._session_retired = False
 
     def _new_session(self, *, exclude: Collection[RawSession]) -> RawSession:
         try:
@@ -1003,9 +1235,44 @@ class LanJebaoDevice(JebaoDevice):
         if guard is not None and guard() is not True:
             raise SafetyInterlockError("device write was blocked by the safety interlock")
 
-    async def _read_values(self, *, accept_reports: bool = True) -> dict[str, Any]:
-        raw = await self._session.read_raw_state(accept_reports=accept_reports)
-        return self.schema.decode_status(raw)
+    def _require_hardware_writes_enabled(self) -> None:
+        if not self._allow_hardware_writes:
+            raise HardwareWritesDisabledError(
+                f"hardware writes are locked for {self._device_id}; review preview_target first"
+            )
+
+    async def _read_values(
+        self,
+        *,
+        accept_reports: bool = True,
+        decoder: StateDecoder | None = None,
+    ) -> dict[str, Any]:
+        try:
+            raw = await self._session.read_raw_state(accept_reports=accept_reports)
+        except asyncio.CancelledError:
+            self._session_retired = True
+            self._quarantine_session_now(self._session)
+            raise
+        return (decoder or self.schema.decode_status)(raw)
+
+    @staticmethod
+    def _control_mismatches(
+        changes: Mapping[str, Any],
+        values: Mapping[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        """Return useful scalar differences without logging raw binary schedules."""
+
+        def evidence(value: Any) -> Any:
+            return "<binary>" if isinstance(value, (bytes, bytearray, memoryview)) else value
+
+        return {
+            name: {
+                "expected": evidence(expected),
+                "actual": evidence(values.get(name)),
+            }
+            for name, expected in changes.items()
+            if values.get(name) != expected
+        }
 
     async def _respect_command_interval(self) -> None:
         if self._last_command_at is None:
@@ -1077,6 +1344,12 @@ class LanJebaoDevice(JebaoDevice):
                 f"{self.schema.name} does not expose {capability.value}"
             )
         return attribute
+
+    def _require_local_wavemaker_pro_schedule(self) -> None:
+        if self.schema.product_key != LOCAL_WAVEMAKER_PRO_PRODUCT_KEY:
+            raise UnsupportedCapabilityError(
+                f"{self.schema.name} does not expose an audited writable schedule image"
+            )
 
     def _validate_power(self, power: int) -> None:
         if isinstance(power, bool) or not isinstance(power, int):

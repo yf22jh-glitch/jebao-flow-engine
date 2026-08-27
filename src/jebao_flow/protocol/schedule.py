@@ -20,6 +20,18 @@ LOCAL_WAVEMAKER_PRODUCT_KEY = "1d8c63eaccac4205b92c84d77d5a08fb"
 LOCAL_WAVEMAKER_PRO_PRODUCT_KEY = "50dbc92221fd4d33ae69a1fedd43b555"
 AQUARIUM_PUMP_PRODUCT_KEY = "6a5c47b3ea364ecb841b47f5997a1775"
 
+LOCAL_WAVEMAKER_PRO_MODES = (
+    "pulse",
+    "sine",
+    "constant",
+    "random",
+    "tidal",
+    "nutrient_transport",
+    "circulation",
+    "feed",
+    "custom",
+)
+
 ParameterDecoder = Callable[[str, bytes], dict[str, int | bool]]
 
 
@@ -94,17 +106,7 @@ _SPECS: dict[str, _ScheduleSpec] = {
         slot_size=9,
         ymd_offset=443,
         hms_offset=447,
-        modes=(
-            "pulse",
-            "sine",
-            "constant",
-            "random",
-            "tidal",
-            "nutrient_transport",
-            "circulation",
-            "feed",
-            "custom",
-        ),
+        modes=LOCAL_WAVEMAKER_PRO_MODES,
         decode_parameters=_local_wavemaker_pro_parameters,
     ),
     AQUARIUM_PUMP_PRODUCT_KEY: _ScheduleSpec(
@@ -226,6 +228,7 @@ __all__ = [
     "AQUARIUM_PUMP_PRODUCT_KEY",
     "DC_PUMP_PRO_PRODUCT_KEY",
     "LOCAL_WAVEMAKER_PRODUCT_KEY",
+    "LOCAL_WAVEMAKER_PRO_MODES",
     "LOCAL_WAVEMAKER_PRO_PRODUCT_KEY",
     "SLOT_CAPACITY",
     "decode_device_schedule",

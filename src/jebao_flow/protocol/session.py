@@ -151,19 +151,22 @@ class GizwitsSession:
     async def read_raw_state(self, *, accept_reports: bool = True) -> bytes:
         self._require_authenticated()
 
-        response_predicate: Callable[[GizwitsFrame], bool] | None = None
+        accepted_actions = {STATE_REPLY_ACTION, STATE_REPORT_ACTION}
         if not accept_reports:
+            accepted_actions.remove(STATE_REPORT_ACTION)
 
-            def is_explicit_state_reply(frame: GizwitsFrame) -> bool:
-                return bool(frame.payload) and frame.payload[0] == STATE_REPLY_ACTION
-
-            response_predicate = is_explicit_state_reply
+        def is_usable_state(frame: GizwitsFrame) -> bool:
+            # A GAgent can interleave empty or unrelated 0x91 serial frames with the response to
+            # this explicit read request. Keep consuming the bounded skip budget until a frame
+            # actually carries a recognised state action. Product-specific length validation is
+            # deliberately left to the schema decoder above this transport layer.
+            return bool(frame.payload) and frame.payload[0] in accepted_actions
 
         response = await self._exchange(
             GizwitsCommand.SERIAL_TRANSMIT_REQUEST,
             bytes([READ_STATE_ACTION]),
             expected={GizwitsCommand.SERIAL_TRANSMIT_RESPONSE},
-            response_predicate=response_predicate,
+            response_predicate=is_usable_state,
         )
         if not response.payload:
             raise UnexpectedResponseError("device returned an empty state payload")

@@ -6,8 +6,10 @@ from pathlib import Path
 import pytest
 
 from jebao_flow.devices import (
+    ControlAckPowerMismatchError,
     ControlAckReadbackError,
     ControlAckResolutionStage,
+    ControlVerificationOutcome,
     DeviceControlSnapshot,
     LanJebaoDevice,
     LinkageApplyError,
@@ -27,7 +29,10 @@ from jebao_flow.protocol.errors import ProtocolConnectionError
 from jebao_flow.protocol.models import DeviceTarget, LinkageRole
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
 from jebao_flow.protocol.schedule import decode_schedule
-from jebao_flow.protocol.session import STATE_REPLY_ACTION, GizwitsSession
+from jebao_flow.protocol.schedule_wire import (
+    build_local_wavemaker_pro_schedule_control_payload,
+)
+from jebao_flow.protocol.session import STATE_REPLY_ACTION, STATE_REPORT_ACTION, GizwitsSession
 from jebao_flow.safety.limits import PowerLimits
 
 
@@ -65,10 +70,14 @@ class _LocalGizwitsPump:
         *,
         lose_timer_on_reply: bool = False,
         fail_first_fresh_state: bool = False,
+        state_action: int = STATE_REPLY_ACTION,
+        pair_report_with_reply: bool = False,
     ) -> None:
         self.current_state = initial_state
         self.lose_timer_on_reply = lose_timer_on_reply
         self.fail_first_fresh_state = fail_first_fresh_state
+        self.state_action = state_action
+        self.pair_report_with_reply = pair_report_with_reply
         self.control_states: dict[bytes, bytes] = {}
         self.timer_on_payload: bytes | None = None
         self.accepted_connections = 0
@@ -114,8 +123,8 @@ class _LocalGizwitsPump:
         *,
         failed_resolution_reads: int,
     ) -> None:
-        if failed_resolution_reads < 1:
-            raise ValueError("failed resolution reads must be positive")
+        if failed_resolution_reads < 0:
+            raise ValueError("failed resolution reads must be non-negative")
         self.register_control(payload, state)
         self._ack_loss_payload = payload
         self._ack_resolution_failures_remaining = failed_resolution_reads
@@ -312,9 +321,16 @@ class _LocalGizwitsPump:
         writer.write(
             encode_frame(
                 GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
-                bytes([STATE_REPLY_ACTION]) + self.current_state,
+                bytes([self.state_action]) + self.current_state,
             )
         )
+        if self.pair_report_with_reply and self.state_action == STATE_REPORT_ACTION:
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+                    bytes([STATE_REPLY_ACTION]) + self.current_state,
+                )
+            )
         await writer.drain()
         return False
 
@@ -417,6 +433,176 @@ def _scheduled_raw_state(
         )
     raw[443:451] = bytes((20, 26, 8, 27, 0, 12, 0, 0))
     return bytes(raw)
+
+
+async def test_ack_loss_report_reply_pair_is_retired_before_next_fresh_read_without_replay(
+) -> None:
+    initial_state = _raw_state(
+        power=33,
+        frequency=20,
+        linkage=LinkageRole.ASYNC_SLAVE,
+        timer_enabled=True,
+    )
+    applied_state = _raw_state(
+        power=38,
+        frequency=20,
+        linkage=LinkageRole.ASYNC_SLAVE,
+        timer_enabled=True,
+    )
+    server = _LocalGizwitsPump(
+        initial_state,
+        state_action=STATE_REPORT_ACTION,
+        pair_report_with_reply=True,
+    )
+    await server.start()
+    device = _device("slave", server, ack_loss_retry_delay_seconds=0)
+    power_attribute = device.schema.power_attribute
+    if power_attribute is None:  # pragma: no cover - the Pro profile always exposes Flow
+        raise AssertionError("test profile has no power attribute")
+    live_power_payload = build_control_payload(device.schema, {power_attribute: 38})
+    server.register_ack_loss_control(
+        live_power_payload,
+        applied_state,
+        failed_resolution_reads=0,
+    )
+
+    try:
+        await device.connect()
+        outcome = await device.write_power(38, guard=lambda: True)
+        server.current_state = _raw_state(
+            power=42,
+            frequency=20,
+            linkage=LinkageRole.ASYNC_SLAVE,
+            timer_enabled=True,
+        )
+        next_state = await device.get_state()
+    finally:
+        await device.disconnect()
+        await server.close()
+
+    assert outcome is ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+    assert next_state.power == 42
+    assert server.accepted_connections == 3
+    assert server.state_requests_by_connection == {1: 0, 2: 1, 3: 1}
+    assert len(server.control_events) == 1
+    assert server.control_events[0][0] == 1
+    assert sum(
+        payload == live_power_payload
+        for _connection, payload, _sent_at in server.control_payload_events
+    ) == 1
+    assert server.errors == []
+
+
+async def test_schedule_ack_loss_accepts_fresh_state_report_without_control_replay() -> None:
+    initial_state = _scheduled_raw_state(
+        power=35,
+        frequency=20,
+        linkage=LinkageRole.ASYNC_SLAVE,
+        timer_enabled=True,
+    )
+    changed_slot = bytes((7, 0, 8, 0, 2, 38, 20, 0, 0))
+    applied = bytearray(initial_state)
+    applied[11 + 7 * 9 : 11 + 8 * 9] = changed_slot
+    applied_state = bytes(applied)
+    schedule_payload = build_local_wavemaker_pro_schedule_control_payload({7: changed_slot})
+    server = _LocalGizwitsPump(initial_state, state_action=STATE_REPORT_ACTION)
+    await server.start()
+    server.register_ack_loss_control(
+        schedule_payload,
+        applied_state,
+        failed_resolution_reads=0,
+    )
+    device = _device("slave", server, ack_loss_retry_delay_seconds=0)
+
+    try:
+        await device.connect()
+        outcome = await device.write_schedule_slots({7: changed_slot}, guard=lambda: True)
+    finally:
+        await device.disconnect()
+        await server.close()
+
+    assert outcome is ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+    assert server.current_state == applied_state
+    assert server.accepted_connections == 3
+    assert server.state_requests_by_connection == {1: 0, 2: 1, 3: 0}
+    assert len(server.control_payload_events) == 1
+    connection, observed_payload, _sent_at = server.control_payload_events[0]
+    assert connection == 1
+    assert observed_payload == schedule_payload
+    assert server.errors == []
+
+
+@pytest.mark.parametrize(
+    ("applied_state", "expected_error", "expected_stage"),
+    [
+        (
+            _raw_state(
+                power=34,
+                frequency=20,
+                linkage=LinkageRole.ASYNC_SLAVE,
+                timer_enabled=True,
+            ),
+            ControlAckPowerMismatchError,
+            None,
+        ),
+        (
+            _raw_state(
+                power=38,
+                frequency=20,
+                linkage=LinkageRole.ASYNC_SLAVE,
+                timer_enabled=True,
+            )[:-1],
+            ControlAckReadbackError,
+            ControlAckResolutionStage.DECODE,
+        ),
+    ],
+)
+async def test_ack_loss_resolver_rejects_invalid_fresh_state_reports_without_control_replay(
+    applied_state: bytes,
+    expected_error: type[Exception],
+    expected_stage: ControlAckResolutionStage | None,
+) -> None:
+    initial_state = _raw_state(
+        power=33,
+        frequency=20,
+        linkage=LinkageRole.ASYNC_SLAVE,
+        timer_enabled=True,
+    )
+    server = _LocalGizwitsPump(initial_state, state_action=STATE_REPORT_ACTION)
+    await server.start()
+    device = _device("slave", server, ack_loss_retry_delay_seconds=0)
+    power_attribute = device.schema.power_attribute
+    if power_attribute is None:  # pragma: no cover - the Pro profile always exposes Flow
+        raise AssertionError("test profile has no power attribute")
+    live_power_payload = build_control_payload(device.schema, {power_attribute: 38})
+    server.register_ack_loss_control(
+        live_power_payload,
+        applied_state,
+        failed_resolution_reads=0,
+    )
+
+    try:
+        await device.connect()
+        with pytest.raises(expected_error) as captured:
+            await device.write_power(38, guard=lambda: True)
+    finally:
+        await device.disconnect()
+        await server.close()
+
+    if expected_stage is not None:
+        assert isinstance(captured.value, ControlAckReadbackError)
+        assert captured.value.stage is expected_stage
+        assert captured.value.attempts == 8
+    assert server.current_state == applied_state
+    assert server.accepted_connections == 9
+    assert server.state_requests_by_connection == {1: 0, **dict.fromkeys(range(2, 10), 1)}
+    assert len(server.control_events) == 1
+    assert server.control_events[0][0] == 1
+    assert sum(
+        payload == live_power_payload
+        for _connection, payload, _sent_at in server.control_payload_events
+    ) == 1
+    assert server.errors == []
 
 
 async def test_timer_on_restore_survives_two_quarantined_streams_without_replay(

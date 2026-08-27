@@ -60,6 +60,12 @@ from jebao_flow.devices.linkage import (
     TemporaryLinkageController,
 )
 from jebao_flow.devices.observer import ResolvedDevice, resolve_device_bindings
+from jebao_flow.devices.schedule_flow_experiment import (
+    ScheduleFlowExperimentSpec,
+    ScheduleFlowOutcome,
+    classify_schedule_flow_sample,
+)
+from jebao_flow.devices.schedule_linkage import ScheduleLinkageSample
 from jebao_flow.hardware_guard import DeploymentHardwareGuard
 from jebao_flow.hardware_safety import (
     HardwareSafetyRootError,
@@ -70,6 +76,7 @@ from jebao_flow.hardware_safety import (
     qualification_directory,
     schedule_linkage_intent_path,
     schedule_linkage_journal_path,
+    temporary_schedule_journal_path,
     validate_hardware_safety_root,
     verification_intent_path,
     verification_journal_path,
@@ -104,6 +111,16 @@ _RECOVERY_LATCH_POLL_SECONDS = 0.1
 _LATE_EMERGENCY_STOP_TIMEOUT_SECONDS = 35.0
 _MAX_SAFETY_ARTIFACT_BYTES = 1024 * 1024
 _AUDITED_SNAPSHOT_MODES = frozenset({"constant", "pulse", "sine"})
+TERMINAL_SCHEDULE_FLOW_OUTCOMES = frozenset(
+    {
+        *(outcome.value for outcome in ScheduleFlowOutcome),
+        "armed_preview_cancelled",
+        "crashed_before_first_write",
+        "experiment_failed_restored",
+        "recovered",
+        "restored",
+    }
+)
 
 
 class HardwareTestError(RuntimeError):
@@ -322,12 +339,26 @@ class HardwareTestEvidence(BaseModel):
         return self
 
 
+class HardwareTestScheduleImageDigest(BaseModel):
+    """A byte-exact schedule binding without persisting the private 432-byte image."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    device_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_.-]+$",
+    )
+    physical_binding: PhysicalDeviceBinding
+    image_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class HardwareTestIntent(BaseModel):
     """Durable one-shot intent that prevents a service restart from replaying a test."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: int = Field(default=1, ge=1, le=2)
+    version: int = Field(default=1, ge=1, le=3)
     instance_id: str
     operation_id: str
     phase: HardwareTestIntentPhase
@@ -339,6 +370,16 @@ class HardwareTestIntent(BaseModel):
     outcome: str | None = None
     primary_failure: HardwareTestPrimaryFailure | None = None
     evidence: HardwareTestEvidence | None = None
+    schedule_flow_spec: ScheduleFlowExperimentSpec | None = None
+    schedule_image_digests: tuple[HardwareTestScheduleImageDigest, ...] = Field(
+        default=(),
+        max_length=2,
+    )
+    schedule_flow_outcome: ScheduleFlowOutcome | None = None
+    schedule_flow_sample: ScheduleLinkageSample | None = None
+    schedule_transition_verified: bool | None = None
+    stable_slave_tuple_observed: bool | None = None
+    stable_observation_seconds: float | None = Field(default=None, ge=0, le=300)
 
     @property
     def has_diagnostic_progress(self) -> bool:
@@ -347,6 +388,11 @@ class HardwareTestIntent(BaseModel):
         return (
             self.outcome is not None
             or self.primary_failure is not None
+            or self.schedule_flow_outcome is not None
+            or self.schedule_flow_sample is not None
+            or self.schedule_transition_verified is not None
+            or self.stable_slave_tuple_observed is not None
+            or self.stable_observation_seconds is not None
             or (
                 self.version == 2
                 and self.evidence is not None
@@ -356,10 +402,96 @@ class HardwareTestIntent(BaseModel):
 
     @model_validator(mode="after")
     def validate_versioned_evidence(self) -> HardwareTestIntent:
+        if self.operation_id != self.spec.operation_id:
+            raise ValueError("intent operation_id must match the confirmed test spec")
+        expected_snapshot_ids = (
+            self.spec.master_device_id,
+            self.spec.slave_device_id,
+        )
+        if tuple(snapshot.device_id for snapshot in self.snapshots) != expected_snapshot_ids:
+            # Preview tokens intentionally sort snapshots for deterministic v1/v2 compatibility.
+            # The durable intent must nevertheless retain the controller's canonical master/slave
+            # order: otherwise a token-preserving tuple reorder can authorize a fresh run whose
+            # crash journal no longer compares equal to its owning intent.
+            raise ValueError("intent snapshots must be ordered master then slave")
+        if (
+            self.created_at.tzinfo is None
+            or self.created_at.utcoffset() is None
+            or self.updated_at.tzinfo is None
+            or self.updated_at.utcoffset() is None
+            or self.updated_at < self.created_at
+        ):
+            raise ValueError("intent timestamps must be timezone-aware and monotonic")
         if self.version == 1 and self.evidence is not None:
             raise ValueError("version-one intents cannot contain diagnostic evidence")
-        if self.version == 2 and self.evidence is None:
-            raise ValueError("version-two intents require diagnostic evidence")
+        if self.version in {2, 3} and self.evidence is None:
+            raise ValueError("version-two and version-three intents require diagnostic evidence")
+        has_schedule_extension = bool(
+            self.schedule_flow_spec is not None
+            or self.schedule_image_digests
+            or self.schedule_flow_outcome is not None
+            or self.schedule_flow_sample is not None
+            or self.schedule_transition_verified is not None
+            or self.stable_slave_tuple_observed is not None
+            or self.stable_observation_seconds is not None
+        )
+        if self.version < 3 and has_schedule_extension:
+            raise ValueError("schedule-flow evidence requires a version-three intent")
+        if self.version == 3:
+            flow_spec = self.schedule_flow_spec
+            if flow_spec is None or len(self.schedule_image_digests) != 2:
+                raise ValueError("version-three intents require schedule-flow spec and digests")
+            if self.spec != flow_spec.outer_linkage_spec():
+                raise ValueError("schedule-flow intent and outer linkage spec disagree")
+            expected_ids = (flow_spec.master_device_id, flow_spec.slave_device_id)
+            if tuple(value.device_id for value in self.schedule_image_digests) != expected_ids:
+                raise ValueError("schedule-flow digest order must match the selected pair")
+            snapshots_by_id = {value.device_id: value for value in self.snapshots}
+            if tuple(snapshots_by_id) != expected_ids:
+                raise ValueError("schedule-flow snapshot order must match the selected pair")
+            if any(
+                digest.physical_binding != snapshots_by_id[digest.device_id].physical_binding
+                for digest in self.schedule_image_digests
+            ):
+                raise ValueError("schedule-flow schedule and control bindings disagree")
+            if self.schedule_flow_sample is not None:
+                sample = self.schedule_flow_sample
+                if (
+                    sample.master_linkage is not LinkageRole.MASTER
+                    or sample.slave_linkage is not LinkageRole.ASYNC_SLAVE
+                ):
+                    raise ValueError("schedule-flow sample has an invalid role topology")
+            if self.schedule_flow_outcome is not None and self.schedule_flow_sample is None:
+                raise ValueError("schedule-flow outcome requires durable sample evidence")
+            result_metadata = (
+                self.schedule_transition_verified,
+                self.stable_slave_tuple_observed,
+                self.stable_observation_seconds,
+            )
+            if self.schedule_flow_outcome is None and any(
+                value is not None for value in result_metadata
+            ):
+                raise ValueError("schedule-flow result metadata requires an outcome")
+            if self.schedule_flow_outcome is not None and any(
+                value is None for value in result_metadata
+            ):
+                raise ValueError("schedule-flow outcome requires complete result metadata")
+            if self.schedule_flow_outcome is not None:
+                sample = self.schedule_flow_sample
+                if sample is None or sample.phase != "after":
+                    raise ValueError("schedule-flow outcome requires an after-boundary sample")
+                expected_outcome = classify_schedule_flow_sample(flow_spec, sample)
+                if self.schedule_flow_outcome is not expected_outcome:
+                    raise ValueError("schedule-flow outcome disagrees with durable sample")
+                expected_transition = (
+                    expected_outcome is ScheduleFlowOutcome.PER_SLOT_POWER_VERIFIED
+                )
+                if self.schedule_transition_verified is not expected_transition:
+                    raise ValueError("schedule-flow transition flag disagrees with outcome")
+                if self.stable_slave_tuple_observed is not True:
+                    raise ValueError("schedule-flow outcome requires a stable slave tuple")
+                if self.stable_observation_seconds != flow_spec.post_boundary_stability_seconds:
+                    raise ValueError("schedule-flow stable duration disagrees with full spec")
         evidence = self.evidence
         if evidence is None:
             return self
@@ -436,6 +568,24 @@ class JsonHardwareTestIntentStore:
     def save(self, intent: HardwareTestIntent) -> None:
         temporary_path: Path | None = None
         try:
+            # ``model_copy(update=...)`` deliberately skips Pydantic validation. Revalidate every
+            # v3 durable successor because terminal experiment evidence is itself authorization
+            # to clear all nested recovery journals. The legacy v1/v2 path has sub-second test
+            # deadlines, so keep its durable ownership check constant-time instead of recursively
+            # rebuilding every evidence model on each sample callback.
+            if intent.version == 3:
+                intent = HardwareTestIntent.model_validate(intent.model_dump(mode="python"))
+            elif (
+                intent.operation_id != intent.spec.operation_id
+                or tuple(snapshot.device_id for snapshot in intent.snapshots)
+                != (intent.spec.master_device_id, intent.spec.slave_device_id)
+                or intent.created_at.tzinfo is None
+                or intent.created_at.utcoffset() is None
+                or intent.updated_at.tzinfo is None
+                or intent.updated_at.utcoffset() is None
+                or intent.updated_at < intent.created_at
+            ):
+                raise ValueError("hardware-test intent durable ownership is invalid")
             self.path.parent.mkdir(parents=True, exist_ok=True)
             existing = _open_existing_private_file(
                 self.path,
@@ -458,7 +608,7 @@ class JsonHardwareTestIntentStore:
                 os.fsync(stream.fileno())
             temporary_path.replace(self.path)
             self._fsync_parent()
-        except OSError as error:
+        except (OSError, ValidationError, ValueError) as error:
             raise HardwareTestError("cannot persist the hardware-test one-shot intent") from error
         finally:
             if temporary_path is not None:
@@ -658,6 +808,10 @@ class ConfirmingLinkageJournalStore:
         before_load: Callable[[], None] = lambda: None,
         expected_loaded_record: LinkageTransactionRecord | None = None,
         require_loaded_record_match: bool = False,
+        confirmation_token_factory: Callable[
+            [str, LinkageTestSpec, Sequence[DeviceControlSnapshot]], str
+        ]
+        | None = None,
     ) -> None:
         self._delegate = delegate
         self._instance_id = instance_id
@@ -667,6 +821,7 @@ class ConfirmingLinkageJournalStore:
         self._before_load = before_load
         self._expected_loaded_record = expected_loaded_record
         self._require_loaded_record_match = require_loaded_record_match
+        self._confirmation_token_factory = confirmation_token_factory
         self.created_record: LinkageTransactionRecord | None = None
 
     def _assert_expected_record_unchanged(self) -> None:
@@ -691,11 +846,8 @@ class ConfirmingLinkageJournalStore:
         return self._delegate.lease()
 
     def create(self, record: LinkageTransactionRecord) -> None:
-        actual = preview_confirmation_token(
-            self._instance_id,
-            record.spec,
-            record.snapshots,
-        )
+        token_factory = self._confirmation_token_factory or preview_confirmation_token
+        actual = token_factory(self._instance_id, record.spec, record.snapshots)
         if not hmac.compare_digest(actual, self._expected_token):
             raise ConfirmationMismatchError(
                 "device state changed after preflight; no control frame was sent"
@@ -774,8 +926,16 @@ def _require_current_qualifications(
             )
 
 
-def _assert_no_verification_conflict() -> None:
-    _assert_no_schedule_linkage_conflict()
+def _assert_no_verification_conflict(
+    *,
+    allow_temporary_schedule: bool = False,
+    allow_schedule_linkage_journal: bool = False,
+) -> None:
+    _assert_no_schedule_linkage_conflict(allow_journal=allow_schedule_linkage_journal)
+    if not allow_temporary_schedule and os.path.lexists(temporary_schedule_journal_path()):
+        raise HardwareTestError(
+            "unfinished temporary schedule recovery blocks native linkage"
+        )
     journal_path = verification_journal_path()
     if os.path.lexists(journal_path):
         if journal_path.is_symlink():
@@ -849,11 +1009,11 @@ def _assert_no_verification_conflict() -> None:
         )
 
 
-def _assert_no_schedule_linkage_conflict() -> None:
+def _assert_no_schedule_linkage_conflict(*, allow_journal: bool = False) -> None:
     """Fail closed when the separate TimerON linkage-only workflow is unfinished."""
 
     journal_path = schedule_linkage_journal_path()
-    if os.path.lexists(journal_path):
+    if not allow_journal and os.path.lexists(journal_path):
         descriptor = _open_existing_private_file(
             journal_path,
             label="schedule-linkage recovery state",
@@ -957,6 +1117,46 @@ def preview_confirmation_token(
     }
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
     return f"JFL-{hashlib.sha256(encoded).hexdigest()[:20].upper()}"
+
+
+def schedule_flow_confirmation_token(
+    instance_id: str,
+    spec: ScheduleFlowExperimentSpec,
+    snapshots: Sequence[DeviceControlSnapshot],
+    schedule_image_digests: Sequence[HardwareTestScheduleImageDigest],
+) -> str:
+    """Bind the attended experiment to controls, the full plan, and both exact images."""
+
+    canonical = {
+        "version": 1,
+        "instance_id": instance_id,
+        "schedule_flow_spec": spec.model_dump(mode="json"),
+        "snapshots": [
+            snapshot.model_dump(mode="json")
+            for snapshot in sorted(snapshots, key=lambda value: value.device_id)
+        ],
+        "schedule_image_digests": [
+            digest.model_dump(mode="json")
+            for digest in sorted(schedule_image_digests, key=lambda value: value.device_id)
+        ],
+    }
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    return f"JFE-{hashlib.sha256(encoded).hexdigest()[:20].upper()}"
+
+
+def hardware_test_intent_confirmation_token(intent: HardwareTestIntent) -> str:
+    """Return the authentic preview token for either legacy or schedule-flow intents."""
+
+    if intent.version == 3:
+        if intent.schedule_flow_spec is None:
+            raise HardwareTestError("schedule-flow intent is incomplete")
+        return schedule_flow_confirmation_token(
+            intent.instance_id,
+            intent.schedule_flow_spec,
+            intent.snapshots,
+            intent.schedule_image_digests,
+        )
+    return preview_confirmation_token(intent.instance_id, intent.spec, intent.snapshots)
 
 
 def recovery_confirmation_token(
@@ -1387,10 +1587,11 @@ def _updated_intent(
     phase: HardwareTestIntentPhase,
     outcome: str | None,
 ) -> HardwareTestIntent:
+    updated_at = max(datetime.now(UTC), intent.created_at, intent.updated_at)
     return intent.model_copy(
         update={
             "phase": phase,
-            "updated_at": datetime.now(UTC),
+            "updated_at": updated_at,
             "outcome": outcome,
         }
     )
@@ -1708,6 +1909,10 @@ async def _run_native_linkage(
         intent = intent_store.load()
         if intent is None or intent.phase is not HardwareTestIntentPhase.ARMED:
             raise HardwareTestError("run requires an armed preflight")
+        if intent.version == 3:
+            raise HardwareTestError(
+                "schedule-flow intents require jebao-flow-schedule-flow-test"
+            )
         if intent.instance_id != config.instance.id or intent.spec != spec:
             raise HardwareTestError("run arguments do not match the armed preflight")
         if not hmac.compare_digest(confirmation, intent.confirmation_token):
@@ -2009,6 +2214,11 @@ def _status(
         raise HardwareTestError("runtime.state_path must be an absolute persistent path")
     intent = intent_store.load()
     record = journal_store.load()
+
+    if intent is not None and intent.version == 3:
+        raise HardwareTestError(
+            "schedule-flow recovery requires jebao-flow-schedule-flow-test recover"
+        )
     recovery_details = None
     if record is not None or (
         intent is not None and intent.phase is not HardwareTestIntentPhase.TERMINAL
@@ -2344,6 +2554,10 @@ async def _recover_linkage(
     _assert_no_verification_conflict()
     intent = intent_store.load()
     record = journal_store.load()
+    if intent is not None and intent.version == 3:
+        raise HardwareTestError(
+            "schedule-flow recovery requires jebao-flow-schedule-flow-test recover"
+        )
 
     if (
         recovery_first

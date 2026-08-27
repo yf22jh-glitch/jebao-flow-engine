@@ -19,6 +19,7 @@ def test_every_operation_uses_one_deployment_wide_safety_root(
     assert hardware_safety.physical_lock_directory() == root / "physical-locks"
     assert hardware_safety.verification_journal_path() == root / "device-verification.json"
     assert hardware_safety.verification_intent_path() == root / "device-verification-intent.json"
+    assert hardware_safety.temporary_schedule_journal_path() == root / "temporary-schedule.json"
     assert hardware_safety.qualification_directory() == root / "qualifications"
 
 

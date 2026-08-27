@@ -20,6 +20,7 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkagePhase,
     ScheduleLinkageRecord,
 )
+from jebao_flow.devices.schedule_transaction import TemporaryScheduleRecord
 from jebao_flow.devices.verification import (
     DeviceVerificationPhase,
     DeviceVerificationRecord,
@@ -49,8 +50,11 @@ def _config() -> AppConfig:
 
 def _native_intent(
     phase: HardwareTestIntentPhase = HardwareTestIntentPhase.STARTED,
+    *,
+    version: int = 2,
 ) -> object:
     return SimpleNamespace(
+        version=version,
         phase=phase,
         instance_id="main",
         operation_id="native-operation",
@@ -222,6 +226,55 @@ async def test_idle_poll_has_zero_recovery_callbacks() -> None:
     assert await supervisor.run_once() is RecoverySupervisorStatus.IDLE
     assert callbacks == 0
     assert supervisor.recovery_in_flight is False
+
+
+async def test_temporary_schedule_journal_blocks_all_automatic_recovery() -> None:
+    callbacks = 0
+
+    async def dispatch(config, args) -> int:
+        nonlocal callbacks
+        del config, args
+        callbacks += 1
+        return 0
+
+    artifacts = RecoveryArtifacts(
+        native_journal=_native_record(),
+        temporary_schedule_journal=cast(TemporaryScheduleRecord, SimpleNamespace()),
+    )
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            artifacts,
+            native_dispatch=dispatch,
+            verification_dispatch=dispatch,
+            schedule_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
+    assert callbacks == 0
+
+
+async def test_schedule_flow_v3_native_intent_always_requires_attended_recovery() -> None:
+    callbacks = 0
+
+    async def dispatch(config, args) -> int:
+        nonlocal callbacks
+        del config, args
+        callbacks += 1
+        return 0
+
+    artifacts = RecoveryArtifacts(
+        native_intent=_native_intent(version=3),
+        native_journal=_native_record(),
+    )
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(artifacts, native_dispatch=dispatch),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
+    assert callbacks == 0
 
 
 @pytest.mark.parametrize("workflow", ["native", "verification", "schedule"])
@@ -425,7 +478,11 @@ async def test_schedule_conflict_with_other_nonterminal_has_zero_callbacks(
 
 @pytest.mark.parametrize(
     "corrupt_name",
-    ["native_linkage_journal_path", "schedule_linkage_journal_path"],
+    [
+        "native_linkage_journal_path",
+        "schedule_linkage_journal_path",
+        "temporary_schedule_journal_path",
+    ],
 )
 async def test_corrupt_artifact_is_error_with_zero_callbacks(
     tmp_path: Path,
@@ -439,6 +496,7 @@ async def test_corrupt_artifact_is_error_with_zero_callbacks(
         "verification_journal_path": tmp_path / "verification-journal.json",
         "schedule_linkage_intent_path": tmp_path / "schedule-intent.json",
         "schedule_linkage_journal_path": tmp_path / "schedule-journal.json",
+        "temporary_schedule_journal_path": tmp_path / "temporary-schedule.json",
     }
     corrupt = paths[corrupt_name]
     corrupt.write_text("not-json", encoding="utf-8")
@@ -875,6 +933,7 @@ def test_artifact_reader_rejects_symlink_without_following_target(
     monkeypatch.setattr(module, "verification_journal_path", lambda: tmp_path / "missing-3")
     monkeypatch.setattr(module, "schedule_linkage_intent_path", lambda: tmp_path / "missing-4")
     monkeypatch.setattr(module, "schedule_linkage_journal_path", lambda: tmp_path / "missing-5")
+    monkeypatch.setattr(module, "temporary_schedule_journal_path", lambda: tmp_path / "missing-6")
 
     with pytest.raises(RecoveryArtifactError):
         module._default_scan_artifacts()
@@ -894,6 +953,7 @@ def test_artifact_reader_rejects_hardlink(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "verification_journal_path", lambda: tmp_path / "missing-3")
     monkeypatch.setattr(module, "schedule_linkage_intent_path", lambda: tmp_path / "missing-4")
     monkeypatch.setattr(module, "schedule_linkage_journal_path", lambda: tmp_path / "missing-5")
+    monkeypatch.setattr(module, "temporary_schedule_journal_path", lambda: tmp_path / "missing-6")
 
     with pytest.raises(RecoveryArtifactError, match="metadata is unsafe"):
         module._default_scan_artifacts()

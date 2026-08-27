@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -66,6 +67,7 @@ _KNOWN_PRO_MODES = frozenset(
 _DAY_SECONDS = 24 * 60 * 60
 _ROLE_ONLY_ROLLBACK_RESERVE_SECONDS = 15.0
 _SCHEDULE_LINKAGE_TEST_MAX_POWER = 45
+_LOGGER = logging.getLogger(__name__)
 
 
 class ScheduleLinkageError(RuntimeError):
@@ -127,6 +129,11 @@ class ScheduleLinkageSpec(BaseModel):
     verification_interval_seconds: float = Field(default=1, gt=0, le=10)
     minimum_lead_seconds: float = Field(default=45, ge=10, le=180)
     ambiguous_band_seconds: float = Field(default=1, ge=0.1, le=5)
+    post_boundary_stability_seconds: float = Field(default=0, ge=0, le=300)
+    # The dedicated schedule-flow experiment needs to observe firmware behavior, including a
+    # slave that remains on its prior tuple or follows the master.  Keep the ordinary role-only
+    # diagnostic strict unless this journaled, opt-in evidence mode is explicitly selected.
+    observe_slave_after_tuple_variance: bool = False
     maximum_clock_skew_seconds: float = Field(default=2, ge=0.1, le=10)
     clock_advance_tolerance_seconds: float = Field(default=2, ge=0.1, le=10)
 
@@ -135,7 +142,9 @@ class ScheduleLinkageSpec(BaseModel):
         if self.master_device_id == self.slave_device_id:
             raise ValueError("master and slave devices must be different")
         post_boundary_budget = (
-            2 * self.ambiguous_band_seconds + 3 * self.verification_interval_seconds
+            self.post_boundary_stability_seconds
+            + 2 * self.ambiguous_band_seconds
+            + 3 * self.verification_interval_seconds
         )
         if self.observation_window_seconds <= self.minimum_lead_seconds:
             raise ValueError("observation window must extend beyond the minimum setup lead")
@@ -158,6 +167,27 @@ class ScheduleAutoEvidence(BaseModel):
     def validate_feed_time(self) -> Self:
         if (self.mode == "feed") != (self.feed_time is not None):
             raise ValueError("AutoFeedTime is required only for feed evidence")
+        return self
+
+
+class ScheduleLinkageSample(BaseModel):
+    """One redacted effective sample suitable for durable experiment evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    observed_at: datetime
+    phase: Literal["before", "after"]
+    master: ScheduleAutoEvidence
+    slave: ScheduleAutoEvidence
+    master_manual_power: int = Field(ge=0, le=100)
+    slave_manual_power: int = Field(ge=0, le=100)
+    master_linkage: Literal[LinkageRole.MASTER]
+    slave_linkage: Literal[LinkageRole.ASYNC_SLAVE]
+
+    @model_validator(mode="after")
+    def validate_timestamp(self) -> Self:
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise ValueError("sample timestamp must be timezone-aware")
         return self
 
 
@@ -319,6 +349,7 @@ PrerequisiteAuthorizer = Callable[
     [ScheduleLinkageSpec, tuple[ScheduleLinkageSnapshot, ...]],
     None,
 ]
+SampleObserver = Callable[[ScheduleLinkageSample], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -546,6 +577,7 @@ class ScheduleActiveLinkageController:
         safety_interlock: LinkageSafetyInterlock,
         monotonic_clock: Callable[[], float] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        sample_observer: SampleObserver | None = None,
     ) -> None:
         self._devices = dict(devices)
         self._store = store
@@ -553,6 +585,7 @@ class ScheduleActiveLinkageController:
         self._safety_interlock = safety_interlock
         self._monotonic_clock = monotonic_clock
         self._sleep = sleep
+        self._sample_observer = sample_observer
         self._run_lock = asyncio.Lock()
         self._active_operation_id: str | None = None
         self._safety_epoch: int | None = None
@@ -632,6 +665,52 @@ class ScheduleActiveLinkageController:
             finally:
                 self._active_operation_id = None
                 self._stop_event = None
+                lease.__exit__(None, None, None)
+
+    async def finalize_externally_disarmed(self, operation_id: str) -> bool:
+        """Clear a role journal only after both controls prove independent and TimerOFF.
+
+        The composed schedule-flow transaction owns the compensating full-control write.  Once it
+        has stopped TimerON on both devices, ordinary role recovery can no longer require the
+        immutable TimerON snapshot.  This no-write closure keeps that exception narrow and bound
+        to the exact role operation while the temporary schedule fingerprint is still installed.
+        """
+
+        if self._run_lock.locked():
+            raise ScheduleLinkageBusyError("another schedule-linkage transaction is running")
+        async with self._run_lock:
+            try:
+                lease = self._store.lease()
+                lease.__enter__()
+            except ScheduleLinkageJournalClaimError as error:
+                raise ScheduleLinkageBusyError(
+                    "another process owns the schedule-linkage journal"
+                ) from error
+            try:
+                try:
+                    record = self._store.load()
+                    if record is None:
+                        return False
+                    if record.operation_id != operation_id:
+                        raise ScheduleLinkageRollbackError(
+                            "external disarm does not own this schedule-linkage journal"
+                        )
+                    self._validate_recovery_bindings(record)
+                    states = await self._read_pair(record.spec)
+                    for snapshot in record.snapshots:
+                        self._assert_externally_disarmed_snapshot(
+                            snapshot,
+                            states[snapshot.device_id],
+                        )
+                    self._store.clear()
+                    return True
+                except ScheduleLinkageRollbackError:
+                    raise
+                except Exception as error:
+                    raise ScheduleLinkageRollbackError(
+                        "external schedule-linkage disarm could not be proven"
+                    ) from error
+            finally:
                 lease.__exit__(None, None, None)
 
     async def _run_owned(
@@ -851,6 +930,7 @@ class ScheduleActiveLinkageController:
             )
         required_window = (
             remaining
+            + spec.post_boundary_stability_seconds
             + 2 * spec.ambiguous_band_seconds
             + 4 * spec.verification_interval_seconds
             + _ROLE_ONLY_ROLLBACK_RESERVE_SECONDS
@@ -1025,10 +1105,15 @@ class ScheduleActiveLinkageController:
         previous_monotonic = initial_sampled_at
         deadline = previous_monotonic + max(
             0.0, boundary_remaining
-        ) + 2 * spec.ambiguous_band_seconds + 4 * spec.verification_interval_seconds
+        ) + (
+            spec.post_boundary_stability_seconds
+            + 2 * spec.ambiguous_band_seconds
+            + 4 * spec.verification_interval_seconds
+        )
         deadline = min(deadline, self._require_observation_deadline())
         consecutive_after = 0
         previous_after: tuple[tuple[str, int, int], ...] | None = None
+        stable_after_started_at: float | None = None
         while self._monotonic() <= deadline:
             if self._stop_requested():
                 return ScheduleLinkageStopReason.MANUAL, False
@@ -1059,10 +1144,12 @@ class ScheduleActiveLinkageController:
                 self._assert_pair_sample(record, states, expected_roles, phase="ambiguous")
                 consecutive_after = 0
                 previous_after = None
+                stable_after_started_at = None
             elif all(position < -spec.ambiguous_band_seconds for position in positions):
                 self._assert_pair_sample(record, states, expected_roles, phase="before")
                 consecutive_after = 0
                 previous_after = None
+                stable_after_started_at = None
             elif all(position > spec.ambiguous_band_seconds for position in positions):
                 self._assert_after_within_immediate_slot(record, states)
                 evidence = self._assert_pair_sample(
@@ -1076,7 +1163,16 @@ class ScheduleActiveLinkageController:
                 else:
                     consecutive_after = 1
                     previous_after = evidence
-                if consecutive_after >= 2:
+                    stable_after_started_at = sampled_at
+                stable_for = (
+                    0.0
+                    if stable_after_started_at is None
+                    else sampled_at - stable_after_started_at
+                )
+                if (
+                    consecutive_after >= 2
+                    and stable_for >= spec.post_boundary_stability_seconds
+                ):
                     self._assert_after_within_immediate_slot(record, states)
                     self._assert_observation_deadline()
                     return ScheduleLinkageStopReason.BOUNDARY_VERIFIED, True
@@ -1085,6 +1181,7 @@ class ScheduleActiveLinkageController:
                 self._assert_pair_sample(record, states, expected_roles, phase="ambiguous")
                 consecutive_after = 0
                 previous_after = None
+                stable_after_started_at = None
             await self._sleep(spec.verification_interval_seconds)
         raise ScheduleLinkageApplyError(
             "schedule boundary was missed or lacked two consecutive fresh samples"
@@ -1099,12 +1196,42 @@ class ScheduleActiveLinkageController:
         phase: Literal["before", "ambiguous", "after"],
     ) -> tuple[tuple[str, int, int], ...]:
         effective: list[tuple[str, int, int]] = []
+        observed: dict[str, ScheduleAutoEvidence] = {}
         for snapshot in record.snapshots:
             state = states[snapshot.device_id]
             self._assert_immutable_snapshot(snapshot, state, expected_roles[snapshot.device_id])
             if phase == "ambiguous":
                 continue
-            evidence = _observed_auto(snapshot.device_id, state)
+            observed[snapshot.device_id] = _observed_auto(snapshot.device_id, state)
+
+        full_linkage_topology = (
+            expected_roles.get(record.spec.master_device_id) is LinkageRole.MASTER
+            and expected_roles.get(record.spec.slave_device_id) is LinkageRole.ASYNC_SLAVE
+        )
+        sample: ScheduleLinkageSample | None = None
+        if phase != "ambiguous" and full_linkage_topology:
+            master_state = states[record.spec.master_device_id]
+            slave_state = states[record.spec.slave_device_id]
+            if master_state.power is None or slave_state.power is None:
+                raise ScheduleLinkageApplyError("manual fallback Flow evidence is unavailable")
+            sample = ScheduleLinkageSample(
+                observed_at=datetime.now(UTC),
+                phase=phase,
+                master=observed[record.spec.master_device_id],
+                slave=observed[record.spec.slave_device_id],
+                master_manual_power=master_state.power,
+                slave_manual_power=slave_state.power,
+                master_linkage=LinkageRole.MASTER,
+                slave_linkage=LinkageRole.ASYNC_SLAVE,
+            )
+            # Evidence is useful even when the following strict expectation check fails.  A sink
+            # is diagnostic only: persistence trouble must not interrupt role compensation.
+            self._emit_sample_best_effort(sample)
+
+        for snapshot in record.snapshots:
+            if phase == "ambiguous":
+                continue
+            evidence = observed[snapshot.device_id]
             if phase == "before":
                 if evidence != snapshot.expectation.before:
                     raise ScheduleLinkageApplyError(
@@ -1112,22 +1239,48 @@ class ScheduleActiveLinkageController:
                     )
             else:
                 expectation = snapshot.expectation
-                if (
+                slave_variance = (
+                    record.spec.observe_slave_after_tuple_variance
+                    and snapshot.device_id == record.spec.slave_device_id
+                )
+                if not slave_variance and (
                     evidence.mode != expectation.after_mode
                     or evidence.flow != expectation.after_flow
                 ):
                     raise ScheduleLinkageApplyError(
                         f"device {snapshot.device_id!r} did not enter its next schedule entry"
                     )
-                if (
+                if not slave_variance and (
                     expectation.after_frequency is not None
                     and evidence.frequency != expectation.after_frequency
                 ):
                     raise ScheduleLinkageApplyError(
                         f"device {snapshot.device_id!r} next AutoFreq did not match"
                     )
+                if slave_variance:
+                    capabilities = self._get_device(snapshot.device_id).capabilities
+                    limits = capabilities.power_limits
+                    guarded_maximum = min(
+                        limits.max_power,
+                        _SCHEDULE_LINKAGE_TEST_MAX_POWER,
+                    )
+                    if (
+                        not limits.min_power <= evidence.flow <= guarded_maximum
+                        or evidence.flow % capabilities.power_step
+                    ):
+                        raise ScheduleLinkageApplyError(
+                            f"device {snapshot.device_id!r} observed unsafe AutoFlow"
+                        )
             effective.append((evidence.mode, evidence.flow, evidence.frequency))
         return tuple(effective)
+
+    def _emit_sample_best_effort(self, sample: ScheduleLinkageSample) -> None:
+        if self._sample_observer is None:
+            return
+        try:
+            self._sample_observer(sample)
+        except BaseException:
+            _LOGGER.warning("schedule-linkage sample evidence could not be persisted")
 
     async def _rollback_uninterruptibly(self, record: ScheduleLinkageRecord) -> None:
         task = asyncio.create_task(self._rollback(record))
@@ -1397,6 +1550,37 @@ class ScheduleActiveLinkageController:
                 f"device {snapshot.device_id!r} schedule fingerprint changed"
             )
 
+    def _assert_externally_disarmed_snapshot(
+        self,
+        snapshot: ScheduleLinkageSnapshot,
+        state: DeviceState,
+    ) -> None:
+        self._assert_healthy(snapshot.device_id, state)
+        actual = (
+            state.enabled,
+            state.power,
+            state.mode,
+            state.frequency,
+            state.timer_enabled,
+            state.linkage,
+        )
+        expected = (
+            snapshot.enabled,
+            snapshot.power,
+            snapshot.mode,
+            snapshot.frequency,
+            False,
+            LinkageRole.INDEPENDENT,
+        )
+        if actual != expected:
+            raise ScheduleLinkageRollbackError(
+                f"device {snapshot.device_id!r} external disarm is not exact"
+            )
+        if schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint:
+            raise ScheduleLinkageRollbackError(
+                f"device {snapshot.device_id!r} schedule changed before external disarm closure"
+            )
+
     @staticmethod
     def _assert_healthy(device_id: str, state: DeviceState) -> None:
         if not state.online or state.error:
@@ -1590,6 +1774,7 @@ __all__ = [
     "ScheduleLinkageRecord",
     "ScheduleLinkageResult",
     "ScheduleLinkageRollbackError",
+    "ScheduleLinkageSample",
     "ScheduleLinkageSnapshot",
     "ScheduleLinkageSpec",
     "ScheduleLinkageStopReason",

@@ -53,6 +53,13 @@ from jebao_flow.devices.linkage import (
 )
 from jebao_flow.devices.observer import ReadOnlyObserver
 from jebao_flow.devices.registry import DeviceRegistry
+from jebao_flow.devices.schedule_flow_experiment import (
+    ScheduleFlowExperimentController,
+    ScheduleFlowExperimentResult,
+    ScheduleFlowExperimentSpec,
+    ScheduleFlowOutcome,
+    classify_schedule_flow_sample,
+)
 from jebao_flow.devices.schedule_linkage import (
     ScheduleActiveLinkageController,
     ScheduleAutoEvidence,
@@ -67,10 +74,27 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageRecord,
     ScheduleLinkageResult,
     ScheduleLinkageRollbackError,
+    ScheduleLinkageSample,
     ScheduleLinkageSnapshot,
     ScheduleLinkageSpec,
     ScheduleLinkageStopReason,
     schedule_linkage_confirmation_token,
+)
+from jebao_flow.devices.schedule_transaction import (
+    DeviceSchedulePatch,
+    ObservationCompletion,
+    ScheduleImageSnapshot,
+    ScheduleSlotPatch,
+    TemporaryScheduleController,
+    TemporaryScheduleError,
+    TemporaryScheduleErrorCode,
+    TemporaryScheduleKind,
+    TemporarySchedulePhase,
+    TemporaryScheduleRecord,
+    TemporaryScheduleResult,
+    TemporaryScheduleSpec,
+    behavior_neutral_unused_slot_patch,
+    temporary_schedule_confirmation_token,
 )
 from jebao_flow.devices.simulator import SimulatedJebaoDevice
 from jebao_flow.devices.verification import (
@@ -102,6 +126,7 @@ __all__ = [
     "ControlVerificationOutcome",
     "DeviceConnectionError",
     "DeviceControlSnapshot",
+    "DeviceSchedulePatch",
     "DeviceVerificationError",
     "DeviceVerificationErrorCode",
     "DeviceVerificationPhase",
@@ -145,6 +170,10 @@ __all__ = [
     "PowerStateVerificationError",
     "ReadOnlyObserver",
     "ScheduleActiveLinkageController",
+    "ScheduleFlowExperimentController",
+    "ScheduleFlowExperimentResult",
+    "ScheduleFlowExperimentSpec",
+    "ScheduleFlowOutcome",
     "ScheduleAutoEvidence",
     "ScheduleBoundaryExpectation",
     "ScheduleLinkageApplyError",
@@ -157,6 +186,7 @@ __all__ = [
     "ScheduleLinkageRecord",
     "ScheduleLinkageResult",
     "ScheduleLinkageRollbackError",
+    "ScheduleLinkageSample",
     "ScheduleLinkageSnapshot",
     "ScheduleLinkageSpec",
     "ScheduleLinkageStopReason",
@@ -164,10 +194,24 @@ __all__ = [
     "SimulatedJebaoDevice",
     "StateVerificationError",
     "TemporaryLinkageController",
+    "TemporaryScheduleController",
+    "TemporaryScheduleError",
+    "TemporaryScheduleErrorCode",
+    "TemporaryScheduleKind",
+    "TemporarySchedulePhase",
+    "TemporaryScheduleRecord",
+    "TemporaryScheduleResult",
+    "TemporaryScheduleSpec",
+    "ObservationCompletion",
+    "ScheduleImageSnapshot",
+    "ScheduleSlotPatch",
     "AttendedRestoreAuthority",
     "UnsupportedCapabilityError",
     "configuration_fingerprint",
     "physical_identity_key",
     "schedule_structure_fingerprint",
     "schedule_linkage_confirmation_token",
+    "behavior_neutral_unused_slot_patch",
+    "classify_schedule_flow_sample",
+    "temporary_schedule_confirmation_token",
 ]

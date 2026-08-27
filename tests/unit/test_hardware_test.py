@@ -401,6 +401,61 @@ def test_forged_armed_progress_is_rejected_before_any_write(
     assert hardware_test.canonical_journal_path(config).exists() is False
 
 
+@pytest.mark.parametrize("mutation", ("operation_id", "snapshot_order"))
+def test_intent_rejects_token_preserving_recovery_owner_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mutation: str,
+) -> None:
+    """A preview token must not authorize a run that recovery can no longer own."""
+
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    token = _token(capsys.readouterr().out)
+    intent_path = hardware_test.canonical_intent_path(config)
+    payload = json.loads(intent_path.read_text(encoding="utf-8"))
+    if mutation == "operation_id":
+        # The historical preview token binds spec.operation_id, not this redundant owner field.
+        payload["operation_id"] = "different_owner"
+    else:
+        # v1/v2 token canonicalization sorts snapshots, so tuple reordering preserves the token.
+        payload["snapshots"].reverse()
+    intent_path.write_text(json.dumps(payload), encoding="utf-8")
+    intent_path.chmod(0o600)
+
+    assert hardware_test.main(_args("run-native-linkage", confirmation=token)) == 2
+
+    assert "hardware-test intent is unreadable" in capsys.readouterr().err
+    assert all(device.commands == [] for device in devices.values())
+    assert hardware_test.canonical_journal_path(config).exists() is False
+
+
+def test_intent_store_revalidates_model_copy_before_replacing_valid_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    original = store.load()
+    assert original is not None
+    bypassed = original.model_copy(update={"operation_id": "different_owner"})
+
+    with pytest.raises(hardware_test.HardwareTestError, match="cannot persist"):
+        store.save(bypassed)
+
+    assert store.load() == original
+
+
 def test_schedule_bootstrap_skips_prior_receipts_steps_async_slave_and_restores(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -533,7 +588,7 @@ def test_ack_lost_but_fresh_state_verified_is_durable_success_and_exact_restore(
     args = _args("preflight")
     args[args.index("sync_slave")] = "async_slave"
     args[args.index("sine")] = "constant"
-    args[args.index("0.02")] = "0.08"
+    args[args.index("0.02")] = "0.5"
     args.extend(
         (
             "--bootstrap-active-schedule",
@@ -1351,7 +1406,7 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
     )
     args = _args("preflight")
     args[args.index("sync_slave")] = "async_slave"
-    args[args.index("0.02")] = "0.08"
+    args[args.index("0.02")] = "0.5"
     if bootstrap_schedule:
         args.append("--bootstrap-active-schedule")
     args.extend(
@@ -1666,6 +1721,17 @@ def test_malformed_terminal_schedule_intent_blocks_native_workflow() -> None:
     path.chmod(0o600)
 
     with pytest.raises(hardware_test.HardwareTestError, match="schedule-linkage"):
+        hardware_test._assert_no_verification_conflict()
+
+
+def test_temporary_schedule_journal_blocks_generic_native_recovery() -> None:
+    root = hardware_safety.hardware_safety_root()
+    root.mkdir(mode=0o700)
+    path = hardware_safety.temporary_schedule_journal_path()
+    path.write_text("unfinished\n", encoding="utf-8")
+    path.chmod(0o600)
+
+    with pytest.raises(hardware_test.HardwareTestError, match="temporary schedule"):
         hardware_test._assert_no_verification_conflict()
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -202,6 +202,46 @@ class JebaoDevice(ABC):
 
         del role, guard
         raise UnsupportedCapabilityError("guarded linkage-only writes are unsupported")
+
+    async def read_schedule_image(self) -> bytes:
+        """Return a product-specific byte-exact schedule image.
+
+        The image intentionally excludes the device clock. Implementations must not expose it
+        through normal observed attributes or guess a layout for unknown products.
+        """
+
+        raise UnsupportedCapabilityError("byte-exact schedule reads are unsupported")
+
+    async def write_schedule_slots(
+        self,
+        slots: Mapping[int, bytes],
+        *,
+        guard: WriteGuard | None = None,
+        on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+        on_ack_resolution: AckResolutionHook | None = None,
+    ) -> ControlVerificationOutcome:
+        """Write selected raw schedule slots once and verify their exact bytes."""
+
+        del slots, guard, on_ack_unconfirmed, on_ack_resolution
+        raise UnsupportedCapabilityError("guarded schedule writes are unsupported")
+
+    async def restore_schedule_image(
+        self,
+        image: bytes,
+        *,
+        guard: WriteGuard | None = None,
+        on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+        on_ack_resolution: AckResolutionHook | None = None,
+    ) -> ControlVerificationOutcome:
+        """Restore one previously captured schedule image exactly.
+
+        This recovery-only operation deliberately does not reinterpret the snapshot through current
+        forward-write power limits. Callers must bind ``image`` to a durable, verified snapshot of
+        the same physical controller before invoking it.
+        """
+
+        del image, guard, on_ack_unconfirmed, on_ack_resolution
+        raise UnsupportedCapabilityError("byte-exact schedule restore is unsupported")
 
     @abstractmethod
     async def set_timer_enabled(self, enabled: bool) -> None: ...

@@ -61,6 +61,7 @@ from jebao_flow.hardware_safety import (
     verification_journal_path,
 )
 from jebao_flow.hardware_test import (
+    TERMINAL_SCHEDULE_FLOW_OUTCOMES,
     HardwareTestError,
     HardwareTestIntent,
     HardwareTestIntentPhase,
@@ -69,7 +70,7 @@ from jebao_flow.hardware_test import (
     _connected,
     _safety_latch_present,
     _validate_config,
-    preview_confirmation_token,
+    hardware_test_intent_confirmation_token,
 )
 from jebao_flow.logging import configure_logging
 from jebao_flow.persistence.qualification import JsonQualificationStore
@@ -87,6 +88,11 @@ _TERMINAL_NATIVE_OUTCOMES = frozenset(
     {
         "armed_preview_cancelled",
         "crashed_before_first_write",
+        "experiment_failed_restored",
+        "per_slot_power_verified",
+        "slave_flow_fixed_at_previous",
+        "slave_flow_followed_master",
+        "unexpected_effective_state",
         "recovered",
         "restored",
         "stopped_before_first_write",
@@ -401,14 +407,15 @@ def _read_other_intent_phase(path: Path, *, label: str, workflow: str) -> str | 
     try:
         if workflow == "native":
             native = HardwareTestIntent.model_validate(payload)
-            expected_token = preview_confirmation_token(
-                native.instance_id,
-                native.spec,
-                native.snapshots,
-            )
+            expected_token = hardware_test_intent_confirmation_token(native)
             valid = (
                 native.phase is HardwareTestIntentPhase.TERMINAL
-                and native.outcome in _TERMINAL_NATIVE_OUTCOMES
+                and native.outcome
+                in (
+                    TERMINAL_SCHEDULE_FLOW_OUTCOMES
+                    if native.version == 3
+                    else _TERMINAL_NATIVE_OUTCOMES
+                )
                 and native.created_at.tzinfo is not None
                 and native.created_at.utcoffset() is not None
                 and native.updated_at.tzinfo is not None
@@ -620,6 +627,7 @@ def _add_spec_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--verification-interval", type=float, default=1)
     parser.add_argument("--minimum-lead", type=float, default=45)
     parser.add_argument("--ambiguous-band", type=float, default=1)
+    parser.add_argument("--post-boundary-stability", type=float, default=0)
     parser.add_argument("--maximum-clock-skew", type=float, default=2)
     parser.add_argument("--clock-advance-tolerance", type=float, default=2)
 
@@ -658,6 +666,7 @@ def _spec_from_args(args: argparse.Namespace) -> ScheduleLinkageSpec:
         verification_interval_seconds=args.verification_interval,
         minimum_lead_seconds=args.minimum_lead,
         ambiguous_band_seconds=args.ambiguous_band,
+        post_boundary_stability_seconds=getattr(args, "post_boundary_stability", 0),
         maximum_clock_skew_seconds=args.maximum_clock_skew,
         clock_advance_tolerance_seconds=args.clock_advance_tolerance,
     )

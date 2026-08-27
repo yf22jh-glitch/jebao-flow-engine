@@ -11,6 +11,7 @@ from jebao_flow.devices import (
     ControlAckReadbackError,
     ControlAckResolutionStage,
     ControlAckResolutionState,
+    ControlAckStateMismatchError,
     ControlReadbackError,
     ControlStateMismatchError,
     ControlVerificationOutcome,
@@ -33,6 +34,11 @@ from jebao_flow.protocol.errors import (
 )
 from jebao_flow.protocol.models import Capability, DeviceTarget, LinkageRole
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
+from jebao_flow.protocol.schedule_wire import (
+    LOCAL_WAVEMAKER_PRO_UNUSED_EE,
+    build_local_wavemaker_pro_schedule_control_payload,
+    extract_local_wavemaker_pro_schedule_image,
+)
 from jebao_flow.safety.limits import PowerLimits
 
 
@@ -51,6 +57,23 @@ def _pro_state(
     raw[2] = power
     raw[3] = 32
     raw[451] = fault
+    return bytes(raw)
+
+
+def _schedule_slot(*, flow: int, start_hour: int = 8, end_hour: int = 9) -> bytes:
+    return bytes((start_hour, 0, end_hour, 0, 2, flow, 20, 0, 0))
+
+
+def _pro_schedule_state(slots: dict[int, bytes], *, clock_marker: bytes | None = None) -> bytes:
+    raw = bytearray(_pro_state(enabled=True, timer_enabled=True, power=35))
+    raw[11:443] = LOCAL_WAVEMAKER_PRO_UNUSED_EE * 48
+    for slot_index, slot_wire in slots.items():
+        start = 11 + slot_index * 9
+        raw[start : start + 9] = slot_wire
+    if clock_marker is not None:
+        if len(clock_marker) != 8:
+            raise ValueError("clock marker must be eight bytes")
+        raw[443:451] = clock_marker
     return bytes(raw)
 
 
@@ -517,7 +540,7 @@ async def test_write_fails_after_bounded_transient_readback_timeouts() -> None:
     assert len(_FakeSession.instances[0].sent) == 1
 
 
-async def test_unconfirmed_ack_hook_precedes_strict_fresh_read_and_returns_verified_outcome(
+async def test_unconfirmed_ack_fresh_state_report_exact_match_is_evidence_not_ack(
 ) -> None:
     _FakeSession.state = _pro_state(power=50)
     _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
@@ -546,12 +569,19 @@ async def test_unconfirmed_ack_hook_precedes_strict_fresh_read_and_returns_verif
     assert session.connect_calls == 1
     assert session.authenticate_calls == 1
     assert session.read_accept_reports == []
-    fresh = _FakeSession.instances[1]
-    assert fresh is not session
-    assert fresh.sent == []
-    assert fresh.connect_calls == 1
-    assert fresh.authenticate_calls == 1
-    assert fresh.read_accept_reports == [False]
+    evidence = _FakeSession.instances[1]
+    replacement = _FakeSession.instances[2]
+    assert evidence is not session
+    assert evidence.sent == []
+    assert evidence.connect_calls == 1
+    assert evidence.authenticate_calls == 1
+    assert evidence.read_accept_reports == [True]
+    assert evidence.connected is False
+    assert replacement.sent == []
+    assert replacement.connect_calls == 1
+    assert replacement.authenticate_calls == 1
+    assert replacement.read_accept_reports == []
+    assert replacement.connected is True
     assert _FakeSession.timeline.index("0:send-control") < _FakeSession.timeline.index(
         "ack-unconfirmed-hook"
     )
@@ -562,8 +592,12 @@ async def test_unconfirmed_ack_hook_precedes_strict_fresh_read_and_returns_verif
         "1:create"
     )
     assert _FakeSession.timeline.index("ack-unconfirmed-hook") < _FakeSession.timeline.index(
-        "1:read:reply-only"
+        "1:read:reports"
     )
+    assert _FakeSession.timeline.index("1:read:reports") < _FakeSession.timeline.index(
+        "1:disconnect"
+    )
+    assert _FakeSession.timeline.index("1:disconnect") < _FakeSession.timeline.index("2:create")
     assert [
         (update.stage, update.attempt, update.state) for update in resolution_updates
     ] == [
@@ -577,10 +611,16 @@ async def test_unconfirmed_ack_hook_precedes_strict_fresh_read_and_returns_verif
         (ControlAckResolutionStage.QUERY, 1, ControlAckResolutionState.SUCCEEDED),
         (ControlAckResolutionStage.DECODE, 1, ControlAckResolutionState.STARTED),
         (ControlAckResolutionStage.DECODE, 1, ControlAckResolutionState.SUCCEEDED),
+        (ControlAckResolutionStage.QUARANTINE, 1, ControlAckResolutionState.STARTED),
+        (ControlAckResolutionStage.QUARANTINE, 1, ControlAckResolutionState.SUCCEEDED),
+        (ControlAckResolutionStage.CONNECT, 1, ControlAckResolutionState.STARTED),
+        (ControlAckResolutionStage.CONNECT, 1, ControlAckResolutionState.SUCCEEDED),
+        (ControlAckResolutionStage.AUTHENTICATE, 1, ControlAckResolutionState.STARTED),
+        (ControlAckResolutionStage.AUTHENTICATE, 1, ControlAckResolutionState.SUCCEEDED),
     ]
 
 
-async def test_unconfirmed_ack_fresh_mismatch_is_typed_without_resending() -> None:
+async def test_unconfirmed_ack_fresh_state_report_mismatch_is_typed_without_resending() -> None:
     _FakeSession.state = _pro_state(power=34)
     _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
     device = _device(allow_writes=True, minimum_command_interval_ms=100)
@@ -612,9 +652,9 @@ async def test_unconfirmed_ack_fresh_mismatch_is_typed_without_resending() -> No
     assert len(resolution_sessions) == 8
     assert len({id(candidate) for candidate in resolution_sessions}) == 8
     assert all(candidate.sent == [] for candidate in resolution_sessions)
-    assert all(candidate.read_accept_reports == [False] for candidate in resolution_sessions)
+    assert all(candidate.read_accept_reports == [True] for candidate in resolution_sessions)
     assert _FakeSession.timeline.index("ack-unconfirmed-hook") < _FakeSession.timeline.index(
-        "1:read:reply-only"
+        "1:read:reports"
     )
     decode_updates = [
         update
@@ -662,7 +702,7 @@ async def test_unconfirmed_ack_fresh_read_unavailable_is_typed_without_resending
     resolution_sessions = _FakeSession.instances[1:9]
     assert len(resolution_sessions) == 8
     assert all(candidate.sent == [] for candidate in resolution_sessions)
-    assert all(candidate.read_accept_reports == [False] for candidate in resolution_sessions)
+    assert all(candidate.read_accept_reports == [True] for candidate in resolution_sessions)
 
 
 async def test_unconfirmed_ack_retires_each_failed_object_then_succeeds_on_fourth_read(
@@ -676,21 +716,27 @@ async def test_unconfirmed_ack_retires_each_failed_object_then_succeeds_on_fourt
     outcome = await device.write_power(50, on_ack_unconfirmed=lambda _kind: None)
 
     assert outcome is ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
-    assert len(_FakeSession.instances) == 5
-    assert len({id(candidate) for candidate in _FakeSession.instances}) == 5
+    assert len(_FakeSession.instances) == 6
+    assert len({id(candidate) for candidate in _FakeSession.instances}) == 6
     assert len(_FakeSession.instances[0].sent) == 1
     assert all(candidate.sent == [] for candidate in _FakeSession.instances[1:])
     for failed_id in range(1, 4):
         assert _FakeSession.timeline.index(f"{failed_id}:disconnect") < (
             _FakeSession.timeline.index(f"{failed_id + 1}:create")
         )
-    successful = _FakeSession.instances[4]
-    assert successful.read_accept_reports == [False]
+    evidence = _FakeSession.instances[4]
+    replacement = _FakeSession.instances[5]
+    assert evidence.read_accept_reports == [True]
+    assert evidence.connected is False
+    assert replacement.read_accept_reports == []
+    assert replacement.connected is True
+    assert _FakeSession.timeline.index("4:disconnect") < _FakeSession.timeline.index("5:create")
 
     await device.get_state()
 
-    assert device._session is successful  # noqa: SLF001
-    assert successful.read_accept_reports == [False, True]
+    assert device._session is replacement  # noqa: SLF001
+    assert evidence.read_accept_reports == [True]
+    assert replacement.read_accept_reports == [True]
 
 
 async def test_unconfirmed_ack_rejects_factory_reusing_retired_object() -> None:
@@ -797,7 +843,7 @@ async def test_unconfirmed_ack_requires_original_session_quarantine_before_resol
     assert all(candidate.connect_calls == 0 for candidate in UnquarantinableSession.instances[1:])
 
 
-async def test_unconfirmed_ack_invalid_full_state_is_decode_stage_failure() -> None:
+async def test_unconfirmed_ack_malformed_state_report_length_is_decode_stage_failure() -> None:
     _FakeSession.state = b""
     _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
     device = _device(
@@ -814,6 +860,9 @@ async def test_unconfirmed_ack_invalid_full_state_is_decode_stage_failure() -> N
     assert captured.value.attempts == 2
     assert len(_FakeSession.instances[0].sent) == 1
     assert all(candidate.sent == [] for candidate in _FakeSession.instances[1:])
+    assert all(
+        candidate.read_accept_reports == [True] for candidate in _FakeSession.instances[1:3]
+    )
 
 
 @pytest.mark.parametrize(
@@ -952,7 +1001,7 @@ async def test_unconfirmed_ack_hook_failure_prevents_fresh_read_and_reconnect() 
     assert session.connect_calls == 1
     assert session.authenticate_calls == 1
     assert session.read_accept_reports == []
-    assert "read:reply-only" not in session.events
+    assert not any(event.startswith("read:") for event in session.events)
     assert all(candidate.connect_calls == 0 for candidate in _FakeSession.instances[1:])
 
 
@@ -1033,7 +1082,7 @@ async def test_unconfirmed_ack_safety_trip_during_reconnect_prevents_resolution_
     assert session.read_accept_reports == []
 
 
-async def test_unconfirmed_ack_safety_trip_during_read_cannot_become_success() -> None:
+async def test_unconfirmed_ack_safety_trip_after_state_report_cannot_become_success() -> None:
     _FakeSession.state = _pro_state(power=50)
     _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
     allowed = True
@@ -1069,7 +1118,90 @@ async def test_unconfirmed_ack_safety_trip_during_read_cannot_become_success() -
 
     assert len(session.sent) == 1
     assert session.read_accept_reports == []
-    assert GuardTripReadSession.instances[1].read_accept_reports == [False]
+    assert GuardTripReadSession.instances[1].read_accept_reports == [True]
+
+
+async def test_unconfirmed_ack_safety_trip_during_clean_session_replacement_cannot_succeed(
+) -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    allowed = True
+
+    class GuardTripReplacementSession(_FakeSession):
+        async def connect(self) -> None:
+            nonlocal allowed
+            await super().connect()
+            if self.instance_id == 2:
+                allowed = False
+
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        allow_hardware_writes=True,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+        ack_loss_retry_delay_seconds=0,
+        session_factory=GuardTripReplacementSession,
+    )
+    await device.connect()
+
+    with pytest.raises(SafetyInterlockError, match="safety interlock"):
+        await device.write_power(
+            50,
+            guard=lambda: allowed,
+            on_ack_unconfirmed=lambda _kind: None,
+        )
+
+    evidence = GuardTripReplacementSession.instances[1]
+    replacement = GuardTripReplacementSession.instances[2]
+    assert evidence.read_accept_reports == [True]
+    assert evidence.connected is False
+    assert replacement.connect_calls == 1
+    assert replacement.authenticate_calls == 0
+    assert replacement.read_accept_reports == []
+    assert replacement.connected is False
+    assert sum(len(candidate.sent) for candidate in GuardTripReplacementSession.instances) == 1
+
+
+async def test_unconfirmed_ack_clean_session_replacement_obeys_hard_deadline() -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+
+    class SlowReplacementSession(_FakeSession):
+        async def connect(self) -> None:
+            if self.instance_id == 2:
+                await asyncio.sleep(1)
+            await super().connect()
+
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        allow_hardware_writes=True,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+        ack_loss_resolution_timeout_seconds=0.05,
+        ack_loss_retry_delay_seconds=0,
+        session_factory=SlowReplacementSession,
+    )
+    await device.connect()
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(ControlAckReadbackError) as captured:
+        await device.write_power(50, on_ack_unconfirmed=lambda _kind: None)
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert captured.value.stage is ControlAckResolutionStage.CONNECT
+    assert captured.value.attempts == 1
+    assert elapsed < 0.3
+    assert SlowReplacementSession.instances[1].read_accept_reports == [True]
+    assert SlowReplacementSession.instances[1].connected is False
+    assert SlowReplacementSession.instances[2].read_accept_reports == []
+    assert SlowReplacementSession.instances[2].connected is False
+    assert sum(len(candidate.sent) for candidate in SlowReplacementSession.instances) == 1
 
 
 async def test_unconfirmed_ack_mismatch_preserves_command_pacing_across_reconnect() -> None:
@@ -1272,3 +1404,293 @@ def test_lan_adapter_rejects_unbounded_ack_loss_resolution_timeout(timeout: floa
             ack_loss_resolution_timeout_seconds=timeout,
             session_factory=_FakeSession,
         )
+
+
+async def test_pro_schedule_read_returns_exact_image_without_device_clock() -> None:
+    first = _schedule_slot(flow=31, start_hour=0, end_hour=8)
+    last = _schedule_slot(flow=47, start_hour=22, end_hour=24)
+    clock = bytes.fromhex("141a081b000c2238")
+    _FakeSession.state = _pro_schedule_state({0: first, 47: last}, clock_marker=clock)
+    device = _device()
+    await device.connect()
+
+    image = await device.read_schedule_image()
+
+    assert image == extract_local_wavemaker_pro_schedule_image(_FakeSession.state)
+    assert len(image) == 432
+    assert image[:9] == first
+    assert image[-9:] == last
+    assert clock not in image
+    assert _FakeSession.instances[0].sent == []
+
+
+async def test_pro_schedule_write_uses_standalone_payload_and_exact_readback() -> None:
+    slot_5 = _schedule_slot(flow=32)
+    slot_23 = _schedule_slot(flow=48, start_hour=17, end_hour=18)
+    _FakeSession.state = _pro_schedule_state({5: slot_5, 23: slot_23})
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+
+    outcome = await device.write_schedule_slots(
+        {5: slot_5, 23: slot_23},
+        guard=lambda: True,
+    )
+
+    assert outcome is ControlVerificationOutcome.STATE_VERIFIED
+    assert _FakeSession.instances[0].sent == [
+        build_local_wavemaker_pro_schedule_control_payload({5: slot_5, 23: slot_23})
+    ]
+    assert _FakeSession.instances[0].read_accept_reports == [True]
+
+
+@pytest.mark.parametrize("flow", [29, 76])
+async def test_pro_forward_schedule_write_enforces_configured_power_limits(flow: int) -> None:
+    slot = _schedule_slot(flow=flow)
+    _FakeSession.state = _pro_schedule_state({6: slot})
+    device = _device(allow_writes=True)
+
+    with pytest.raises(ValueError, match="outside configured range"):
+        await device.write_schedule_slots({6: slot}, guard=lambda: True)
+
+    assert _FakeSession.instances[0].connect_calls == 0
+    assert _FakeSession.instances[0].sent == []
+
+
+async def test_pro_forward_schedule_write_enforces_configured_power_step() -> None:
+    slot = _schedule_slot(flow=32)
+    _FakeSession.state = _pro_schedule_state({6: slot})
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        power_step=5,
+        allow_hardware_writes=True,
+        session_factory=_FakeSession,
+    )
+
+    with pytest.raises(ValueError, match="does not match step 5"):
+        await device.write_schedule_slots({6: slot}, guard=lambda: True)
+
+    assert _FakeSession.instances[0].connect_calls == 0
+    assert _FakeSession.instances[0].sent == []
+
+
+async def test_pro_forward_feed_schedule_allows_zero_flow() -> None:
+    feed = bytes((8, 0, 9, 0, 7, 0, 0, 15, 0))
+    _FakeSession.state = _pro_schedule_state({6: feed})
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+
+    outcome = await device.write_schedule_slots({6: feed}, guard=lambda: True)
+
+    assert outcome is ControlVerificationOutcome.STATE_VERIFIED
+    assert _FakeSession.instances[0].sent == [
+        build_local_wavemaker_pro_schedule_control_payload({6: feed})
+    ]
+
+
+@pytest.mark.parametrize("flow", [20, 76, 100])
+async def test_pro_forward_feed_schedule_rejects_nonzero_flow_outside_limits(
+    flow: int,
+) -> None:
+    feed = bytes((8, 0, 9, 0, 7, flow, 0, 15, 0))
+    _FakeSession.state = _pro_schedule_state({6: feed})
+    device = _device(allow_writes=True)
+
+    with pytest.raises(ValueError, match="outside configured range"):
+        await device.write_schedule_slots({6: feed}, guard=lambda: True)
+
+    assert _FakeSession.instances[0].connect_calls == 0
+    assert _FakeSession.instances[0].sent == []
+
+
+async def test_pro_forward_feed_schedule_enforces_step_for_nonzero_flow() -> None:
+    feed = bytes((8, 0, 9, 0, 7, 32, 0, 15, 0))
+    _FakeSession.state = _pro_schedule_state({6: feed})
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        power_step=5,
+        allow_hardware_writes=True,
+        session_factory=_FakeSession,
+    )
+
+    with pytest.raises(ValueError, match="does not match step 5"):
+        await device.write_schedule_slots({6: feed}, guard=lambda: True)
+
+    assert _FakeSession.instances[0].connect_calls == 0
+    assert _FakeSession.instances[0].sent == []
+
+
+async def test_pro_exact_schedule_restore_bypasses_forward_limits_and_verifies_full_image() -> None:
+    outside_current_limit = _schedule_slot(flow=89)
+    raw_state = _pro_schedule_state({0: outside_current_limit})
+    image = extract_local_wavemaker_pro_schedule_image(raw_state)
+    _FakeSession.state = raw_state
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+
+    outcome = await device.restore_schedule_image(image, guard=lambda: True)
+
+    expected_slots = {
+        index: image[index * 9 : (index + 1) * 9]
+        for index in range(48)
+    }
+    assert outcome is ControlVerificationOutcome.STATE_VERIFIED
+    assert _FakeSession.instances[0].sent == [
+        build_local_wavemaker_pro_schedule_control_payload(expected_slots)
+    ]
+    assert _FakeSession.instances[0].connect_calls == 1
+    assert _FakeSession.instances[0].authenticate_calls == 1
+    assert _FakeSession.instances[0].read_accept_reports == [True]
+
+
+async def test_cancelled_schedule_send_retires_transport_before_exact_restore() -> None:
+    original_state = _pro_schedule_state({0: _schedule_slot(flow=89)})
+    original_image = extract_local_wavemaker_pro_schedule_image(original_state)
+    temporary = _schedule_slot(flow=38)
+    _FakeSession.state = original_state
+    _FakeSession.send_failure = asyncio.CancelledError()
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    uncertain_session = _FakeSession.instances[0]
+
+    with pytest.raises(asyncio.CancelledError):
+        await device.write_schedule_slots({0: temporary}, guard=lambda: True)
+
+    assert uncertain_session.connected is False
+    assert uncertain_session.events[-1] == "quarantine"
+    assert uncertain_session.sent == [
+        build_local_wavemaker_pro_schedule_control_payload({0: temporary})
+    ]
+
+    _FakeSession.send_failure = None
+    outcome = await device.restore_schedule_image(original_image, guard=lambda: True)
+
+    replacement = _FakeSession.instances[1]
+    expected_slots = {
+        index: original_image[index * 9 : (index + 1) * 9]
+        for index in range(48)
+    }
+    assert outcome is ControlVerificationOutcome.STATE_VERIFIED
+    assert device._session is replacement  # noqa: SLF001
+    assert replacement.connect_calls == 1
+    assert replacement.authenticate_calls == 1
+    assert replacement.sent == [
+        build_local_wavemaker_pro_schedule_control_payload(expected_slots)
+    ]
+    assert sum(len(session.sent) for session in _FakeSession.instances) == 2
+
+
+async def test_pro_exact_schedule_restore_mismatch_redacts_both_full_images() -> None:
+    requested_state = _pro_schedule_state({0: _schedule_slot(flow=89)})
+    actual_state = _pro_schedule_state({0: _schedule_slot(flow=88)})
+    requested = extract_local_wavemaker_pro_schedule_image(requested_state)
+    actual = extract_local_wavemaker_pro_schedule_image(actual_state)
+    _FakeSession.state = actual_state
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+
+    with pytest.raises(ControlStateMismatchError) as captured:
+        await device.restore_schedule_image(requested, guard=lambda: True)
+
+    message = str(captured.value)
+    assert "ScheduleImage" in message
+    assert message.count("<binary>") == 2
+    assert requested.hex() not in message
+    assert actual.hex() not in message
+    assert len(_FakeSession.instances[0].sent) == 1
+
+
+async def test_pro_schedule_write_is_hardware_locked_and_guarded_before_send() -> None:
+    slot = _schedule_slot(flow=38)
+    _FakeSession.state = _pro_schedule_state({6: slot})
+    image = extract_local_wavemaker_pro_schedule_image(_FakeSession.state)
+
+    locked = _device(allow_writes=False)
+    with pytest.raises(HardwareWritesDisabledError):
+        await locked.write_schedule_slots({6: slot}, guard=lambda: True)
+    with pytest.raises(HardwareWritesDisabledError):
+        await locked.restore_schedule_image(image, guard=lambda: True)
+    assert _FakeSession.instances[0].connect_calls == 0
+    assert _FakeSession.instances[0].sent == []
+
+    guarded = _device(allow_writes=True)
+    with pytest.raises(SafetyInterlockError):
+        await guarded.write_schedule_slots({6: slot}, guard=lambda: False)
+    with pytest.raises(SafetyInterlockError):
+        await guarded.restore_schedule_image(image, guard=lambda: False)
+    assert _FakeSession.instances[1].connect_calls == 0
+    assert _FakeSession.instances[1].sent == []
+
+
+async def test_pro_schedule_ack_loss_accepts_fresh_report_without_control_replay() -> None:
+    slot = _schedule_slot(flow=38)
+    _FakeSession.state = _pro_schedule_state({7: slot})
+    _FakeSession.send_failure = ProtocolTimeoutError("private transport endpoint")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+
+    outcome = await device.write_schedule_slots({7: slot}, guard=lambda: True)
+
+    assert outcome is ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+    assert len(_FakeSession.instances[0].sent) == 1
+    assert _FakeSession.instances[0].sent[0] == (
+        build_local_wavemaker_pro_schedule_control_payload({7: slot})
+    )
+    assert len(_FakeSession.instances) == 3
+    assert _FakeSession.instances[1].sent == []
+    assert _FakeSession.instances[1].read_accept_reports == [True]
+    assert _FakeSession.instances[1].connected is False
+    assert _FakeSession.instances[2].sent == []
+    assert _FakeSession.instances[2].read_accept_reports == []
+    assert _FakeSession.instances[2].connected is True
+
+
+async def test_pro_schedule_ack_loss_mismatch_is_typed_and_redacts_raw_bytes() -> None:
+    actual = _schedule_slot(flow=33)
+    requested = _schedule_slot(flow=38)
+    _FakeSession.state = _pro_schedule_state({7: actual})
+    _FakeSession.send_failure = ProtocolTimeoutError("private transport endpoint")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+
+    with pytest.raises(ControlAckStateMismatchError) as captured:
+        await device.write_schedule_slots({7: requested}, guard=lambda: True)
+
+    message = str(captured.value)
+    assert "AutoTime07" in message
+    assert message.count("<binary>") == 2
+    assert repr(requested) not in message
+    assert repr(actual) not in message
+    assert requested.hex() not in message
+    assert actual.hex() not in message
+    assert len(_FakeSession.instances[0].sent) == 1
+    assert all(session.sent == [] for session in _FakeSession.instances[1:])
+    assert all(
+        session.read_accept_reports == [True] for session in _FakeSession.instances[1:9]
+    )
+
+
+async def test_non_pro_product_rejects_schedule_read_and_write_without_io() -> None:
+    device = LanJebaoDevice(
+        "legacy",
+        "pump.local",
+        LOCAL_WAVEMAKER.product_key,
+        allow_hardware_writes=True,
+        session_factory=_FakeSession,
+    )
+    slot = _schedule_slot(flow=38)
+
+    with pytest.raises(UnsupportedCapabilityError, match="writable schedule image"):
+        await device.read_schedule_image()
+    with pytest.raises(UnsupportedCapabilityError, match="writable schedule image"):
+        await device.write_schedule_slots({0: slot}, guard=lambda: True)
+    with pytest.raises(UnsupportedCapabilityError, match="writable schedule image"):
+        await device.restore_schedule_image(LOCAL_WAVEMAKER_PRO_UNUSED_EE * 48)
+
+    assert _FakeSession.instances[0].connect_calls == 0
+    assert _FakeSession.instances[0].read_accept_reports == []
+    assert _FakeSession.instances[0].sent == []

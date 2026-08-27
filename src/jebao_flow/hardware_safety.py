@@ -123,6 +123,12 @@ def schedule_linkage_intent_path() -> Path:
     return hardware_safety_root() / "schedule-linkage-intent.json"
 
 
+def temporary_schedule_journal_path() -> Path:
+    """Return the fixed byte-exact schedule restore journal path."""
+
+    return hardware_safety_root() / "temporary-schedule.json"
+
+
 def qualification_directory() -> Path:
     return hardware_safety_root() / "qualifications"
 
@@ -138,6 +144,7 @@ __all__ = [
     "qualification_directory",
     "schedule_linkage_intent_path",
     "schedule_linkage_journal_path",
+    "temporary_schedule_journal_path",
     "verification_intent_path",
     "verification_journal_path",
     "validate_hardware_safety_root",

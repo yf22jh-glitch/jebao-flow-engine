@@ -193,6 +193,63 @@ async def test_explicit_state_read_skips_reports_and_empty_payload_without_reque
     ]
 
 
+async def test_report_capable_state_read_skips_empty_and_wrong_action_without_requery() -> None:
+    received: list[tuple[int, bytes]] = []
+
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            passcode = b"abc123"
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.PASSCODE_RESPONSE,
+                    struct.pack(">H", len(passcode)) + passcode,
+                )
+            )
+            await writer.drain()
+
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            writer.write(encode_frame(GizwitsCommand.LOGIN_RESPONSE, b"\x00"))
+            await writer.drain()
+
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            writer.write(encode_frame(GizwitsCommand.SERIAL_TRANSMIT_RESPONSE, b""))
+            writer.write(encode_frame(GizwitsCommand.SERIAL_TRANSMIT_RESPONSE, b"\x7fwrong"))
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+                    bytes([STATE_REPORT_ACTION]) + b"reported-state",
+                )
+            )
+            await writer.drain()
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    session = GizwitsSession("127.0.0.1", port=port, max_skipped_frames=2)
+    try:
+        await session.connect()
+        await session.authenticate()
+        state = await session.read_raw_state(accept_reports=True)
+    finally:
+        await session.disconnect()
+        server.close()
+        await server.wait_closed()
+
+    assert state == b"reported-state"
+    assert received == [
+        (GizwitsCommand.PASSCODE_REQUEST, b""),
+        (GizwitsCommand.LOGIN_REQUEST, b"\x00\x06abc123"),
+        (GizwitsCommand.SERIAL_TRANSMIT_REQUEST, b"\x02"),
+    ]
+
+
 async def test_explicit_state_read_exhausts_skip_budget_without_requery() -> None:
     received: list[tuple[int, bytes]] = []
 
