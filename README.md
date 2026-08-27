@@ -8,11 +8,12 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 > MQTT 상태 계약과 Home Assistant 커스텀 통합 뼈대까지 구현했습니다. 기본 실행 모드는
 > `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 현장 전용 경로에서는 Pro 두 대의
 > 제한된 저출력 Sync와 자동 exact restore가 성공해 qualification 영수증 2/2를 발급했습니다.
-> 다만 뒤이은 Async 슬레이브 출력 변경 시험은 자동 rollback 실패 뒤 attended recovery가 필요했고,
-> version 2 진단으로 재검증한 실행도 38% write 시도만 남긴 채 adapter/full-state 검증 0건으로
-> 끝났습니다. attended recovery와 Observer가 원래 TimerON 상태·14개 스케줄·지문을 확인했지만
-> Async 출력 변경은 성공으로 인정할 수 없습니다. 따라서 네이티브 Linkage는 운영 기능으로
-> 승격하지 않았으며, 일반 데몬·MQTT·HA에는 이 시험 기능을 노출하지 않습니다.
+> 다만 Async 슬레이브 출력 변경과 TimerON 슬롯별 출력 전환은 아직 성공으로 인정할 수 없습니다.
+> 2026-08-28의 최신 단일 시험은 `master` 적용 뒤 `async_slave`까지 도달했지만, 역할 적용 시
+> 슬레이브의 manual Frequency가 지속적으로 바뀌는 펌웨어 동작을 명시적 응답에서 확인하고 A→B
+> 시간표 경계 전에 안전 중단했습니다. 자동 rollback, 두 번의 새 연결 원상태 비교, Observer 복귀는
+> 모두 성공했습니다. 따라서 네이티브 Linkage는 계속 운영 기능으로 잠겨 있으며 일반 데몬·MQTT·HA에
+> 시험 기능을 노출하지 않습니다.
 
 ## 구조
 

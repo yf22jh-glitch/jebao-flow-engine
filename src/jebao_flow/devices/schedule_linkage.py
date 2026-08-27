@@ -910,6 +910,8 @@ class ScheduleActiveLinkageController:
         self._forward_deadline: float | None = None
         self._observation_deadline: float | None = None
         self._staged_transition_not_before: float | None = None
+        self._staged_role_frequency_allowlist: frozenset[int] = frozenset()
+        self._staged_role_frequency_pins: dict[str, int] = {}
         self._run_failure: ScheduleLinkageRunFailure | None = None
         self._run_drift_dimensions: tuple[ScheduleLinkageDriftDimension, ...] = ()
         self._run_pair_participant: Literal["master", "slave"] | None = None
@@ -989,6 +991,8 @@ class ScheduleActiveLinkageController:
             finally:
                 self._active_operation_id = None
                 self._stop_event = None
+                self._staged_role_frequency_allowlist = frozenset()
+                self._staged_role_frequency_pins.clear()
                 lease.__exit__(None, None, None)
 
     async def finalize_externally_disarmed(self, operation_id: str) -> bool:
@@ -1054,6 +1058,8 @@ class ScheduleActiveLinkageController:
         spec = preflight.spec
         self._active_operation_id = spec.operation_id
         self._stop_event = asyncio.Event()
+        self._staged_role_frequency_allowlist = frozenset()
+        self._staged_role_frequency_pins.clear()
         self._safety_epoch = self._safety_interlock.epoch
         started_at = datetime.now(UTC)
         started_monotonic = self._monotonic()
@@ -1210,6 +1216,8 @@ class ScheduleActiveLinkageController:
             self._forward_deadline = None
             self._observation_deadline = None
             self._staged_transition_not_before = None
+            self._staged_role_frequency_allowlist = frozenset()
+            self._staged_role_frequency_pins.clear()
             self._run_failure = None
             self._run_drift_dimensions = ()
             self._run_pair_participant = None
@@ -1300,6 +1308,10 @@ class ScheduleActiveLinkageController:
             raise ScheduleLinkagePreflightError(
                 "staged Auto transition entries must share one validity window"
             )
+        frequency_allowlist = {
+            snapshot.frequency
+            for snapshot in snapshots
+        }
         for snapshot in snapshots:
             schedule = states[snapshot.device_id].schedule
             if schedule is None:
@@ -1317,6 +1329,15 @@ class ScheduleActiveLinkageController:
                 raise ScheduleLinkagePreflightError(
                     "Auto transition observation requires a non-wrapping two-entry schedule"
                 )
+            if (
+                expectation.before.mode != "constant"
+                or expectation.after_mode != "sine"
+                or entries[0].mode != "constant"
+                or entries[0].parameters.get("frequency") != 0
+            ):
+                raise ScheduleLinkagePreflightError(
+                    "staged Auto transition requires exact Constant(0) to Sine entries"
+                )
             if expectation.before.mode == expectation.after_mode:
                 raise ScheduleLinkagePreflightError(
                     "staged Auto transition must change mode at the observed boundary"
@@ -1331,6 +1352,13 @@ class ScheduleActiveLinkageController:
                 raise ScheduleLinkagePreflightError(
                     "staged next entry is too short for stable Auto evidence"
                 )
+            frequency_allowlist.add(expectation.before.frequency)
+            if expectation.after_frequency is not None:
+                frequency_allowlist.add(expectation.after_frequency)
+        # Zero is an approved role-side effect only because both token-bound A entries above
+        # proved the Pro wire's ignored Constant frequency byte is exactly zero.
+        frequency_allowlist.add(0)
+        self._staged_role_frequency_allowlist = frozenset(frequency_allowlist)
 
     def _snapshot_from_state(
         self,
@@ -1663,6 +1691,7 @@ class ScheduleActiveLinkageController:
             states, sampled_at = await self._converge_role_frequency(
                 record,
                 expected_roles,
+                initial_states=states,
                 initial_anchor=(
                     previous_anchor
                     if self._owned_staged_auto_transition_observation
@@ -1704,6 +1733,7 @@ class ScheduleActiveLinkageController:
         record: ScheduleLinkageRecord,
         expected_roles: Mapping[str, LinkageRole],
         *,
+        initial_states: Mapping[str, DeviceState],
         initial_anchor: _ClockAnchor,
         initial_error: ScheduleLinkageApplyError,
         pair_failure: ScheduleLinkageRunFailure,
@@ -1720,9 +1750,20 @@ class ScheduleActiveLinkageController:
             _ROLE_FREQUENCY_CONVERGENCE_MAX_INTERVAL_SECONDS,
         )
         exact_reads = 0
+        alternate_frequency: int | None = None
+        alternate_exact_reads = 0
         previous_anchor = initial_anchor
         last_frequency_error = initial_error
         last_frequency_failure = self._run_failure
+        if self._owned_staged_auto_transition_observation:
+            # The first mismatch authorizes no alternate baseline.  It only proves that the
+            # controller should open fresh authenticated sessions.  Reject values outside the
+            # token-bound Constant/Sine plan before spending the convergence budget.
+            self._staged_slave_frequency_candidate(
+                record,
+                initial_states,
+                expected_roles,
+            )
         for _attempt in range(_ROLE_FREQUENCY_CONVERGENCE_MAX_READS):
             settled = await self._wait_for_role_frequency_settle(
                 interval,
@@ -1770,7 +1811,39 @@ class ScheduleActiveLinkageController:
                 exact_reads = 0
                 last_frequency_error = error
                 last_frequency_failure = self._run_failure
+                if self._owned_staged_auto_transition_observation:
+                    candidate = self._staged_slave_frequency_candidate(
+                        record,
+                        states,
+                        expected_roles,
+                    )
+                    if candidate == alternate_frequency:
+                        alternate_exact_reads += 1
+                    else:
+                        alternate_frequency = candidate
+                        alternate_exact_reads = 1
+                    if (
+                        not convergence_expired
+                        and alternate_exact_reads
+                        >= _ROLE_FREQUENCY_CONVERGENCE_REQUIRED_EXACT_READS
+                    ):
+                        slave_id = record.spec.slave_device_id
+                        self._staged_role_frequency_pins[slave_id] = candidate
+                        try:
+                            self._assert_pair_sample(
+                                record,
+                                states,
+                                expected_roles,
+                                phase="before",
+                                emit_sample=True,
+                            )
+                        except BaseException:
+                            self._staged_role_frequency_pins.pop(slave_id, None)
+                            raise
+                        return states, sampled_at
             else:
+                alternate_frequency = None
+                alternate_exact_reads = 0
                 exact_reads += 1
                 if (
                     not convergence_expired
@@ -1795,6 +1868,40 @@ class ScheduleActiveLinkageController:
         self._run_failure = last_frequency_failure
         self._run_drift_dimensions = (ScheduleLinkageDriftDimension.FREQUENCY,)
         raise last_frequency_error
+
+    def _staged_slave_frequency_candidate(
+        self,
+        record: ScheduleLinkageRecord,
+        states: Mapping[str, DeviceState],
+        expected_roles: Mapping[str, LinkageRole],
+    ) -> int:
+        """Return one allow-listed ASYNC side effect or fail closed without another write."""
+
+        master_id = record.spec.master_device_id
+        slave_id = record.spec.slave_device_id
+        if (
+            not self._owned_staged_auto_transition_observation
+            or self._run_failure is not ScheduleLinkageRunFailure.SLAVE_PAIR_SLAVE_STATE
+            or self._run_drift_dimensions
+            != (ScheduleLinkageDriftDimension.FREQUENCY,)
+            or expected_roles.get(master_id) is not LinkageRole.MASTER
+            or expected_roles.get(slave_id) is not LinkageRole.ASYNC_SLAVE
+        ):
+            raise ScheduleLinkageApplyError(
+                "role-induced frequency evidence is outside the owned staged slave scope"
+            )
+        candidate = states[slave_id].frequency
+        snapshot = self._snapshot(record, slave_id)
+        if (
+            isinstance(candidate, bool)
+            or not isinstance(candidate, int)
+            or candidate == snapshot.frequency
+            or candidate not in self._staged_role_frequency_allowlist
+        ):
+            raise ScheduleLinkageApplyError(
+                "role-induced slave frequency is outside the confirmed staged plan"
+            )
+        return candidate
 
     async def _wait_for_role_frequency_settle(
         self,
@@ -2612,7 +2719,19 @@ class ScheduleActiveLinkageController:
                     for snapshot in record.snapshots
                 )
             )
-            for snapshot, state in zip(record.snapshots, states, strict=True):
+            states_by_id = {
+                snapshot.device_id: state
+                for snapshot, state in zip(record.snapshots, states, strict=True)
+            }
+            if self._owned_staged_auto_transition_observation:
+                self._assert_staged_auto_transition_preconditions(
+                    record.spec,
+                    states_by_id,
+                    record.snapshots,
+                )
+                self._prepare_staged_frequency_recovery_pins(record, states_by_id)
+            for snapshot in record.snapshots:
+                state = states_by_id[snapshot.device_id]
                 allowed = {LinkageRole.INDEPENDENT}
                 if snapshot.device_id in intended and snapshot.device_id not in detached:
                     allowed.add(role_by_device[snapshot.device_id])
@@ -2629,6 +2748,35 @@ class ScheduleActiveLinkageController:
             raise ScheduleLinkageRollbackError(
                 "controller role topology does not match durable recovery intent"
             ) from error
+
+    def _prepare_staged_frequency_recovery_pins(
+        self,
+        record: ScheduleLinkageRecord,
+        states: Mapping[str, DeviceState],
+    ) -> None:
+        """Tolerate decoded linked-role Frequency only long enough to detach exactly."""
+
+        self._staged_role_frequency_pins.clear()
+        for snapshot in record.snapshots:
+            state = states[snapshot.device_id]
+            if state.linkage is LinkageRole.INDEPENDENT:
+                continue
+            candidate = state.frequency
+            if candidate == snapshot.frequency:
+                continue
+            # Forward observation pins only token-bound slave candidates.  Recovery is narrower
+            # in time but broader in value: once forward execution has failed, a decoded byte is
+            # accepted solely to authorize Linkage=independent.  The following read must prove
+            # the original snapshot Frequency exactly or the journal remains recoverable.
+            if (
+                isinstance(candidate, bool)
+                or not isinstance(candidate, int)
+                or not 0 <= candidate <= 100
+            ):
+                raise ScheduleLinkageApplyError(
+                    "linked role frequency is not safe recovery evidence"
+                )
+            self._staged_role_frequency_pins[snapshot.device_id] = candidate
 
     async def _reconcile_detached(
         self,
@@ -2705,6 +2853,13 @@ class ScheduleActiveLinkageController:
         *,
         observed_role: Literal["master", "slave"] | None = None,
     ) -> None:
+        expected_frequency = (
+            self._staged_role_frequency_pins[snapshot.device_id]
+            if self._owned_staged_auto_transition_observation
+            and expected_role is not LinkageRole.INDEPENDENT
+            and snapshot.device_id in self._staged_role_frequency_pins
+            else snapshot.frequency
+        )
         dimensions: set[ScheduleLinkageDriftDimension] = set()
         if not state.online:
             dimensions.add(ScheduleLinkageDriftDimension.ONLINE)
@@ -2729,7 +2884,7 @@ class ScheduleActiveLinkageController:
             (
                 ScheduleLinkageDriftDimension.FREQUENCY,
                 state.frequency,
-                snapshot.frequency,
+                expected_frequency,
             ),
             (
                 ScheduleLinkageDriftDimension.TIMER_ENABLED,
@@ -2774,7 +2929,7 @@ class ScheduleActiveLinkageController:
             snapshot.enabled,
             snapshot.power,
             snapshot.mode,
-            snapshot.frequency,
+            expected_frequency,
             True,
             expected_role,
         )

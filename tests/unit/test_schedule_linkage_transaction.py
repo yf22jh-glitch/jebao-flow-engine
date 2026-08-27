@@ -104,6 +104,7 @@ class _ScheduleDevice(SimulatedJebaoDevice):
             LinkageRole,
             list[dict[str, object] | None],
         ] = {}
+        self.role_frequency_overrides: dict[LinkageRole, int] = {}
         self.reported_auto_updates_by_role: dict[LinkageRole, dict[str, object]] = {}
         self.reported_auto_update_sequences_by_role: dict[
             LinkageRole,
@@ -159,6 +160,10 @@ class _ScheduleDevice(SimulatedJebaoDevice):
 
     async def get_state(self):
         state = await super().get_state()
+        if state.linkage in self.role_frequency_overrides:
+            state = state.model_copy(
+                update={"frequency": self.role_frequency_overrides[state.linkage]}
+            )
         if state.linkage in self.fail_state_reads_for_roles:
             self.fail_state_reads_for_roles.remove(state.linkage)
             raise RuntimeError("simulated linked state read failure")
@@ -2429,7 +2434,7 @@ async def test_staged_post_role_and_frequency_convergence_ignore_cached_clock_ju
     # Force frequency convergence, then reproduce independently batched +25s/+22s explicit
     # clock reports. Auto evidence remains the correlated reply's effective tuple.
     slave.reported_state_update_sequences_by_role[LinkageRole.ASYNC_SLAVE] = [
-        {"frequency": 6},
+        {"frequency": 40},
         None,
         None,
     ]
@@ -2457,6 +2462,283 @@ async def test_staged_post_role_and_frequency_convergence_ignore_cached_clock_ju
     assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
     assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
     _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize("candidate", [0, 5, 20, 40, 80])
+async def test_staged_pins_two_fresh_allowlisted_slave_frequencies_without_writing(
+    tmp_path: Path,
+    candidate: int,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    await master.set_frequency(20)
+    await slave.set_frequency(21)
+    master.calls.clear()
+    slave.calls.clear()
+    master.commands.clear()
+    slave.commands.clear()
+    slave.role_frequency_overrides[LinkageRole.ASYNC_SLAVE] = candidate
+    reads_when_verified: list[int] = []
+
+    def observe_progress(event: ScheduleLinkageRunProgressEvent) -> None:
+        if event.kind is ScheduleLinkageRunProgressKind.SLAVE_PAIR_VERIFIED:
+            reads_when_verified.append(slave.explicit_state_read_count)
+
+    store = JsonScheduleLinkageJournalStore(tmp_path / f"staged-pin-{candidate}.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=observe_progress,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    result = await controller.run(await controller.preflight(_staged_spec()))
+
+    assert result.schedule_transition_verified is True
+    # Gate, post-master, initial post-slave, then two independent convergence replies.
+    assert reads_when_verified == [5]
+    assert store.load() is None
+    assert (await slave.get_state()).frequency == 21
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_pinned_frequency_holds_through_five_minute_after_window(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair(next_entry_end="18:20")
+    await master.set_frequency(20)
+    await slave.set_frequency(21)
+    master.calls.clear()
+    slave.calls.clear()
+    master.commands.clear()
+    slave.commands.clear()
+    slave.role_frequency_overrides[LinkageRole.ASYNC_SLAVE] = 5
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-pin-five-minutes.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    result = await controller.run(
+        await controller.preflight(
+            _staged_spec(
+                observation_window_seconds=600,
+                post_boundary_stability_seconds=300,
+            )
+        )
+    )
+
+    assert result.schedule_transition_verified is True
+    assert master.virtual_time.value >= 340
+    assert store.load() is None
+    assert (await slave.get_state()).frequency == 21
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_rejects_allowlisted_slave_frequency_that_never_stabilizes(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    await master.set_frequency(20)
+    await slave.set_frequency(21)
+    master.calls.clear()
+    slave.calls.clear()
+    master.commands.clear()
+    slave.commands.clear()
+    slave.reported_state_update_sequences_by_role[LinkageRole.ASYNC_SLAVE] = [
+        {"frequency": value}
+        for value in (5, 5, 40, 5, 40)
+    ]
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-pin-unstable.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_staged_spec()))
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.SLAVE_PAIR_SLAVE_STATE
+    assert progress[-1].drift_dimensions == (
+        ScheduleLinkageDriftDimension.FREQUENCY,
+    )
+    assert slave.explicit_state_read_count == 7
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_rejects_unconfirmed_role_frequency_without_retry(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    await master.set_frequency(20)
+    await slave.set_frequency(21)
+    master.calls.clear()
+    slave.calls.clear()
+    master.commands.clear()
+    slave.commands.clear()
+    slave.role_frequency_overrides[LinkageRole.ASYNC_SLAVE] = 99
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-pin-unconfirmed.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_staged_spec()))
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.SLAVE_PAIR_SLAVE_STATE
+    assert progress[-1].drift_dimensions == (
+        ScheduleLinkageDriftDimension.FREQUENCY,
+    )
+    assert slave.explicit_state_read_count == 3
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_frequency_pin_is_not_available_to_standalone_controller(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair(linked_clock_step_seconds=1)
+    await master.set_frequency(20)
+    await slave.set_frequency(21)
+    master.calls.clear()
+    slave.calls.clear()
+    master.commands.clear()
+    slave.commands.clear()
+    slave.reported_state_update_sequences_by_role[LinkageRole.ASYNC_SLAVE] = [
+        {"frequency": 5}
+        for _ in range(5)
+    ]
+    store = JsonScheduleLinkageJournalStore(tmp_path / "standalone-no-pin.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_spec()))
+
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_master_frequency_side_effect_is_never_pinned(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    await master.set_frequency(20)
+    await slave.set_frequency(21)
+    master.calls.clear()
+    slave.calls.clear()
+    master.commands.clear()
+    slave.commands.clear()
+    master.role_frequency_overrides[LinkageRole.MASTER] = 5
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-master-no-pin.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_staged_spec()))
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MASTER_PAIR_MASTER_STATE
+    assert progress[-1].drift_dimensions == (
+        ScheduleLinkageDriftDimension.FREQUENCY,
+    )
+    assert slave.calls == []
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize("changed_frequency", [21, 40])
+async def test_staged_frequency_pin_change_during_monitor_fails_and_restores(
+    tmp_path: Path,
+    changed_frequency: int,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    await master.set_frequency(20)
+    await slave.set_frequency(21)
+    master.calls.clear()
+    slave.calls.clear()
+    master.commands.clear()
+    slave.commands.clear()
+    slave.reported_state_update_sequences_by_role[LinkageRole.ASYNC_SLAVE] = [
+        {"frequency": value}
+        for value in (5, 5, 5, changed_frequency)
+    ]
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"staged-pin-changed-{changed_frequency}.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_staged_spec()))
+
+    assert store.load() is None
+    assert (await slave.get_state()).frequency == 21
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_rejects_nonzero_raw_constant_frequency_at_preflight(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    slave.entries = (
+        slave.entries[0].model_copy(
+            update={
+                "parameters": {
+                    **slave.entries[0].parameters,
+                    "frequency": 1,
+                }
+            }
+        ),
+        slave.entries[1],
+    )
+    controller = _controller(
+        master,
+        slave,
+        JsonScheduleLinkageJournalStore(tmp_path / "staged-constant-nonzero.json"),
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(
+        ScheduleLinkagePreflightError,
+        match=r"Constant\(0\) to Sine",
+    ):
+        await controller.preflight(_staged_spec())
+
+    assert master.calls == []
+    assert slave.calls == []
 
 
 async def test_staged_monitor_uses_explicit_reads_and_accepts_mixed_auto_refresh(
@@ -3214,6 +3496,63 @@ async def test_crash_recovery_detaches_slave_then_master_with_linkage_only(
     )
     assert master.calls == [("write_linkage", LinkageRole.INDEPENDENT)]
     assert slave.calls == [("write_linkage", LinkageRole.INDEPENDENT)]
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_restart_recovery_accepts_role_frequency_only_to_detach(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    master, slave = await _ready_staged_pair(events=events)
+    await master.set_frequency(20)
+    await slave.set_frequency(21)
+    store = _RecordingStore(tmp_path / "staged-pin-restart.json", events)
+    setup = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await setup.preflight(_staged_spec())
+    slave.role_frequency_overrides[LinkageRole.ASYNC_SLAVE] = 5
+    await master.write_linkage(LinkageRole.MASTER)
+    await slave.write_linkage(LinkageRole.ASYNC_SLAVE)
+    master.calls.clear()
+    slave.calls.clear()
+    master.commands.clear()
+    slave.commands.clear()
+    events.clear()
+    now = datetime.now(UTC)
+    with store.lease():
+        store.create(
+            ScheduleLinkageRecord(
+                operation_id=preflight.spec.operation_id,
+                phase=ScheduleLinkagePhase.ACTIVE,
+                spec=preflight.spec,
+                snapshots=preflight.snapshots,
+                created_at=now,
+                updated_at=now,
+                expires_at=now + timedelta(minutes=2),
+                linkage_write_intent_device_ids=("master", "slave"),
+                linked_device_ids=("master", "slave"),
+            )
+        )
+    restarted = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    assert await restarted.recover_pending() is True
+
+    assert store.load() is None
+    assert events.index("write:slave:independent") < events.index(
+        "write:master:independent"
+    )
+    assert (await slave.get_state()).frequency == 21
     _assert_only_linkage_calls(master, slave)
 
 

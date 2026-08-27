@@ -50,6 +50,16 @@ Observer가 시험 전 Constant 30%/32와 Random 89%/34, 두 장비의 TimerON/I
 schedule enabled, 14 slots, invalid 0 및 snapshot schedule fingerprint 일치를 교차 확인했습니다.
 private 현장 설정은 다시 `dry_run: true`로 잠갔습니다.
 
+2026-08-28에는 앱 시간표를 기다리지 않고 동일한 pause → 임시 저출력 Constant/Sine 2슬롯 →
+TimerON → 역할 적용 → exact restore 합성 경로로 한 번만 시험했습니다. full
+`master`/`async_slave` 역할은 적용됐지만 슬레이브 manual Frequency가 원 snapshot과 다른 값으로
+여러 fresh explicit reply에 지속되어 A→B 경계 전에 fail-closed 종료됐습니다. 자동 rollback은
+완료됐고 새 연결 두 번에서 원 control과 전체 schedule image가 일치했으며 Observer와 recovery
+서비스도 정상 복귀했습니다. 따라서 핵심 질문인 “B 슬롯에서 slave가 별도 `AutoFlow`를 적용하는가”는
+아직 답하지 못했습니다. 후속 구현은 confirmed Constant/Sine plan의 제한된 Frequency 후보를
+2개 fresh session에서 연속 확인할 때만 읽기 기준으로 고정하고, Frequency write 없이 이후 변화는
+즉시 원복합니다. 이 보완의 다음 실기 검증 전에는 native Linkage를 운영 기능으로 승격하지 않습니다.
+
 ## 완료된 사전 검증
 
 - 격리 IoT VLAN의 장비 6대 discovery 및 TCP 12416 연결
@@ -75,7 +85,9 @@ private 현장 설정은 다시 `dry_run: true`로 잠갔습니다.
 - version 2 재진단도 38% write 시도 뒤 adapter/full-state 검증 0건으로 실패했고, attended
   recovery와 Observer가 원래 TimerON 상태·14개 스케줄·지문을 exact 확인
 - `async_slave` Flow 개별 유지 기능은 지원 기능으로 인정하지 않으며, 독립 유지와 물리 유량 모두 미검증
-- `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 동작은 미실행·미검증
+- `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 성공 관찰은 미검증
+- 2026-08-28 슬롯 전환 시험은 역할 적용 후 manual Frequency side effect로 A→B 전에 안전 종료,
+  자동 exact rollback과 Observer 복귀 성공; 슬롯별 `AutoFlow`는 계속 미검증
 - 네이티브 Linkage의 Pro 4역할과 `TimerON` encode/decode 단위 테스트
 - Sync/Async 개별 출력, timeout·수동 종료·취소·부분 실패·재시작 원복 시뮬레이터 테스트
 

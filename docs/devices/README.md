@@ -17,6 +17,10 @@ restore와 영수증 2/2까지 성공했습니다. 후속 Async slave 38% 진단
 attended recovery로 원복됐습니다. version 2 evidence를 적용한 한 번의 재진단도 write 시도만
 남고 adapter/full-state 검증 0건으로 끝났으며, attended recovery와 Observer가 원래 TimerON
 상태·14개 스케줄·지문을 확인했습니다. Async 독립 출력과 물리 파형은 계속 미검증입니다.
+2026-08-28 TimerON Constant→Sine 단일 시험은 두 역할 적용 뒤 슬레이브 manual Frequency의
+지속적인 역할 유발 변경을 fresh explicit reply에서 확인해 A→B 경계 전에 안전 중단했습니다.
+자동 rollback과 두 번의 새 연결 원상태 비교가 성공했으므로 장비는 다시 Observer 운전 중이지만,
+슬롯별 slave `AutoFlow` 전환과 물리 파형은 여전히 미검증입니다.
 
 | 제품군 | 수량 | 분류 | 상태 읽기 | 제한 레지스터 write |
 |---|---:|---|---|---|

@@ -39,6 +39,13 @@ automatic rollback and required attended recovery. Schedule-linkage therefore re
 operationally locked despite those receipts. Whether an `async_slave` applies its own `AutoMode`
 and `AutoFlow` together at a slot boundary remains unverified on hardware.
 
+The 2026-08-28 one-shot reached the full `master` + `async_slave` topology, but stopped before the
+A-to-B boundary because the slave's manual `Frequency` no longer matched its pre-role snapshot in
+repeated fresh explicit replies. Ordered automatic rollback completed, two new-session comparisons
+matched the original controls and complete schedule images, and Observer resumed with writes locked.
+This is evidence of a persistent role-induced manual-Frequency side effect; it is **not** evidence
+that the slave did or did not apply its per-slot `AutoFlow`.
+
 ## Attended flow
 
 Use a private control configuration with Observer disabled, writes enabled for exactly the two
@@ -86,9 +93,19 @@ projects a conservative monotonic not-before window from the final pre-write clo
 rejects any earlier B evidence. It then uses explicit query replies to prove an exact master
 A-to-B `Auto*` transition and holds one unchanged, safe slave result for two consecutive samples
 and the full requested monotonic stability interval. Manual controls, `TimerON`, roles, health,
-and the schedule fingerprint must remain exact on every sample. This can answer whether the slave
+and the schedule fingerprint must remain exact on every sample. The only exception is the observed
+manual-Frequency side effect after the full native topology exists. The composed fixed
+Constant(0)-to-Sine test may pin one token-bound candidate only after two consecutive explicit
+replies from separate fresh sessions agree. The candidate set is limited to the two captured manual
+frequencies, both A effective frequencies, both B frequencies, and raw zero proven by the exact
+Constant entries. The initial mismatch does not count. No Frequency write is sent, the pin is
+run-local, and any later change fails closed; independent detach and outer restoration still require
+the original Frequency exactly. This can answer whether the slave
 applies its per-slot Flow, keeps the previous Flow, or follows the master; it cannot prove
 subsecond phase alignment or the exact wall-clock instant at which either controller changed.
+
+Safety-critical schedule snapshots, staged-write verification, and restore verification use an
+explicit state reply and reject unsolicited reports as proof of the exact 432-byte schedule image.
 
 ## Status and recovery
 

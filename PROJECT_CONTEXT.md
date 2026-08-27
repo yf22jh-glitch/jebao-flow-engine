@@ -84,6 +84,13 @@ slave detach에서 자동 rollback이 실패했지만, attended recovery와 Obse
 영수증 2/2까지 성공했습니다. 그러나 후속 Async 35%/33%→slave 38% 진단은 자동 rollback이
 실패했고, attended recovery와 Observer 교차 확인으로만 원복을 완료했습니다. typed primary
 failure가 없어 Async 독립 출력은 여전히 미검증이며 네이티브 Linkage 잠금은 유지합니다.
+2026-08-28의 TimerON Constant→Sine 단일 시험은 두 역할 적용까지 진행했지만, `async_slave`
+적용 직후 슬레이브 manual Frequency가 여러 fresh explicit reply에서 원 snapshot과 다르게 유지되어
+A→B 관찰 전에 fail-closed로 종료됐습니다. 자동 rollback과 두 번의 새 연결 control/schedule
+비교는 exact였고 Observer도 복귀했습니다. 이 결과는 역할 유발 Frequency side effect의 증거이지
+슬롯별 slave `AutoFlow` 전환 증거가 아닙니다. 후속 코드는 token-bound Constant/Sine 값 중 하나가
+서로 다른 새 세션에서 2회 연속 같을 때만 그 값을 run-local로 고정하며 Frequency write는 보내지
+않습니다. 실기 재검증 전까지 네이티브 Linkage 잠금은 그대로 유지합니다.
 실제 wiring에서는 fail-closed Linkage safety interlock을 비상정지·정비 latch와 공유해야
 하며, journal lease를 획득하지 못한 다른 daemon은 시험이나 startup recovery를 실행하지
 않습니다.
