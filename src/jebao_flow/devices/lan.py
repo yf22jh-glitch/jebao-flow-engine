@@ -276,13 +276,23 @@ class LanJebaoDevice(JebaoDevice):
                 self._last_sent_values.clear()
 
     async def get_state(self) -> DeviceState:
+        return await self._get_state(accept_reports=None)
+
+    async def get_explicit_state(self) -> DeviceState:
+        return await self._get_state(accept_reports=False)
+
+    async def _get_state(self, *, accept_reports: bool | None) -> DeviceState:
         async with self._io_lock:
             if self._session_retired:
                 raise DeviceConnectionError(
                     f"retired session for {self._device_id!r} must be replaced before reading"
                 )
             try:
-                raw = await self._session.read_raw_state()
+                raw = (
+                    await self._session.read_raw_state()
+                    if accept_reports is None
+                    else await self._session.read_raw_state(accept_reports=accept_reports)
+                )
                 values = self.schema.decode_status(raw)
                 schedule = decode_schedule(
                     self.schema.product_key,

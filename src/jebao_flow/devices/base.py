@@ -160,6 +160,16 @@ class JebaoDevice(ABC):
 
         ...
 
+    async def get_explicit_state(self) -> DeviceState:
+        """Return an explicitly queried state when the transport supports correlation.
+
+        Drivers that cannot distinguish a query reply from an unsolicited state report retain
+        the ordinary fresh-state contract.  The LAN driver narrows this for guarded convergence
+        reads without changing normal monitoring compatibility.
+        """
+
+        return await self.get_state()
+
     @abstractmethod
     async def set_enabled(self, enabled: bool) -> None: ...
 

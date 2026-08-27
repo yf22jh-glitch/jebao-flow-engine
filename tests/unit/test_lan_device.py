@@ -207,6 +207,17 @@ async def test_adapter_reads_protocol_neutral_state_and_faults() -> None:
     assert state.error == "Fault_UART"
 
 
+async def test_explicit_state_read_rejects_unsolicited_reports() -> None:
+    device = _device()
+    await device.connect()
+
+    ordinary = await device.get_state()
+    explicit = await device.get_explicit_state()
+
+    assert ordinary == explicit.model_copy(update={"observed_at": ordinary.observed_at})
+    assert _FakeSession.instances[0].read_accept_reports == [True, False]
+
+
 async def test_explicit_disconnect_replaces_the_session_object_on_reconnect() -> None:
     device = _device()
     await device.connect()

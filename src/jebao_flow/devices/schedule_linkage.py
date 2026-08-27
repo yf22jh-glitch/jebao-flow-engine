@@ -66,6 +66,14 @@ _KNOWN_PRO_MODES = frozenset(
 )
 _DAY_SECONDS = 24 * 60 * 60
 _ROLE_ONLY_ROLLBACK_RESERVE_SECONDS = 15.0
+_ROLE_FREQUENCY_CONVERGENCE_MAX_READS = 4
+_ROLE_FREQUENCY_CONVERGENCE_ADMISSION_WINDOW_SECONDS = 20.0
+_ROLE_FREQUENCY_CONVERGENCE_MAX_INTERVAL_SECONDS = 5.0
+_ROLE_FREQUENCY_CONVERGENCE_REQUIRED_EXACT_READS = 2
+# One LAN session boundary can spend 5s closing, 5s connecting, 10s authenticating and 5s
+# querying.  Keep a further 5s scheduling margin and do not admit a convergence read unless that
+# whole path fits before the observation deadline, which preserves a separate rollback reserve.
+_ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS = 30.0
 _SCHEDULE_LINKAGE_TEST_MAX_POWER = 45
 _LOGGER = logging.getLogger(__name__)
 
@@ -154,7 +162,11 @@ class ScheduleLinkageRunFailure(StrEnum):
     MASTER_PAIR_DEADLINE = "master_pair_deadline"
     MASTER_PAIR_CLOCK = "master_pair_clock"
     MASTER_PAIR_STATE = "master_pair_state"
+    MASTER_PAIR_MASTER_STATE = "master_pair_master_state"
+    MASTER_PAIR_SLAVE_STATE = "master_pair_slave_state"
     MASTER_PAIR_AUTO = "master_pair_auto"
+    MASTER_PAIR_MASTER_AUTO = "master_pair_master_auto"
+    MASTER_PAIR_SLAVE_AUTO = "master_pair_slave_auto"
     SLAVE_INTENT = "slave_intent"
     SLAVE_ADAPTER_WRITE = "slave_adapter_write"
     SLAVE_PAIR_VERIFICATION = "slave_pair_verification"
@@ -163,7 +175,11 @@ class ScheduleLinkageRunFailure(StrEnum):
     SLAVE_PAIR_DEADLINE = "slave_pair_deadline"
     SLAVE_PAIR_CLOCK = "slave_pair_clock"
     SLAVE_PAIR_STATE = "slave_pair_state"
+    SLAVE_PAIR_MASTER_STATE = "slave_pair_master_state"
+    SLAVE_PAIR_SLAVE_STATE = "slave_pair_slave_state"
     SLAVE_PAIR_AUTO = "slave_pair_auto"
+    SLAVE_PAIR_MASTER_AUTO = "slave_pair_master_auto"
+    SLAVE_PAIR_SLAVE_AUTO = "slave_pair_slave_auto"
     MONITOR = "monitor"
     CANCELLED = "cancelled"
 
@@ -215,11 +231,19 @@ class ScheduleLinkageRunProgressEvent(BaseModel):
             raise ValueError("only failed schedule-linkage progress may include a failure")
         pair_state_failures = {
             ScheduleLinkageRunFailure.MASTER_PAIR_STATE,
+            ScheduleLinkageRunFailure.MASTER_PAIR_MASTER_STATE,
+            ScheduleLinkageRunFailure.MASTER_PAIR_SLAVE_STATE,
             ScheduleLinkageRunFailure.SLAVE_PAIR_STATE,
+            ScheduleLinkageRunFailure.SLAVE_PAIR_MASTER_STATE,
+            ScheduleLinkageRunFailure.SLAVE_PAIR_SLAVE_STATE,
         }
         pair_auto_failures = {
             ScheduleLinkageRunFailure.MASTER_PAIR_AUTO,
+            ScheduleLinkageRunFailure.MASTER_PAIR_MASTER_AUTO,
+            ScheduleLinkageRunFailure.MASTER_PAIR_SLAVE_AUTO,
             ScheduleLinkageRunFailure.SLAVE_PAIR_AUTO,
+            ScheduleLinkageRunFailure.SLAVE_PAIR_MASTER_AUTO,
+            ScheduleLinkageRunFailure.SLAVE_PAIR_SLAVE_AUTO,
         }
         dimensional_failures = {
             ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH,
@@ -1349,6 +1373,53 @@ class ScheduleActiveLinkageController:
         )
         return dict(zip(ids, states, strict=True))
 
+    async def _read_pair_explicit_states(
+        self,
+        spec: ScheduleLinkageSpec,
+    ) -> dict[str, DeviceState]:
+        """Read correlated replies only when a driver can distinguish them from reports."""
+
+        ids = (spec.master_device_id, spec.slave_device_id)
+        states = await asyncio.gather(
+            *(self._get_device(device_id).get_explicit_state() for device_id in ids)
+        )
+        return dict(zip(ids, states, strict=True))
+
+    async def _read_pair_explicit_states_guarded(
+        self,
+        spec: ScheduleLinkageSpec,
+    ) -> dict[str, DeviceState]:
+        """Cancel a read promptly if stop or safety authority changes after refresh."""
+
+        stop_event = self._stop_event
+        if stop_event is None:
+            raise ScheduleLinkageApplyError("schedule-linkage stop authority is unavailable")
+        read_task = asyncio.create_task(self._read_pair_explicit_states(spec))
+        stop_task = asyncio.create_task(stop_event.wait())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = (read_task, stop_task, safety_task)
+        try:
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                self._set_pair_verification_checkpoint()
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage stop was requested during frequency convergence"
+                )
+            if safety_task in done:
+                self._set_pair_verification_checkpoint()
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage safety authority was revoked"
+                )
+            return read_task.result()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _assert_first_write_gate(
         self,
         record: ScheduleLinkageRecord,
@@ -1468,8 +1539,19 @@ class ScheduleActiveLinkageController:
                 else LinkageRole.INDEPENDENT
             ),
         }
-        self._set_pair_verification_failure("state")
-        self._assert_pair_sample(record, states, expected_roles, phase="before")
+        self._set_pair_verification_checkpoint()
+        try:
+            self._assert_pair_sample(record, states, expected_roles, phase="before")
+        except ScheduleLinkageApplyError as error:
+            if not self._frequency_only_pair_state_failure():
+                raise
+            states, sampled_at = await self._converge_role_frequency(
+                record,
+                expected_roles,
+                initial_anchor=self._clock_anchor(states, sampled_at),
+                initial_error=error,
+                pair_failure=pair_failure,
+            )
         self._run_failure = pair_failure
         self._run_drift_dimensions = ()
         linked = (*record.linked_device_ids, device_id)
@@ -1480,6 +1562,182 @@ class ScheduleActiveLinkageController:
         self._emit_progress_best_effort(pair_verified)
         self._run_pair_participant = None
         return record, self._clock_anchor(states, sampled_at)
+
+    async def _converge_role_frequency(
+        self,
+        record: ScheduleLinkageRecord,
+        expected_roles: Mapping[str, LinkageRole],
+        *,
+        initial_anchor: _ClockAnchor,
+        initial_error: ScheduleLinkageApplyError,
+        pair_failure: ScheduleLinkageRunFailure,
+    ) -> tuple[dict[str, DeviceState], float]:
+        """Require two exact fresh reads after a frequency-only role transition report."""
+
+        spec = record.spec
+        convergence_deadline = min(
+            self._monotonic() + _ROLE_FREQUENCY_CONVERGENCE_ADMISSION_WINDOW_SECONDS,
+            self._require_observation_deadline(),
+        )
+        interval = min(
+            spec.verification_interval_seconds,
+            _ROLE_FREQUENCY_CONVERGENCE_MAX_INTERVAL_SECONDS,
+        )
+        exact_reads = 0
+        previous_anchor = initial_anchor
+        last_frequency_error = initial_error
+        last_frequency_failure = self._run_failure
+        for _attempt in range(_ROLE_FREQUENCY_CONVERGENCE_MAX_READS):
+            settled = await self._wait_for_role_frequency_settle(
+                interval,
+                convergence_deadline=convergence_deadline,
+                pair_failure=pair_failure,
+            )
+            if not settled:
+                break
+            self._set_pair_verification_failure("session_refresh")
+            await self._refresh_pair_sessions_uninterruptibly(spec)
+            self._validate_recovery_bindings(record)
+            self._assert_role_frequency_retry_authority(pair_failure)
+            self._set_pair_verification_failure("state_read")
+            states = await self._read_pair_explicit_states_guarded(spec)
+            self._set_pair_verification_failure("clock")
+            self._assert_pair_clock_skew(spec, states)
+            sampled_at = self._monotonic()
+            self._set_pair_verification_failure("deadline")
+            self._assert_observation_deadline(sampled_at)
+            self._set_pair_verification_failure("clock")
+            self._assert_clock_continuity(
+                spec,
+                states,
+                previous_clocks=previous_anchor.clocks,
+                elapsed_monotonic=(
+                    sampled_at - previous_anchor.sampled_at_monotonic
+                ),
+            )
+            self._assert_role_frequency_retry_authority(pair_failure)
+            convergence_expired = sampled_at > convergence_deadline
+            self._set_pair_verification_checkpoint()
+            try:
+                self._assert_pair_sample(
+                    record,
+                    states,
+                    expected_roles,
+                    phase="before",
+                    emit_sample=False,
+                )
+            except ScheduleLinkageApplyError as error:
+                if not self._frequency_only_pair_state_failure():
+                    raise
+                exact_reads = 0
+                last_frequency_error = error
+                last_frequency_failure = self._run_failure
+            else:
+                exact_reads += 1
+                if (
+                    not convergence_expired
+                    and exact_reads
+                    >= _ROLE_FREQUENCY_CONVERGENCE_REQUIRED_EXACT_READS
+                ):
+                    # The retry reads are diagnostic until the pair has converged twice in a
+                    # row.  Reuse the final immutable states to publish exactly one
+                    # evidence sample; this must not open another session or device read.
+                    self._assert_pair_sample(
+                        record,
+                        states,
+                        expected_roles,
+                        phase="before",
+                        emit_sample=True,
+                    )
+                    return states, sampled_at
+            previous_anchor = self._clock_anchor(states, sampled_at)
+            if convergence_expired:
+                break
+        self._run_failure = last_frequency_failure
+        self._run_drift_dimensions = (ScheduleLinkageDriftDimension.FREQUENCY,)
+        raise last_frequency_error
+
+    async def _wait_for_role_frequency_settle(
+        self,
+        interval: float,
+        *,
+        convergence_deadline: float,
+        pair_failure: ScheduleLinkageRunFailure,
+    ) -> bool:
+        self._assert_role_frequency_retry_authority(pair_failure)
+        now = self._monotonic()
+        convergence_remaining = convergence_deadline - now
+        observation_remaining = self._require_observation_deadline() - now
+        settle_seconds = min(interval, convergence_remaining)
+        if (
+            settle_seconds <= 0
+            or observation_remaining
+            < settle_seconds + _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS
+        ):
+            return False
+        stop_event = self._stop_event
+        if stop_event is None:
+            raise ScheduleLinkageApplyError("schedule-linkage stop authority is unavailable")
+        settle_task = asyncio.create_task(self._sleep(settle_seconds))
+        stop_task = asyncio.create_task(stop_event.wait())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = (settle_task, stop_task, safety_task)
+        try:
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage stop was requested during frequency convergence"
+                )
+            if safety_task in done:
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage safety authority was revoked"
+                )
+            settle_task.result()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._assert_role_frequency_retry_authority(pair_failure)
+        now = self._monotonic()
+        return (
+            now <= convergence_deadline
+            and self._require_observation_deadline() - now
+            >= _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS
+        )
+
+    def _assert_role_frequency_retry_authority(
+        self,
+        pair_failure: ScheduleLinkageRunFailure | None,
+    ) -> None:
+        self._run_failure = pair_failure
+        self._run_drift_dimensions = ()
+        if self._stop_requested():
+            raise ScheduleLinkageApplyError(
+                "schedule-linkage stop was requested during frequency convergence"
+            )
+        self._set_pair_verification_failure("deadline")
+        self._assert_observation_deadline()
+        if not self._active_observation_allowed():
+            self._run_failure = pair_failure
+            raise ScheduleLinkageApplyError("schedule-linkage safety authority was revoked")
+        self._run_failure = pair_failure
+        self._run_drift_dimensions = ()
+
+    def _frequency_only_pair_state_failure(self) -> bool:
+        return self._run_failure in {
+            ScheduleLinkageRunFailure.MASTER_PAIR_STATE,
+            ScheduleLinkageRunFailure.MASTER_PAIR_MASTER_STATE,
+            ScheduleLinkageRunFailure.MASTER_PAIR_SLAVE_STATE,
+            ScheduleLinkageRunFailure.SLAVE_PAIR_STATE,
+            ScheduleLinkageRunFailure.SLAVE_PAIR_MASTER_STATE,
+            ScheduleLinkageRunFailure.SLAVE_PAIR_SLAVE_STATE,
+        } and self._run_drift_dimensions == (
+            ScheduleLinkageDriftDimension.FREQUENCY,
+        )
 
     async def _monitor_boundary(
         self,
@@ -1605,18 +1863,30 @@ class ScheduleActiveLinkageController:
         expected_roles: Mapping[str, LinkageRole],
         *,
         phase: Literal["before", "ambiguous", "after"],
+        emit_sample: bool = True,
     ) -> tuple[tuple[str, int, int], ...]:
         effective: list[tuple[str, int, int]] = []
         observed: dict[str, ScheduleAutoEvidence] = {}
         for snapshot in record.snapshots:
             state = states[snapshot.device_id]
-            self._set_pair_verification_failure("state")
-            self._assert_immutable_snapshot(snapshot, state, expected_roles[snapshot.device_id])
+            observed_role: Literal["master", "slave"] = (
+                "master"
+                if snapshot.device_id == record.spec.master_device_id
+                else "slave"
+            )
+            self._set_pair_verification_checkpoint()
+            self._assert_immutable_snapshot(
+                snapshot,
+                state,
+                expected_roles[snapshot.device_id],
+                observed_role=observed_role,
+            )
             if phase == "ambiguous":
                 continue
             self._set_pair_verification_failure(
                 "auto",
                 dimensions=(ScheduleLinkageDriftDimension.AUTO_EVIDENCE,),
+                observed_role=observed_role,
             )
             observed[snapshot.device_id] = _observed_auto(snapshot.device_id, state)
 
@@ -1642,11 +1912,22 @@ class ScheduleActiveLinkageController:
             )
             # Evidence is useful even when the following strict expectation check fails.  A sink
             # is diagnostic only: persistence trouble must not interrupt role compensation.
-            self._emit_sample_best_effort(sample)
+            if emit_sample:
+                self._emit_sample_best_effort(sample)
 
         for snapshot in record.snapshots:
             if phase == "ambiguous":
                 continue
+            observed_role = (
+                "master"
+                if snapshot.device_id == record.spec.master_device_id
+                else "slave"
+            )
+            self._set_pair_verification_failure(
+                "auto",
+                dimensions=(ScheduleLinkageDriftDimension.AUTO_EVIDENCE,),
+                observed_role=observed_role,
+            )
             evidence = observed[snapshot.device_id]
             if phase == "before":
                 if evidence != snapshot.expectation.before:
@@ -1710,6 +1991,7 @@ class ScheduleActiveLinkageController:
         ],
         *,
         dimensions: tuple[ScheduleLinkageDriftDimension, ...] = (),
+        observed_role: Literal["master", "slave"] | None = None,
     ) -> None:
         """Set in-memory detail only while a post-write pair checkpoint owns failure."""
 
@@ -1734,8 +2016,49 @@ class ScheduleActiveLinkageController:
             ("slave", "state"): ScheduleLinkageRunFailure.SLAVE_PAIR_STATE,
             ("slave", "auto"): ScheduleLinkageRunFailure.SLAVE_PAIR_AUTO,
         }
-        self._run_failure = failure_by_stage[(participant, substage)]
+        observed_failure = {
+            ("master", "state", "master"): (
+                ScheduleLinkageRunFailure.MASTER_PAIR_MASTER_STATE
+            ),
+            ("master", "state", "slave"): (
+                ScheduleLinkageRunFailure.MASTER_PAIR_SLAVE_STATE
+            ),
+            ("master", "auto", "master"): (
+                ScheduleLinkageRunFailure.MASTER_PAIR_MASTER_AUTO
+            ),
+            ("master", "auto", "slave"): (
+                ScheduleLinkageRunFailure.MASTER_PAIR_SLAVE_AUTO
+            ),
+            ("slave", "state", "master"): (
+                ScheduleLinkageRunFailure.SLAVE_PAIR_MASTER_STATE
+            ),
+            ("slave", "state", "slave"): (
+                ScheduleLinkageRunFailure.SLAVE_PAIR_SLAVE_STATE
+            ),
+            ("slave", "auto", "master"): (
+                ScheduleLinkageRunFailure.SLAVE_PAIR_MASTER_AUTO
+            ),
+            ("slave", "auto", "slave"): (
+                ScheduleLinkageRunFailure.SLAVE_PAIR_SLAVE_AUTO
+            ),
+        }
+        self._run_failure = observed_failure.get(
+            (participant, substage, observed_role),
+            failure_by_stage[(participant, substage)],
+        )
         self._run_drift_dimensions = dimensions
+
+    def _set_pair_verification_checkpoint(self) -> None:
+        """Use a dimension-free stage until strict state inspection finds a mismatch."""
+
+        participant = self._run_pair_participant
+        if participant is None:
+            return
+        self._run_failure = {
+            "master": ScheduleLinkageRunFailure.MASTER_PAIR_VERIFICATION,
+            "slave": ScheduleLinkageRunFailure.SLAVE_PAIR_VERIFICATION,
+        }[participant]
+        self._run_drift_dimensions = ()
 
     async def _refresh_pair_sessions_if_enabled(
         self,
@@ -1745,6 +2068,14 @@ class ScheduleActiveLinkageController:
 
         if not self._refresh_sessions_before_critical_reads:
             return
+        await self._refresh_pair_sessions_uninterruptibly(spec)
+
+    async def _refresh_pair_sessions_uninterruptibly(
+        self,
+        spec: ScheduleLinkageSpec,
+    ) -> None:
+        """Complete a paired transport boundary before propagating cancellation."""
+
         task = asyncio.create_task(self._refresh_pair_sessions(spec))
         cancellation_received = False
         while not task.done():
@@ -2059,6 +2390,8 @@ class ScheduleActiveLinkageController:
         snapshot: ScheduleLinkageSnapshot,
         state: DeviceState,
         expected_role: LinkageRole,
+        *,
+        observed_role: Literal["master", "slave"] | None = None,
     ) -> None:
         dimensions: set[ScheduleLinkageDriftDimension] = set()
         if not state.online:
@@ -2113,6 +2446,7 @@ class ScheduleActiveLinkageController:
             self._set_pair_verification_failure(
                 "state",
                 dimensions=canonical_dimensions,
+                observed_role=observed_role,
             )
 
         self._assert_healthy(snapshot.device_id, state)

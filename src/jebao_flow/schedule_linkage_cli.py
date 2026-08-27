@@ -734,6 +734,7 @@ async def _preflight(
                 qualification_store, dependencies.clock
             ),
             safety_interlock=guard,
+            refresh_sessions_before_critical_reads=True,
         )
         async with _connected(devices):
             preflight = await controller.preflight(spec)
@@ -891,6 +892,7 @@ async def _run_schedule_linkage(
                 qualification_store, dependencies.clock
             ),
             safety_interlock=guard,
+            refresh_sessions_before_critical_reads=True,
         )
         async with _connected(devices):
             try:
@@ -1013,6 +1015,7 @@ async def _recover_once(
             qualification_store, dependencies.clock
         ),
         safety_interlock=guard,
+        refresh_sessions_before_critical_reads=True,
     )
     async with _connected(devices):
         guard.clear()
