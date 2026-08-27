@@ -60,6 +60,15 @@ TimerON → 역할 적용 → exact restore 합성 경로로 한 번만 시험�
 2개 fresh session에서 연속 확인할 때만 읽기 기준으로 고정하고, Frequency write 없이 이후 변화는
 즉시 원복합니다. 이 보완의 다음 실기 검증 전에는 native Linkage를 운영 기능으로 승격하지 않습니다.
 
+이어 `da62b73`으로 새 `_08`을 한 번 실행했습니다. read-only preflight는 어떤 write도 보내지 않고
+통과했으며, run은 임시 Constant 31%/32% → Sine 35%/40% 계획을 staged했습니다. 그러나 native
+역할 실행·Linkage write와 A→B 관찰 전에 `role_preflight`에서 fail-closed로 종료됐습니다. 자동
+outer rollback은 완료됐고 outer-control·temporary-schedule·role journal은 모두 `none`이었습니다.
+서로 독립적인 fresh read-only 확인 두 번에서 원래 controls와 두 장비의 완전한 432-byte schedule
+image가 exact임을 확인했습니다. private 설정은 `dry_run: true`로 잠겼고 Observer와 recovery
+서비스가 정상 복귀했습니다. `_08`은 재실행하지 않았으며, slave의 슬롯별 `AutoFlow` 적용 여부는
+계속 미검증입니다.
+
 ## 완료된 사전 검증
 
 - 격리 IoT VLAN의 장비 6대 discovery 및 TCP 12416 연결
@@ -88,6 +97,9 @@ TimerON → 역할 적용 → exact restore 합성 경로로 한 번만 시험�
 - `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 성공 관찰은 미검증
 - 2026-08-28 슬롯 전환 시험은 역할 적용 후 manual Frequency side effect로 A→B 전에 안전 종료,
   자동 exact rollback과 Observer 복귀 성공; 슬롯별 `AutoFlow`는 계속 미검증
+- `da62b73`의 새 `_08`은 write 없는 preflight와 임시 Constant 31%/32% → Sine 35%/40% stage 뒤
+  `role_preflight`에서 native 역할 실행·Linkage write와 A→B 관찰 전에 안전 종료; 자동 outer
+  rollback, journal 3종 제거, 독립 fresh read-only exact 확인 2회와 서비스 복귀 성공, 재실행 없음
 - 네이티브 Linkage의 Pro 4역할과 `TimerON` encode/decode 단위 테스트
 - Sync/Async 개별 출력, timeout·수동 종료·취소·부분 실패·재시작 원복 시뮬레이터 테스트
 

@@ -9,11 +9,17 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 > `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 현장 전용 경로에서는 Pro 두 대의
 > 제한된 저출력 Sync와 자동 exact restore가 성공해 qualification 영수증 2/2를 발급했습니다.
 > 다만 Async 슬레이브 출력 변경과 TimerON 슬롯별 출력 전환은 아직 성공으로 인정할 수 없습니다.
-> 2026-08-28의 최신 단일 시험은 `master` 적용 뒤 `async_slave`까지 도달했지만, 역할 적용 시
+> 2026-08-28의 첫 단일 시험은 `master` 적용 뒤 `async_slave`까지 도달했지만, 역할 적용 시
 > 슬레이브의 manual Frequency가 지속적으로 바뀌는 펌웨어 동작을 명시적 응답에서 확인하고 A→B
 > 시간표 경계 전에 안전 중단했습니다. 자동 rollback, 두 번의 새 연결 원상태 비교, Observer 복귀는
-> 모두 성공했습니다. 따라서 네이티브 Linkage는 계속 운영 기능으로 잠겨 있으며 일반 데몬·MQTT·HA에
-> 시험 기능을 노출하지 않습니다.
+> 모두 성공했습니다. 이어 `da62b73`으로 실행한 새 `_08`은 write 없는 preflight를 통과하고 임시
+> Constant 31%/32% → Sine 35%/40% 계획을 staged했지만, native 역할 실행과 Linkage write 및
+> A→B 관찰 전 `role_preflight`에서 fail-closed로 종료됐습니다. 자동 outer rollback 완료 뒤 세
+> journal은 모두 `none`이었고, 서로 독립적인 두 번의 fresh read-only 확인에서 원래 controls와
+> 두 장비의 전체 432-byte schedule image가 정확히 일치했습니다. 설정은 `dry_run: true`로 다시
+> 잠겼고 Observer와 recovery 서비스가 정상 복귀했으며 `_08`은 재실행하지 않았습니다. 따라서 핵심
+> slave 슬롯별 `AutoFlow` 질문은 계속 미검증이고, 네이티브 Linkage는 운영 기능으로 잠겨 있으며
+> 일반 데몬·MQTT·HA에 시험 기능을 노출하지 않습니다.
 
 ## 구조
 

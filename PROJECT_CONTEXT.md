@@ -91,6 +91,13 @@ A→B 관찰 전에 fail-closed로 종료됐습니다. 자동 rollback과 두 �
 슬롯별 slave `AutoFlow` 전환 증거가 아닙니다. 후속 코드는 token-bound Constant/Sine 값 중 하나가
 서로 다른 새 세션에서 2회 연속 같을 때만 그 값을 run-local로 고정하며 Frequency write는 보내지
 않습니다. 실기 재검증 전까지 네이티브 Linkage 잠금은 그대로 유지합니다.
+같은 날 `da62b73`으로 새 `_08`을 한 번 실행했습니다. write 없는 preflight는 통과했고 임시
+Constant 31%/32% → Sine 35%/40% 계획도 staged됐지만, native 역할 실행·Linkage write와 A→B
+관찰 전에 `role_preflight`에서 fail-closed로 끝났습니다. 자동 outer rollback은 완료됐고
+outer-control·temporary-schedule·role journal은 모두 `none`이었습니다. 서로 독립적인 fresh
+read-only 확인 두 번에서 원래 controls와 두 장비의 완전한 432-byte schedule image가 exact임을
+확인했습니다. private 설정은 `dry_run: true`이고 Observer와 recovery 서비스도 정상 복귀했습니다.
+이 실행은 재시도하지 않았으며, slave의 슬롯별 `AutoFlow` 적용 여부는 계속 미검증입니다.
 실제 wiring에서는 fail-closed Linkage safety interlock을 비상정지·정비 latch와 공유해야
 하며, journal lease를 획득하지 못한 다른 daemon은 시험이나 startup recovery를 실행하지
 않습니다.

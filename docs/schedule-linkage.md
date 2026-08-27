@@ -46,6 +46,14 @@ matched the original controls and complete schedule images, and Observer resumed
 This is evidence of a persistent role-induced manual-Frequency side effect; it is **not** evidence
 that the slave did or did not apply its per-slot `AutoFlow`.
 
+A new `_08` one-shot on `da62b73` then passed its write-free preflight and staged the temporary
+Constant 31%/32% to Sine 35%/40% plan. It failed closed at `role_preflight`, before any native-role
+run, Linkage write, or A-to-B observation. Automatic outer rollback completed, and the outer-control,
+temporary-schedule, and role journals were all absent afterward. Two independent fresh read-only
+passes matched the original controls and both complete 432-byte schedule images exactly. The private
+configuration returned to `dry_run: true`, Observer and recovery resumed normally, and `_08` was not
+rerun. The per-slot slave `AutoFlow` question therefore remains unverified.
+
 ## Attended flow
 
 Use a private control configuration with Observer disabled, writes enabled for exactly the two
@@ -103,6 +111,23 @@ run-local, and any later change fails closed; independent detach and outer resto
 the original Frequency exactly. This can answer whether the slave
 applies its per-slot Flow, keeps the previous Flow, or follows the master; it cannot prove
 subsecond phase alignment or the exact wall-clock instant at which either controller changed.
+
+The fixed composed plan selects a boundary four to five minutes after the freshest device clock.
+Before the outer pause can create its journal or send any control frame, all four planned A/B Flow
+values must satisfy the corresponding device minimum, maximum, step, and the attended 45% cap.
+Execution accepts only 240 through 300 seconds of fresh lead and uses a 630-second observation
+window while retaining the 300-second stable-after requirement. Immediately before the first
+`TimerON` frame, a newly authenticated explicit reply from both controllers must prove the exact
+owned TimerOFF controls and decoded two-entry plan with strictly more than 180 seconds remaining.
+The raw 432-byte image has already passed byte-exact staged-write verification; this later gate
+does not claim a second raw-image read. Starting immediately before the first possible `TimerON`
+frame, one absolute 30-second budget covers both TimerON write/proof and read-only current-A
+convergence. Retries are allowed only when both complete states are otherwise exact and the
+well-formed, capability-valid, at-most-45% `Auto*` tuple has not yet adopted the owned Constant A
+flow. Every retry replaces both sessions and sends no control frame. Control, Linkage, Timer,
+schedule, clock, transport, authentication, unsafe power, or malformed-value failure stops the
+forward path immediately; paired sessions are refreshed before compensation, and inverse TimerOFF
+plus exact schedule/control restoration remain mandatory.
 
 Safety-critical schedule snapshots, staged-write verification, and restore verification use an
 explicit state reply and reject unsolicited reports as proof of the exact 432-byte schedule image.

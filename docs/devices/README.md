@@ -21,6 +21,13 @@ attended recovery로 원복됐습니다. version 2 evidence를 적용한 한 번
 지속적인 역할 유발 변경을 fresh explicit reply에서 확인해 A→B 경계 전에 안전 중단했습니다.
 자동 rollback과 두 번의 새 연결 원상태 비교가 성공했으므로 장비는 다시 Observer 운전 중이지만,
 슬롯별 slave `AutoFlow` 전환과 물리 파형은 여전히 미검증입니다.
+이어 `da62b73`으로 한 번 실행한 새 `_08`은 write 없는 preflight를 통과하고 임시 Constant
+31%/32% → Sine 35%/40% 계획을 staged했지만, native 역할 실행·Linkage write와 A→B 관찰 전에
+`role_preflight`에서 fail-closed로 종료됐습니다. 자동 outer rollback 뒤 세 journal은 모두
+`none`이었고, 서로 독립적인 두 fresh read-only 확인에서 원래 controls와 두 장비의 전체
+432-byte schedule image가 exact였습니다. private 설정은 `dry_run: true`로 복귀했고 Observer와
+recovery 서비스도 정상이며 `_08`은 재실행하지 않았습니다. 슬롯별 slave `AutoFlow`와 물리 파형은
+계속 미검증입니다.
 
 | 제품군 | 수량 | 분류 | 상태 읽기 | 제한 레지스터 write |
 |---|---:|---|---|---|
