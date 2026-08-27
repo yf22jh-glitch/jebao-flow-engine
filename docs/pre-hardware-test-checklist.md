@@ -234,9 +234,11 @@ fresh state가 snapshot과 두 번 연속 exact 일치할 때만 복구 완료�
 31/16/5.5/64초 상한 안에서 확인되지 않거나 safety interlock이 걸리면 journal을 유지하고 안전한
 TimerOFF fallback을 우선합니다.
 
-Async 슬레이브 출력 변경이 실제로 독립 유지되는지 확인하는 2분 예시는 다음과 같습니다. 전체
-bootstrap 실행은 최대 600초이고 임시 시험·qualification target은 45% 이하로 제한됩니다. 마지막
-atomic 원복 frame만 journal에 저장된 원래 수동 fallback 값을 그대로 사용합니다.
+Async 슬레이브 출력 변경이 실제로 독립 유지되는지 확인하는 장기 예시는 다음과 같습니다. 전체
+bootstrap 실행은 최대 600초이고 임시 시험·qualification target은 45% 이하로 제한됩니다. 첫
+control 전 배포 commit과 컨테이너 image ID를 함께 기록하고, 같은 image가 recovery supervisor와
+one-shot CLI 양쪽에 사용되는지 확인합니다. 마지막 atomic 원복 frame만 journal에 저장된 원래
+수동 fallback 값을 그대로 사용합니다.
 
 > 아래는 실행 형식을 보존한 예시입니다. 2026-08-27에 사용한 operation ID와 확인 토큰은 폐기됐고
 > 같은 시험을 그대로 반복하지 않습니다. 새 시험은 코드·상태·현장 중단 조건을 다시 검토한 뒤
@@ -253,7 +255,7 @@ docker compose exec jebao-flow-recovery \
   --master-power 35 \
   --slave-power 33 \
   --frequency 20 \
-  --duration 150 \
+  --duration 600 \
   --verification-interval 2 \
   --bootstrap-active-schedule \
   --slave-power-after 38 \
@@ -262,8 +264,16 @@ docker compose exec jebao-flow-recovery \
 
 출력된 `JFL-...` 토큰을 사용해 모든 인수를 동일하게 유지한
 `run-native-linkage`를 실행합니다. ACTIVE 60초 후 슬레이브만 33%에서 38%로 바꾸며, 남은 시간
-동안 master/slave의 fresh read-back을 계속 확인합니다. 요청한 power change가 실행되기 전에
-전체 deadline이 끝나면 성공으로 처리하지 않고 즉시 원복합니다.
+동안 master/slave의 fresh read-back을 계속 확인합니다. 전체 600초에는 bootstrap 준비 시간이
+포함되므로 종료 후 `status`의 `verified_span`이 300초 이상인지 별도로 확인합니다. 300초보다
+짧거나 sample이 하나뿐이면 출력 유지 성공으로 판정하지 않습니다. 요청한 power change가
+실행되기 전에 전체 deadline이 끝나도 성공으로 처리하지 않고 즉시 원복합니다.
+
+live control ACK가 없으면 같은 control을 재전송하지 않습니다. 원 연결을 격리한 뒤 최대 55초,
+8개의 서로 다른 새 인증 세션에서 explicit state reply만 읽습니다. `status`에는 원 ACK의
+allow-listed `ack_failure`, 마지막 `ack_resolution=stage/state/attempt_N`, 소요 시간이 남습니다.
+`state_verified_without_ack=yes`, `full_state_verified=yes`, 38% control frame 1회와 300초 이상의
+`verified_span`을 모두 확인하기 전에는 Async 독립 출력 성공으로 인정하지 않습니다.
 
 이 경로도 정전·컨테이너 강제 종료·VLAN 단절까지 포함한 절대 원복을 보장하지는 않습니다.
 특히 TimerON snapshot이 남은 비정상 종료는 supervisor가 자동으로 다시 켜지 않고
@@ -309,6 +319,8 @@ Emergency latch는 자동으로 지워지지 않습니다. 펌프 전원과 수�
 필요하면 물리 전원을 먼저 차단하고 운영자가 명시적으로 latch 파일을 제거합니다. 그 후 status와
 확인 토큰을 새로 받아 attended recovery를 실행합니다.
 
-모든 intent가 `terminal`, journal이 `none`인지 확인하기 전에는 앱 시간표나 다른 제어기를 다시
-켜지 않습니다. 시험 종료 후 private 설정을 다시 `dry_run: true`로 잠그고, 필요하면 앱에서
-TimerON 스케줄을 수동으로 다시 활성화합니다.
+모든 intent가 `terminal`, journal이 `none`, persistent latch가 `clear`인지 확인하기 전에는 앱
+시간표나 다른 제어기를 다시 켜지 않습니다. Observer를 다시 시작한 뒤 두 장비 모두 원래
+`TimerON/independent/mode/power/frequency`, schedule enabled, 14 slots, invalid 0과 snapshot
+schedule fingerprint가 일치하는지 교차 확인합니다. 마지막으로 private 설정을 반드시 다시
+`dry_run: true`로 잠급니다.

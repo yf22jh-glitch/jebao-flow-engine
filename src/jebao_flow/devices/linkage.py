@@ -12,11 +12,11 @@ import hashlib
 import json
 import logging
 import math
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Annotated, Literal, Protocol, Self
+from typing import Annotated, Literal, Protocol, Self, TypeVar
 from uuid import uuid4
 
 from pydantic import (
@@ -29,9 +29,13 @@ from pydantic import (
 )
 
 from jebao_flow.devices.base import (
+    ControlAckFailureKind,
     ControlAcknowledgementError,
     ControlAckPowerMismatchError,
     ControlAckReadbackError,
+    ControlAckResolutionStage,
+    ControlAckResolutionState,
+    ControlAckResolutionUpdate,
     ControlAckStateMismatchError,
     ControlReadbackError,
     ControlStateMismatchError,
@@ -55,6 +59,7 @@ _SCHEDULE_BOOTSTRAP_SNAPSHOT_MODES = _AUDITED_SNAPSHOT_MODES | {"random"}
 _SAFETY_STOP_TIMEOUT_SECONDS = 30.0
 _RESTORE_TIMING_UNSET = object()
 _LOGGER = logging.getLogger(__name__)
+_ForwardResultT = TypeVar("_ForwardResultT")
 
 
 class LinkageTransactionError(RuntimeError):
@@ -135,6 +140,7 @@ class LinkageDiagnosticEventKind(StrEnum):
     ACTIVE_ENTERED = "active_entered"
     LIVE_SLAVE_WRITE_ATTEMPTED = "live_slave_write_attempted"
     LIVE_SLAVE_ACK_UNCONFIRMED = "live_slave_ack_unconfirmed"
+    LIVE_SLAVE_ACK_RESOLUTION = "live_slave_ack_resolution"
     LIVE_SLAVE_ADAPTER_VERIFIED = "live_slave_adapter_verified"
     LIVE_SLAVE_STATE_VERIFIED_WITHOUT_ACK = "live_slave_state_verified_without_ack"
     LIVE_SLAVE_FULL_STATE_VERIFIED = "live_slave_full_state_verified"
@@ -150,6 +156,11 @@ class LinkageForwardFailureCategory(StrEnum):
     POWER_STATE_NOT_VERIFIED = "power_state_not_verified"
     CONTROL_ACK_NOT_CONFIRMED = "control_ack_not_confirmed"
     CONTROL_ACK_READBACK_UNAVAILABLE = "control_ack_readback_unavailable"
+    CONTROL_ACK_QUARANTINE_FAILED = "control_ack_quarantine_failed"
+    CONTROL_ACK_CONNECT_FAILED = "control_ack_connect_failed"
+    CONTROL_ACK_AUTHENTICATE_FAILED = "control_ack_authenticate_failed"
+    CONTROL_ACK_QUERY_FAILED = "control_ack_query_failed"
+    CONTROL_ACK_DECODE_FAILED = "control_ack_decode_failed"
     CONTROL_ACK_STATE_MISMATCH = "control_ack_state_mismatch"
     CONTROL_ACK_POWER_MISMATCH = "control_ack_power_mismatch"
     CONTROL_READBACK_UNAVAILABLE = "control_readback_unavailable"
@@ -218,14 +229,33 @@ class LinkageDiagnosticEvent(BaseModel):
     kind: LinkageDiagnosticEventKind
     occurred_at: datetime
     forward_failure: LinkageForwardFailureCategory | None = None
+    ack_failure_kind: ControlAckFailureKind | None = None
+    ack_resolution_stage: ControlAckResolutionStage | None = None
+    ack_resolution_state: ControlAckResolutionState | None = None
+    ack_resolution_attempt: int | None = Field(default=None, ge=0, le=8)
 
     @model_validator(mode="after")
-    def validate_failure(self) -> Self:
+    def validate_payload(self) -> Self:
         if self.kind is LinkageDiagnosticEventKind.FORWARD_FAILED:
             if self.forward_failure is None:
                 raise ValueError("forward_failed events require a fixed failure category")
         elif self.forward_failure is not None:
             raise ValueError("only forward_failed events may include a failure category")
+        resolution_fields = (
+            self.ack_resolution_stage,
+            self.ack_resolution_state,
+            self.ack_resolution_attempt,
+        )
+        if self.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED:
+            if self.ack_failure_kind is None:
+                raise ValueError("ACK-unconfirmed events require a fixed failure kind")
+        elif self.ack_failure_kind is not None:
+            raise ValueError("only ACK-unconfirmed events may include an ACK failure kind")
+        if self.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_RESOLUTION:
+            if any(value is None for value in resolution_fields):
+                raise ValueError("ACK-resolution events require stage, state and attempt")
+        elif any(value is not None for value in resolution_fields):
+            raise ValueError("only ACK-resolution events may include resolution progress")
         return self
 
 
@@ -657,13 +687,29 @@ class TemporaryLinkageController:
         kind: LinkageDiagnosticEventKind,
         *,
         forward_failure: LinkageForwardFailureCategory | None = None,
+        ack_failure_kind: ControlAckFailureKind | None = None,
+        ack_resolution_stage: ControlAckResolutionStage | None = None,
+        ack_resolution_state: ControlAckResolutionState | None = None,
+        ack_resolution_attempt: int | None = None,
     ) -> None:
         self._on_diagnostic_event(
             LinkageDiagnosticEvent(
                 kind=kind,
                 occurred_at=datetime.now(UTC),
                 forward_failure=forward_failure,
+                ack_failure_kind=ack_failure_kind,
+                ack_resolution_stage=ack_resolution_stage,
+                ack_resolution_state=ack_resolution_state,
+                ack_resolution_attempt=ack_resolution_attempt,
             )
+        )
+
+    def _emit_ack_resolution_event(self, update: ControlAckResolutionUpdate) -> None:
+        self._emit_diagnostic_event(
+            LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_RESOLUTION,
+            ack_resolution_stage=update.stage,
+            ack_resolution_state=update.state,
+            ack_resolution_attempt=update.attempt,
         )
 
     def _emit_rollback_event_best_effort(self) -> None:
@@ -681,6 +727,25 @@ class TemporaryLinkageController:
         if isinstance(error, ControlAckPowerMismatchError):
             return LinkageForwardFailureCategory.CONTROL_ACK_POWER_MISMATCH
         if isinstance(error, ControlAckReadbackError):
+            stage_categories = {
+                ControlAckResolutionStage.QUARANTINE: (
+                    LinkageForwardFailureCategory.CONTROL_ACK_QUARANTINE_FAILED
+                ),
+                ControlAckResolutionStage.CONNECT: (
+                    LinkageForwardFailureCategory.CONTROL_ACK_CONNECT_FAILED
+                ),
+                ControlAckResolutionStage.AUTHENTICATE: (
+                    LinkageForwardFailureCategory.CONTROL_ACK_AUTHENTICATE_FAILED
+                ),
+                ControlAckResolutionStage.QUERY: (
+                    LinkageForwardFailureCategory.CONTROL_ACK_QUERY_FAILED
+                ),
+                ControlAckResolutionStage.DECODE: (
+                    LinkageForwardFailureCategory.CONTROL_ACK_DECODE_FAILED
+                ),
+            }
+            if error.stage is not None:
+                return stage_categories[error.stage]
             return LinkageForwardFailureCategory.CONTROL_ACK_READBACK_UNAVAILABLE
         if isinstance(error, ControlAckStateMismatchError):
             return LinkageForwardFailureCategory.CONTROL_ACK_STATE_MISMATCH
@@ -1098,16 +1163,19 @@ class TemporaryLinkageController:
         for snapshot in record.snapshots:
             self._require_forward_write(record)
             device = self._get_device(snapshot.device_id)
-            await device.write_target(
-                DeviceTarget(
-                    enabled=True,
-                    power=self._safe_power(device),
-                    mode="constant",
-                    frequency=record.spec.frequency,
-                    linkage=LinkageRole.INDEPENDENT,
-                    timer_enabled=False,
+            await self._run_forward_operation(
+                record,
+                device.write_target(
+                    DeviceTarget(
+                        enabled=True,
+                        power=self._safe_power(device),
+                        mode="constant",
+                        frequency=record.spec.frequency,
+                        linkage=LinkageRole.INDEPENDENT,
+                        timer_enabled=False,
+                    ),
+                    guard=lambda: self._forward_write_allowed(record),
                 ),
-                guard=lambda: self._forward_write_allowed(record),
             )
         return record
 
@@ -1146,9 +1214,14 @@ class TemporaryLinkageController:
                 baseline,
             ):
                 self._require_forward_write(record)
-                await device.write_target(
-                    target,
-                    guard=lambda current_record=record: self._forward_write_allowed(current_record),
+                await self._run_forward_operation(
+                    record,
+                    device.write_target(
+                        target,
+                        guard=lambda current_record=record: (
+                            self._forward_write_allowed(current_record)
+                        ),
+                    ),
                 )
                 qualification_state = await device.get_state()
                 self._assert_target(device.device_id, qualification_state, target)
@@ -1177,28 +1250,34 @@ class TemporaryLinkageController:
         master = self._get_device(spec.master_device_id)
         slave = self._get_device(spec.slave_device_id)
         self._require_forward_write(record)
-        await master.write_target(
-            DeviceTarget(
-                enabled=True,
-                power=spec.master_power,
-                mode=spec.mode,
-                frequency=spec.frequency,
-                linkage=LinkageRole.MASTER,
-                timer_enabled=False,
+        await self._run_forward_operation(
+            record,
+            master.write_target(
+                DeviceTarget(
+                    enabled=True,
+                    power=spec.master_power,
+                    mode=spec.mode,
+                    frequency=spec.frequency,
+                    linkage=LinkageRole.MASTER,
+                    timer_enabled=False,
+                ),
+                guard=lambda: self._forward_write_allowed(record),
             ),
-            guard=lambda: self._forward_write_allowed(record),
         )
         self._require_forward_write(record)
-        await slave.write_target(
-            DeviceTarget(
-                enabled=True,
-                power=spec.slave_power,
-                mode=spec.mode,
-                frequency=spec.frequency,
-                linkage=spec.slave_role,
-                timer_enabled=False,
+        await self._run_forward_operation(
+            record,
+            slave.write_target(
+                DeviceTarget(
+                    enabled=True,
+                    power=spec.slave_power,
+                    mode=spec.mode,
+                    frequency=spec.frequency,
+                    linkage=spec.slave_role,
+                    timer_enabled=False,
+                ),
+                guard=lambda: self._forward_write_allowed(record),
             ),
-            guard=lambda: self._forward_write_allowed(record),
         )
 
     async def _verify_active_relationship(
@@ -1342,11 +1421,18 @@ class TemporaryLinkageController:
                     LinkageDiagnosticEventKind.LIVE_SLAVE_WRITE_ATTEMPTED
                 )
                 try:
-                    verification = await slave.write_power(
-                        expected_slave_power,
-                        guard=lambda: self._forward_write_allowed(record),
-                        on_ack_unconfirmed=lambda: self._emit_diagnostic_event(
-                            LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED
+                    verification = await self._run_forward_operation(
+                        record,
+                        slave.write_power(
+                            expected_slave_power,
+                            guard=lambda: self._forward_write_allowed(record),
+                            on_ack_unconfirmed=lambda failure_kind: (
+                                self._emit_diagnostic_event(
+                                    LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED,
+                                    ack_failure_kind=failure_kind,
+                                )
+                            ),
+                            on_ack_resolution=self._emit_ack_resolution_event,
                         ),
                     )
                 except PowerStateVerificationError as error:
@@ -1961,14 +2047,13 @@ class TemporaryLinkageController:
         """Replace one poisoned read session within the convergence deadline."""
 
         self._require_restore_safety()
-        if device.connected:
-            await self._disconnect_restore_session(
-                device,
-                timeout_seconds=self._remaining_restore_timeout(
-                    deadline,
-                    ceiling=self._restore_connection_timeout_seconds,
-                ),
-            )
+        await self._disconnect_restore_session(
+            device,
+            timeout_seconds=self._remaining_restore_timeout(
+                deadline,
+                ceiling=self._restore_connection_timeout_seconds,
+            ),
+        )
         await self._ensure_restore_connection(
             device,
             deadline=min(
@@ -1986,11 +2071,10 @@ class TemporaryLinkageController:
         """
 
         self._require_restore_safety()
-        if device.connected:
-            await self._disconnect_restore_session(
-                device,
-                timeout_seconds=self._restore_connection_timeout_seconds,
-            )
+        await self._disconnect_restore_session(
+            device,
+            timeout_seconds=self._restore_connection_timeout_seconds,
+        )
         await self._ensure_restore_connection(
             device,
             deadline=(
@@ -2590,6 +2674,67 @@ class TemporaryLinkageController:
 
     def _stop_requested(self) -> bool:
         return self._stop_event is not None and self._stop_event.is_set()
+
+    async def _run_forward_operation(
+        self,
+        record: LinkageTransactionRecord,
+        operation: Awaitable[_ForwardResultT],
+    ) -> _ForwardResultT:
+        """Race temporary forward I/O against stop, safety and the operation deadline.
+
+        A device adapter may be authenticating or resolving an uncertain ACK for several
+        seconds. Those transport bounds must never delay a requested rollback. If completion and
+        a stop condition become observable together, the stop condition wins and the completed
+        result is ignored.
+        """
+
+        self._require_forward_write(record)
+        stop_event = self._stop_event
+        if stop_event is None:
+            orphan = asyncio.ensure_future(operation)
+            orphan.cancel()
+            await asyncio.gather(orphan, return_exceptions=True)
+            raise LinkageTransactionError("forward operation has no active stop event")
+
+        operation_task = asyncio.ensure_future(operation)
+        stop_task = asyncio.create_task(stop_event.wait())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = {operation_task, stop_task, safety_task}
+        try:
+            loop = asyncio.get_running_loop()
+            monotonic_deadline = self._operation_monotonic_deadline
+            monotonic_remaining = (
+                math.inf
+                if monotonic_deadline is None
+                else monotonic_deadline - loop.time()
+            )
+            wall_remaining = (record.expires_at - datetime.now(UTC)).total_seconds()
+            timeout = max(0.0, min(monotonic_remaining, wall_remaining))
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Safety, stop and deadline are deliberately checked before the operation result.
+            # This establishes deterministic stop-wins behavior for simultaneous completion.
+            if safety_task in done or not self._safety_allows_operation():
+                self._require_safety_interlock()
+            if stop_task in done or self._stop_requested():
+                raise _ForwardStopRequested(
+                    "linkage test was stopped during temporary forward I/O"
+                )
+            if operation_task not in done or self._forward_deadline_expired(record):
+                raise _ForwardDeadlineExpired(
+                    "linkage test expired during temporary forward I/O"
+                )
+            self._require_forward_write(record)
+            return operation_task.result()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _forward_deadline_expired(self, record: LinkageTransactionRecord) -> bool:
         monotonic_deadline = self._operation_monotonic_deadline

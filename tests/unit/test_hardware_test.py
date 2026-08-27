@@ -12,7 +12,12 @@ import pytest
 from jebao_flow import hardware_guard, hardware_safety, hardware_test
 from jebao_flow.config import AppConfig
 from jebao_flow.devices import (
+    ControlAckFailureKind,
     ControlAcknowledgementError,
+    ControlAckReadbackError,
+    ControlAckResolutionStage,
+    ControlAckResolutionState,
+    ControlAckResolutionUpdate,
     ControlVerificationOutcome,
     LinkageForwardFailureCategory,
     LinkageRecoveryReason,
@@ -552,7 +557,23 @@ def test_ack_lost_but_fresh_state_verified_is_durable_success_and_exact_restore(
             return outcome
         on_ack_unconfirmed = kwargs.get("on_ack_unconfirmed")
         assert callable(on_ack_unconfirmed)
-        on_ack_unconfirmed()
+        on_ack_unconfirmed(ControlAckFailureKind.TIMEOUT)
+        on_ack_resolution = kwargs.get("on_ack_resolution")
+        assert callable(on_ack_resolution)
+        on_ack_resolution(
+            ControlAckResolutionUpdate(
+                stage=ControlAckResolutionStage.DECODE,
+                attempt=1,
+                state=ControlAckResolutionState.STARTED,
+            )
+        )
+        on_ack_resolution(
+            ControlAckResolutionUpdate(
+                stage=ControlAckResolutionStage.DECODE,
+                attempt=1,
+                state=ControlAckResolutionState.SUCCEEDED,
+            )
+        )
         return ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
 
     monkeypatch.setattr(right, "write_power", apply_then_verify_without_ack)
@@ -571,6 +592,12 @@ def test_ack_lost_but_fresh_state_verified_is_durable_success_and_exact_restore(
     assert evidence is not None
     assert evidence.live_slave_write_attempted_at is not None
     assert evidence.live_slave_ack_unconfirmed_at is not None
+    assert evidence.live_slave_ack_failure_kind is ControlAckFailureKind.TIMEOUT
+    assert evidence.live_slave_ack_resolution_started_at is not None
+    assert evidence.live_slave_ack_resolution_updated_at is not None
+    assert evidence.live_slave_ack_resolution_stage is ControlAckResolutionStage.DECODE
+    assert evidence.live_slave_ack_resolution_state is ControlAckResolutionState.SUCCEEDED
+    assert evidence.live_slave_ack_resolution_attempts == 1
     assert evidence.live_slave_adapter_verified_at is None
     assert evidence.live_slave_state_verified_without_ack_at is not None
     assert evidence.live_slave_full_state_verified_at is not None
@@ -616,9 +643,14 @@ def test_ack_lost_but_fresh_state_verified_is_durable_success_and_exact_restore(
     assert hardware_test.main(["status"]) == 0
     status_output = capsys.readouterr().out
     assert "ack_unconfirmed=yes" in status_output
+    assert "ack_failure=timeout" in status_output
+    assert "ack_resolution=decode/succeeded/attempt_1" in status_output
+    assert "ack_resolution_duration=" in status_output
     assert "adapter_verified=no" in status_output
     assert "state_verified_without_ack=yes" in status_output
     assert "full_state_verified=yes" in status_output
+    assert "verified_span=" in status_output
+    assert "verified_span=none" not in status_output
     assert "forward_failure=none" in status_output
 
 
@@ -627,6 +659,11 @@ def test_ack_lost_but_fresh_state_verified_is_durable_success_and_exact_restore(
     (
         LinkageForwardFailureCategory.CONTROL_ACK_NOT_CONFIRMED,
         LinkageForwardFailureCategory.CONTROL_ACK_READBACK_UNAVAILABLE,
+        LinkageForwardFailureCategory.CONTROL_ACK_QUARANTINE_FAILED,
+        LinkageForwardFailureCategory.CONTROL_ACK_CONNECT_FAILED,
+        LinkageForwardFailureCategory.CONTROL_ACK_AUTHENTICATE_FAILED,
+        LinkageForwardFailureCategory.CONTROL_ACK_QUERY_FAILED,
+        LinkageForwardFailureCategory.CONTROL_ACK_DECODE_FAILED,
         LinkageForwardFailureCategory.CONTROL_ACK_STATE_MISMATCH,
         LinkageForwardFailureCategory.CONTROL_ACK_POWER_MISMATCH,
     ),
@@ -643,6 +680,63 @@ def test_verified_live_state_rejects_contradictory_terminal_ack_failure(
             live_slave_ack_unconfirmed_at=now,
             live_slave_state_verified_without_ack_at=now,
             forward_failure=terminal_failure,
+        )
+
+
+def test_version_two_ack_evidence_without_new_optional_fields_remains_readable() -> None:
+    now = datetime.now(UTC)
+    legacy_payload = {
+        "active_entered_at": now.isoformat(),
+        "live_slave_write_attempted_at": now.isoformat(),
+        "live_slave_ack_unconfirmed_at": now.isoformat(),
+        "live_slave_adapter_verified_at": None,
+        "live_slave_state_verified_without_ack_at": now.isoformat(),
+        "live_slave_full_state_verified_at": now.isoformat(),
+        "verified_sample_count": 1,
+        "first_verified_sample": {
+            "verified_at": now.isoformat(),
+            "master_power": 35,
+            "slave_power": 38,
+            "slave_linkage": "async_slave",
+        },
+        "last_verified_sample": {
+            "verified_at": now.isoformat(),
+            "master_power": 35,
+            "slave_power": 38,
+            "slave_linkage": "async_slave",
+        },
+        "forward_failure": None,
+        "rollback_started_at": now.isoformat(),
+        "rollback_completed_at": now.isoformat(),
+        "rollback_recovery_reasons": [],
+        "rollback_failures": [],
+    }
+
+    evidence = hardware_test.HardwareTestEvidence.model_validate_json(
+        json.dumps(legacy_payload)
+    )
+
+    assert evidence.live_slave_ack_unconfirmed_at == now
+    assert evidence.live_slave_ack_failure_kind is None
+    assert evidence.live_slave_ack_resolution_started_at is None
+    assert evidence.live_slave_ack_resolution_attempts is None
+
+
+def test_ack_less_verification_rejects_failed_resolution_progress() -> None:
+    now = datetime.now(UTC)
+
+    with pytest.raises(ValueError, match="successful resolution"):
+        hardware_test.HardwareTestEvidence(
+            active_entered_at=now,
+            live_slave_write_attempted_at=now,
+            live_slave_ack_unconfirmed_at=now,
+            live_slave_ack_failure_kind=ControlAckFailureKind.TIMEOUT,
+            live_slave_ack_resolution_started_at=now,
+            live_slave_ack_resolution_updated_at=now,
+            live_slave_ack_resolution_stage=ControlAckResolutionStage.QUERY,
+            live_slave_ack_resolution_state=ControlAckResolutionState.FAILED,
+            live_slave_ack_resolution_attempts=8,
+            live_slave_state_verified_without_ack_at=now,
         )
 
 
@@ -1088,7 +1182,23 @@ def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
             return outcome
         on_ack_unconfirmed = kwargs.get("on_ack_unconfirmed")
         assert callable(on_ack_unconfirmed)
-        on_ack_unconfirmed()
+        on_ack_unconfirmed(ControlAckFailureKind.TIMEOUT)
+        on_ack_resolution = kwargs.get("on_ack_resolution")
+        assert callable(on_ack_resolution)
+        on_ack_resolution(
+            ControlAckResolutionUpdate(
+                stage=ControlAckResolutionStage.DECODE,
+                attempt=1,
+                state=ControlAckResolutionState.STARTED,
+            )
+        )
+        on_ack_resolution(
+            ControlAckResolutionUpdate(
+                stage=ControlAckResolutionStage.DECODE,
+                attempt=1,
+                state=ControlAckResolutionState.SUCCEEDED,
+            )
+        )
         return ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
 
     monkeypatch.setattr(
@@ -1141,6 +1251,13 @@ def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
     assert failed_evidence is not None
     assert failed_intent.primary_failure is None
     assert failed_evidence.live_slave_ack_unconfirmed_at is not None
+    assert failed_evidence.live_slave_ack_failure_kind is ControlAckFailureKind.TIMEOUT
+    assert failed_evidence.live_slave_ack_resolution_stage is ControlAckResolutionStage.DECODE
+    assert (
+        failed_evidence.live_slave_ack_resolution_state
+        is ControlAckResolutionState.SUCCEEDED
+    )
+    assert failed_evidence.live_slave_ack_resolution_attempts == 1
     assert failed_evidence.live_slave_adapter_verified_at is None
     assert failed_evidence.live_slave_state_verified_without_ack_at is not None
     assert failed_evidence.live_slave_full_state_verified_at is not None
@@ -1204,6 +1321,7 @@ def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
         "driver_power_error_with_slave_error",
         "driver_power_error_with_schedule_change",
         "control_ack_unconfirmed",
+        "control_ack_query_exhausted",
         "slave_power_and_linkage_mismatch",
         "slave_write_error",
     ),
@@ -1269,6 +1387,32 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
             return outcome
         if failure_kind == "control_ack_unconfirmed":
             raise ControlAcknowledgementError("live slave control ACK was not confirmed")
+        if failure_kind == "control_ack_query_exhausted":
+            on_ack_unconfirmed = kwargs.get("on_ack_unconfirmed")
+            on_ack_resolution = kwargs.get("on_ack_resolution")
+            assert callable(on_ack_unconfirmed)
+            assert callable(on_ack_resolution)
+            on_ack_unconfirmed(ControlAckFailureKind.TIMEOUT)
+            for attempt in range(1, 9):
+                on_ack_resolution(
+                    ControlAckResolutionUpdate(
+                        stage=ControlAckResolutionStage.QUERY,
+                        attempt=attempt,
+                        state=ControlAckResolutionState.STARTED,
+                    )
+                )
+                on_ack_resolution(
+                    ControlAckResolutionUpdate(
+                        stage=ControlAckResolutionStage.QUERY,
+                        attempt=attempt,
+                        state=ControlAckResolutionState.FAILED,
+                    )
+                )
+            raise ControlAckReadbackError(
+                "private address and transport detail must not persist",
+                stage=ControlAckResolutionStage.QUERY,
+                attempts=8,
+            )
         if failure_kind == "master_readback_mismatch":
             master._state = master._state.model_copy(update={"power": 34})  # noqa: SLF001
         elif failure_kind == "master_transport_error":
@@ -1347,6 +1491,7 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
             "driver_power_error_with_slave_error",
             "driver_power_error_with_schedule_change",
             "control_ack_unconfirmed",
+            "control_ack_query_exhausted",
             "slave_write_error",
         }
     )
@@ -1378,6 +1523,15 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
         assert sum(
             command.name == "power" and command.value == 38 for command in slave.commands
         ) == 1
+    if failure_kind == "control_ack_query_exhausted":
+        assert evidence.live_slave_ack_failure_kind is ControlAckFailureKind.TIMEOUT
+        assert evidence.live_slave_ack_resolution_stage is ControlAckResolutionStage.QUERY
+        assert evidence.live_slave_ack_resolution_state is ControlAckResolutionState.FAILED
+        assert evidence.live_slave_ack_resolution_attempts == 8
+        assert (
+            evidence.forward_failure
+            is LinkageForwardFailureCategory.CONTROL_ACK_QUERY_FAILED
+        )
     assert hardware_test.main(["status"]) == 0
     status_output = capsys.readouterr().out
     adapter_verified = failure_kind not in {
@@ -1385,12 +1539,17 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
         "driver_power_error_with_slave_error",
         "driver_power_error_with_schedule_change",
         "control_ack_unconfirmed",
+        "control_ack_query_exhausted",
         "slave_write_error",
     }
     full_state_verified = failure_kind == "driver_power_error_then_converges"
     assert "write_attempted=yes" in status_output
     assert f"adapter_verified={'yes' if adapter_verified else 'no'}" in status_output
     assert f"full_state_verified={'yes' if full_state_verified else 'no'}" in status_output
+    if failure_kind == "control_ack_query_exhausted":
+        assert "ack_failure=timeout" in status_output
+        assert "ack_resolution=query/failed/attempt_8" in status_output
+        assert "private address and transport detail" not in status_output
 
 
 def test_native_intent_loads_version_one_without_primary_failure(

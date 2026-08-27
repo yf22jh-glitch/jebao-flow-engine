@@ -1,7 +1,11 @@
 from jebao_flow.devices.base import (
+    ControlAckFailureKind,
     ControlAcknowledgementError,
     ControlAckPowerMismatchError,
     ControlAckReadbackError,
+    ControlAckResolutionStage,
+    ControlAckResolutionState,
+    ControlAckResolutionUpdate,
     ControlAckStateMismatchError,
     ControlReadbackError,
     ControlStateMismatchError,
@@ -87,6 +91,10 @@ from jebao_flow.devices.verification import (
 __all__ = [
     "ControlAckPowerMismatchError",
     "ControlAckReadbackError",
+    "ControlAckFailureKind",
+    "ControlAckResolutionStage",
+    "ControlAckResolutionState",
+    "ControlAckResolutionUpdate",
     "ControlAckStateMismatchError",
     "ControlAcknowledgementError",
     "ControlReadbackError",

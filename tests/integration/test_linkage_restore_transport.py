@@ -3,9 +3,14 @@ import struct
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from jebao_flow.devices import (
+    ControlAckReadbackError,
+    ControlAckResolutionStage,
     DeviceControlSnapshot,
     LanJebaoDevice,
+    LinkageApplyError,
     LinkageRecoveryAuthority,
     LinkageSafetyInterlock,
     LinkageTestSpec,
@@ -17,6 +22,7 @@ from jebao_flow.devices import (
 )
 from jebao_flow.persistence import JsonLinkageJournalStore
 from jebao_flow.protocol.codec import MAGIC, GizwitsCommand, encode_frame, read_frame
+from jebao_flow.protocol.control import build_control_payload
 from jebao_flow.protocol.errors import ProtocolConnectionError
 from jebao_flow.protocol.models import DeviceTarget, LinkageRole
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
@@ -71,9 +77,14 @@ class _LocalGizwitsPump:
         self.control_sequences: list[int] = []
         self.timer_on_control_sequences: list[int] = []
         self.control_events: list[tuple[int, int, bool, bool]] = []
+        self.control_payload_events: list[tuple[int, bytes, float]] = []
         self.state_requests_by_connection: dict[int, int] = {}
+        self.state_request_events: list[tuple[int, float]] = []
         self.errors: list[Exception] = []
         self._post_timer_fault_origin: int | None = None
+        self._ack_loss_payload: bytes | None = None
+        self._ack_loss_origin: int | None = None
+        self._ack_resolution_failures_remaining = 0
         self._server: asyncio.Server | None = None
         self._writers: set[asyncio.StreamWriter] = set()
         self._handlers: set[asyncio.Task[None]] = set()
@@ -95,6 +106,19 @@ class _LocalGizwitsPump:
         self.control_states[payload] = state
         if timer_on:
             self.timer_on_payload = payload
+
+    def register_ack_loss_control(
+        self,
+        payload: bytes,
+        state: bytes,
+        *,
+        failed_resolution_reads: int,
+    ) -> None:
+        if failed_resolution_reads < 1:
+            raise ValueError("failed resolution reads must be positive")
+        self.register_control(payload, state)
+        self._ack_loss_payload = payload
+        self._ack_resolution_failures_remaining = failed_resolution_reads
 
     async def close(self) -> None:
         if self._server is not None:
@@ -206,6 +230,22 @@ class _LocalGizwitsPump:
         self.control_events.append(
             (connection_number, sequence, is_timer_on, authenticated)
         )
+        self.control_payload_events.append(
+            (connection_number, control_payload, asyncio.get_running_loop().time())
+        )
+
+        if control_payload == self._ack_loss_payload:
+            self._ack_loss_payload = None
+            self._ack_loss_origin = connection_number
+            # Apply the Flow frame but leave its 0x94 response between magic and length. The
+            # production session must classify this as an uncertain ACK and never replay it.
+            writer.write(MAGIC)
+            await writer.drain()
+            try:
+                await reader.read()
+            except ConnectionResetError:
+                pass
+            return True
 
         if is_timer_on:
             self.timer_on_control_sequences.append(sequence)
@@ -239,6 +279,19 @@ class _LocalGizwitsPump:
         writer: asyncio.StreamWriter,
     ) -> bool:
         self.state_requests_by_connection[connection_number] += 1
+        self.state_request_events.append(
+            (connection_number, asyncio.get_running_loop().time())
+        )
+        if (
+            self._ack_resolution_failures_remaining
+            and self._ack_loss_origin is not None
+            and connection_number != self._ack_loss_origin
+        ):
+            self._ack_resolution_failures_remaining -= 1
+            # Close without a frame. Each failure therefore belongs to one explicit read on one
+            # newly authenticated TCP session, while keeping the integration test fast enough to
+            # expose command pacing before rollback.
+            return True
         if (
             self.fail_first_fresh_state
             and self._post_timer_fault_origin is not None
@@ -266,30 +319,48 @@ class _LocalGizwitsPump:
         return False
 
 
-def _session_factory(port: int):
+def _session_factory(
+    port: int,
+    *,
+    created_sessions: list[GizwitsSession] | None = None,
+):
     def create(address: str) -> GizwitsSession:
-        return GizwitsSession(
+        session = GizwitsSession(
             address,
             port=port,
             connect_timeout_seconds=0.2,
             response_timeout_seconds=0.05,
         )
+        if created_sessions is not None:
+            created_sessions.append(session)
+        return session
 
     return create
 
 
-def _device(device_id: str, server: _LocalGizwitsPump) -> LanJebaoDevice:
+def _device(
+    device_id: str,
+    server: _LocalGizwitsPump,
+    *,
+    minimum_command_interval_ms: int = 100,
+    ack_loss_retry_delay_seconds: float = 0.5,
+    created_sessions: list[GizwitsSession] | None = None,
+) -> LanJebaoDevice:
     return LanJebaoDevice(
         device_id,
         "127.0.0.1",
         LOCAL_WAVEMAKER_PRO.product_key,
         power_limits=PowerLimits(min_power=30, max_power=75),
-        minimum_command_interval_ms=100,
+        minimum_command_interval_ms=minimum_command_interval_ms,
         readback_delay_ms=0,
         readback_attempts=1,
         allow_hardware_writes=True,
         physical_binding=_binding(device_id),
-        session_factory=_session_factory(server.port),
+        session_factory=_session_factory(
+            server.port,
+            created_sessions=created_sessions,
+        ),
+        ack_loss_retry_delay_seconds=ack_loss_retry_delay_seconds,
     )
 
 
@@ -319,6 +390,33 @@ def _snapshot(device: LanJebaoDevice, *, power: int, frequency: int) -> DeviceCo
         timer_enabled=True,
         schedule_fingerprint=schedule_structure_fingerprint(schedule),
     )
+
+
+def _scheduled_raw_state(
+    *,
+    power: int,
+    frequency: int,
+    linkage: LinkageRole,
+    timer_enabled: bool,
+) -> bytes:
+    """Build a status frame whose 14-entry schedule survives every temporary target."""
+
+    raw = bytearray(
+        _raw_state(
+            power=power,
+            frequency=frequency,
+            linkage=linkage,
+            timer_enabled=timer_enabled,
+        )
+    )
+    raw[11:443] = bytes([0xEE]) * 432
+    for slot in range(14):
+        offset = 11 + (slot * 9)
+        raw[offset : offset + 9] = bytes(
+            (slot, 0, slot + 1, 0, 2, 35 + slot, 20, 0, 0)
+        )
+    raw[443:451] = bytes((20, 26, 8, 27, 0, 12, 0, 0))
+    return bytes(raw)
 
 
 async def test_timer_on_restore_survives_two_quarantined_streams_without_replay(
@@ -493,6 +591,263 @@ async def test_timer_on_restore_survives_two_quarantined_streams_without_replay(
         ]
         assert slave_server.state_requests_by_connection == {1: 0, 2: 3, 3: 1, 4: 4}
         assert slave_server.state_request_count == 8
+        assert master_server.errors == []
+        assert slave_server.errors == []
+    finally:
+        await asyncio.gather(*(device.disconnect() for device in devices), return_exceptions=True)
+        await asyncio.gather(master_server.close(), slave_server.close())
+
+
+async def test_live_ack_loss_exhausts_eight_fresh_queries_then_uses_paced_fresh_rollback(
+    tmp_path: Path,
+) -> None:
+    master_initial = _scheduled_raw_state(
+        power=46,
+        frequency=22,
+        linkage=LinkageRole.INDEPENDENT,
+        timer_enabled=True,
+    )
+    slave_initial = _scheduled_raw_state(
+        power=54,
+        frequency=28,
+        linkage=LinkageRole.INDEPENDENT,
+        timer_enabled=True,
+    )
+    master_server = _LocalGizwitsPump(master_initial)
+    slave_server = _LocalGizwitsPump(slave_initial)
+    await asyncio.gather(master_server.start(), slave_server.start())
+    master_sessions: list[GizwitsSession] = []
+    slave_sessions: list[GizwitsSession] = []
+    command_interval_ms = 500
+    master = _device(
+        "master",
+        master_server,
+        minimum_command_interval_ms=command_interval_ms,
+        ack_loss_retry_delay_seconds=0,
+        created_sessions=master_sessions,
+    )
+    slave = _device(
+        "slave",
+        slave_server,
+        minimum_command_interval_ms=command_interval_ms,
+        ack_loss_retry_delay_seconds=0,
+        created_sessions=slave_sessions,
+    )
+    devices = (master, slave)
+
+    try:
+        await asyncio.gather(*(device.connect() for device in devices))
+        original_states = await asyncio.gather(*(device.get_state() for device in devices))
+        original_snapshots = tuple(
+            DeviceControlSnapshot.from_state(
+                device.device_id,
+                state,
+                physical_binding=device.physical_binding,
+            )
+            for device, state in zip(devices, original_states, strict=True)
+            if device.physical_binding is not None
+        )
+        assert len(original_snapshots) == 2
+        assert all(
+            state.schedule is not None
+            and len(state.schedule.entries) == 14
+            and state.schedule.invalid_slots == ()
+            for state in original_states
+        )
+
+        stage_target = DeviceTarget(
+            enabled=True,
+            power=30,
+            mode="constant",
+            frequency=20,
+            linkage=LinkageRole.INDEPENDENT,
+            timer_enabled=False,
+        )
+        master_active_target = DeviceTarget(
+            enabled=True,
+            power=35,
+            mode="constant",
+            frequency=20,
+            linkage=LinkageRole.MASTER,
+            timer_enabled=False,
+        )
+        slave_active_target = DeviceTarget(
+            enabled=True,
+            power=33,
+            mode="constant",
+            frequency=20,
+            linkage=LinkageRole.ASYNC_SLAVE,
+            timer_enabled=False,
+        )
+        master_restore_target = DeviceTarget(
+            enabled=True,
+            power=46,
+            mode="constant",
+            frequency=22,
+            linkage=LinkageRole.INDEPENDENT,
+            timer_enabled=True,
+        )
+        slave_restore_target = DeviceTarget(
+            enabled=True,
+            power=54,
+            mode="constant",
+            frequency=28,
+            linkage=LinkageRole.INDEPENDENT,
+            timer_enabled=True,
+        )
+
+        stage_state = _scheduled_raw_state(
+            power=30,
+            frequency=20,
+            linkage=LinkageRole.INDEPENDENT,
+            timer_enabled=False,
+        )
+        master_server.register_control(master.preview_target(stage_target).payload, stage_state)
+        master_server.register_control(
+            master.preview_target(master_active_target).payload,
+            _scheduled_raw_state(
+                power=35,
+                frequency=20,
+                linkage=LinkageRole.MASTER,
+                timer_enabled=False,
+            ),
+        )
+        master_server.register_control(
+            master.preview_target(master_restore_target).payload,
+            master_initial,
+            timer_on=True,
+        )
+        slave_server.register_control(slave.preview_target(stage_target).payload, stage_state)
+        slave_server.register_control(
+            slave.preview_target(slave_active_target).payload,
+            _scheduled_raw_state(
+                power=33,
+                frequency=20,
+                linkage=LinkageRole.ASYNC_SLAVE,
+                timer_enabled=False,
+            ),
+        )
+        slave_server.register_control(
+            slave.preview_target(slave_restore_target).payload,
+            slave_initial,
+            timer_on=True,
+        )
+        power_attribute = slave.schema.power_attribute
+        if power_attribute is None:  # pragma: no cover - the Pro profile always exposes Flow
+            raise AssertionError("test profile has no power attribute")
+        live_power_payload = build_control_payload(
+            slave.schema,
+            {power_attribute: 38},
+        )
+        slave_server.register_ack_loss_control(
+            live_power_payload,
+            _scheduled_raw_state(
+                power=38,
+                frequency=20,
+                linkage=LinkageRole.ASYNC_SLAVE,
+                timer_enabled=False,
+            ),
+            failed_resolution_reads=8,
+        )
+
+        store = JsonLinkageJournalStore(tmp_path / "live-ack-loss-eight-fresh.json")
+        controller = TemporaryLinkageController(
+            {"master": master, "slave": slave},
+            store,
+            safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+            restore_verification_backoff_seconds=0,
+            restore_verification_read_timeout_seconds=0.2,
+            restore_write_timeout_seconds=1.2,
+            restore_connection_timeout_seconds=0.5,
+            restore_verification_convergence_timeout_seconds=1,
+        )
+        spec = LinkageTestSpec(
+            operation_id="live_ack_loss_eight_fresh",
+            master_device_id="master",
+            slave_device_id="slave",
+            slave_role=LinkageRole.ASYNC_SLAVE,
+            mode="constant",
+            master_power=35,
+            slave_power=33,
+            frequency=20,
+            duration_seconds=5,
+            verification_interval_seconds=0.01,
+            slave_power_after=38,
+            power_change_after_seconds=0.05,
+        )
+
+        with pytest.raises(LinkageApplyError) as captured:
+            async with asyncio.timeout(10):
+                await controller.run(spec)
+
+        ack_error = captured.value.__cause__
+        assert isinstance(ack_error, ControlAckReadbackError)
+        assert ack_error.stage is ControlAckResolutionStage.QUERY
+        assert ack_error.attempts == 8
+        assert store.load() is None
+
+        resolver_connections = set(range(2, 10))
+        assert slave_server.accepted_connections == 11
+        assert slave_server.passcode_requests == 11
+        assert slave_server.login_requests == 11
+        assert {
+            connection
+            for connection, count in slave_server.state_requests_by_connection.items()
+            if connection in resolver_connections and count == 1
+        } == resolver_connections
+        assert all(
+            connection not in resolver_connections
+            for connection, _sequence, _timer_on, _authenticated in slave_server.control_events
+        )
+        assert slave_server.control_sequences == [1, 2, 3, 1, 2]
+        assert [event[0] for event in slave_server.control_events] == [1, 1, 1, 10, 10]
+        assert slave_server.timer_on_control_sequences == [2]
+        assert sum(
+            payload == live_power_payload
+            for _connection, payload, _sent_at in slave_server.control_payload_events
+        ) == 1
+
+        live_sent_at = next(
+            sent_at
+            for _connection, payload, sent_at in slave_server.control_payload_events
+            if payload == live_power_payload
+        )
+        rollback_sent_at = next(
+            sent_at
+            for connection, _payload, sent_at in slave_server.control_payload_events
+            if connection == 10
+        )
+        assert rollback_sent_at - live_sent_at >= 0.45
+
+        # Eight resolver objects, one never-connected clean handoff, one rollback object and one
+        # final TimerON verification object follow the original control session.
+        assert len(slave_sessions) == 12
+        assert len({id(session) for session in slave_sessions}) == 12
+        assert slave_sessions[9].connected is False
+        assert len(master_sessions) == 3
+        assert len({id(session) for session in master_sessions}) == 3
+        assert master_server.control_sequences == [1, 2, 1, 2]
+        assert [event[0] for event in master_server.control_events] == [1, 1, 2, 2]
+
+        restored_states = await asyncio.gather(*(device.get_state() for device in devices))
+        restored_snapshots = tuple(
+            DeviceControlSnapshot.from_state(
+                device.device_id,
+                state,
+                physical_binding=device.physical_binding,
+            )
+            for device, state in zip(devices, restored_states, strict=True)
+            if device.physical_binding is not None
+        )
+        assert restored_snapshots == original_snapshots
+        assert master_server.current_state == master_initial
+        assert slave_server.current_state == slave_initial
+        assert all(
+            state.schedule is not None
+            and len(state.schedule.entries) == 14
+            and state.schedule.invalid_slots == ()
+            for state in restored_states
+        )
         assert master_server.errors == []
         assert slave_server.errors == []
     finally:

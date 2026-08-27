@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from jebao_flow.devices.base import (
+    AckResolutionHook,
     AckUnconfirmedHook,
     ControlVerificationOutcome,
     DeviceConnectionError,
@@ -143,8 +144,9 @@ class SimulatedJebaoDevice(JebaoDevice):
         *,
         guard: WriteGuard | None = None,
         on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+        on_ack_resolution: AckResolutionHook | None = None,
     ) -> ControlVerificationOutcome:
-        del on_ack_unconfirmed
+        del on_ack_unconfirmed, on_ack_resolution
         limits = self._capabilities.power_limits
         if not limits.min_power <= power <= limits.max_power:
             raise ValueError(

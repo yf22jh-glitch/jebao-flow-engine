@@ -12,6 +12,51 @@ from jebao_flow.protocol.errors import (
 from jebao_flow.protocol.session import STATE_REPLY_ACTION, STATE_REPORT_ACTION, GizwitsSession
 
 
+async def test_quarantine_drops_logical_connection_without_waiting_for_tcp_close() -> None:
+    release_close = asyncio.Event()
+
+    class Transport:
+        aborted = False
+
+        def abort(self) -> None:
+            self.aborted = True
+
+    class SlowWriter:
+        closing = False
+
+        def __init__(self) -> None:
+            self.transport = Transport()
+
+        def close(self) -> None:
+            self.closing = True
+
+        def is_closing(self) -> bool:
+            return self.closing
+
+        async def wait_closed(self) -> None:
+            await release_close.wait()
+
+    session = GizwitsSession("127.0.0.1")
+    writer = SlowWriter()
+    session._reader = asyncio.StreamReader()  # noqa: SLF001
+    session._writer = writer  # type: ignore[assignment]  # noqa: SLF001
+    session._authenticated = True  # noqa: SLF001
+
+    session.quarantine()
+
+    assert session.connected is False
+    assert session.authenticated is False
+    assert writer.transport.aborted is True
+    assert not session._closing_writers  # noqa: SLF001
+    assert len(session._background_close_tasks) == 1  # noqa: SLF001
+    release_close.set()
+    await asyncio.gather(*tuple(session._background_close_tasks))  # noqa: SLF001
+    await asyncio.sleep(0)
+    await session.disconnect()
+    assert not session._closing_writers  # noqa: SLF001
+    assert not session._background_close_tasks  # noqa: SLF001
+
+
 async def test_session_authenticates_skips_unsolicited_and_reads_state() -> None:
     received: list[tuple[int, bytes]] = []
     completed = asyncio.Event()

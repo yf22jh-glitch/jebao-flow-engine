@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from enum import StrEnum
 
 from jebao_flow.devices.identity import PhysicalDeviceBinding
@@ -46,8 +47,52 @@ class PowerStateVerificationError(ControlStateMismatchError):
     """A decoded control read-back differed only in the requested power field."""
 
 
+class ControlAckResolutionStage(StrEnum):
+    """Redacted stage at which read-only ACK-loss resolution stopped."""
+
+    QUARANTINE = "quarantine"
+    CONNECT = "connect"
+    AUTHENTICATE = "authenticate"
+    QUERY = "query"
+    DECODE = "decode"
+
+
+class ControlAckFailureKind(StrEnum):
+    """Allow-listed cause of a missing or invalid control acknowledgement."""
+
+    TIMEOUT = "timeout"
+    CONNECTION = "connection"
+    UNEXPECTED_RESPONSE = "unexpected_response"
+    PROTOCOL = "protocol"
+    OS_ERROR = "os_error"
+
+
+class ControlAckResolutionState(StrEnum):
+    STARTED = "started"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class ControlAckResolutionUpdate:
+    stage: ControlAckResolutionStage
+    attempt: int
+    state: ControlAckResolutionState
+
+
 class ControlAckReadbackError(ControlAcknowledgementError, ControlReadbackError):
     """Neither a control ACK nor a fresh decoded state could confirm the write."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: ControlAckResolutionStage | None = None,
+        attempts: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.attempts = attempts
 
 
 class ControlAckStateMismatchError(ControlAcknowledgementError, ControlStateMismatchError):
@@ -63,7 +108,8 @@ class SafetyInterlockError(DeviceError):
 
 
 WriteGuard = Callable[[], bool]
-AckUnconfirmedHook = Callable[[], None]
+AckUnconfirmedHook = Callable[[ControlAckFailureKind], None]
+AckResolutionHook = Callable[[ControlAckResolutionUpdate], None]
 
 
 class ControlVerificationOutcome(StrEnum):
@@ -126,6 +172,7 @@ class JebaoDevice(ABC):
         *,
         guard: WriteGuard | None = None,
         on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+        on_ack_resolution: AckResolutionHook | None = None,
     ) -> ControlVerificationOutcome:
         """Write only the power datapoint under a last-moment safety guard.
 
@@ -133,7 +180,7 @@ class JebaoDevice(ABC):
         not re-assert its mode, linkage role, timer authority or power switch in the same frame.
         """
 
-        del power, guard, on_ack_unconfirmed
+        del power, guard, on_ack_unconfirmed, on_ack_resolution
         raise UnsupportedCapabilityError("guarded power-only writes are unsupported")
 
     @abstractmethod

@@ -5,12 +5,16 @@ import pytest
 
 from jebao_flow.config import DeviceConfig, DeviceControlConfig, DeviceType, RuntimeConfig
 from jebao_flow.devices import (
+    ControlAckFailureKind,
     ControlAcknowledgementError,
     ControlAckPowerMismatchError,
     ControlAckReadbackError,
+    ControlAckResolutionStage,
+    ControlAckResolutionState,
     ControlReadbackError,
     ControlStateMismatchError,
     ControlVerificationOutcome,
+    DeviceConnectionError,
     HardwareWritesDisabledError,
     LanJebaoDevice,
     PhysicalDeviceBinding,
@@ -21,7 +25,12 @@ from jebao_flow.devices import (
     create_lan_device,
     create_read_only_lan_device,
 )
-from jebao_flow.protocol.errors import ProtocolTimeoutError
+from jebao_flow.protocol.errors import (
+    ProtocolConnectionError,
+    ProtocolError,
+    ProtocolTimeoutError,
+    UnexpectedResponseError,
+)
 from jebao_flow.protocol.models import Capability, DeviceTarget, LinkageRole
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
 from jebao_flow.safety.limits import PowerLimits
@@ -47,12 +56,14 @@ def _pro_state(
 
 class _FakeSession:
     instances: ClassVar[list["_FakeSession"]] = []
+    timeline: ClassVar[list[str]] = []
     state = _pro_state()
     read_failures_remaining = 0
     read_failures_disconnect = False
     send_failure: Exception | None = None
 
     def __init__(self, address: str) -> None:
+        self.instance_id = len(self.__class__.instances)
         self.address = address
         self.connected = False
         self.connect_calls = 0
@@ -61,24 +72,36 @@ class _FakeSession:
         self.read_accept_reports: list[bool] = []
         self.events: list[str] = []
         self.__class__.instances.append(self)
+        self.__class__.timeline.append(f"{self.instance_id}:create")
 
     async def connect(self) -> None:
         self.connect_calls += 1
         self.events.append("connect")
+        self.__class__.timeline.append(f"{self.instance_id}:connect")
         self.connected = True
 
     async def disconnect(self) -> None:
         self.events.append("disconnect")
+        self.__class__.timeline.append(f"{self.instance_id}:disconnect")
+        self.connected = False
+
+    def quarantine(self) -> None:
+        self.events.append("quarantine")
+        self.__class__.timeline.append(f"{self.instance_id}:quarantine")
         self.connected = False
 
     async def authenticate(self) -> bytes:
         self.authenticate_calls += 1
         self.events.append("authenticate")
+        self.__class__.timeline.append(f"{self.instance_id}:authenticate")
         return b"never-logged"
 
     async def read_raw_state(self, *, accept_reports: bool = True) -> bytes:
         self.read_accept_reports.append(accept_reports)
         self.events.append(f"read:{'reports' if accept_reports else 'reply-only'}")
+        self.__class__.timeline.append(
+            f"{self.instance_id}:read:{'reports' if accept_reports else 'reply-only'}"
+        )
         if self.__class__.read_failures_remaining:
             self.__class__.read_failures_remaining -= 1
             if self.__class__.read_failures_disconnect:
@@ -88,6 +111,7 @@ class _FakeSession:
 
     async def send_raw_control(self, control_payload: bytes) -> bytes:
         self.events.append("send-control")
+        self.__class__.timeline.append(f"{self.instance_id}:send-control")
         self.sent.append(control_payload)
         if self.__class__.send_failure is not None:
             raise self.__class__.send_failure
@@ -97,6 +121,7 @@ class _FakeSession:
 @pytest.fixture(autouse=True)
 def _reset_fake_session() -> None:
     _FakeSession.instances.clear()
+    _FakeSession.timeline.clear()
     _FakeSession.state = _pro_state()
     _FakeSession.read_failures_remaining = 0
     _FakeSession.read_failures_disconnect = False
@@ -107,6 +132,8 @@ def _device(
     *,
     allow_writes: bool = False,
     minimum_command_interval_ms: int = 1000,
+    ack_loss_resolution_attempts: int = 8,
+    ack_loss_resolution_timeout_seconds: float = 55.0,
 ) -> LanJebaoDevice:
     return LanJebaoDevice(
         "right",
@@ -116,8 +143,28 @@ def _device(
         allow_hardware_writes=allow_writes,
         minimum_command_interval_ms=minimum_command_interval_ms,
         readback_delay_ms=0,
+        ack_loss_resolution_attempts=ack_loss_resolution_attempts,
+        ack_loss_resolution_timeout_seconds=ack_loss_resolution_timeout_seconds,
+        ack_loss_retry_delay_seconds=0,
         session_factory=_FakeSession,
     )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    (
+        (ProtocolTimeoutError("private"), ControlAckFailureKind.TIMEOUT),
+        (UnexpectedResponseError("private"), ControlAckFailureKind.UNEXPECTED_RESPONSE),
+        (ProtocolConnectionError("private"), ControlAckFailureKind.CONNECTION),
+        (ProtocolError("private"), ControlAckFailureKind.PROTOCOL),
+        (OSError("private"), ControlAckFailureKind.OS_ERROR),
+    ),
+)
+def test_ack_failure_classification_is_allow_listed(
+    error: BaseException,
+    expected: ControlAckFailureKind,
+) -> None:
+    assert LanJebaoDevice._classify_ack_failure(error) is expected  # noqa: SLF001
 
 
 async def test_adapter_reads_protocol_neutral_state_and_faults() -> None:
@@ -135,6 +182,22 @@ async def test_adapter_reads_protocol_neutral_state_and_faults() -> None:
     assert state.linkage is LinkageRole.INDEPENDENT
     assert state.timer_enabled is False
     assert state.error == "Fault_UART"
+
+
+async def test_explicit_disconnect_replaces_the_session_object_on_reconnect() -> None:
+    device = _device()
+    await device.connect()
+    original = _FakeSession.instances[0]
+
+    await device.disconnect()
+    await device.connect()
+
+    replacement = _FakeSession.instances[1]
+    assert replacement is not original
+    assert original.connected is False
+    assert original.connect_calls == 1
+    assert replacement.connect_calls == 1
+    assert replacement.authenticate_calls == 1
 
 
 def test_pro_profile_exposes_native_linkage_and_timer_capabilities() -> None:
@@ -462,27 +525,59 @@ async def test_unconfirmed_ack_hook_precedes_strict_fresh_read_and_returns_verif
     await device.connect()
     session = _FakeSession.instances[0]
     hook_calls = 0
+    resolution_updates = []
 
-    def persist_ack_unconfirmed() -> None:
+    def persist_ack_unconfirmed(kind: ControlAckFailureKind) -> None:
         nonlocal hook_calls
+        assert kind is ControlAckFailureKind.TIMEOUT
         hook_calls += 1
         session.events.append("ack-unconfirmed-hook")
+        _FakeSession.timeline.append("ack-unconfirmed-hook")
 
     outcome = await device.write_power(
         50,
         on_ack_unconfirmed=persist_ack_unconfirmed,
+        on_ack_resolution=resolution_updates.append,
     )
 
     assert outcome is ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
     assert hook_calls == 1
     assert len(session.sent) == 1
-    assert session.connect_calls == 2
-    assert session.authenticate_calls == 2
-    assert session.read_accept_reports == [False]
-    hook_index = session.events.index("ack-unconfirmed-hook")
-    assert hook_index > session.events.index("send-control")
-    assert hook_index < session.events.index("connect", 1)
-    assert hook_index < session.events.index("read:reply-only")
+    assert session.connect_calls == 1
+    assert session.authenticate_calls == 1
+    assert session.read_accept_reports == []
+    fresh = _FakeSession.instances[1]
+    assert fresh is not session
+    assert fresh.sent == []
+    assert fresh.connect_calls == 1
+    assert fresh.authenticate_calls == 1
+    assert fresh.read_accept_reports == [False]
+    assert _FakeSession.timeline.index("0:send-control") < _FakeSession.timeline.index(
+        "ack-unconfirmed-hook"
+    )
+    assert _FakeSession.timeline.index("ack-unconfirmed-hook") < _FakeSession.timeline.index(
+        "0:disconnect"
+    )
+    assert _FakeSession.timeline.index("ack-unconfirmed-hook") < _FakeSession.timeline.index(
+        "1:create"
+    )
+    assert _FakeSession.timeline.index("ack-unconfirmed-hook") < _FakeSession.timeline.index(
+        "1:read:reply-only"
+    )
+    assert [
+        (update.stage, update.attempt, update.state) for update in resolution_updates
+    ] == [
+        (ControlAckResolutionStage.QUARANTINE, 0, ControlAckResolutionState.STARTED),
+        (ControlAckResolutionStage.QUARANTINE, 0, ControlAckResolutionState.SUCCEEDED),
+        (ControlAckResolutionStage.CONNECT, 1, ControlAckResolutionState.STARTED),
+        (ControlAckResolutionStage.CONNECT, 1, ControlAckResolutionState.SUCCEEDED),
+        (ControlAckResolutionStage.AUTHENTICATE, 1, ControlAckResolutionState.STARTED),
+        (ControlAckResolutionStage.AUTHENTICATE, 1, ControlAckResolutionState.SUCCEEDED),
+        (ControlAckResolutionStage.QUERY, 1, ControlAckResolutionState.STARTED),
+        (ControlAckResolutionStage.QUERY, 1, ControlAckResolutionState.SUCCEEDED),
+        (ControlAckResolutionStage.DECODE, 1, ControlAckResolutionState.STARTED),
+        (ControlAckResolutionStage.DECODE, 1, ControlAckResolutionState.SUCCEEDED),
+    ]
 
 
 async def test_unconfirmed_ack_fresh_mismatch_is_typed_without_resending() -> None:
@@ -492,56 +587,340 @@ async def test_unconfirmed_ack_fresh_mismatch_is_typed_without_resending() -> No
     await device.connect()
     session = _FakeSession.instances[0]
     hook_calls = 0
+    resolution_updates = []
 
-    def persist_ack_unconfirmed() -> None:
+    def persist_ack_unconfirmed(kind: ControlAckFailureKind) -> None:
         nonlocal hook_calls
+        assert kind is ControlAckFailureKind.TIMEOUT
         hook_calls += 1
         session.events.append("ack-unconfirmed-hook")
+        _FakeSession.timeline.append("ack-unconfirmed-hook")
 
     with pytest.raises(ControlAckPowerMismatchError, match="did not apply control"):
         await device.write_power(
             50,
             on_ack_unconfirmed=persist_ack_unconfirmed,
+            on_ack_resolution=resolution_updates.append,
         )
 
     assert hook_calls == 1
     assert len(session.sent) == 1
-    assert session.connect_calls == 2
-    assert session.authenticate_calls == 2
-    assert session.read_accept_reports == [False, False, False]
-    assert session.events.index("ack-unconfirmed-hook") < session.events.index(
-        "read:reply-only"
+    assert session.connect_calls == 1
+    assert session.authenticate_calls == 1
+    assert session.read_accept_reports == []
+    resolution_sessions = _FakeSession.instances[1:9]
+    assert len(resolution_sessions) == 8
+    assert len({id(candidate) for candidate in resolution_sessions}) == 8
+    assert all(candidate.sent == [] for candidate in resolution_sessions)
+    assert all(candidate.read_accept_reports == [False] for candidate in resolution_sessions)
+    assert _FakeSession.timeline.index("ack-unconfirmed-hook") < _FakeSession.timeline.index(
+        "1:read:reply-only"
     )
+    decode_updates = [
+        update
+        for update in resolution_updates
+        if update.stage is ControlAckResolutionStage.DECODE
+    ]
+    assert len(decode_updates) == 16
+    assert all(
+        update.state
+        in {ControlAckResolutionState.STARTED, ControlAckResolutionState.FAILED}
+        for update in decode_updates
+    )
+    assert decode_updates[-1].attempt == 8
+    assert decode_updates[-1].state is ControlAckResolutionState.FAILED
 
 
 async def test_unconfirmed_ack_fresh_read_unavailable_is_typed_without_resending() -> None:
     _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
-    _FakeSession.read_failures_remaining = 3
+    _FakeSession.read_failures_remaining = 8
     _FakeSession.read_failures_disconnect = True
     device = _device(allow_writes=True, minimum_command_interval_ms=100)
     await device.connect()
     session = _FakeSession.instances[0]
     hook_calls = 0
 
-    def persist_ack_unconfirmed() -> None:
+    def persist_ack_unconfirmed(kind: ControlAckFailureKind) -> None:
         nonlocal hook_calls
+        assert kind is ControlAckFailureKind.TIMEOUT
         hook_calls += 1
         session.events.append("ack-unconfirmed-hook")
 
-    with pytest.raises(ControlAckReadbackError, match="3 readback attempts"):
+    with pytest.raises(ControlAckReadbackError) as captured:
         await device.write_power(
             50,
             on_ack_unconfirmed=persist_ack_unconfirmed,
         )
 
+    assert captured.value.stage is ControlAckResolutionStage.QUERY
+    assert captured.value.attempts == 8
     assert hook_calls == 1
     assert len(session.sent) == 1
-    assert session.connect_calls == 4
-    assert session.authenticate_calls == 4
-    assert session.read_accept_reports == [False, False, False]
-    assert session.events.index("ack-unconfirmed-hook") < session.events.index(
-        "read:reply-only"
+    assert session.connect_calls == 1
+    assert session.authenticate_calls == 1
+    assert session.read_accept_reports == []
+    resolution_sessions = _FakeSession.instances[1:9]
+    assert len(resolution_sessions) == 8
+    assert all(candidate.sent == [] for candidate in resolution_sessions)
+    assert all(candidate.read_accept_reports == [False] for candidate in resolution_sessions)
+
+
+async def test_unconfirmed_ack_retires_each_failed_object_then_succeeds_on_fourth_read(
+) -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    _FakeSession.read_failures_remaining = 3
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+
+    outcome = await device.write_power(50, on_ack_unconfirmed=lambda _kind: None)
+
+    assert outcome is ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+    assert len(_FakeSession.instances) == 5
+    assert len({id(candidate) for candidate in _FakeSession.instances}) == 5
+    assert len(_FakeSession.instances[0].sent) == 1
+    assert all(candidate.sent == [] for candidate in _FakeSession.instances[1:])
+    for failed_id in range(1, 4):
+        assert _FakeSession.timeline.index(f"{failed_id}:disconnect") < (
+            _FakeSession.timeline.index(f"{failed_id + 1}:create")
+        )
+    successful = _FakeSession.instances[4]
+    assert successful.read_accept_reports == [False]
+
+    await device.get_state()
+
+    assert device._session is successful  # noqa: SLF001
+    assert successful.read_accept_reports == [False, True]
+
+
+async def test_unconfirmed_ack_rejects_factory_reusing_retired_object() -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    shared = _FakeSession("pump.local")
+
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        allow_hardware_writes=True,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+        ack_loss_resolution_attempts=2,
+        ack_loss_retry_delay_seconds=0,
+        session_factory=lambda _address: shared,
     )
+    await device.connect()
+
+    with pytest.raises(ControlAckReadbackError) as captured:
+        await device.write_power(50, on_ack_unconfirmed=lambda _kind: None)
+
+    assert captured.value.stage is ControlAckResolutionStage.CONNECT
+    assert captured.value.attempts == 2
+    assert len(shared.sent) == 1
+    assert shared.read_accept_reports == []
+
+    with pytest.raises(DeviceConnectionError, match="replace retired session"):
+        await device.connect()
+
+    assert shared.connect_calls == 1
+
+
+async def test_unconfirmed_ack_resolution_obeys_hard_deadline_before_next_session(
+) -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+
+    class SlowFreshSession(_FakeSession):
+        async def connect(self) -> None:
+            if self.instance_id > 0:
+                await asyncio.sleep(1)
+            await super().connect()
+
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        allow_hardware_writes=True,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+        ack_loss_resolution_timeout_seconds=0.05,
+        ack_loss_resolution_attempts=8,
+        ack_loss_retry_delay_seconds=0,
+        session_factory=SlowFreshSession,
+    )
+    await device.connect()
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(ControlAckReadbackError) as captured:
+        await device.write_power(50, on_ack_unconfirmed=lambda _kind: None)
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert captured.value.stage is ControlAckResolutionStage.CONNECT
+    assert captured.value.attempts == 1
+    assert elapsed < 0.3
+    assert sum(len(candidate.sent) for candidate in SlowFreshSession.instances) == 1
+    assert all(candidate.read_accept_reports == [] for candidate in SlowFreshSession.instances)
+    assert sum(candidate.connect_calls for candidate in SlowFreshSession.instances[1:]) == 0
+
+
+async def test_unconfirmed_ack_requires_original_session_quarantine_before_resolution(
+) -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+
+    class UnquarantinableSession(_FakeSession):
+        async def disconnect(self) -> None:
+            self.events.append("disconnect-stuck")
+
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        allow_hardware_writes=True,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+        ack_loss_retry_delay_seconds=0,
+        session_factory=UnquarantinableSession,
+    )
+    await device.connect()
+    original = UnquarantinableSession.instances[0]
+
+    with pytest.raises(ControlAckReadbackError) as captured:
+        await device.write_power(50, on_ack_unconfirmed=lambda _kind: None)
+
+    assert captured.value.stage is ControlAckResolutionStage.QUARANTINE
+    assert len(original.sent) == 1
+    assert original.connected is True
+    assert all(candidate.connect_calls == 0 for candidate in UnquarantinableSession.instances[1:])
+
+
+async def test_unconfirmed_ack_invalid_full_state_is_decode_stage_failure() -> None:
+    _FakeSession.state = b""
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    device = _device(
+        allow_writes=True,
+        minimum_command_interval_ms=100,
+        ack_loss_resolution_attempts=2,
+    )
+    await device.connect()
+
+    with pytest.raises(ControlAckReadbackError) as captured:
+        await device.write_power(50, on_ack_unconfirmed=lambda _kind: None)
+
+    assert captured.value.stage is ControlAckResolutionStage.DECODE
+    assert captured.value.attempts == 2
+    assert len(_FakeSession.instances[0].sent) == 1
+    assert all(candidate.sent == [] for candidate in _FakeSession.instances[1:])
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_stage"),
+    [
+        ("connect", ControlAckResolutionStage.CONNECT),
+        ("authenticate", ControlAckResolutionStage.AUTHENTICATE),
+        ("query", ControlAckResolutionStage.QUERY),
+    ],
+)
+async def test_unconfirmed_ack_unexpected_stage_failure_retires_connected_candidate(
+    failure_stage: str,
+    expected_stage: ControlAckResolutionStage,
+) -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+
+    class UnexpectedFailureSession(_FakeSession):
+        async def connect(self) -> None:
+            await super().connect()
+            if self.instance_id in {1, 2} and failure_stage == "connect":
+                raise RuntimeError("private unexpected connect failure")
+
+        async def authenticate(self) -> bytes:
+            result = await super().authenticate()
+            if self.instance_id in {1, 2} and failure_stage == "authenticate":
+                raise RuntimeError("private unexpected authentication failure")
+            return result
+
+        async def read_raw_state(self, *, accept_reports: bool = True) -> bytes:
+            if self.instance_id in {1, 2} and failure_stage == "query":
+                raise RuntimeError("private unexpected query failure")
+            return await super().read_raw_state(accept_reports=accept_reports)
+
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        allow_hardware_writes=True,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+        ack_loss_resolution_attempts=2,
+        ack_loss_retry_delay_seconds=0,
+        session_factory=UnexpectedFailureSession,
+    )
+    await device.connect()
+
+    with pytest.raises(ControlAckReadbackError) as captured:
+        await device.write_power(50, on_ack_unconfirmed=lambda _kind: None)
+
+    assert captured.value.stage is expected_stage
+    assert captured.value.attempts == 2
+    assert sum(len(candidate.sent) for candidate in UnexpectedFailureSession.instances) == 1
+    failed_candidates = UnexpectedFailureSession.instances[1:3]
+    assert all(candidate.connected is False for candidate in failed_candidates)
+    clean = UnexpectedFailureSession.instances[3]
+    assert clean not in failed_candidates
+    await device.connect()
+    assert device._session is clean  # noqa: SLF001
+    assert clean.connected is True
+    assert clean.sent == []
+
+
+async def test_unconfirmed_ack_resolution_cancellation_quarantines_without_close_wait(
+) -> None:
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    query_started = asyncio.Event()
+
+    class SlowQuerySession(_FakeSession):
+        async def read_raw_state(self, *, accept_reports: bool = True) -> bytes:
+            if self.instance_id > 0:
+                query_started.set()
+                await asyncio.sleep(10)
+            return await super().read_raw_state(accept_reports=accept_reports)
+
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        allow_hardware_writes=True,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+        ack_loss_retry_delay_seconds=0,
+        session_factory=SlowQuerySession,
+    )
+    await device.connect()
+    task = asyncio.create_task(
+        device.write_power(50, on_ack_unconfirmed=lambda _kind: None)
+    )
+    await asyncio.wait_for(query_started.wait(), timeout=1)
+    cancelled_at = asyncio.get_running_loop().time()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert asyncio.get_running_loop().time() - cancelled_at < 0.2
+    assert len(SlowQuerySession.instances[0].sent) == 1
+    assert sum(len(candidate.sent) for candidate in SlowQuerySession.instances) == 1
+    assert SlowQuerySession.instances[1].connected is False
+    assert device.connected is False
+    await device.connect()
+    assert device.connected is True
+    assert all(candidate.sent == [] for candidate in SlowQuerySession.instances[1:])
 
 
 async def test_unconfirmed_ack_hook_failure_prevents_fresh_read_and_reconnect() -> None:
@@ -555,8 +934,9 @@ async def test_unconfirmed_ack_hook_failure_prevents_fresh_read_and_reconnect() 
     session = _FakeSession.instances[0]
     hook_calls = 0
 
-    def fail_to_persist_ack_unconfirmed() -> None:
+    def fail_to_persist_ack_unconfirmed(kind: ControlAckFailureKind) -> None:
         nonlocal hook_calls
+        assert kind is ControlAckFailureKind.TIMEOUT
         hook_calls += 1
         session.events.append("ack-unconfirmed-hook")
         raise EvidencePersistenceError("simulated durable evidence failure")
@@ -573,34 +953,82 @@ async def test_unconfirmed_ack_hook_failure_prevents_fresh_read_and_reconnect() 
     assert session.authenticate_calls == 1
     assert session.read_accept_reports == []
     assert "read:reply-only" not in session.events
+    assert all(candidate.connect_calls == 0 for candidate in _FakeSession.instances[1:])
+
+
+async def test_unconfirmed_ack_resolution_hook_failure_quarantines_before_rollback() -> None:
+    class EvidencePersistenceError(RuntimeError):
+        pass
+
+    _FakeSession.state = _pro_state(power=50)
+    _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    original = _FakeSession.instances[0]
+    updates = []
+
+    def fail_to_persist_resolution(update) -> None:
+        updates.append(update)
+        raise EvidencePersistenceError("simulated resolution evidence failure")
+
+    with pytest.raises(EvidencePersistenceError, match="resolution evidence failure"):
+        await device.write_power(
+            50,
+            on_ack_unconfirmed=lambda _kind: None,
+            on_ack_resolution=fail_to_persist_resolution,
+        )
+
+    assert len(updates) == 1
+    assert updates[0].stage is ControlAckResolutionStage.QUARANTINE
+    assert updates[0].attempt == 0
+    assert updates[0].state is ControlAckResolutionState.STARTED
+    assert original.connected is False
+    assert original.sent and len(original.sent) == 1
+    assert "quarantine" in original.events
+    assert all(candidate.connect_calls == 0 for candidate in _FakeSession.instances[1:])
+
+    await device.connect()
+
+    assert device.connected is True
+    assert device._session is _FakeSession.instances[1]  # noqa: SLF001
+    assert _FakeSession.instances[1].sent == []
 
 
 async def test_unconfirmed_ack_safety_trip_during_reconnect_prevents_resolution_read() -> None:
     _FakeSession.state = _pro_state(power=50)
     _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
-    device = _device(allow_writes=True, minimum_command_interval_ms=100)
-    await device.connect()
-    session = _FakeSession.instances[0]
-    original_connect = session.connect
     allowed = True
 
-    async def reconnect_then_trip_guard() -> None:
-        nonlocal allowed
-        await original_connect()
-        if session.connect_calls == 2:
-            allowed = False
+    class GuardTripSession(_FakeSession):
+        async def connect(self) -> None:
+            nonlocal allowed
+            await super().connect()
+            if self.instance_id == 1:
+                allowed = False
 
-    session.connect = reconnect_then_trip_guard  # type: ignore[method-assign]
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        allow_hardware_writes=True,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+        ack_loss_retry_delay_seconds=0,
+        session_factory=GuardTripSession,
+    )
+    await device.connect()
+    session = GuardTripSession.instances[0]
 
     with pytest.raises(SafetyInterlockError, match="safety interlock"):
         await device.write_power(
             50,
             guard=lambda: allowed,
-            on_ack_unconfirmed=lambda: None,
+            on_ack_unconfirmed=lambda _kind: None,
         )
 
     assert len(session.sent) == 1
-    assert session.connect_calls == 2
+    assert session.connect_calls == 1
     assert session.authenticate_calls == 1
     assert session.read_accept_reports == []
 
@@ -608,29 +1036,40 @@ async def test_unconfirmed_ack_safety_trip_during_reconnect_prevents_resolution_
 async def test_unconfirmed_ack_safety_trip_during_read_cannot_become_success() -> None:
     _FakeSession.state = _pro_state(power=50)
     _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
-    device = _device(allow_writes=True, minimum_command_interval_ms=100)
-    await device.connect()
-    session = _FakeSession.instances[0]
-    original_read = session.read_raw_state
     allowed = True
 
-    async def read_then_trip_guard(*, accept_reports: bool = True) -> bytes:
-        nonlocal allowed
-        raw = await original_read(accept_reports=accept_reports)
-        allowed = False
-        return raw
+    class GuardTripReadSession(_FakeSession):
+        async def read_raw_state(self, *, accept_reports: bool = True) -> bytes:
+            nonlocal allowed
+            raw = await super().read_raw_state(accept_reports=accept_reports)
+            if self.instance_id == 1:
+                allowed = False
+            return raw
 
-    session.read_raw_state = read_then_trip_guard  # type: ignore[method-assign]
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        allow_hardware_writes=True,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+        ack_loss_retry_delay_seconds=0,
+        session_factory=GuardTripReadSession,
+    )
+    await device.connect()
+    session = GuardTripReadSession.instances[0]
 
     with pytest.raises(SafetyInterlockError, match="safety interlock"):
         await device.write_power(
             50,
             guard=lambda: allowed,
-            on_ack_unconfirmed=lambda: None,
+            on_ack_unconfirmed=lambda _kind: None,
         )
 
     assert len(session.sent) == 1
-    assert session.read_accept_reports == [False]
+    assert session.read_accept_reports == []
+    assert GuardTripReadSession.instances[1].read_accept_reports == [False]
 
 
 async def test_unconfirmed_ack_mismatch_preserves_command_pacing_across_reconnect() -> None:
@@ -651,17 +1090,26 @@ async def test_unconfirmed_ack_mismatch_preserves_command_pacing_across_reconnec
 async def test_unconfirmed_live_write_spaces_one_compensating_frame_after_reconnect() -> None:
     _FakeSession.state = _pro_state(power=34)
     _FakeSession.send_failure = ProtocolTimeoutError("simulated missing control ACK")
-    device = _device(allow_writes=True, minimum_command_interval_ms=100)
-    await device.connect()
-    session = _FakeSession.instances[0]
     sent_at: list[float] = []
-    original_send = session.send_raw_control
 
-    async def timed_send(payload: bytes) -> bytes:
-        sent_at.append(asyncio.get_running_loop().time())
-        return await original_send(payload)
+    class TimedSession(_FakeSession):
+        async def send_raw_control(self, control_payload: bytes) -> bytes:
+            sent_at.append(asyncio.get_running_loop().time())
+            return await super().send_raw_control(control_payload)
 
-    session.send_raw_control = timed_send  # type: ignore[method-assign]
+    device = LanJebaoDevice(
+        "right",
+        "pump.local",
+        LOCAL_WAVEMAKER_PRO.product_key,
+        power_limits=PowerLimits(min_power=30, max_power=75),
+        allow_hardware_writes=True,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+        ack_loss_retry_delay_seconds=0,
+        session_factory=TimedSession,
+    )
+    await device.connect()
+    original_session = TimedSession.instances[0]
 
     with pytest.raises(ControlAcknowledgementError):
         await device.write_power(38)
@@ -671,11 +1119,15 @@ async def test_unconfirmed_live_write_spaces_one_compensating_frame_after_reconn
     await device.connect()
     await device.write_power(34)
 
-    assert len(session.sent) == 2
+    assert len(original_session.sent) == 1
+    assert sum(len(candidate.sent) for candidate in TimedSession.instances) == 2
     assert len(sent_at) == 2
     assert sent_at[1] - sent_at[0] >= 0.09
-    assert session.sent[0][9 + 2] == 38
-    assert session.sent[1][9 + 2] == 34
+    sent_payloads = [
+        payload for candidate in TimedSession.instances for payload in candidate.sent
+    ]
+    assert sent_payloads[0][9 + 2] == 38
+    assert sent_payloads[1][9 + 2] == 34
 
 
 async def test_verified_duplicate_write_is_suppressed() -> None:
@@ -806,5 +1258,17 @@ def test_lan_adapter_rejects_binding_for_a_different_product() -> None:
             "pump.local",
             LOCAL_WAVEMAKER_PRO.product_key,
             physical_binding=binding,
+            session_factory=_FakeSession,
+        )
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, 55.0001, float("inf"), float("nan")])
+def test_lan_adapter_rejects_unbounded_ack_loss_resolution_timeout(timeout: float) -> None:
+    with pytest.raises(ValueError, match="ACK-loss resolution timeout"):
+        LanJebaoDevice(
+            "right",
+            "pump.local",
+            LOCAL_WAVEMAKER_PRO.product_key,
+            ack_loss_resolution_timeout_seconds=timeout,
             session_factory=_FakeSession,
         )

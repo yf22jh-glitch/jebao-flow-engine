@@ -28,7 +28,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from jebao_flow.config import AppConfig, DeviceConfig, DeviceType, RuntimeMode, load_config
-from jebao_flow.devices.base import JebaoDevice
+from jebao_flow.devices.base import (
+    ControlAckFailureKind,
+    ControlAckResolutionStage,
+    ControlAckResolutionState,
+    JebaoDevice,
+)
 from jebao_flow.devices.factory import create_lan_device, create_read_only_lan_device
 from jebao_flow.devices.identity import (
     PhysicalDeviceBinding,
@@ -192,6 +197,12 @@ class HardwareTestEvidence(BaseModel):
     active_entered_at: datetime | None = None
     live_slave_write_attempted_at: datetime | None = None
     live_slave_ack_unconfirmed_at: datetime | None = None
+    live_slave_ack_failure_kind: ControlAckFailureKind | None = None
+    live_slave_ack_resolution_started_at: datetime | None = None
+    live_slave_ack_resolution_updated_at: datetime | None = None
+    live_slave_ack_resolution_stage: ControlAckResolutionStage | None = None
+    live_slave_ack_resolution_state: ControlAckResolutionState | None = None
+    live_slave_ack_resolution_attempts: int | None = Field(default=None, ge=0, le=8)
     live_slave_adapter_verified_at: datetime | None = None
     live_slave_state_verified_without_ack_at: datetime | None = None
     live_slave_full_state_verified_at: datetime | None = None
@@ -208,6 +219,12 @@ class HardwareTestEvidence(BaseModel):
     def validate_progress(self) -> HardwareTestEvidence:
         attempted = self.live_slave_write_attempted_at
         ack_unconfirmed = self.live_slave_ack_unconfirmed_at
+        ack_failure_kind = self.live_slave_ack_failure_kind
+        resolution_started = self.live_slave_ack_resolution_started_at
+        resolution_updated = self.live_slave_ack_resolution_updated_at
+        resolution_stage = self.live_slave_ack_resolution_stage
+        resolution_state = self.live_slave_ack_resolution_state
+        resolution_attempts = self.live_slave_ack_resolution_attempts
         adapter = self.live_slave_adapter_verified_at
         without_ack = self.live_slave_state_verified_without_ack_at
         full_state = self.live_slave_full_state_verified_at
@@ -221,15 +238,46 @@ class HardwareTestEvidence(BaseModel):
             attempted is None or ack_unconfirmed < attempted
         ):
             raise ValueError("ACK loss must follow a live slave write attempt")
+        if ack_failure_kind is not None and ack_unconfirmed is None:
+            raise ValueError("an ACK failure kind requires recorded ACK loss")
+        resolution_fields = (
+            resolution_started,
+            resolution_updated,
+            resolution_stage,
+            resolution_state,
+            resolution_attempts,
+        )
+        if any(value is not None for value in resolution_fields):
+            if any(value is None for value in resolution_fields):
+                raise ValueError("ACK resolution progress must be complete")
+            if ack_unconfirmed is None:
+                raise ValueError("ACK resolution progress requires recorded ACK loss")
+            assert resolution_started is not None
+            assert resolution_updated is not None
+            if resolution_started < ack_unconfirmed:
+                raise ValueError("ACK resolution must follow recorded ACK loss")
+            if resolution_updated < resolution_started:
+                raise ValueError("ACK resolution update cannot precede its start")
         if adapter is not None and ack_unconfirmed is not None:
             raise ValueError("a live slave write cannot both confirm and lose its ACK")
         if without_ack is not None and (
             ack_unconfirmed is None or without_ack < ack_unconfirmed
         ):
             raise ValueError("ACK-less state verification must follow recorded ACK loss")
+        if (
+            without_ack is not None
+            and resolution_state is not None
+            and resolution_state is not ControlAckResolutionState.SUCCEEDED
+        ):
+            raise ValueError("ACK-less state verification requires successful resolution")
         ack_terminal_failures = {
             LinkageForwardFailureCategory.CONTROL_ACK_NOT_CONFIRMED,
             LinkageForwardFailureCategory.CONTROL_ACK_READBACK_UNAVAILABLE,
+            LinkageForwardFailureCategory.CONTROL_ACK_QUARANTINE_FAILED,
+            LinkageForwardFailureCategory.CONTROL_ACK_CONNECT_FAILED,
+            LinkageForwardFailureCategory.CONTROL_ACK_AUTHENTICATE_FAILED,
+            LinkageForwardFailureCategory.CONTROL_ACK_QUERY_FAILED,
+            LinkageForwardFailureCategory.CONTROL_ACK_DECODE_FAILED,
             LinkageForwardFailureCategory.CONTROL_ACK_STATE_MISMATCH,
             LinkageForwardFailureCategory.CONTROL_ACK_POWER_MISMATCH,
         }
@@ -322,6 +370,12 @@ class HardwareTestIntent(BaseModel):
             for value in (
                 evidence.live_slave_write_attempted_at,
                 evidence.live_slave_ack_unconfirmed_at,
+                evidence.live_slave_ack_failure_kind,
+                evidence.live_slave_ack_resolution_started_at,
+                evidence.live_slave_ack_resolution_updated_at,
+                evidence.live_slave_ack_resolution_stage,
+                evidence.live_slave_ack_resolution_state,
+                evidence.live_slave_ack_resolution_attempts,
                 evidence.live_slave_adapter_verified_at,
                 evidence.live_slave_state_verified_without_ack_at,
                 evidence.live_slave_full_state_verified_at,
@@ -1359,6 +1413,26 @@ def _evidence_after_event(
     elif event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED:
         if evidence.live_slave_ack_unconfirmed_at is None:
             update["live_slave_ack_unconfirmed_at"] = event.occurred_at
+        if evidence.live_slave_ack_failure_kind is None:
+            update["live_slave_ack_failure_kind"] = event.ack_failure_kind
+    elif event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_RESOLUTION:
+        if evidence.live_slave_ack_unconfirmed_at is None:
+            raise HardwareTestError("ACK resolution has no recorded ACK loss")
+        if event.ack_resolution_attempt is None:
+            raise AssertionError("validated ACK-resolution event has no attempt")
+        if evidence.live_slave_ack_resolution_started_at is None:
+            update["live_slave_ack_resolution_started_at"] = event.occurred_at
+        update.update(
+            {
+                "live_slave_ack_resolution_updated_at": event.occurred_at,
+                "live_slave_ack_resolution_stage": event.ack_resolution_stage,
+                "live_slave_ack_resolution_state": event.ack_resolution_state,
+                "live_slave_ack_resolution_attempts": max(
+                    evidence.live_slave_ack_resolution_attempts or 0,
+                    event.ack_resolution_attempt,
+                ),
+            }
+        )
     elif event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_ADAPTER_VERIFIED:
         if evidence.live_slave_adapter_verified_at is None:
             update["live_slave_adapter_verified_at"] = event.occurred_at
@@ -2000,6 +2074,44 @@ def _status(
             if evidence.forward_failure is not None
             else "none"
         )
+        ack_failure = (
+            evidence.live_slave_ack_failure_kind.value
+            if evidence.live_slave_ack_failure_kind is not None
+            else "unknown"
+            if evidence.live_slave_ack_unconfirmed_at is not None
+            else "none"
+        )
+        ack_resolution = (
+            f"{evidence.live_slave_ack_resolution_stage.value}/"
+            f"{evidence.live_slave_ack_resolution_state.value}/"
+            f"attempt_{evidence.live_slave_ack_resolution_attempts}"
+            if evidence.live_slave_ack_resolution_stage is not None
+            and evidence.live_slave_ack_resolution_state is not None
+            and evidence.live_slave_ack_resolution_attempts is not None
+            else "none"
+        )
+        ack_resolution_duration = (
+            evidence.live_slave_ack_resolution_updated_at
+            - evidence.live_slave_ack_resolution_started_at
+            if evidence.live_slave_ack_resolution_started_at is not None
+            and evidence.live_slave_ack_resolution_updated_at is not None
+            else None
+        )
+        ack_resolution_duration_text = (
+            f"{ack_resolution_duration.total_seconds():.1f}s"
+            if ack_resolution_duration is not None
+            else "none"
+        )
+        verified_span = (
+            evidence.last_verified_sample.verified_at
+            - evidence.first_verified_sample.verified_at
+            if evidence.first_verified_sample is not None
+            and evidence.last_verified_sample is not None
+            else None
+        )
+        verified_span_text = (
+            f"{verified_span.total_seconds():.1f}s" if verified_span is not None else "none"
+        )
         rollback_state = (
             "completed"
             if evidence.rollback_completed_at is not None
@@ -2021,11 +2133,15 @@ def _status(
             f"{'yes' if evidence.live_slave_adapter_verified_at is not None else 'no'}, "
             "ack_unconfirmed="
             f"{'yes' if evidence.live_slave_ack_unconfirmed_at is not None else 'no'}, "
+            f"ack_failure={ack_failure}, "
+            f"ack_resolution={ack_resolution}, "
+            f"ack_resolution_duration={ack_resolution_duration_text}, "
             "state_verified_without_ack="
             f"{'yes' if evidence.live_slave_state_verified_without_ack_at is not None else 'no'}, "
             "full_state_verified="
             f"{'yes' if evidence.live_slave_full_state_verified_at is not None else 'no'}, "
             f"samples={evidence.verified_sample_count}, "
+            f"verified_span={verified_span_text}, "
             f"forward_failure={forward_failure}"
         )
         print(

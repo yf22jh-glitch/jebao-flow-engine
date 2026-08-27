@@ -91,6 +91,24 @@ class GizwitsSession:
             self._begin_writer_close(writer)
         await self._reap_closing_writers()
 
+    def quarantine(self) -> None:
+        """Synchronously retire an uncertain stream without waiting for TCP close.
+
+        Safety interlocks use this when an in-flight resolution is cancelled. The logical
+        connection disappears immediately. Every current or already-closing transport is also
+        aborted and removed from the reconnect gate; background tasks consume ``wait_closed``
+        results without delaying a replacement session.
+        """
+
+        writer = self._drop_connection()
+        if writer is not None:
+            self._begin_writer_close(writer)
+        for closing_writer, task in tuple(self._closing_writers.items()):
+            self._abort_writer(closing_writer)
+            self._closing_writers.pop(closing_writer, None)
+            self._background_close_tasks.add(task)
+            task.add_done_callback(self._finish_background_close)
+
     async def authenticate(self) -> bytes:
         try:
             passcode_response = await self._exchange(
@@ -252,9 +270,17 @@ class GizwitsSession:
     def _begin_writer_close(self, writer: asyncio.StreamWriter) -> None:
         writer.close()
         if writer not in self._closing_writers:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # A synchronously rejected custom factory can theoretically return a connected
+                # writer outside an event loop. Abort it; there is no loop on which wait_closed
+                # could be owned or consumed.
+                self._abort_writer(writer)
+                return
             # Keep the task alive across a bounded reap timeout. Cancelling ``wait_closed`` can
             # cancel asyncio's shared close waiter and make later cleanup permanently impossible.
-            self._closing_writers[writer] = asyncio.create_task(writer.wait_closed())
+            self._closing_writers[writer] = loop.create_task(writer.wait_closed())
 
     async def _reap_closing_writers(self) -> None:
         """Wait a bounded time for every quarantined transport to actually close."""
@@ -277,10 +303,7 @@ class GizwitsSession:
                 # abort the local transport and remove it from the reconnect gate. Keep consuming
                 # the waiter in the background so a broken close cannot permanently block the
                 # fresh session needed for rollback.
-                transport = getattr(writer, "transport", None)
-                abort = getattr(transport, "abort", None)
-                if callable(abort):
-                    abort()
+                self._abort_writer(writer)
                 self._closing_writers.pop(writer, None)
                 self._background_close_tasks.add(task)
                 task.add_done_callback(self._finish_background_close)
@@ -300,6 +323,13 @@ class GizwitsSession:
             pass
         except asyncio.CancelledError:
             pass
+
+    @staticmethod
+    def _abort_writer(writer: asyncio.StreamWriter) -> None:
+        transport = getattr(writer, "transport", None)
+        abort = getattr(transport, "abort", None)
+        if callable(abort):
+            abort()
 
     def _require_connection(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         if self._reader is None or self._writer is None or self._writer.is_closing():

@@ -8,9 +8,13 @@ from pathlib import Path
 import pytest
 
 from jebao_flow.devices import (
+    ControlAckFailureKind,
     ControlAcknowledgementError,
     ControlAckPowerMismatchError,
     ControlAckReadbackError,
+    ControlAckResolutionStage,
+    ControlAckResolutionState,
+    ControlAckResolutionUpdate,
     ControlAckStateMismatchError,
     ControlReadbackError,
     ControlStateMismatchError,
@@ -59,6 +63,41 @@ from jebao_flow.protocol.models import (
         (
             ControlAckReadbackError("ACK lost and readback unavailable"),
             LinkageForwardFailureCategory.CONTROL_ACK_READBACK_UNAVAILABLE,
+        ),
+        (
+            ControlAckReadbackError(
+                "ACK lost and quarantine failed",
+                stage=ControlAckResolutionStage.QUARANTINE,
+            ),
+            LinkageForwardFailureCategory.CONTROL_ACK_QUARANTINE_FAILED,
+        ),
+        (
+            ControlAckReadbackError(
+                "ACK lost and connect failed",
+                stage=ControlAckResolutionStage.CONNECT,
+            ),
+            LinkageForwardFailureCategory.CONTROL_ACK_CONNECT_FAILED,
+        ),
+        (
+            ControlAckReadbackError(
+                "ACK lost and authentication failed",
+                stage=ControlAckResolutionStage.AUTHENTICATE,
+            ),
+            LinkageForwardFailureCategory.CONTROL_ACK_AUTHENTICATE_FAILED,
+        ),
+        (
+            ControlAckReadbackError(
+                "ACK lost and query failed",
+                stage=ControlAckResolutionStage.QUERY,
+            ),
+            LinkageForwardFailureCategory.CONTROL_ACK_QUERY_FAILED,
+        ),
+        (
+            ControlAckReadbackError(
+                "ACK lost and decode failed",
+                stage=ControlAckResolutionStage.DECODE,
+            ),
+            LinkageForwardFailureCategory.CONTROL_ACK_DECODE_FAILED,
         ),
         (
             ControlAckStateMismatchError("ACK lost and state mismatched"),
@@ -163,13 +202,57 @@ class _AckLostStateVerifiedDevice(_RecordingDevice):
         *,
         guard=None,
         on_ack_unconfirmed=None,
+        on_ack_resolution=None,
     ) -> ControlVerificationOutcome:
         outcome = await super().write_power(power, guard=guard)
         if power != 38:
             return outcome
         assert on_ack_unconfirmed is not None
-        on_ack_unconfirmed()
+        on_ack_unconfirmed(ControlAckFailureKind.TIMEOUT)
+        if on_ack_resolution is not None:
+            on_ack_resolution(
+                ControlAckResolutionUpdate(
+                    stage=ControlAckResolutionStage.DECODE,
+                    attempt=1,
+                    state=ControlAckResolutionState.STARTED,
+                )
+            )
+            on_ack_resolution(
+                ControlAckResolutionUpdate(
+                    stage=ControlAckResolutionStage.DECODE,
+                    attempt=1,
+                    state=ControlAckResolutionState.SUCCEEDED,
+                )
+            )
         return ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+
+
+class _HangingLivePowerDevice(_RecordingDevice):
+    """Hang only the ACTIVE slave Flow write until the controller cancels it."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.live_write_started = asyncio.Event()
+        self.live_write_cancelled = asyncio.Event()
+
+    async def write_power(
+        self,
+        power: int,
+        *,
+        guard=None,
+        on_ack_unconfirmed=None,
+        on_ack_resolution=None,
+    ) -> ControlVerificationOutcome:
+        del on_ack_unconfirmed, on_ack_resolution
+        if power != 38:
+            return await super().write_power(power, guard=guard)
+        self.live_write_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.live_write_cancelled.set()
+            raise
+        raise AssertionError("unreachable hanging live write")
 
 
 class _DiagnosticRecordingController(TemporaryLinkageController):
@@ -1409,6 +1492,111 @@ async def test_temporary_linkage_applies_distinct_power_and_restores_on_manual_s
         assert final_timer.issued_at == device.commands[-1].issued_at
 
 
+def _hanging_live_spec(*, operation_id: str, duration: float) -> LinkageTestSpec:
+    return LinkageTestSpec(
+        operation_id=operation_id,
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="sine",
+        master_power=60,
+        slave_power=42,
+        frequency=30,
+        duration_seconds=duration,
+        verification_interval_seconds=0.005,
+        slave_power_after=38,
+        power_change_after_seconds=0.02,
+    )
+
+
+async def test_stop_cancels_hanging_live_write_and_starts_restore_promptly(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=48, frequency=21)
+    slave = await _ready_device(
+        "slave",
+        device_class=_HangingLivePowerDevice,
+        power=52,
+        frequency=27,
+    )
+    store = JsonLinkageJournalStore(tmp_path / "stop-hanging-live.json")
+    controller = _controller(master, slave, store)
+    spec = _hanging_live_spec(operation_id="stop_hanging_live", duration=5)
+    task = asyncio.create_task(controller.run(spec))
+    await asyncio.wait_for(slave.live_write_started.wait(), timeout=1)
+    stop_requested_at = asyncio.get_running_loop().time()
+
+    assert await controller.stop(spec.operation_id) is True
+    result = await asyncio.wait_for(task, timeout=1)
+
+    assert asyncio.get_running_loop().time() - stop_requested_at < 0.3
+    assert slave.live_write_cancelled.is_set()
+    assert result.stop_reason is LinkageStopReason.MANUAL
+    assert store.load() is None
+    assert (await master.get_state()).power == 48
+    assert (await slave.get_state()).power == 52
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).timer_enabled is True
+
+
+async def test_deadline_cancels_hanging_live_write_and_restores_promptly(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=48, frequency=21)
+    slave = await _ready_device(
+        "slave",
+        device_class=_HangingLivePowerDevice,
+        power=52,
+        frequency=27,
+    )
+    store = JsonLinkageJournalStore(tmp_path / "deadline-hanging-live.json")
+    controller = _controller(master, slave, store)
+    spec = _hanging_live_spec(operation_id="deadline_hanging_live", duration=0.08)
+    task = asyncio.create_task(controller.run(spec))
+    await asyncio.wait_for(slave.live_write_started.wait(), timeout=1)
+    live_started_at = asyncio.get_running_loop().time()
+
+    with pytest.raises(LinkageApplyError, match="failed and was restored"):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert asyncio.get_running_loop().time() - live_started_at < 0.3
+    assert slave.live_write_cancelled.is_set()
+    assert store.load() is None
+    assert (await master.get_state()).power == 48
+    assert (await slave.get_state()).power == 52
+
+
+async def test_interlock_cancels_hanging_live_write_before_safe_stop(
+    tmp_path: Path,
+) -> None:
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    master = await _ready_device("master", power=48, frequency=21)
+    slave = await _ready_device(
+        "slave",
+        device_class=_HangingLivePowerDevice,
+        power=52,
+        frequency=27,
+    )
+    store = JsonLinkageJournalStore(tmp_path / "interlock-hanging-live.json")
+    controller = _controller(master, slave, store, interlock=interlock)
+    spec = _hanging_live_spec(operation_id="interlock_hanging_live", duration=5)
+    task = asyncio.create_task(controller.run(spec))
+    await asyncio.wait_for(slave.live_write_started.wait(), timeout=1)
+    tripped_at = asyncio.get_running_loop().time()
+
+    interlock.trip()
+    with pytest.raises(LinkageRollbackError, match="safety interlock"):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert asyncio.get_running_loop().time() - tripped_at < 0.3
+    assert slave.live_write_cancelled.is_set()
+    pending = store.load()
+    assert pending is not None
+    assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
+    assert (await master.get_state()).enabled is False
+    assert (await slave.get_state()).enabled is False
+
+
 async def test_normal_rollback_replaces_active_sessions_slave_first_before_any_io(
     tmp_path: Path,
 ) -> None:
@@ -1874,15 +2062,37 @@ async def test_live_slave_ack_loss_is_recorded_before_state_resolution_and_exact
     assert result.slave_power_change_verified is True
     kinds = [event.kind for event in diagnostic_events]
     assert kinds.count(LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED) == 1
+    assert kinds.count(LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_RESOLUTION) == 2
     assert (
         kinds.index(LinkageDiagnosticEventKind.LIVE_SLAVE_WRITE_ATTEMPTED)
         < kinds.index(LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED)
+        < kinds.index(LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_RESOLUTION)
         < kinds.index(LinkageDiagnosticEventKind.LIVE_SLAVE_STATE_VERIFIED_WITHOUT_ACK)
         < kinds.index(LinkageDiagnosticEventKind.LIVE_SLAVE_FULL_STATE_VERIFIED)
         < kinds.index(LinkageDiagnosticEventKind.ROLLBACK_STARTED)
     )
     assert LinkageDiagnosticEventKind.LIVE_SLAVE_ADAPTER_VERIFIED not in kinds
     assert LinkageDiagnosticEventKind.FORWARD_FAILED not in kinds
+    ack_event = next(
+        event
+        for event in diagnostic_events
+        if event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_UNCONFIRMED
+    )
+    assert ack_event.ack_failure_kind is ControlAckFailureKind.TIMEOUT
+    resolution_events = [
+        event
+        for event in diagnostic_events
+        if event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_ACK_RESOLUTION
+    ]
+    assert [event.ack_resolution_state for event in resolution_events] == [
+        ControlAckResolutionState.STARTED,
+        ControlAckResolutionState.SUCCEEDED,
+    ]
+    assert all(
+        event.ack_resolution_stage is ControlAckResolutionStage.DECODE
+        for event in resolution_events
+    )
+    assert all(event.ack_resolution_attempt == 1 for event in resolution_events)
     assert sum(
         command.name == "power" and command.value == 38 for command in slave.commands
     ) == 1

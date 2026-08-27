@@ -72,6 +72,13 @@ verification 실패가 남았습니다. 추가 시험 명령 없이 새 토큰�
 같은 실기는 반복하지 않으며, 원인을 더 좁히려면 예외 원문 대신 transport/send/read-back 단계를
 추가 allow-listed category로 나눈 새 진단이 먼저 필요합니다.
 
+후속 구현은 빠진 control ACK의 종류를 allow-listed 값으로 먼저 fsync하고, 원 세션을 폐기한 뒤
+최대 55초·8회의 서로 다른 fresh session에서 explicit state reply만 조회합니다. resolver는 control
+payload를 받지 않아 같은 변경을 재전송할 수 없고, 각 quarantine/connect/authenticate/query/decode
+단계와 attempt를 version 2 evidence에 남깁니다. stop·deadline·safety interlock은 이 read-only
+resolver보다 우선하며, 실패 후 rollback도 별도의 새 세션 경계에서 시작합니다. 이 변경은 전체
+소프트웨어 테스트와 독립 감사를 통과한 뒤에만 다음 5~10분 저출력 실기에 사용합니다.
+
 이 결과는 이전 짧은 실행에서 관찰한 native Linkage 레지스터 관계와 read-back 자체를 부정하지
 않지만, `async_slave`의 개별 `Flow` 유지나 물리 유량·파형을 입증하지도 않습니다. 따라서
 slave별 gain/출력이 필요한 운영은 모든 펌프를 `independent`로 둔 소프트웨어 그룹을
@@ -85,6 +92,7 @@ Home Assistant 버튼에는 연결하지 않습니다. 일반 `jebao-flowd`도 �
 
 - 네이티브 관계의 ACTIVE 진입
 - live slave 출력 쓰기 시도 직전
+- control ACK 유실의 allow-listed 종류와 read-only resolver 단계·상태·시도 횟수
 - LAN adapter의 쓰기·read-back 정상 반환
 - 두 장비 전체 상태 검증 성공과 이후 성공 sample 수·첫/마지막 시각
 - forward failure의 고정 분류
@@ -99,8 +107,10 @@ MAC, vendor ID, IP, 인증정보와 예외 원문은 evidence와 status에 기�
 `full_state_verified`는 master/slave 모두의 online, error, power, mode, frequency, linkage,
 TimerON과 snapshot schedule fingerprint 검증을 통과했다는 뜻입니다. 자동 rollback이 나중에
 실패하더라도 이 forward 증거는 terminal intent에 남고, attended recovery 뒤에도 삭제되지
-않습니다. 기존 version 1 intent는 읽을 수 있지만 evidence 의미는 `unknown`이며, version 1의
-ARMED operation은 새 preflight 없이 실행할 수 없습니다.
+않습니다. `status`의 `verified_span`은 첫 full-state sample과 마지막 성공 sample 사이의 실제
+시간이며, 장기 시험에서는 300초 이상이어야 5분 유지 증거로 사용합니다. 기존 version 1 intent는
+읽을 수 있지만 evidence 의미는 `unknown`이며, version 1의 ARMED operation은 새 preflight 없이
+실행할 수 없습니다.
 
 ## 지원 동작
 

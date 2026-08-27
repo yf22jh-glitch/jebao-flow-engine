@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+import math
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from jebao_flow.devices.base import (
+    AckResolutionHook,
     AckUnconfirmedHook,
+    ControlAckFailureKind,
     ControlAckPowerMismatchError,
     ControlAckReadbackError,
+    ControlAckResolutionStage,
+    ControlAckResolutionState,
+    ControlAckResolutionUpdate,
     ControlAckStateMismatchError,
     ControlReadbackError,
     ControlStateMismatchError,
     ControlVerificationOutcome,
+    DeviceConnectionError,
     HardwareWritesDisabledError,
     JebaoDevice,
     PowerStateVerificationError,
@@ -25,7 +32,12 @@ from jebao_flow.devices.base import (
 )
 from jebao_flow.devices.identity import PhysicalDeviceBinding
 from jebao_flow.protocol.control import build_control_payload
-from jebao_flow.protocol.errors import ProtocolError
+from jebao_flow.protocol.errors import (
+    ProtocolConnectionError,
+    ProtocolError,
+    ProtocolTimeoutError,
+    UnexpectedResponseError,
+)
 from jebao_flow.protocol.models import (
     Capability,
     DeviceCapabilities,
@@ -49,6 +61,8 @@ class RawSession(Protocol):
 
     async def disconnect(self) -> None: ...
 
+    def quarantine(self) -> None: ...
+
     async def authenticate(self) -> bytes: ...
 
     async def read_raw_state(self, *, accept_reports: bool = True) -> bytes: ...
@@ -65,6 +79,15 @@ class ControlPlan:
 
 SessionFactory = Callable[[str], RawSession]
 _LINKAGE_ROLES_BY_VALUE = {role.value: role for role in LinkageRole}
+_ACK_LOSS_RESOLUTION_TIMEOUT_SECONDS = 55.0
+_ACK_LOSS_RESOLUTION_ATTEMPTS = 8
+_ACK_LOSS_RETRY_DELAY_SECONDS = 0.5
+_ACK_LOSS_STAGE_TIMEOUT_SECONDS = {
+    ControlAckResolutionStage.QUARANTINE: 6.0,
+    ControlAckResolutionStage.CONNECT: 5.0,
+    ControlAckResolutionStage.AUTHENTICATE: 10.0,
+    ControlAckResolutionStage.QUERY: 5.0,
+}
 
 
 class LanJebaoDevice(JebaoDevice):
@@ -88,6 +111,9 @@ class LanJebaoDevice(JebaoDevice):
         allow_hardware_writes: bool = False,
         physical_binding: PhysicalDeviceBinding | None = None,
         session_factory: SessionFactory = GizwitsSession,
+        ack_loss_resolution_timeout_seconds: float = _ACK_LOSS_RESOLUTION_TIMEOUT_SECONDS,
+        ack_loss_resolution_attempts: int = _ACK_LOSS_RESOLUTION_ATTEMPTS,
+        ack_loss_retry_delay_seconds: float = _ACK_LOSS_RETRY_DELAY_SECONDS,
     ) -> None:
         if not device_id or not address:
             raise ValueError("device id and address are required")
@@ -99,6 +125,20 @@ class LanJebaoDevice(JebaoDevice):
             raise ValueError("read-back delay must be non-negative")
         if readback_attempts < 1:
             raise ValueError("read-back attempts must be positive")
+        if (
+            not math.isfinite(ack_loss_resolution_timeout_seconds)
+            or not 0
+            < ack_loss_resolution_timeout_seconds
+            <= _ACK_LOSS_RESOLUTION_TIMEOUT_SECONDS
+        ):
+            raise ValueError("ACK-loss resolution timeout must be finite and at most 55 seconds")
+        if not 1 <= ack_loss_resolution_attempts <= _ACK_LOSS_RESOLUTION_ATTEMPTS:
+            raise ValueError(
+                f"ACK-loss resolution attempts must be between 1 and "
+                f"{_ACK_LOSS_RESOLUTION_ATTEMPTS}"
+            )
+        if not math.isfinite(ack_loss_retry_delay_seconds) or ack_loss_retry_delay_seconds < 0:
+            raise ValueError("ACK-loss retry delay must be finite and non-negative")
 
         self._device_id = device_id
         self.address = address
@@ -111,8 +151,13 @@ class LanJebaoDevice(JebaoDevice):
         self._minimum_command_interval = minimum_command_interval_ms / 1000
         self._readback_delay = readback_delay_ms / 1000
         self._readback_attempts = readback_attempts
+        self._ack_loss_resolution_timeout = ack_loss_resolution_timeout_seconds
+        self._ack_loss_resolution_attempts = ack_loss_resolution_attempts
+        self._ack_loss_retry_delay = ack_loss_retry_delay_seconds
         self._allow_hardware_writes = allow_hardware_writes
-        self._session = session_factory(address)
+        self._session_factory = session_factory
+        self._session = self._new_session(exclude=())
+        self._session_retired = False
         self._io_lock = asyncio.Lock()
         self._last_command_at: float | None = None
         self._last_sent_values: dict[str, Any] = {}
@@ -182,25 +227,66 @@ class LanJebaoDevice(JebaoDevice):
 
     async def connect(self) -> None:
         async with self._io_lock:
-            await self._session.connect()
-            await self._session.authenticate()
+            if self._session_retired:
+                if self._session.connected:
+                    raise DeviceConnectionError(
+                        f"retired session for {self._device_id!r} is still connected"
+                    )
+                try:
+                    self._session = self._new_session(exclude=(self._session,))
+                except RuntimeError as error:
+                    raise DeviceConnectionError(
+                        f"could not replace retired session for {self._device_id!r}"
+                    ) from error
+            try:
+                await self._session.connect()
+                await self._session.authenticate()
+            except asyncio.CancelledError:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            except Exception:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            self._session_retired = False
             self._last_sent_values.clear()
 
     async def disconnect(self) -> None:
         async with self._io_lock:
-            await self._session.disconnect()
-            self._last_sent_values.clear()
+            try:
+                await self._session.disconnect()
+            finally:
+                # A caller asking for disconnect is asking for a transport boundary. Retire the
+                # object as well, so rollback and reconnect never inherit its sequence, buffered
+                # frames or pending writer-close bookkeeping.
+                self._session_retired = True
+                self._last_sent_values.clear()
 
     async def get_state(self) -> DeviceState:
         async with self._io_lock:
-            raw = await self._session.read_raw_state()
-            values = self.schema.decode_status(raw)
-            schedule = decode_schedule(
-                self.schema.product_key,
-                raw,
-                enabled=bool(values.get(self.schema.timer_attribute, False)),
-            )
-            return self._to_device_state(values, schedule=schedule)
+            if self._session_retired:
+                raise DeviceConnectionError(
+                    f"retired session for {self._device_id!r} must be replaced before reading"
+                )
+            try:
+                raw = await self._session.read_raw_state()
+                values = self.schema.decode_status(raw)
+                schedule = decode_schedule(
+                    self.schema.product_key,
+                    raw,
+                    enabled=bool(values.get(self.schema.timer_attribute, False)),
+                )
+                state = self._to_device_state(values, schedule=schedule)
+            except asyncio.CancelledError:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            except Exception:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            return state
 
     async def set_enabled(self, enabled: bool) -> None:
         attribute = self._require_logical_attribute(Capability.ENABLED)
@@ -215,6 +301,7 @@ class LanJebaoDevice(JebaoDevice):
         *,
         guard: WriteGuard | None = None,
         on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+        on_ack_resolution: AckResolutionHook | None = None,
     ) -> ControlVerificationOutcome:
         self._validate_power(power)
         attribute = self._require_logical_attribute(Capability.POWER)
@@ -222,6 +309,7 @@ class LanJebaoDevice(JebaoDevice):
             {attribute: power},
             guard=guard,
             on_ack_unconfirmed=on_ack_unconfirmed,
+            on_ack_resolution=on_ack_resolution,
         )
 
     async def set_mode(self, mode: str) -> None:
@@ -340,6 +428,7 @@ class LanJebaoDevice(JebaoDevice):
         *,
         guard: WriteGuard | None = None,
         on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+        on_ack_resolution: AckResolutionHook | None = None,
     ) -> ControlVerificationOutcome:
         if not self._allow_hardware_writes:
             raise HardwareWritesDisabledError(
@@ -348,6 +437,10 @@ class LanJebaoDevice(JebaoDevice):
         payload = build_control_payload(self.schema, changes)
 
         async with self._io_lock:
+            if self._session_retired:
+                raise DeviceConnectionError(
+                    f"retired session for {self._device_id!r} must be replaced before writing"
+                )
             self._require_write_guard(guard)
             if all(self._last_sent_values.get(name) == value for name, value in changes.items()):
                 # The app, native schedules or master broadcasts may have changed the device
@@ -365,36 +458,16 @@ class LanJebaoDevice(JebaoDevice):
             # Record the physical command boundary before awaiting the ACK. A timeout or lost ACK
             # leaves the write outcome uncertain, so rollback must still respect command pacing.
             self._last_command_at = asyncio.get_running_loop().time()
-            acknowledgement_confirmed = True
             try:
                 await self._session.send_raw_control(payload)
             except (ProtocolError, OSError) as acknowledgement_error:
-                acknowledgement_confirmed = False
-                # The frame may already have reached the pump. Quarantine this response stream,
-                # never retransmit the control, and use only a fresh authenticated state read to
-                # decide whether the requested datapoint was applied.
-                try:
-                    await self._session.disconnect()
-                except (ProtocolError, OSError) as disconnect_error:
-                    if self._session.connected:
-                        if on_ack_unconfirmed is not None:
-                            on_ack_unconfirmed()
-                        raise ControlAckReadbackError(
-                            f"device {self._device_id!r} could not quarantine the "
-                            "unacknowledged control session"
-                        ) from disconnect_error
-                self._last_sent_values.clear()
-                if self._session.connected:
-                    if on_ack_unconfirmed is not None:
-                        on_ack_unconfirmed()
-                    raise ControlAckReadbackError(
-                        f"device {self._device_id!r} retained an unacknowledged control session"
-                    ) from acknowledgement_error
-                # This synchronous hook is the crash boundary: attended hardware tests fsync the
-                # non-terminal ACK-loss fact before any reconnect or read-only resolution query.
-                # If persistence fails, no further forward work is allowed and rollback begins.
-                if on_ack_unconfirmed is not None:
-                    on_ack_unconfirmed()
+                return await self._resolve_unacknowledged_control(
+                    changes,
+                    acknowledgement_error=acknowledgement_error,
+                    guard=guard,
+                    on_ack_unconfirmed=on_ack_unconfirmed,
+                    on_ack_resolution=on_ack_resolution,
+                )
             self._require_write_guard(guard)
 
             for attempt in range(self._readback_attempts):
@@ -411,18 +484,11 @@ class LanJebaoDevice(JebaoDevice):
                     # attended operation deadline/interlock before issuing even a read-only
                     # query, and again before accepting its result as forward progress.
                     self._require_write_guard(guard)
-                    values = await self._read_values(
-                        accept_reports=acknowledgement_confirmed
-                    )
+                    values = await self._read_values()
                     self._require_write_guard(guard)
                 except (ProtocolError, OSError, ValueError) as error:
                     if attempt + 1 == self._readback_attempts:
-                        error_type = (
-                            ControlReadbackError
-                            if acknowledgement_confirmed
-                            else ControlAckReadbackError
-                        )
-                        raise error_type(
+                        raise ControlReadbackError(
                             f"device {self._device_id!r} could not verify control after "
                             f"{self._readback_attempts} readback attempts"
                         ) from error
@@ -431,11 +497,7 @@ class LanJebaoDevice(JebaoDevice):
                     continue
                 if all(values.get(name) == expected for name, expected in changes.items()):
                     self._last_sent_values.update(changes)
-                    return (
-                        ControlVerificationOutcome.STATE_VERIFIED
-                        if acknowledgement_confirmed
-                        else ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
-                    )
+                    return ControlVerificationOutcome.STATE_VERIFIED
                 if attempt + 1 == self._readback_attempts:
                     mismatches = {
                         name: {"expected": expected, "actual": values.get(name)}
@@ -446,21 +508,495 @@ class LanJebaoDevice(JebaoDevice):
                         self.schema.power_attribute is not None
                         and set(mismatches) == {self.schema.power_attribute}
                     )
-                    if acknowledgement_confirmed:
-                        error_type = (
-                            PowerStateVerificationError
-                            if power_only
-                            else ControlStateMismatchError
-                        )
-                    else:
-                        error_type = (
-                            ControlAckPowerMismatchError
-                            if power_only
-                            else ControlAckStateMismatchError
-                        )
+                    error_type = (
+                        PowerStateVerificationError
+                        if power_only
+                        else ControlStateMismatchError
+                    )
                     raise error_type(
                         f"device {self._device_id!r} did not apply control: {mismatches}"
                     )
+
+    async def _resolve_unacknowledged_control(
+        self,
+        changes: Mapping[str, Any],
+        *,
+        acknowledgement_error: BaseException,
+        guard: WriteGuard | None,
+        on_ack_unconfirmed: AckUnconfirmedHook | None,
+        on_ack_resolution: AckResolutionHook | None,
+    ) -> ControlVerificationOutcome:
+        """Resolve one uncertain control frame using fresh, read-only sessions only.
+
+        A missing or malformed 0x94 response does not prove whether the MCU applied the frame.
+        Retrying that frame could double-apply a non-idempotent control, so this path creates a
+        new authenticated session object for every explicit 0x03 state query. The adapter and
+        its command timestamp remain intact for correctly paced rollback.
+        """
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._ack_loss_resolution_timeout
+        retired_sessions: list[RawSession] = [self._session]
+        self._session_retired = True
+        self._last_sent_values.clear()
+
+        # Persist the ACK-loss fact before transport cleanup. A crash or cancellation during a
+        # slow FIN must not erase the fact that the control frame already crossed the send
+        # boundary with an uncertain result.
+        if on_ack_unconfirmed is not None:
+            try:
+                on_ack_unconfirmed(self._classify_ack_failure(acknowledgement_error))
+            except BaseException:
+                self._quarantine_session_now(self._session)
+                self._install_clean_session_best_effort(retired_sessions)
+                raise
+        try:
+            quarantine_failure = await self._quarantine_ack_session(
+                self._session,
+                deadline=deadline,
+                attempts=0,
+                on_ack_resolution=on_ack_resolution,
+                emit_progress=True,
+            )
+        except BaseException:
+            self._quarantine_session_now(self._session)
+            self._install_clean_session_best_effort(retired_sessions)
+            raise
+
+        if quarantine_failure is not None:
+            self._install_clean_session_best_effort(retired_sessions)
+            raise quarantine_failure from acknowledgement_error
+        try:
+            self._require_write_guard(guard)
+        except SafetyInterlockError:
+            self._install_clean_session_best_effort(retired_sessions)
+            raise
+
+        last_failure: ControlAckReadbackError | None = None
+        last_mismatches: dict[str, dict[str, Any]] | None = None
+        attempts_completed = 0
+        try:
+            for attempt in range(1, self._ack_loss_resolution_attempts + 1):
+                if loop.time() >= deadline:
+                    break
+                self._require_write_guard(guard)
+                if attempt > 1:
+                    if not await self._ack_resolution_backoff(
+                        deadline,
+                        attempt=attempt,
+                        guard=guard,
+                    ):
+                        break
+                attempts_completed = attempt
+
+                self._emit_ack_resolution_update(
+                    on_ack_resolution,
+                    stage=ControlAckResolutionStage.CONNECT,
+                    attempt=attempt,
+                    state=ControlAckResolutionState.STARTED,
+                )
+                try:
+                    session = self._new_session(exclude=retired_sessions)
+                except (TypeError, ValueError, RuntimeError) as error:
+                    self._emit_ack_resolution_update(
+                        on_ack_resolution,
+                        stage=ControlAckResolutionStage.CONNECT,
+                        attempt=attempt,
+                        state=ControlAckResolutionState.FAILED,
+                    )
+                    last_failure = ControlAckReadbackError(
+                        f"device {self._device_id!r} could not create a fresh ACK-loss "
+                        f"resolution session on attempt {attempt}",
+                        stage=ControlAckResolutionStage.CONNECT,
+                        attempts=attempt,
+                    )
+                    last_failure.__cause__ = error
+                    continue
+                retired_sessions.append(session)
+                self._session = session
+
+                try:
+                    await self._run_ack_resolution_stage(
+                        session.connect,
+                        stage=ControlAckResolutionStage.CONNECT,
+                        deadline=deadline,
+                        attempts=attempt,
+                        on_ack_resolution=on_ack_resolution,
+                        emit_started=False,
+                    )
+                    self._require_write_guard(guard)
+                    await self._run_ack_resolution_stage(
+                        session.authenticate,
+                        stage=ControlAckResolutionStage.AUTHENTICATE,
+                        deadline=deadline,
+                        attempts=attempt,
+                        on_ack_resolution=on_ack_resolution,
+                    )
+                    self._last_sent_values.clear()
+                    self._require_write_guard(guard)
+                    raw = await self._run_ack_resolution_stage(
+                        lambda session=session: session.read_raw_state(accept_reports=False),
+                        stage=ControlAckResolutionStage.QUERY,
+                        deadline=deadline,
+                        attempts=attempt,
+                        on_ack_resolution=on_ack_resolution,
+                    )
+                    self._require_write_guard(guard)
+                    self._emit_ack_resolution_update(
+                        on_ack_resolution,
+                        stage=ControlAckResolutionStage.DECODE,
+                        attempt=attempt,
+                        state=ControlAckResolutionState.STARTED,
+                    )
+                    try:
+                        values = self.schema.decode_status(raw)
+                    except Exception as error:
+                        self._emit_ack_resolution_update(
+                            on_ack_resolution,
+                            stage=ControlAckResolutionStage.DECODE,
+                            attempt=attempt,
+                            state=ControlAckResolutionState.FAILED,
+                        )
+                        raise ControlAckReadbackError(
+                            f"device {self._device_id!r} could not decode the fresh ACK-loss "
+                            f"state on attempt {attempt}",
+                            stage=ControlAckResolutionStage.DECODE,
+                            attempts=attempt,
+                        ) from error
+                    self._require_ack_resolution_time(
+                        deadline,
+                        stage=ControlAckResolutionStage.DECODE,
+                        attempts=attempt,
+                    )
+                    self._require_write_guard(guard)
+                except ControlAckReadbackError as error:
+                    last_failure = error
+                    last_mismatches = None
+                    self._session_retired = True
+                    cleanup_failure = await self._quarantine_ack_session(
+                        session,
+                        deadline=deadline,
+                        attempts=attempt,
+                        on_ack_resolution=on_ack_resolution,
+                        emit_progress=False,
+                    )
+                    if cleanup_failure is not None:
+                        last_failure = cleanup_failure
+                        break
+                    continue
+
+                mismatches = {
+                    name: {"expected": expected, "actual": values.get(name)}
+                    for name, expected in changes.items()
+                    if values.get(name) != expected
+                }
+                if not mismatches:
+                    self._emit_ack_resolution_update(
+                        on_ack_resolution,
+                        stage=ControlAckResolutionStage.DECODE,
+                        attempt=attempt,
+                        state=ControlAckResolutionState.SUCCEEDED,
+                    )
+                    self._last_sent_values.update(changes)
+                    self._session_retired = False
+                    return ControlVerificationOutcome.STATE_VERIFIED_WITHOUT_ACK
+
+                last_failure = None
+                last_mismatches = mismatches
+                self._emit_ack_resolution_update(
+                    on_ack_resolution,
+                    stage=ControlAckResolutionStage.DECODE,
+                    attempt=attempt,
+                    state=ControlAckResolutionState.FAILED,
+                )
+                self._session_retired = True
+                cleanup_failure = await self._quarantine_ack_session(
+                    session,
+                    deadline=deadline,
+                    attempts=attempt,
+                    on_ack_resolution=on_ack_resolution,
+                    emit_progress=False,
+                )
+                if cleanup_failure is not None:
+                    last_failure = cleanup_failure
+                    last_mismatches = None
+                    break
+        except ControlAckReadbackError as error:
+            last_failure = error
+            last_mismatches = None
+        except (asyncio.CancelledError, SafetyInterlockError):
+            self._session_retired = True
+            self._quarantine_session_now(self._session)
+            self._install_clean_session_best_effort(retired_sessions)
+            raise
+        except BaseException:
+            self._session_retired = True
+            self._quarantine_session_now(self._session)
+            self._install_clean_session_best_effort(retired_sessions)
+            raise
+
+        self._install_clean_session_best_effort(retired_sessions)
+        if last_mismatches is not None:
+            power_only = (
+                self.schema.power_attribute is not None
+                and set(last_mismatches) == {self.schema.power_attribute}
+            )
+            error_type = (
+                ControlAckPowerMismatchError
+                if power_only
+                else ControlAckStateMismatchError
+            )
+            raise error_type(
+                f"device {self._device_id!r} did not apply control with an "
+                f"unacknowledged response: "
+                f"{last_mismatches}"
+            ) from acknowledgement_error
+        if last_failure is None:
+            last_failure = ControlAckReadbackError(
+                f"device {self._device_id!r} exhausted its bounded ACK-loss resolution",
+                stage=ControlAckResolutionStage.QUERY,
+                attempts=attempts_completed,
+            )
+        raise last_failure from acknowledgement_error
+
+    def _new_session(self, *, exclude: Collection[RawSession]) -> RawSession:
+        try:
+            session = self._session_factory(self.address)
+        except Exception as error:
+            raise RuntimeError("session factory could not create a session") from error
+        if any(session is retired for retired in exclude):
+            raise RuntimeError("session factory returned a retired session object")
+        if session.connected:
+            self._quarantine_session_now(session)
+            raise RuntimeError("session factory returned an already-connected session")
+        return session
+
+    def _install_clean_session_best_effort(
+        self,
+        retired_sessions: Collection[RawSession],
+    ) -> None:
+        """Leave rollback a never-connected object without masking the original failure."""
+
+        # Never drop the sole reference to a live transport. Doing so could let rollback open a
+        # second session while an unquarantined control stream still exists.
+        if self._session.connected:
+            return
+        try:
+            session = self._new_session(exclude=retired_sessions)
+        except RuntimeError:
+            return
+        self._session = session
+        self._session_retired = False
+
+    @staticmethod
+    def _classify_ack_failure(error: BaseException) -> ControlAckFailureKind:
+        """Reduce a transport exception to an allow-listed, persistence-safe category."""
+
+        # ProtocolTimeoutError inherits ProtocolConnectionError, so the most specific classes
+        # must be checked first. No exception text is allowed across the diagnostic hook.
+        if isinstance(error, ProtocolTimeoutError):
+            return ControlAckFailureKind.TIMEOUT
+        if isinstance(error, UnexpectedResponseError):
+            return ControlAckFailureKind.UNEXPECTED_RESPONSE
+        if isinstance(error, ProtocolConnectionError):
+            return ControlAckFailureKind.CONNECTION
+        if isinstance(error, ProtocolError):
+            return ControlAckFailureKind.PROTOCOL
+        if isinstance(error, OSError):
+            return ControlAckFailureKind.OS_ERROR
+        raise TypeError("unsupported ACK failure type")
+
+    @staticmethod
+    def _emit_ack_resolution_update(
+        hook: AckResolutionHook | None,
+        *,
+        stage: ControlAckResolutionStage,
+        attempt: int,
+        state: ControlAckResolutionState,
+    ) -> None:
+        """Synchronously persist one redacted resolution transition when requested."""
+
+        if hook is None:
+            return
+        hook(
+            ControlAckResolutionUpdate(
+                stage=stage,
+                attempt=attempt,
+                state=state,
+            )
+        )
+
+    @staticmethod
+    def _quarantine_session_now(session: RawSession) -> None:
+        """Logically drop a transport synchronously so safety rollback is never delayed."""
+
+        quarantine = getattr(session, "quarantine", None)
+        if callable(quarantine):
+            try:
+                quarantine()
+            except Exception:
+                pass
+
+    async def _quarantine_ack_session(
+        self,
+        session: RawSession,
+        *,
+        deadline: float,
+        attempts: int,
+        on_ack_resolution: AckResolutionHook | None,
+        emit_progress: bool,
+    ) -> ControlAckReadbackError | None:
+        if asyncio.get_running_loop().time() >= deadline:
+            if emit_progress:
+                self._emit_ack_resolution_update(
+                    on_ack_resolution,
+                    stage=ControlAckResolutionStage.QUARANTINE,
+                    attempt=attempts,
+                    state=ControlAckResolutionState.STARTED,
+                )
+            self._quarantine_session_now(session)
+            if emit_progress or session.connected:
+                self._emit_ack_resolution_update(
+                    on_ack_resolution,
+                    stage=ControlAckResolutionStage.QUARANTINE,
+                    attempt=attempts,
+                    state=ControlAckResolutionState.FAILED,
+                )
+                return ControlAckReadbackError(
+                    f"device {self._device_id!r} retained an unacknowledged control session",
+                    stage=ControlAckResolutionStage.QUARANTINE,
+                    attempts=attempts,
+                )
+            return None
+        failure: ControlAckReadbackError | None = None
+        try:
+            await self._run_ack_resolution_stage(
+                session.disconnect,
+                stage=ControlAckResolutionStage.QUARANTINE,
+                deadline=deadline,
+                attempts=attempts,
+                on_ack_resolution=on_ack_resolution,
+                emit_started=emit_progress,
+                emit_completed=emit_progress,
+            )
+        except ControlAckReadbackError as error:
+            failure = error
+            self._quarantine_session_now(session)
+        if session.connected:
+            if not emit_progress:
+                self._emit_ack_resolution_update(
+                    on_ack_resolution,
+                    stage=ControlAckResolutionStage.QUARANTINE,
+                    attempt=attempts,
+                    state=ControlAckResolutionState.FAILED,
+                )
+            return failure or ControlAckReadbackError(
+                f"device {self._device_id!r} retained an unacknowledged control session",
+                stage=ControlAckResolutionStage.QUARANTINE,
+                attempts=attempts,
+            )
+        return None
+
+    async def _run_ack_resolution_stage(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        stage: ControlAckResolutionStage,
+        deadline: float,
+        attempts: int,
+        on_ack_resolution: AckResolutionHook | None,
+        emit_started: bool = True,
+        emit_completed: bool = True,
+    ) -> Any:
+        remaining = deadline - asyncio.get_running_loop().time()
+        timeout = min(_ACK_LOSS_STAGE_TIMEOUT_SECONDS[stage], remaining)
+        if timeout <= 0:
+            if emit_completed:
+                self._emit_ack_resolution_update(
+                    on_ack_resolution,
+                    stage=stage,
+                    attempt=attempts,
+                    state=ControlAckResolutionState.FAILED,
+                )
+            raise ControlAckReadbackError(
+                f"device {self._device_id!r} ACK-loss resolution deadline expired",
+                stage=stage,
+                attempts=attempts,
+            )
+        if emit_started:
+            self._emit_ack_resolution_update(
+                on_ack_resolution,
+                stage=stage,
+                attempt=attempts,
+                state=ControlAckResolutionState.STARTED,
+            )
+        try:
+            async with asyncio.timeout(timeout):
+                result = await operation()
+        except TimeoutError as error:
+            if emit_completed:
+                self._emit_ack_resolution_update(
+                    on_ack_resolution,
+                    stage=stage,
+                    attempt=attempts,
+                    state=ControlAckResolutionState.FAILED,
+                )
+            raise ControlAckReadbackError(
+                f"device {self._device_id!r} ACK-loss {stage.value} timed out",
+                stage=stage,
+                attempts=attempts,
+            ) from error
+        except Exception as error:
+            if emit_completed:
+                self._emit_ack_resolution_update(
+                    on_ack_resolution,
+                    stage=stage,
+                    attempt=attempts,
+                    state=ControlAckResolutionState.FAILED,
+                )
+            raise ControlAckReadbackError(
+                f"device {self._device_id!r} ACK-loss {stage.value} failed",
+                stage=stage,
+                attempts=attempts,
+            ) from error
+        if emit_completed:
+            self._emit_ack_resolution_update(
+                on_ack_resolution,
+                stage=stage,
+                attempt=attempts,
+                state=ControlAckResolutionState.SUCCEEDED,
+            )
+        return result
+
+    async def _ack_resolution_backoff(
+        self,
+        deadline: float,
+        *,
+        attempt: int,
+        guard: WriteGuard | None,
+    ) -> bool:
+        delay = min(self._ack_loss_retry_delay * (attempt - 1), 1.5)
+        if delay:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= delay:
+                return False
+            await asyncio.sleep(delay)
+        self._require_write_guard(guard)
+        return True
+
+    @staticmethod
+    def _require_ack_resolution_time(
+        deadline: float,
+        *,
+        stage: ControlAckResolutionStage,
+        attempts: int,
+    ) -> None:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise ControlAckReadbackError(
+                "bounded ACK-loss resolution deadline expired",
+                stage=stage,
+                attempts=attempts,
+            )
 
     @staticmethod
     def _require_write_guard(guard: WriteGuard | None) -> None:
