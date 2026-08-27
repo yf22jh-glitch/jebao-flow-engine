@@ -27,10 +27,13 @@ from jebao_flow.devices.schedule_transaction import (
     TemporaryScheduleApplyError,
     TemporaryScheduleController,
     TemporaryScheduleErrorCode,
+    TemporaryScheduleJournalError,
     TemporaryScheduleJournalStore,
     TemporaryScheduleKind,
     TemporarySchedulePhase,
     TemporarySchedulePreflightError,
+    TemporaryScheduleProgressEvent,
+    TemporaryScheduleProgressKind,
     TemporaryScheduleRecord,
     TemporaryScheduleRecoveryError,
     TemporaryScheduleRollbackUnsafeError,
@@ -287,12 +290,14 @@ def _controller(
     guard: LinkageSafetyInterlock,
     *,
     monotonic_clock=None,
+    progress_observer=None,
 ) -> TemporaryScheduleController:
     return TemporaryScheduleController(
         {"left": left, "right": right},
         store,
         safety_interlock=guard,
         monotonic_clock=monotonic_clock,
+        progress_observer=progress_observer,
     )
 
 
@@ -337,6 +342,67 @@ async def test_stages_selected_slots_then_restores_all_48_exactly() -> None:
     assert events.index("journal:applying") < events.index("write:left:48")
     assert events.index("write:right:48") < events.index("journal:staged")
     assert events.index("journal:rolling_back") < events.index("restore:right:48")
+
+
+@pytest.mark.asyncio
+async def test_progress_events_distinguish_both_participants_without_identity() -> None:
+    progress: list[TemporaryScheduleProgressEvent] = []
+    left = _ScheduleDevice("left", _original_image())
+    right = _ScheduleDevice("right", _original_image(invert=True))
+    store = _MemoryStore()
+    guard = LinkageSafetyInterlock(initially_permitted=True)
+
+    async def observe(_: TemporaryScheduleRecord) -> ObservationCompletion:
+        return ObservationCompletion.DISARM_VERIFIED
+
+    await _controller(
+        left,
+        right,
+        store,
+        guard,
+        progress_observer=progress.append,
+    ).run(_spec(), observe=observe)
+
+    assert [(event.kind, event.completed_participants) for event in progress] == [
+        (TemporaryScheduleProgressKind.SNAPSHOT_STARTED, 0),
+        (TemporaryScheduleProgressKind.SNAPSHOT_COMPLETED, 2),
+        (TemporaryScheduleProgressKind.STAGE_WRITE_STARTED, 0),
+        (TemporaryScheduleProgressKind.STAGE_VERIFIED, 1),
+        (TemporaryScheduleProgressKind.STAGE_WRITE_STARTED, 1),
+        (TemporaryScheduleProgressKind.STAGE_VERIFIED, 2),
+        (TemporaryScheduleProgressKind.RESTORE_STARTED, 0),
+        (TemporaryScheduleProgressKind.RESTORE_COMPLETED, 1),
+        (TemporaryScheduleProgressKind.RESTORE_COMPLETED, 2),
+    ]
+    encoded = "".join(event.model_dump_json() for event in progress)
+    assert "left" not in encoded
+    assert "right" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_progress_persistence_failure_is_typed_before_schedule_write() -> None:
+    left = _ScheduleDevice("left", _original_image())
+    right = _ScheduleDevice("right", _original_image(invert=True))
+    store = _MemoryStore()
+    guard = LinkageSafetyInterlock(initially_permitted=True)
+
+    def fail_before_write(event: TemporaryScheduleProgressEvent) -> None:
+        if event.kind is TemporaryScheduleProgressKind.STAGE_WRITE_STARTED:
+            raise OSError("private persistence detail")
+
+    with pytest.raises(TemporaryScheduleJournalError) as captured:
+        await _controller(
+            left,
+            right,
+            store,
+            guard,
+            progress_observer=fail_before_write,
+        ).run(_spec())
+
+    assert captured.value.code is TemporaryScheduleErrorCode.JOURNAL_FAILED
+    assert left.writes == []
+    assert right.writes == []
+    assert store.record is None
 
 
 @pytest.mark.asyncio

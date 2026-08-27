@@ -32,10 +32,15 @@ from jebao_flow.devices.linkage import (
     LinkageTransactionRecord,
 )
 from jebao_flow.devices.schedule_flow_experiment import (
+    SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT,
+    SCHEDULE_FLOW_STAGE_EVENT_LIMIT,
     ScheduleFlowExperimentController,
     ScheduleFlowExperimentSpec,
     ScheduleFlowOutcome,
+    ScheduleFlowStage,
+    ScheduleFlowStageEvent,
     classify_schedule_flow_sample,
+    schedule_flow_stage_rank,
 )
 from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageRecord,
@@ -361,6 +366,50 @@ def _persist_successor(
     return successor
 
 
+def _append_schedule_stage_event(
+    events: tuple[ScheduleFlowStageEvent, ...],
+    event: ScheduleFlowStageEvent,
+) -> tuple[ScheduleFlowStageEvent, ...]:
+    """Append one bounded monotonic event before the atomic/fsynced intent save."""
+
+    terminal_event = (
+        event.stage is ScheduleFlowStage.OUTER_RESTORED
+        and event.temporary_error_code is None
+        and event.failure_category is None
+    )
+    if (
+        terminal_event
+        and events
+        and events[-1].stage is ScheduleFlowStage.OUTER_RESTORED
+        and events[-1].temporary_error_code is None
+        and events[-1].failure_category is None
+    ):
+        # A failed journal clear can replay the before-clear hook. Coalesce that one
+        # identity-free terminal fact instead of consuming its reserved slot twice.
+        return events
+    limit = (
+        SCHEDULE_FLOW_STAGE_EVENT_LIMIT
+        if terminal_event
+        else SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT
+    )
+    if len(events) >= limit:
+        raise ScheduleFlowCliError("schedule-flow stage evidence is full")
+    if events:
+        previous = events[-1]
+        previous_rank = schedule_flow_stage_rank(previous.stage)
+        current_rank = schedule_flow_stage_rank(event.stage)
+        if event.occurred_at < previous.occurred_at or current_rank < previous_rank:
+            raise ScheduleFlowCliError("schedule-flow stage evidence regressed")
+        if (
+            current_rank == previous_rank
+            and event.completed_participants is not None
+            and previous.completed_participants is not None
+            and event.completed_participants < previous.completed_participants
+        ):
+            raise ScheduleFlowCliError("schedule-flow participant evidence regressed")
+    return (*events, event)
+
+
 async def _preflight(
     config: AppConfig,
     args: argparse.Namespace,
@@ -474,7 +523,26 @@ def _snapshot_authorizer(
         spec: TemporaryScheduleSpec,
         snapshots: tuple[ScheduleImageSnapshot, ...],
     ) -> None:
-        if intent_store.load() != expected_intent:
+        current = intent_store.load()
+        immutable_authority = (
+            "version",
+            "instance_id",
+            "operation_id",
+            "confirmation_token",
+            "spec",
+            "snapshots",
+            "created_at",
+            "schedule_flow_spec",
+            "schedule_image_digests",
+        )
+        if (
+            current is None
+            or current.phase is not HardwareTestIntentPhase.STARTED
+            or any(
+                getattr(current, field) != getattr(expected_intent, field)
+                for field in immutable_authority
+            )
+        ):
             raise ConfirmationMismatchError("schedule-flow intent changed during execution")
         if spec.operation_id not in expected_operation_ids:
             raise ConfirmationMismatchError("temporary schedule operation identity changed")
@@ -622,6 +690,21 @@ async def _run(
             pending_evidence = intent.evidence
             if pending_evidence is None:
                 raise ScheduleFlowCliError("diagnostic intent evidence is unavailable")
+            pending_stage_events = intent.schedule_flow_stage_events
+
+            def persist_stage_event(event: ScheduleFlowStageEvent) -> None:
+                nonlocal intent, pending_stage_events
+                pending_stage_events = _append_schedule_stage_event(
+                    pending_stage_events,
+                    event,
+                )
+                successor = intent.model_copy(
+                    update={
+                        "schedule_flow_stage_events": pending_stage_events,
+                        "updated_at": max(datetime.now(UTC), intent.updated_at),
+                    }
+                )
+                intent = _persist_successor(intent_store, intent, successor)
 
             def persist_diagnostic_event(event: LinkageDiagnosticEvent) -> None:
                 """Persist the outer controller's allow-listed event without raw errors."""
@@ -644,6 +727,7 @@ async def _run(
                 successor = intent.model_copy(
                     update={
                         "evidence": successor_evidence,
+                        "schedule_flow_stage_events": pending_stage_events,
                         "updated_at": max(datetime.now(UTC), intent.updated_at),
                     }
                 )
@@ -666,6 +750,7 @@ async def _run(
                 successor = intent.model_copy(
                     update={
                         "schedule_flow_sample": sample,
+                        "schedule_flow_stage_events": pending_stage_events,
                         "updated_at": max(datetime.now(UTC), intent.updated_at),
                     }
                 )
@@ -682,6 +767,12 @@ async def _run(
                     raise ScheduleFlowCliError(
                         "nested schedule recovery remains before outer journal clear"
                     )
+                persist_stage_event(
+                    ScheduleFlowStageEvent(
+                        stage=ScheduleFlowStage.OUTER_RESTORED,
+                        occurred_at=datetime.now(UTC),
+                    )
+                )
                 latest = controller.last_role_sample
                 role_result = controller.last_role_result
                 result_updates: dict[str, Any] = {}
@@ -714,6 +805,7 @@ async def _run(
                 current = intent.model_copy(
                     update={
                         **result_updates,
+                        "schedule_flow_stage_events": pending_stage_events,
                         "evidence": _evidence_with_rollback_completed(
                             pending_evidence,
                             completed_at=completed_at,
@@ -748,6 +840,7 @@ async def _run(
                 prerequisite_authorizer=_qualification_authorizer(qualification_store),
                 role_sample_observer=persist_sample,
                 diagnostic_event_observer=persist_diagnostic_event,
+                stage_event_observer=persist_stage_event,
                 schedule_snapshot_authorizer=_snapshot_authorizer(intent_store, intent),
             )
             guard.clear()
@@ -772,6 +865,14 @@ async def _run(
                     current = current.model_copy(
                         update={
                             "evidence": pending_evidence,
+                            "schedule_flow_stage_events": pending_stage_events,
+                            "updated_at": max(datetime.now(UTC), current.updated_at),
+                        }
+                    )
+                elif current.schedule_flow_stage_events != pending_stage_events:
+                    current = current.model_copy(
+                        update={
+                            "schedule_flow_stage_events": pending_stage_events,
                             "updated_at": max(datetime.now(UTC), current.updated_at),
                         }
                     )
@@ -985,6 +1086,40 @@ def _status(
             elif evidence.rollback_started_at is not None:
                 rollback_status = "started"
             print(f"Outer rollback: {rollback_status}")
+        latest_stage = (
+            intent.schedule_flow_stage_events[-1]
+            if intent.schedule_flow_stage_events
+            else None
+        )
+        print(
+            "Schedule-flow stage: "
+            + (latest_stage.stage.value if latest_stage is not None else "none")
+        )
+        if latest_stage is not None and latest_stage.completed_participants is not None:
+            print(
+                "Stage participants completed: "
+                f"{latest_stage.completed_participants}/2"
+            )
+        latest_failure = next(
+            (
+                event
+                for event in reversed(intent.schedule_flow_stage_events)
+                if event.temporary_error_code is not None
+                or event.failure_category is not None
+            ),
+            None,
+        )
+        failure_text = "none"
+        if latest_failure is not None:
+            classification = (
+                latest_failure.temporary_error_code.value
+                if latest_failure.temporary_error_code is not None
+                else latest_failure.failure_category.value
+                if latest_failure.failure_category is not None
+                else "none"
+            )
+            failure_text = f"{latest_failure.stage.value}/{classification}"
+        print(f"Schedule-flow failure: {failure_text}")
         _print_sample(intent.schedule_flow_sample)
         if intent.phase is not HardwareTestIntentPhase.TERMINAL or any(
             value is not None for value in (outer, temporary, role)
@@ -1101,6 +1236,21 @@ async def _recover(
         )
         intent_store.save(recovery_intent)
         intent = recovery_intent
+        pending_stage_events = intent.schedule_flow_stage_events
+
+        def persist_stage_event(event: ScheduleFlowStageEvent) -> None:
+            nonlocal intent, pending_stage_events
+            pending_stage_events = _append_schedule_stage_event(
+                pending_stage_events,
+                event,
+            )
+            successor = intent.model_copy(
+                update={
+                    "schedule_flow_stage_events": pending_stage_events,
+                    "updated_at": max(datetime.now(UTC), intent.updated_at),
+                }
+            )
+            intent = _persist_successor(intent_store, intent, successor)
 
         def before_load() -> None:
             if intent_store.load() != intent:
@@ -1112,6 +1262,12 @@ async def _recover(
                 raise ScheduleFlowCliError(
                     "nested schedule recovery remains before outer journal clear"
                 )
+            persist_stage_event(
+                ScheduleFlowStageEvent(
+                    stage=ScheduleFlowStage.OUTER_RESTORED,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
             evidence = intent.evidence
             if evidence is None:
                 raise ScheduleFlowCliError("diagnostic intent evidence is unavailable")
@@ -1128,7 +1284,8 @@ async def _recover(
                         "evidence": _evidence_with_rollback_completed(
                             evidence,
                             completed_at=completed_at,
-                        )
+                        ),
+                        "schedule_flow_stage_events": pending_stage_events,
                     }
                 ),
                 HardwareTestIntentPhase.TERMINAL,
@@ -1155,6 +1312,7 @@ async def _recover(
             role_store,
             safety_interlock=guard,
             prerequisite_authorizer=_qualification_authorizer(qualification_store),
+            stage_event_observer=persist_stage_event,
         )
         guard.clear()
         if not guard.permitted:
@@ -1176,6 +1334,14 @@ async def _recover(
                                 latest_evidence,
                                 pending_outer,
                             ),
+                            "schedule_flow_stage_events": pending_stage_events,
+                            "updated_at": max(datetime.now(UTC), latest.updated_at),
+                        }
+                    )
+                elif latest.schedule_flow_stage_events != pending_stage_events:
+                    latest = latest.model_copy(
+                        update={
+                            "schedule_flow_stage_events": pending_stage_events,
                             "updated_at": max(datetime.now(UTC), latest.updated_at),
                         }
                     )

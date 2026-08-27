@@ -61,9 +61,14 @@ from jebao_flow.devices.linkage import (
 )
 from jebao_flow.devices.observer import ResolvedDevice, resolve_device_bindings
 from jebao_flow.devices.schedule_flow_experiment import (
+    SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT,
+    SCHEDULE_FLOW_STAGE_EVENT_LIMIT,
     ScheduleFlowExperimentSpec,
     ScheduleFlowOutcome,
+    ScheduleFlowStage,
+    ScheduleFlowStageEvent,
     classify_schedule_flow_sample,
+    schedule_flow_stage_rank,
 )
 from jebao_flow.devices.schedule_linkage import ScheduleLinkageSample
 from jebao_flow.hardware_guard import DeploymentHardwareGuard
@@ -380,6 +385,10 @@ class HardwareTestIntent(BaseModel):
     schedule_transition_verified: bool | None = None
     stable_slave_tuple_observed: bool | None = None
     stable_observation_seconds: float | None = Field(default=None, ge=0, le=300)
+    schedule_flow_stage_events: tuple[ScheduleFlowStageEvent, ...] = Field(
+        default=(),
+        max_length=SCHEDULE_FLOW_STAGE_EVENT_LIMIT,
+    )
 
     @property
     def has_diagnostic_progress(self) -> bool:
@@ -393,6 +402,7 @@ class HardwareTestIntent(BaseModel):
             or self.schedule_transition_verified is not None
             or self.stable_slave_tuple_observed is not None
             or self.stable_observation_seconds is not None
+            or bool(self.schedule_flow_stage_events)
             or (
                 self.version in {2, 3}
                 and self.evidence is not None
@@ -434,6 +444,7 @@ class HardwareTestIntent(BaseModel):
             or self.schedule_transition_verified is not None
             or self.stable_slave_tuple_observed is not None
             or self.stable_observation_seconds is not None
+            or self.schedule_flow_stage_events
         )
         if self.version < 3 and has_schedule_extension:
             raise ValueError("schedule-flow evidence requires a version-three intent")
@@ -454,6 +465,38 @@ class HardwareTestIntent(BaseModel):
                 for digest in self.schedule_image_digests
             ):
                 raise ValueError("schedule-flow schedule and control bindings disagree")
+            previous_event: ScheduleFlowStageEvent | None = None
+            for event in self.schedule_flow_stage_events:
+                if event.occurred_at < self.created_at:
+                    raise ValueError("schedule-flow stage cannot precede the confirmed intent")
+                if previous_event is not None:
+                    if event.occurred_at < previous_event.occurred_at:
+                        raise ValueError("schedule-flow stage timestamps must be monotonic")
+                    current_rank = schedule_flow_stage_rank(event.stage)
+                    previous_rank = schedule_flow_stage_rank(previous_event.stage)
+                    if current_rank < previous_rank:
+                        raise ValueError("schedule-flow stages must be monotonic")
+                    if (
+                        current_rank == previous_rank
+                        and event.completed_participants is not None
+                        and previous_event.completed_participants is not None
+                        and event.completed_participants
+                        < previous_event.completed_participants
+                    ):
+                        raise ValueError(
+                            "schedule-flow participant progress must be monotonic"
+                        )
+                previous_event = event
+            if len(self.schedule_flow_stage_events) > SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT:
+                terminal_event = self.schedule_flow_stage_events[-1]
+                if (
+                    terminal_event.stage is not ScheduleFlowStage.OUTER_RESTORED
+                    or terminal_event.temporary_error_code is not None
+                    or terminal_event.failure_category is not None
+                ):
+                    raise ValueError(
+                        "the reserved schedule-flow event slot requires OUTER_RESTORED"
+                    )
             if self.schedule_flow_sample is not None:
                 sample = self.schedule_flow_sample
                 if (

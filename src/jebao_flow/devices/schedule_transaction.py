@@ -144,6 +144,47 @@ class TemporaryScheduleKind(StrEnum):
     SENTINEL_QUALIFICATION = "sentinel_qualification"
 
 
+class TemporaryScheduleProgressKind(StrEnum):
+    """Redacted milestones emitted around the exact schedule transaction."""
+
+    SNAPSHOT_STARTED = "snapshot_started"
+    SNAPSHOT_COMPLETED = "snapshot_completed"
+    STAGE_WRITE_STARTED = "stage_write_started"
+    STAGE_VERIFIED = "stage_verified"
+    RESTORE_STARTED = "restore_started"
+    RESTORE_COMPLETED = "restore_completed"
+    FAILED = "failed"
+
+
+class TemporaryScheduleProgressEvent(BaseModel):
+    """Privacy-safe transaction progress; it deliberately contains no device identity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: TemporaryScheduleProgressKind
+    schedule_kind: TemporaryScheduleKind
+    occurred_at: datetime
+    completed_participants: int = Field(ge=0, le=2)
+    error_code: TemporaryScheduleErrorCode | None = None
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> Self:
+        if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
+            raise ValueError("schedule progress timestamps must be timezone-aware")
+        if self.kind is TemporaryScheduleProgressKind.FAILED:
+            if self.error_code is None:
+                raise ValueError("failed schedule progress requires an allow-listed code")
+        elif self.error_code is not None:
+            raise ValueError("only failed schedule progress may include an error code")
+        if self.kind is TemporaryScheduleProgressKind.SNAPSHOT_STARTED:
+            if self.completed_participants != 0:
+                raise ValueError("snapshot-started progress cannot have completed participants")
+        elif self.kind is TemporaryScheduleProgressKind.SNAPSHOT_COMPLETED:
+            if self.completed_participants != 2:
+                raise ValueError("snapshot-completed progress must cover both participants")
+        return self
+
+
 class ObservationCompletion(StrEnum):
     DISARM_VERIFIED = "disarm_verified"
 
@@ -399,6 +440,7 @@ SnapshotAuthorizer = Callable[
     [TemporaryScheduleSpec, tuple[ScheduleImageSnapshot, ...]],
     None,
 ]
+TemporaryScheduleProgressObserver = Callable[[TemporaryScheduleProgressEvent], None]
 
 
 class TemporaryScheduleController:
@@ -412,12 +454,14 @@ class TemporaryScheduleController:
         safety_interlock: LinkageSafetyInterlock,
         monotonic_clock: Callable[[], float] | None = None,
         snapshot_authorizer: SnapshotAuthorizer | None = None,
+        progress_observer: TemporaryScheduleProgressObserver | None = None,
     ) -> None:
         self._devices = dict(devices)
         self._store = store
         self._safety_interlock = safety_interlock
         self._monotonic_clock = monotonic_clock
         self._snapshot_authorizer = snapshot_authorizer
+        self._progress_observer = progress_observer
         self._run_lock = asyncio.Lock()
         self._active_operation_id: str | None = None
         self._safety_epoch: int | None = None
@@ -564,6 +608,11 @@ class TemporaryScheduleController:
         observation_completed = False
         operation_error: BaseException | None = None
         try:
+            self._emit_progress(
+                TemporaryScheduleProgressKind.SNAPSHOT_STARTED,
+                spec.kind,
+                completed_participants=0,
+            )
             snapshots = await self._capture_snapshots(spec)
             if self._snapshot_authorizer is not None:
                 try:
@@ -574,6 +623,11 @@ class TemporaryScheduleController:
                     raise TemporarySchedulePreflightError(
                         TemporaryScheduleErrorCode.SNAPSHOT_FAILED
                     ) from None
+            self._emit_progress(
+                TemporaryScheduleProgressKind.SNAPSHOT_COMPLETED,
+                spec.kind,
+                completed_participants=2,
+            )
             self._require_forward_write()
             started_at = datetime.now(UTC)
             record = TemporaryScheduleRecord(
@@ -588,7 +642,12 @@ class TemporaryScheduleController:
             expected_images = self._expected_images(spec, snapshots)
             self._create_exact(record)
             journal_created = True
-            for patch in spec.device_patches:
+            for participant_index, patch in enumerate(spec.device_patches):
+                self._emit_progress(
+                    TemporaryScheduleProgressKind.STAGE_WRITE_STARTED,
+                    spec.kind,
+                    completed_participants=participant_index,
+                )
                 await self._revalidate_forward_source(
                     patch.device_id,
                     self._snapshot(record, patch.device_id),
@@ -659,6 +718,11 @@ class TemporaryScheduleController:
                 )
                 self._save_exact(staged)
                 record = staged
+                self._emit_progress(
+                    TemporaryScheduleProgressKind.STAGE_VERIFIED,
+                    spec.kind,
+                    completed_participants=participant_index + 1,
+                )
 
             staged_record = record.model_copy(
                 update={
@@ -701,6 +765,16 @@ class TemporaryScheduleController:
                     ) from None
         except BaseException as error:
             operation_error = operation_error or error
+            if isinstance(error, TemporaryScheduleError):
+                self._emit_progress(
+                    TemporaryScheduleProgressKind.FAILED,
+                    spec.kind,
+                    completed_participants=(
+                        len(record.staged_device_ids) if record is not None else 0
+                    ),
+                    error_code=error.code,
+                    best_effort=True,
+                )
             if not journal_created or record is None:
                 raise
             if isinstance(
@@ -1161,11 +1235,27 @@ class TemporaryScheduleController:
                 await asyncio.shield(task)
             except asyncio.CancelledError:
                 cancellation_received = True
-        task.result()
+        try:
+            task.result()
+        except TemporaryScheduleError as error:
+            self._emit_progress(
+                TemporaryScheduleProgressKind.FAILED,
+                record.spec.kind,
+                completed_participants=len(record.restored_device_ids),
+                error_code=error.code,
+                best_effort=True,
+            )
+            raise
         if cancellation_received:
             raise asyncio.CancelledError
 
     async def _rollback(self, caller: TemporaryScheduleRecord) -> None:
+        self._emit_progress(
+            TemporaryScheduleProgressKind.RESTORE_STARTED,
+            caller.spec.kind,
+            completed_participants=len(caller.restored_device_ids),
+            best_effort=True,
+        )
         durable = self._load_exact(recovery=True)
         if (
             durable is None
@@ -1260,6 +1350,13 @@ class TemporaryScheduleController:
                 )
                 self._save_exact(restored, recovery=True)
                 record = restored
+                if len(record.restored_device_ids) < 2:
+                    self._emit_progress(
+                        TemporaryScheduleProgressKind.RESTORE_COMPLETED,
+                        record.spec.kind,
+                        completed_participants=len(record.restored_device_ids),
+                        best_effort=True,
+                    )
         await self._verify_all_original_images(record)
         completed = record.model_copy(
             update={
@@ -1269,7 +1366,46 @@ class TemporaryScheduleController:
             }
         )
         self._save_exact(completed, recovery=True)
+        self._emit_progress(
+            TemporaryScheduleProgressKind.RESTORE_COMPLETED,
+            record.spec.kind,
+            completed_participants=2,
+            best_effort=True,
+        )
         self._clear_exact()
+
+    def _emit_progress(
+        self,
+        kind: TemporaryScheduleProgressKind,
+        schedule_kind: TemporaryScheduleKind,
+        *,
+        completed_participants: int,
+        error_code: TemporaryScheduleErrorCode | None = None,
+        best_effort: bool = False,
+    ) -> None:
+        observer = self._progress_observer
+        if observer is None:
+            return
+        event = TemporaryScheduleProgressEvent(
+            kind=kind,
+            schedule_kind=schedule_kind,
+            occurred_at=datetime.now(UTC),
+            completed_participants=completed_participants,
+            error_code=error_code,
+        )
+        if not best_effort:
+            try:
+                observer(event)
+            except Exception:
+                raise TemporaryScheduleJournalError(
+                    TemporaryScheduleErrorCode.JOURNAL_FAILED
+                ) from None
+            return
+        try:
+            observer(event)
+        except Exception:
+            # Exact rollback must continue even when diagnostic persistence is unavailable.
+            pass
 
     async def _verify_all_original_images(self, record: TemporaryScheduleRecord) -> None:
         for device_id in record.stage_write_intent_device_ids:

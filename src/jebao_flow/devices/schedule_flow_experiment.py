@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
@@ -51,6 +51,8 @@ from jebao_flow.devices.schedule_transaction import (
     TemporaryScheduleJournalStore,
     TemporaryScheduleKind,
     TemporaryScheduleObserverUnstoppableError,
+    TemporaryScheduleProgressEvent,
+    TemporaryScheduleProgressKind,
     TemporaryScheduleRecord,
     TemporaryScheduleResult,
     TemporaryScheduleSpec,
@@ -67,6 +69,9 @@ WallTime = Annotated[
     str,
     StringConstraints(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"),
 ]
+
+SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT = 64
+SCHEDULE_FLOW_STAGE_EVENT_LIMIT = SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT + 1
 
 
 class ScheduleFlowExperimentSpec(BaseModel):
@@ -199,6 +204,129 @@ class ScheduleFlowOutcome(StrEnum):
     UNEXPECTED_EFFECTIVE_STATE = "unexpected_effective_state"
 
 
+class ScheduleFlowStage(StrEnum):
+    """Totally ordered, identity-free milestones for one composed field run."""
+
+    OUTER_BOOTSTRAP_STARTED = "outer_bootstrap_started"
+    OUTER_BOOTSTRAP_COMPLETED = "outer_bootstrap_completed"
+    SENTINEL_SNAPSHOT_STARTED = "sentinel_snapshot_started"
+    SENTINEL_SNAPSHOT_COMPLETED = "sentinel_snapshot_completed"
+    SENTINEL_WRITE_STARTED = "sentinel_write_started"
+    SENTINEL_VERIFIED = "sentinel_verified"
+    SENTINEL_RESTORE_STARTED = "sentinel_restore_started"
+    SENTINEL_RESTORED = "sentinel_restored"
+    FIELD_SNAPSHOT_STARTED = "field_snapshot_started"
+    FIELD_SNAPSHOT_COMPLETED = "field_snapshot_completed"
+    FIELD_WRITE_STARTED = "field_write_started"
+    FIELD_VERIFIED = "field_verified"
+    TIMER_ON_ARM_STARTED = "timer_on_arm_started"
+    TIMER_ON_ARMED = "timer_on_armed"
+    ROLE_PREFLIGHT_STARTED = "role_preflight_started"
+    ROLE_PREFLIGHT_COMPLETED = "role_preflight_completed"
+    ROLE_OBSERVATION_STARTED = "role_observation_started"
+    ROLE_OBSERVATION_COMPLETED = "role_observation_completed"
+    ROLE_DISARM_STARTED = "role_disarm_started"
+    ROLE_DISARMED = "role_disarmed"
+    FIELD_RESTORE_STARTED = "field_restore_started"
+    FIELD_RESTORED = "field_restored"
+    OUTER_RESTORE_STARTED = "outer_restore_started"
+    OUTER_RESTORED = "outer_restored"
+
+
+_SCHEDULE_FLOW_STAGE_ORDER = {stage: index for index, stage in enumerate(ScheduleFlowStage)}
+
+
+def schedule_flow_stage_rank(stage: ScheduleFlowStage) -> int:
+    """Return the stable monotonic rank used by durable intent validation."""
+
+    return _SCHEDULE_FLOW_STAGE_ORDER[stage]
+
+
+class ScheduleFlowFailureCategory(StrEnum):
+    """Allow-listed non-schedule failure intervals safe for durable operator output."""
+
+    OUTER_BOOTSTRAP = "outer_bootstrap"
+    TIMER_ON_ARM = "timer_on_arm"
+    ROLE_PREFLIGHT = "role_preflight"
+    ROLE_OBSERVATION = "role_observation"
+    ROLE_DISARM = "role_disarm"
+    OUTER_RESTORE = "outer_restore"
+    CANCELLED = "cancelled"
+    UNEXPECTED = "unexpected"
+
+
+class ScheduleFlowStageEvent(BaseModel):
+    """One durable stage event with no raw transport or physical identity fields."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    stage: ScheduleFlowStage
+    occurred_at: datetime
+    completed_participants: int | None = Field(default=None, ge=0, le=2)
+    temporary_error_code: TemporaryScheduleErrorCode | None = None
+    failure_category: ScheduleFlowFailureCategory | None = None
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> Self:
+        if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
+            raise ValueError("schedule-flow stage timestamps must be timezone-aware")
+        if self.temporary_error_code is not None and self.failure_category is not None:
+            raise ValueError("a schedule-flow stage may contain only one failure classification")
+        return self
+
+
+_TEMPORARY_PROGRESS_STAGE = {
+    (
+        TemporaryScheduleKind.SENTINEL_QUALIFICATION,
+        TemporaryScheduleProgressKind.SNAPSHOT_STARTED,
+    ): ScheduleFlowStage.SENTINEL_SNAPSHOT_STARTED,
+    (
+        TemporaryScheduleKind.SENTINEL_QUALIFICATION,
+        TemporaryScheduleProgressKind.SNAPSHOT_COMPLETED,
+    ): ScheduleFlowStage.SENTINEL_SNAPSHOT_COMPLETED,
+    (
+        TemporaryScheduleKind.SENTINEL_QUALIFICATION,
+        TemporaryScheduleProgressKind.STAGE_WRITE_STARTED,
+    ): ScheduleFlowStage.SENTINEL_WRITE_STARTED,
+    (
+        TemporaryScheduleKind.SENTINEL_QUALIFICATION,
+        TemporaryScheduleProgressKind.STAGE_VERIFIED,
+    ): ScheduleFlowStage.SENTINEL_VERIFIED,
+    (
+        TemporaryScheduleKind.SENTINEL_QUALIFICATION,
+        TemporaryScheduleProgressKind.RESTORE_STARTED,
+    ): ScheduleFlowStage.SENTINEL_RESTORE_STARTED,
+    (
+        TemporaryScheduleKind.SENTINEL_QUALIFICATION,
+        TemporaryScheduleProgressKind.RESTORE_COMPLETED,
+    ): ScheduleFlowStage.SENTINEL_RESTORED,
+    (
+        TemporaryScheduleKind.FIELD_OBSERVATION,
+        TemporaryScheduleProgressKind.SNAPSHOT_STARTED,
+    ): ScheduleFlowStage.FIELD_SNAPSHOT_STARTED,
+    (
+        TemporaryScheduleKind.FIELD_OBSERVATION,
+        TemporaryScheduleProgressKind.SNAPSHOT_COMPLETED,
+    ): ScheduleFlowStage.FIELD_SNAPSHOT_COMPLETED,
+    (
+        TemporaryScheduleKind.FIELD_OBSERVATION,
+        TemporaryScheduleProgressKind.STAGE_WRITE_STARTED,
+    ): ScheduleFlowStage.FIELD_WRITE_STARTED,
+    (
+        TemporaryScheduleKind.FIELD_OBSERVATION,
+        TemporaryScheduleProgressKind.STAGE_VERIFIED,
+    ): ScheduleFlowStage.FIELD_VERIFIED,
+    (
+        TemporaryScheduleKind.FIELD_OBSERVATION,
+        TemporaryScheduleProgressKind.RESTORE_STARTED,
+    ): ScheduleFlowStage.FIELD_RESTORE_STARTED,
+    (
+        TemporaryScheduleKind.FIELD_OBSERVATION,
+        TemporaryScheduleProgressKind.RESTORE_COMPLETED,
+    ): ScheduleFlowStage.FIELD_RESTORED,
+}
+
+
 class ScheduleFlowExperimentResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -228,6 +356,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         prerequisite_authorizer: PrerequisiteAuthorizer,
         role_sample_observer: Callable[[ScheduleLinkageSample], None] | None = None,
         diagnostic_event_observer: Callable[[LinkageDiagnosticEvent], None] | None = None,
+        stage_event_observer: Callable[[ScheduleFlowStageEvent], None] | None = None,
         schedule_snapshot_authorizer: SnapshotAuthorizer | None = None,
     ) -> None:
         super().__init__(devices, outer_store, safety_interlock=safety_interlock)
@@ -239,6 +368,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             schedule_store,
             safety_interlock=safety_interlock,
             snapshot_authorizer=schedule_snapshot_authorizer,
+            progress_observer=self._observe_temporary_schedule_progress,
         )
         self._role_controller = ScheduleActiveLinkageController(
             devices,
@@ -249,6 +379,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         )
         self._external_role_sample_observer = role_sample_observer
         self._external_diagnostic_event_observer = diagnostic_event_observer
+        self._external_stage_event_observer = stage_event_observer
         self._experiment_spec: ScheduleFlowExperimentSpec | None = None
         self._sentinel_result: TemporaryScheduleResult | None = None
         self._temporary_result: TemporaryScheduleResult | None = None
@@ -257,6 +388,8 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         self._last_role_sample: ScheduleLinkageSample | None = None
         self._experiment_entry_lock = asyncio.Lock()
         self._schedule_restore_blocked = False
+        self._last_schedule_stage: ScheduleFlowStage | None = None
+        self._schedule_failure_recorded = False
 
     async def run_experiment(
         self,
@@ -280,6 +413,8 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             self._role_error = None
             self._last_role_sample = None
             self._schedule_restore_blocked = False
+            self._last_schedule_stage = None
+            self._schedule_failure_recorded = False
             try:
                 outer_result = await super().run(spec.outer_linkage_spec())
                 if self._temporary_result is None or self._role_result is None:
@@ -329,28 +464,224 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         if self._external_diagnostic_event_observer is not None:
             self._external_diagnostic_event_observer(event)
 
+    def _emit_stage(
+        self,
+        stage: ScheduleFlowStage,
+        *,
+        completed_participants: int | None = None,
+        temporary_error_code: TemporaryScheduleErrorCode | None = None,
+        failure_category: ScheduleFlowFailureCategory | None = None,
+        best_effort: bool = False,
+    ) -> None:
+        """Emit one typed milestone; compensating paths never depend on its observer."""
+
+        previous = self._last_schedule_stage
+        if previous is not None and schedule_flow_stage_rank(stage) < schedule_flow_stage_rank(
+            previous
+        ):
+            # A recovery can skip forward milestones, but it must never report backwards.
+            return
+        self._last_schedule_stage = stage
+        if temporary_error_code is not None or failure_category is not None:
+            self._schedule_failure_recorded = True
+        observer = self._external_stage_event_observer
+        if observer is None:
+            return
+        event = ScheduleFlowStageEvent(
+            stage=stage,
+            occurred_at=datetime.now(UTC),
+            completed_participants=completed_participants,
+            temporary_error_code=temporary_error_code,
+            failure_category=failure_category,
+        )
+        if not best_effort:
+            observer(event)
+            return
+        try:
+            observer(event)
+        except Exception:
+            # TimerOFF, exact schedule restoration and outer control restoration must continue.
+            pass
+
+    def _observe_temporary_schedule_progress(
+        self,
+        event: TemporaryScheduleProgressEvent,
+    ) -> None:
+        if event.kind is TemporaryScheduleProgressKind.FAILED:
+            stage = self._last_schedule_stage
+            if stage is None:
+                stage = (
+                    ScheduleFlowStage.SENTINEL_SNAPSHOT_STARTED
+                    if event.schedule_kind is TemporaryScheduleKind.SENTINEL_QUALIFICATION
+                    else ScheduleFlowStage.FIELD_SNAPSHOT_STARTED
+                )
+            self._emit_stage(
+                stage,
+                completed_participants=event.completed_participants,
+                temporary_error_code=event.error_code,
+                best_effort=True,
+            )
+            return
+        stage = _TEMPORARY_PROGRESS_STAGE[(event.schedule_kind, event.kind)]
+        if (
+            event.kind is TemporaryScheduleProgressKind.STAGE_VERIFIED
+            and event.completed_participants < 2
+        ):
+            stage = (
+                ScheduleFlowStage.SENTINEL_WRITE_STARTED
+                if event.schedule_kind is TemporaryScheduleKind.SENTINEL_QUALIFICATION
+                else ScheduleFlowStage.FIELD_WRITE_STARTED
+            )
+        elif (
+            event.kind is TemporaryScheduleProgressKind.RESTORE_COMPLETED
+            and 0 < event.completed_participants < 2
+        ):
+            stage = (
+                ScheduleFlowStage.SENTINEL_RESTORE_STARTED
+                if event.schedule_kind is TemporaryScheduleKind.SENTINEL_QUALIFICATION
+                else ScheduleFlowStage.FIELD_RESTORE_STARTED
+            )
+        self._emit_stage(
+            stage,
+            completed_participants=event.completed_participants,
+            best_effort=event.kind
+            in {
+                TemporaryScheduleProgressKind.RESTORE_STARTED,
+                TemporaryScheduleProgressKind.RESTORE_COMPLETED,
+            },
+        )
+
+    async def _stage_devices(
+        self,
+        record: LinkageTransactionRecord,
+    ) -> LinkageTransactionRecord:
+        self._emit_stage(
+            ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
+            completed_participants=0,
+        )
+        try:
+            staged = await super()._stage_devices(record)
+        except asyncio.CancelledError:
+            self._emit_stage(
+                self._last_schedule_stage or ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
+                completed_participants=self._outer_bootstrap_completed_participants(),
+                failure_category=ScheduleFlowFailureCategory.CANCELLED,
+                best_effort=True,
+            )
+            raise
+        except BaseException:
+            self._emit_stage(
+                self._last_schedule_stage or ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
+                completed_participants=self._outer_bootstrap_completed_participants(),
+                failure_category=ScheduleFlowFailureCategory.OUTER_BOOTSTRAP,
+                best_effort=True,
+            )
+            raise
+        self._emit_stage(
+            ScheduleFlowStage.OUTER_BOOTSTRAP_COMPLETED,
+            completed_participants=len(staged.bootstrap_qualified_device_ids),
+        )
+        return staged
+
+    def _outer_bootstrap_completed_participants(self) -> int | None:
+        try:
+            durable = self._store.load()
+        except Exception:
+            return None
+        return len(durable.bootstrap_qualified_device_ids) if durable is not None else 0
+
     async def _activate_relationship(self, record: LinkageTransactionRecord) -> None:
         """Run the nested experiment while the outer transaction remains safely TimerOFF."""
 
         spec = self._require_experiment(record)
         if spec.sentinel_qualification:
-            self._sentinel_result = await self._schedule_controller.run(
-                await self._sentinel_spec(spec)
-            )
+            self._emit_stage(ScheduleFlowStage.SENTINEL_SNAPSHOT_STARTED)
+            try:
+                self._sentinel_result = await self._schedule_controller.run(
+                    await self._sentinel_spec(spec)
+                )
+            except asyncio.CancelledError:
+                if not self._schedule_failure_recorded:
+                    self._emit_stage(
+                        self._last_schedule_stage
+                        or ScheduleFlowStage.SENTINEL_SNAPSHOT_STARTED,
+                        failure_category=ScheduleFlowFailureCategory.CANCELLED,
+                        best_effort=True,
+                    )
+                raise
+            except BaseException:
+                if not self._schedule_failure_recorded:
+                    self._emit_stage(
+                        self._last_schedule_stage
+                        or ScheduleFlowStage.SENTINEL_SNAPSHOT_STARTED,
+                        failure_category=ScheduleFlowFailureCategory.UNEXPECTED,
+                        best_effort=True,
+                    )
+                raise
 
         async def observe(_record: TemporaryScheduleRecord) -> ObservationCompletion:
             role_error: BaseException | None = None
             try:
+                self._emit_stage(ScheduleFlowStage.TIMER_ON_ARM_STARTED)
                 await self._arm_temporary_schedule(record)
+                self._emit_stage(ScheduleFlowStage.TIMER_ON_ARMED)
+                self._emit_stage(ScheduleFlowStage.ROLE_PREFLIGHT_STARTED)
                 preflight = await self._role_controller.preflight(
                     spec.role_observation_spec()
                 )
+                self._emit_stage(ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED)
+                self._emit_stage(ScheduleFlowStage.ROLE_OBSERVATION_STARTED)
                 self._role_result = await self._role_controller.run(preflight)
+                self._emit_stage(ScheduleFlowStage.ROLE_OBSERVATION_COMPLETED)
+            except asyncio.CancelledError as error:
+                role_error = error
+                self._emit_stage(
+                    self._last_schedule_stage or ScheduleFlowStage.TIMER_ON_ARM_STARTED,
+                    failure_category=ScheduleFlowFailureCategory.CANCELLED,
+                    best_effort=True,
+                )
             except BaseException as error:
                 role_error = error
+                current = self._last_schedule_stage
+                category = (
+                    ScheduleFlowFailureCategory.TIMER_ON_ARM
+                    if current
+                    in {
+                        ScheduleFlowStage.TIMER_ON_ARM_STARTED,
+                        ScheduleFlowStage.TIMER_ON_ARMED,
+                    }
+                    else ScheduleFlowFailureCategory.ROLE_PREFLIGHT
+                    if current
+                    in {
+                        ScheduleFlowStage.ROLE_PREFLIGHT_STARTED,
+                        ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED,
+                    }
+                    else ScheduleFlowFailureCategory.ROLE_OBSERVATION
+                )
+                self._emit_stage(
+                    current or ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+                    failure_category=category,
+                    best_effort=True,
+                )
             finally:
-                await self._disarm_temporary_schedule_uninterruptibly(record)
-                await self._clear_role_journal_before_schedule_restore(record)
+                self._emit_stage(
+                    ScheduleFlowStage.ROLE_DISARM_STARTED,
+                    best_effort=True,
+                )
+                try:
+                    await self._disarm_temporary_schedule_uninterruptibly(record)
+                    await self._clear_role_journal_before_schedule_restore(record)
+                except BaseException:
+                    self._emit_stage(
+                        ScheduleFlowStage.ROLE_DISARM_STARTED,
+                        failure_category=ScheduleFlowFailureCategory.ROLE_DISARM,
+                        best_effort=True,
+                    )
+                    raise
+                self._emit_stage(
+                    ScheduleFlowStage.ROLE_DISARMED,
+                    best_effort=True,
+                )
             self._role_error = role_error
             return ObservationCompletion.DISARM_VERIFIED
 
@@ -359,6 +690,18 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 spec.temporary_schedule_spec(),
                 observe=observe,
             )
+        except asyncio.CancelledError:
+            try:
+                self._schedule_restore_blocked = self._schedule_store.load() is not None
+            except BaseException:
+                self._schedule_restore_blocked = True
+            if not self._schedule_failure_recorded:
+                self._emit_stage(
+                    self._last_schedule_stage or ScheduleFlowStage.FIELD_SNAPSHOT_STARTED,
+                    failure_category=ScheduleFlowFailureCategory.CANCELLED,
+                    best_effort=True,
+                )
+            raise
         except BaseException:
             # If the exact schedule journal survives, the controller could not prove that the
             # original 48 slots are back. Refuse the parent's TimerON control restore until an
@@ -367,6 +710,12 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 self._schedule_restore_blocked = self._schedule_store.load() is not None
             except BaseException:
                 self._schedule_restore_blocked = True
+            if not self._schedule_failure_recorded:
+                self._emit_stage(
+                    self._last_schedule_stage or ScheduleFlowStage.FIELD_SNAPSHOT_STARTED,
+                    failure_category=ScheduleFlowFailureCategory.UNEXPECTED,
+                    best_effort=True,
+                )
             raise
         if self._role_error is not None:
             raise self._role_error
@@ -417,11 +766,23 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 # the outer journal recovery-required and never restores saved TimerON state.
                 self._safety_interlock.trip()
                 await self._defer_restore_for_safety(record)
-        await super()._rollback_uninterruptibly(
-            record,
-            schedule_change_ids=schedule_change_ids,
-            read_failure_ids=read_failure_ids,
+        self._emit_stage(
+            ScheduleFlowStage.OUTER_RESTORE_STARTED,
+            best_effort=True,
         )
+        try:
+            await super()._rollback_uninterruptibly(
+                record,
+                schedule_change_ids=schedule_change_ids,
+                read_failure_ids=read_failure_ids,
+            )
+        except BaseException:
+            self._emit_stage(
+                ScheduleFlowStage.OUTER_RESTORE_STARTED,
+                failure_category=ScheduleFlowFailureCategory.OUTER_RESTORE,
+                best_effort=True,
+            )
+            raise
 
     async def recover_experiment(self) -> bool:
         """Recover nested roles, safe TimerOFF, exact slots, then original controls.
@@ -481,7 +842,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         recovered = False
         controls_disarmed = False
         if role_record is not None:
-            await self._disarm_temporary_schedule_uninterruptibly(outer_record)
+            await self._disarm_nested_recovery_controls(outer_record)
             controls_disarmed = True
             recovered = (
                 await self._role_controller.finalize_externally_disarmed(
@@ -495,7 +856,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 )
         if schedule_record is not None:
             if not controls_disarmed:
-                await self._disarm_temporary_schedule_uninterruptibly(outer_record)
+                await self._disarm_nested_recovery_controls(outer_record)
             recovered = (
                 await self._schedule_controller.manual_recover(
                     disarm_verified=True,
@@ -513,6 +874,30 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             raise LinkageRollbackError("nested schedule recovery remains incomplete")
         self._schedule_restore_blocked = False
         return recovered
+
+    async def _disarm_nested_recovery_controls(
+        self,
+        outer_record: LinkageTransactionRecord,
+    ) -> None:
+        """Report the real TimerOFF proof used by role and schedule-only recovery."""
+
+        self._emit_stage(
+            ScheduleFlowStage.ROLE_DISARM_STARTED,
+            best_effort=True,
+        )
+        try:
+            await self._disarm_temporary_schedule_uninterruptibly(outer_record)
+        except BaseException:
+            self._emit_stage(
+                ScheduleFlowStage.ROLE_DISARM_STARTED,
+                failure_category=ScheduleFlowFailureCategory.ROLE_DISARM,
+                best_effort=True,
+            )
+            raise
+        self._emit_stage(
+            ScheduleFlowStage.ROLE_DISARMED,
+            best_effort=True,
+        )
 
     async def _clear_role_journal_before_schedule_restore(
         self,
@@ -849,9 +1234,15 @@ def classify_schedule_flow_sample(
 
 
 __all__ = [
+    "SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT",
+    "SCHEDULE_FLOW_STAGE_EVENT_LIMIT",
     "ScheduleFlowExperimentController",
     "ScheduleFlowExperimentResult",
     "ScheduleFlowExperimentSpec",
+    "ScheduleFlowFailureCategory",
     "ScheduleFlowOutcome",
+    "ScheduleFlowStage",
+    "ScheduleFlowStageEvent",
     "classify_schedule_flow_sample",
+    "schedule_flow_stage_rank",
 ]

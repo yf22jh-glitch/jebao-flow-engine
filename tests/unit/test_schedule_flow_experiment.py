@@ -22,6 +22,8 @@ from jebao_flow.devices.schedule_flow_experiment import (
     ScheduleFlowExperimentController,
     ScheduleFlowExperimentSpec,
     ScheduleFlowOutcome,
+    ScheduleFlowStage,
+    ScheduleFlowStageEvent,
     classify_schedule_flow_sample,
 )
 from jebao_flow.devices.schedule_linkage import (
@@ -316,7 +318,9 @@ class _SequenceController(ScheduleFlowExperimentController):
 
 async def test_nested_sequence_disarms_before_temporary_schedule_restore() -> None:
     events: list[str] = []
+    stage_events: list[ScheduleFlowStageEvent] = []
     controller = _SequenceController(events)
+    controller._external_stage_event_observer = stage_events.append  # noqa: SLF001
     spec = _spec(sentinel_qualification=True)
     controller._experiment_spec = spec  # noqa: SLF001
     controller._schedule_controller = _FakeScheduleController(events)  # type: ignore[assignment]  # noqa: SLF001
@@ -337,6 +341,17 @@ async def test_nested_sequence_disarms_before_temporary_schedule_restore() -> No
         "roles:run",
         "timer:off",
         "temporary:restore",
+    ]
+    assert [event.stage for event in stage_events] == [
+        ScheduleFlowStage.SENTINEL_SNAPSHOT_STARTED,
+        ScheduleFlowStage.TIMER_ON_ARM_STARTED,
+        ScheduleFlowStage.TIMER_ON_ARMED,
+        ScheduleFlowStage.ROLE_PREFLIGHT_STARTED,
+        ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED,
+        ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+        ScheduleFlowStage.ROLE_OBSERVATION_COMPLETED,
+        ScheduleFlowStage.ROLE_DISARM_STARTED,
+        ScheduleFlowStage.ROLE_DISARMED,
     ]
 
 
@@ -730,6 +745,52 @@ async def test_attended_recovery_orders_roles_timer_schedule_then_outer(monkeypa
         "roles:journal_close",
         "schedule:restore",
         "outer:restore",
+    ]
+
+
+async def test_schedule_only_recovery_reports_its_actual_disarm(monkeypatch) -> None:
+    events: list[str] = []
+    stage_events: list[ScheduleFlowStageEvent] = []
+    outer_record = cast(LinkageTransactionRecord, _disarm_record("schedule_only"))
+    outer_store = _MutableStore(outer_record)
+    schedule_store = _MutableStore(object())
+    role_store = _MutableStore(None)
+    controller = ScheduleFlowExperimentController(
+        {},
+        cast(object, outer_store),
+        cast(object, schedule_store),
+        cast(object, role_store),
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+        stage_event_observer=stage_events.append,
+    )
+    controller._schedule_controller = _RecoverSchedule(  # type: ignore[assignment]  # noqa: SLF001
+        events,
+        schedule_store,
+    )
+    monkeypatch.setattr(controller, "_validate_recovery_bindings", lambda _record: None)
+    monkeypatch.setattr(
+        controller,
+        "_validate_nested_recovery_ownership",
+        lambda _outer, _schedule, _role: None,
+    )
+
+    async def disarm(_record) -> None:
+        events.append("timer:off_verified")
+
+    async def recover_outer(self, *, authority) -> bool:
+        del self, authority
+        outer_store.record = None
+        return True
+
+    monkeypatch.setattr(controller, "_disarm_temporary_schedule_uninterruptibly", disarm)
+    monkeypatch.setattr(TemporaryLinkageController, "recover_pending", recover_outer)
+
+    assert await controller.recover_experiment() is True
+    assert events == ["timer:off_verified", "schedule:restore"]
+    assert [event.stage for event in stage_events[:2]] == [
+        ScheduleFlowStage.ROLE_DISARM_STARTED,
+        ScheduleFlowStage.ROLE_DISARMED,
     ]
 
 

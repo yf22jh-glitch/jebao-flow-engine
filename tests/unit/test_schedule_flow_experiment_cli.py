@@ -22,13 +22,19 @@ from jebao_flow.devices.linkage import (
     LinkageTransactionRecord,
 )
 from jebao_flow.devices.schedule_flow_experiment import (
+    SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT,
+    SCHEDULE_FLOW_STAGE_EVENT_LIMIT,
     ScheduleFlowExperimentResult,
+    ScheduleFlowFailureCategory,
     ScheduleFlowOutcome,
+    ScheduleFlowStage,
+    ScheduleFlowStageEvent,
     classify_schedule_flow_sample,
 )
 from jebao_flow.devices.schedule_linkage import ScheduleAutoEvidence, ScheduleLinkageSample
 from jebao_flow.devices.schedule_transaction import (
     ScheduleImageSnapshot,
+    TemporaryScheduleErrorCode,
     TemporarySchedulePhase,
     TemporaryScheduleRecord,
 )
@@ -316,6 +322,133 @@ def test_armed_v3_intent_rejects_outer_diagnostic_progress() -> None:
 
     with pytest.raises(ValidationError, match="armed intents cannot contain"):
         HardwareTestIntent.model_validate(payload)
+
+
+def test_v3_stage_events_are_monotonic_bounded_and_identity_free() -> None:
+    intent = _intent(phase=HardwareTestIntentPhase.STARTED)
+    started = ScheduleFlowStageEvent(
+        stage=ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
+        occurred_at=intent.created_at,
+    )
+    first_write = ScheduleFlowStageEvent(
+        stage=ScheduleFlowStage.SENTINEL_WRITE_STARTED,
+        occurred_at=intent.created_at + timedelta(microseconds=1),
+        completed_participants=0,
+    )
+    first_verified = first_write.model_copy(
+        update={
+            "occurred_at": intent.created_at + timedelta(microseconds=2),
+            "completed_participants": 1,
+        }
+    )
+    validated = HardwareTestIntent.model_validate(
+        intent.model_dump(mode="python")
+        | {"schedule_flow_stage_events": (started, first_write, first_verified)}
+    )
+
+    assert validated.schedule_flow_stage_events[-1].completed_participants == 1
+    encoded = validated.schedule_flow_stage_events[-1].model_dump_json()
+    assert "device_id" not in encoded
+    assert "physical_binding" not in encoded
+    with pytest.raises(ValidationError):
+        ScheduleFlowStageEvent.model_validate(
+            started.model_dump(mode="python")
+            | {"raw_exception": "secret 198.51.100.77"}
+        )
+    with pytest.raises(ValidationError, match="stages must be monotonic"):
+        HardwareTestIntent.model_validate(
+            intent.model_dump(mode="python")
+            | {
+                "schedule_flow_stage_events": (
+                    first_write,
+                    started.model_copy(
+                        update={
+                            "occurred_at": intent.created_at
+                            + timedelta(microseconds=4)
+                        }
+                    ),
+                )
+            }
+        )
+
+    failed = ScheduleFlowStageEvent(
+        stage=ScheduleFlowStage.FIELD_WRITE_STARTED,
+        occurred_at=intent.created_at + timedelta(microseconds=5),
+        completed_participants=1,
+        temporary_error_code=TemporaryScheduleErrorCode.STAGE_WRITE_FAILED,
+    )
+    restored = ScheduleFlowStageEvent(
+        stage=ScheduleFlowStage.OUTER_RESTORED,
+        occurred_at=intent.created_at + timedelta(microseconds=6),
+    )
+    terminal = HardwareTestIntent.model_validate(
+        intent.model_dump(mode="python")
+        | {
+            "phase": HardwareTestIntentPhase.TERMINAL,
+            "outcome": "experiment_failed_restored",
+            "schedule_flow_stage_events": (failed, restored),
+        }
+    )
+    assert terminal.schedule_flow_stage_events[-1].stage is ScheduleFlowStage.OUTER_RESTORED
+    assert (
+        terminal.schedule_flow_stage_events[-2].temporary_error_code
+        is TemporaryScheduleErrorCode.STAGE_WRITE_FAILED
+    )
+    with pytest.raises(ValidationError, match="participant progress"):
+        HardwareTestIntent.model_validate(
+            intent.model_dump(mode="python")
+            | {
+                "schedule_flow_stage_events": (
+                    first_verified,
+                    first_write.model_copy(
+                        update={
+                            "occurred_at": intent.created_at
+                            + timedelta(microseconds=3)
+                        }
+                    ),
+                )
+            }
+        )
+
+
+def test_terminal_stage_has_a_reserved_slot_and_coalesces_replay() -> None:
+    intent = _intent(phase=HardwareTestIntentPhase.STARTED)
+    failures = tuple(
+        ScheduleFlowStageEvent(
+            stage=ScheduleFlowStage.OUTER_RESTORE_STARTED,
+            occurred_at=intent.created_at + timedelta(microseconds=index),
+            failure_category=ScheduleFlowFailureCategory.OUTER_RESTORE,
+        )
+        for index in range(SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT)
+    )
+    terminal_event = ScheduleFlowStageEvent(
+        stage=ScheduleFlowStage.OUTER_RESTORED,
+        occurred_at=intent.created_at
+        + timedelta(microseconds=SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT),
+    )
+
+    completed = cli._append_schedule_stage_event(failures, terminal_event)  # noqa: SLF001
+
+    assert len(completed) == SCHEDULE_FLOW_STAGE_EVENT_LIMIT
+    assert completed[:-1] == failures
+    assert completed[-1] == terminal_event
+    assert cli._append_schedule_stage_event(completed, terminal_event) == completed  # noqa: SLF001
+    validated = HardwareTestIntent.model_validate(
+        intent.model_dump(mode="python")
+        | {
+            "phase": HardwareTestIntentPhase.TERMINAL,
+            "outcome": "experiment_failed_restored",
+            "schedule_flow_stage_events": completed,
+        }
+    )
+    assert validated.schedule_flow_stage_events[:-1] == failures
+    with pytest.raises(cli.ScheduleFlowCliError, match="evidence is full"):
+        cli._append_schedule_stage_event(failures, failures[-1])  # noqa: SLF001
+    with pytest.raises(ValidationError, match="reserved schedule-flow event slot"):
+        HardwareTestIntent.model_validate(
+            intent.model_dump(mode="python")
+            | {"schedule_flow_stage_events": (*failures, failures[-1])}
+        )
 
 
 @pytest.mark.parametrize(
@@ -802,13 +935,56 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
     monkeypatch.setattr(cli, "_capture_schedule_context", capture_context)
 
     class Controller:
-        def __init__(self, _devices, outer, *_args, role_sample_observer, **_kwargs):
+        def __init__(
+            self,
+            _devices,
+            outer,
+            *_args,
+            role_sample_observer,
+            stage_event_observer,
+            **_kwargs,
+        ):
             self.outer = outer
             self.observe = role_sample_observer
+            self.observe_stage = stage_event_observer
             self.last_role_sample = None
             self.last_role_result = None
 
         async def run_experiment(self, spec):
+            now = datetime.now(UTC)
+            for index, stage in enumerate(
+                (
+                    ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
+                    ScheduleFlowStage.OUTER_BOOTSTRAP_COMPLETED,
+                    ScheduleFlowStage.SENTINEL_SNAPSHOT_STARTED,
+                    ScheduleFlowStage.SENTINEL_SNAPSHOT_COMPLETED,
+                    ScheduleFlowStage.SENTINEL_WRITE_STARTED,
+                    ScheduleFlowStage.SENTINEL_VERIFIED,
+                    ScheduleFlowStage.SENTINEL_RESTORE_STARTED,
+                    ScheduleFlowStage.SENTINEL_RESTORED,
+                    ScheduleFlowStage.FIELD_SNAPSHOT_STARTED,
+                    ScheduleFlowStage.FIELD_SNAPSHOT_COMPLETED,
+                    ScheduleFlowStage.FIELD_WRITE_STARTED,
+                    ScheduleFlowStage.FIELD_VERIFIED,
+                    ScheduleFlowStage.TIMER_ON_ARM_STARTED,
+                    ScheduleFlowStage.TIMER_ON_ARMED,
+                    ScheduleFlowStage.ROLE_PREFLIGHT_STARTED,
+                    ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED,
+                    ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+                    ScheduleFlowStage.ROLE_OBSERVATION_COMPLETED,
+                    ScheduleFlowStage.ROLE_DISARM_STARTED,
+                    ScheduleFlowStage.ROLE_DISARMED,
+                    ScheduleFlowStage.FIELD_RESTORE_STARTED,
+                    ScheduleFlowStage.FIELD_RESTORED,
+                    ScheduleFlowStage.OUTER_RESTORE_STARTED,
+                )
+            ):
+                self.observe_stage(
+                    ScheduleFlowStageEvent(
+                        stage=stage,
+                        occurred_at=now + timedelta(microseconds=index),
+                    )
+                )
             sample = _after_sample(slave_flow=32)
             self.last_role_sample = sample
             self.last_role_result = SimpleNamespace(schedule_transition_verified=True)
@@ -844,6 +1020,15 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
     assert terminal.stable_slave_tuple_observed is True
     assert terminal.stable_observation_seconds == 300
     assert terminal.schedule_flow_sample.slave.flow == 32
+    assert terminal.schedule_flow_stage_events[-1].stage is ScheduleFlowStage.OUTER_RESTORED
+    retained_stages = {event.stage for event in terminal.schedule_flow_stage_events}
+    assert {
+        ScheduleFlowStage.OUTER_BOOTSTRAP_COMPLETED,
+        ScheduleFlowStage.TIMER_ON_ARMED,
+        ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED,
+        ScheduleFlowStage.ROLE_OBSERVATION_COMPLETED,
+        ScheduleFlowStage.ROLE_DISARMED,
+    } <= retained_stages
     output = capsys.readouterr().out
     assert "slave_flow_fixed_at_previous" in output
     assert "Stable observation: 300s" in output
@@ -915,15 +1100,24 @@ async def test_bootstrap_failure_durably_records_outer_category_and_completed_re
             outer,
             *_args,
             diagnostic_event_observer,
+            stage_event_observer,
             **_kwargs,
         ):
             self.outer = outer
             self.diagnostic_event_observer = diagnostic_event_observer
+            self.stage_event_observer = stage_event_observer
             self.last_role_sample = None
             self.last_role_result = None
 
         async def run_experiment(self, _spec):
             now = datetime.now(UTC)
+            self.stage_event_observer(
+                ScheduleFlowStageEvent(
+                    stage=ScheduleFlowStage.OUTER_BOOTSTRAP_STARTED,
+                    occurred_at=now,
+                    failure_category=ScheduleFlowFailureCategory.OUTER_BOOTSTRAP,
+                )
+            )
             try:
                 self.diagnostic_event_observer(
                     LinkageDiagnosticEvent(
@@ -973,6 +1167,11 @@ async def test_bootstrap_failure_durably_records_outer_category_and_completed_re
     )
     assert terminal.evidence.rollback_started_at is not None
     assert terminal.evidence.rollback_completed_at is not None
+    assert terminal.schedule_flow_stage_events[-1].stage is ScheduleFlowStage.OUTER_RESTORED
+    assert any(
+        event.failure_category is ScheduleFlowFailureCategory.OUTER_BOOTSTRAP
+        for event in terminal.schedule_flow_stage_events
+    )
     assert intent_store.failed_once is True
     encoded = terminal.model_dump_json()
     assert "vendor-master-secret" not in encoded
@@ -1021,7 +1220,19 @@ async def test_recover_uses_composed_order_and_terminalizes_before_outer_clear(
     monkeypatch,
     capsys,
 ) -> None:
-    started = _intent(phase=HardwareTestIntentPhase.STARTED)
+    base = _intent(phase=HardwareTestIntentPhase.STARTED)
+    retained_failures = tuple(
+        ScheduleFlowStageEvent(
+            stage=ScheduleFlowStage.OUTER_RESTORE_STARTED,
+            occurred_at=base.created_at,
+            failure_category=ScheduleFlowFailureCategory.OUTER_RESTORE,
+        )
+        for _ in range(SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT)
+    )
+    started = HardwareTestIntent.model_validate(
+        base.model_dump(mode="python")
+        | {"schedule_flow_stage_events": retained_failures}
+    )
     now = datetime.now(UTC)
     outer_record = LinkageTransactionRecord(
         operation_id=started.operation_id,
@@ -1080,5 +1291,8 @@ async def test_recover_uses_composed_order_and_terminalizes_before_outer_clear(
     terminal = intent_store.load()
     assert terminal.phase is HardwareTestIntentPhase.TERMINAL
     assert terminal.outcome == "recovered"
+    assert terminal.schedule_flow_stage_events[:-1] == retained_failures
+    assert terminal.schedule_flow_stage_events[-1].stage is ScheduleFlowStage.OUTER_RESTORED
+    assert len(terminal.schedule_flow_stage_events) == SCHEDULE_FLOW_STAGE_EVENT_LIMIT
     assert outer_store.load() is None
     assert "restored in order" in capsys.readouterr().out
