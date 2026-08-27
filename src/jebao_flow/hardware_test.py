@@ -275,6 +275,8 @@ class HardwareTestIntent(BaseModel):
         evidence = self.evidence
         if evidence is None:
             return self
+        if self.phase is HardwareTestIntentPhase.ARMED and evidence != HardwareTestEvidence():
+            raise ValueError("armed version-two intents require empty diagnostic evidence")
         has_live_evidence = any(
             value is not None
             for value in (
@@ -1945,16 +1947,6 @@ def _status(
     if evidence is None:
         print("Diagnostic evidence: unknown (legacy or absent)")
     else:
-        if evidence.live_slave_full_state_verified_at is not None:
-            live_stage = "full_state_verified"
-        elif evidence.live_slave_adapter_verified_at is not None:
-            live_stage = "adapter_verified"
-        elif evidence.live_slave_write_attempted_at is not None:
-            live_stage = "write_attempted"
-        elif intent.spec.slave_power_after is None:
-            live_stage = "not_requested"
-        else:
-            live_stage = "not_attempted"
         forward_failure = (
             evidence.forward_failure.value
             if evidence.forward_failure is not None
@@ -1974,7 +1966,14 @@ def _status(
         print(
             "Diagnostic evidence: "
             f"active={'yes' if evidence.active_entered_at is not None else 'no'}, "
-            f"live_change={live_stage}, samples={evidence.verified_sample_count}, "
+            f"live_requested={'yes' if intent.spec.slave_power_after is not None else 'no'}, "
+            "write_attempted="
+            f"{'yes' if evidence.live_slave_write_attempted_at is not None else 'no'}, "
+            "adapter_verified="
+            f"{'yes' if evidence.live_slave_adapter_verified_at is not None else 'no'}, "
+            "full_state_verified="
+            f"{'yes' if evidence.live_slave_full_state_verified_at is not None else 'no'}, "
+            f"samples={evidence.verified_sample_count}, "
             f"forward_failure={forward_failure}"
         )
         print(
@@ -2190,6 +2189,18 @@ async def _recover_linkage(
         if intent.instance_id != config.instance.id:
             raise HardwareTestError("one-shot intent belongs to another instance")
         if intent.phase is HardwareTestIntentPhase.STARTED:
+            if intent.version == 2 and intent.evidence != HardwareTestEvidence():
+                intent_store.save(
+                    _updated_intent(
+                        intent,
+                        HardwareTestIntentPhase.RECOVERY_REQUIRED,
+                        "recovery_authority_missing",
+                    )
+                )
+                raise HardwareTestError(
+                    "diagnostic progress exists but the recovery journal is missing; "
+                    "refusing to declare a no-write crash"
+                )
             # STARTED precedes connect/controller.run; the core journal precedes its first write;
             # terminal intent precedes journal removal.  This state therefore proves zero writes.
             intent_store.save(

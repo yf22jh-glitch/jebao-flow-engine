@@ -353,9 +353,38 @@ def test_preflight_is_read_only_private_and_arms_exact_snapshot(
     assert intent.evidence == hardware_test.HardwareTestEvidence()
     assert intent.phase is hardware_test.HardwareTestIntentPhase.ARMED
     assert stat.S_IMODE(intent_path.stat().st_mode) == 0o600
+    raw_intent = intent_path.read_text(encoding="utf-8")
+    assert _VENDOR_MASTER_ID not in raw_intent
+    assert _VENDOR_SLAVE_ID not in raw_intent
+    assert _MASTER_MAC not in raw_intent
+    assert _SLAVE_MAC not in raw_intent
     assert hardware_test.canonical_journal_path(config).parent == (
         tmp_path / "shared-hardware-safety"
     )
+
+
+def test_forged_armed_diagnostic_progress_is_rejected_before_any_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    token = _token(capsys.readouterr().out)
+    intent_path = hardware_test.canonical_intent_path(config)
+    payload = json.loads(intent_path.read_text(encoding="utf-8"))
+    payload["evidence"]["active_entered_at"] = datetime.now(UTC).isoformat()
+    intent_path.write_text(json.dumps(payload), encoding="utf-8")
+    intent_path.chmod(0o600)
+
+    assert hardware_test.main(_args("run-native-linkage", confirmation=token)) == 2
+
+    assert "hardware-test intent is unreadable" in capsys.readouterr().err
+    assert devices["pro_left"].commands == []
+    assert devices["pro_right"].commands == []
+    assert hardware_test.canonical_journal_path(config).exists() is False
 
 
 def test_schedule_bootstrap_skips_prior_receipts_steps_async_slave_and_restores(
@@ -847,6 +876,24 @@ def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
 ) -> None:
     config = _config(tmp_path)
     devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    sensitive_values = (
+        _VENDOR_MASTER_ID,
+        _VENDOR_SLAVE_ID,
+        _MASTER_MAC,
+        _SLAVE_MAC,
+        "198.51.100.77",
+        "MQTT_PASSWORD=must-not-persist",
+        "sensitive transport detail",
+    )
+    for device in devices.values():
+        device._state = device._state.model_copy(  # noqa: SLF001
+            update={
+                "observed_attributes": {
+                    "address": "198.51.100.77",
+                    "credential": "MQTT_PASSWORD=must-not-persist",
+                }
+            }
+        )
     _install_fakes(monkeypatch, config, devices)
     args = _args("preflight")
     args[args.index("sync_slave")] = "async_slave"
@@ -912,6 +959,14 @@ def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
         )
         for failure in failed_evidence.rollback_failures
     ] == [("slave", "session_refresh", "session_refresh_failed")]
+    intent_json = hardware_test.canonical_intent_path(config).read_text(encoding="utf-8")
+    journal_json = hardware_test.canonical_journal_path(config).read_text(encoding="utf-8")
+    assert hardware_test.main(["status"]) == 0
+    status_output = capsys.readouterr().out
+    for sensitive in sensitive_values:
+        assert sensitive not in intent_json
+        assert sensitive not in journal_json
+        assert sensitive not in status_output
 
     monkeypatch.setattr(
         TemporaryLinkageController,
@@ -1093,6 +1148,18 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
     )
     assert evidence.forward_failure is not None
     assert evidence.rollback_completed_at is not None
+    assert hardware_test.main(["status"]) == 0
+    status_output = capsys.readouterr().out
+    adapter_verified = failure_kind not in {
+        "driver_power_error_then_converges",
+        "driver_power_error_with_slave_error",
+        "driver_power_error_with_schedule_change",
+        "slave_write_error",
+    }
+    full_state_verified = failure_kind == "driver_power_error_then_converges"
+    assert "write_attempted=yes" in status_output
+    assert f"adapter_verified={'yes' if adapter_verified else 'no'}" in status_output
+    assert f"full_state_verified={'yes' if full_state_verified else 'no'}" in status_output
 
 
 def test_native_intent_loads_version_one_without_primary_failure(
@@ -1632,6 +1699,46 @@ def test_started_intent_without_journal_closes_terminal_with_zero_writes(
     assert terminal is not None
     assert terminal.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
     assert terminal.outcome == "crashed_before_first_write"
+
+
+def test_started_intent_with_progress_and_no_journal_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    intent_store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    intent = intent_store.load()
+    assert intent is not None
+    progressed = hardware_test.HardwareTestIntent.model_validate(
+        {
+            **intent.model_dump(mode="python"),
+            "phase": hardware_test.HardwareTestIntentPhase.STARTED,
+            "evidence": hardware_test.HardwareTestEvidence(
+                active_entered_at=datetime.now(UTC)
+            ),
+        }
+    )
+    intent_store.save(progressed)
+
+    assert hardware_test.main(["recover-linkage"]) == 2
+
+    error_output = capsys.readouterr().err
+    assert "recovery journal is missing" in error_output
+    assert "refusing to declare a no-write crash" in error_output
+    assert devices["pro_left"].commands == []
+    assert devices["pro_right"].commands == []
+    locked = intent_store.load()
+    assert locked is not None
+    assert locked.phase is hardware_test.HardwareTestIntentPhase.RECOVERY_REQUIRED
+    assert locked.outcome == "recovery_authority_missing"
+    assert locked.evidence == progressed.evidence
 
 
 def test_pending_journal_recovers_exact_snapshot_after_confirmation(
