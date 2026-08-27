@@ -363,10 +363,12 @@ def test_preflight_is_read_only_private_and_arms_exact_snapshot(
     )
 
 
-def test_forged_armed_diagnostic_progress_is_rejected_before_any_write(
+@pytest.mark.parametrize("progress_kind", ("evidence", "primary_failure", "outcome"))
+def test_forged_armed_progress_is_rejected_before_any_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    progress_kind: str,
 ) -> None:
     config = _config(tmp_path)
     devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
@@ -375,7 +377,12 @@ def test_forged_armed_diagnostic_progress_is_rejected_before_any_write(
     token = _token(capsys.readouterr().out)
     intent_path = hardware_test.canonical_intent_path(config)
     payload = json.loads(intent_path.read_text(encoding="utf-8"))
-    payload["evidence"]["active_entered_at"] = datetime.now(UTC).isoformat()
+    if progress_kind == "evidence":
+        payload["evidence"]["active_entered_at"] = datetime.now(UTC).isoformat()
+    elif progress_kind == "primary_failure":
+        payload["primary_failure"] = "slave_power_change_not_verified"
+    else:
+        payload["outcome"] = "unexpected_armed_outcome"
     intent_path.write_text(json.dumps(payload), encoding="utf-8")
     intent_path.chmod(0o600)
 
@@ -1701,10 +1708,16 @@ def test_started_intent_without_journal_closes_terminal_with_zero_writes(
     assert terminal.outcome == "crashed_before_first_write"
 
 
+@pytest.mark.parametrize(
+    ("version", "progress_kind"),
+    ((2, "evidence"), (2, "primary_failure"), (1, "primary_failure"), (1, "outcome")),
+)
 def test_started_intent_with_progress_and_no_journal_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    version: int,
+    progress_kind: str,
 ) -> None:
     config = _config(tmp_path)
     devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
@@ -1716,15 +1729,29 @@ def test_started_intent_with_progress_and_no_journal_fails_closed(
     )
     intent = intent_store.load()
     assert intent is not None
-    progressed = hardware_test.HardwareTestIntent.model_validate(
+    payload = intent.model_dump(mode="python")
+    payload.update(
         {
-            **intent.model_dump(mode="python"),
+            "version": version,
             "phase": hardware_test.HardwareTestIntentPhase.STARTED,
-            "evidence": hardware_test.HardwareTestEvidence(
-                active_entered_at=datetime.now(UTC)
+            "evidence": (
+                hardware_test.HardwareTestEvidence(
+                    active_entered_at=datetime.now(UTC)
+                )
+                if version == 2 and progress_kind == "evidence"
+                else hardware_test.HardwareTestEvidence()
+                if version == 2
+                else None
             ),
+            "primary_failure": (
+                hardware_test.HardwareTestPrimaryFailure.SLAVE_POWER_CHANGE_NOT_VERIFIED
+                if progress_kind == "primary_failure"
+                else None
+            ),
+            "outcome": "unexpected_started_outcome" if progress_kind == "outcome" else None,
         }
     )
+    progressed = hardware_test.HardwareTestIntent.model_validate(payload)
     intent_store.save(progressed)
 
     assert hardware_test.main(["recover-linkage"]) == 2

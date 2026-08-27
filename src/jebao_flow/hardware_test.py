@@ -266,6 +266,20 @@ class HardwareTestIntent(BaseModel):
     primary_failure: HardwareTestPrimaryFailure | None = None
     evidence: HardwareTestEvidence | None = None
 
+    @property
+    def has_diagnostic_progress(self) -> bool:
+        """Whether durable intent fields prove execution moved beyond an untouched preview."""
+
+        return (
+            self.outcome is not None
+            or self.primary_failure is not None
+            or (
+                self.version == 2
+                and self.evidence is not None
+                and self.evidence != HardwareTestEvidence()
+            )
+        )
+
     @model_validator(mode="after")
     def validate_versioned_evidence(self) -> HardwareTestIntent:
         if self.version == 1 and self.evidence is not None:
@@ -275,8 +289,8 @@ class HardwareTestIntent(BaseModel):
         evidence = self.evidence
         if evidence is None:
             return self
-        if self.phase is HardwareTestIntentPhase.ARMED and evidence != HardwareTestEvidence():
-            raise ValueError("armed version-two intents require empty diagnostic evidence")
+        if self.phase is HardwareTestIntentPhase.ARMED and self.has_diagnostic_progress:
+            raise ValueError("armed intents cannot contain execution progress")
         has_live_evidence = any(
             value is not None
             for value in (
@@ -2189,7 +2203,7 @@ async def _recover_linkage(
         if intent.instance_id != config.instance.id:
             raise HardwareTestError("one-shot intent belongs to another instance")
         if intent.phase is HardwareTestIntentPhase.STARTED:
-            if intent.version == 2 and intent.evidence != HardwareTestEvidence():
+            if intent.has_diagnostic_progress:
                 intent_store.save(
                     _updated_intent(
                         intent,
