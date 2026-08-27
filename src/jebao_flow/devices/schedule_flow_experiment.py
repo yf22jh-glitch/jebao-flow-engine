@@ -118,11 +118,14 @@ class ScheduleFlowExperimentSpec(BaseModel):
     maximum_clock_skew_seconds: float = Field(default=2, ge=0.1, le=10)
     clock_advance_tolerance_seconds: float = Field(default=2, ge=0.1, le=10)
     sentinel_qualification: bool = True
+    sentinel_only: bool = False
 
     @model_validator(mode="after")
     def validate_experiment(self) -> Self:
         if self.master_device_id == self.slave_device_id:
             raise ValueError("master and slave devices must differ")
+        if self.sentinel_only and not self.sentinel_qualification:
+            raise ValueError("sentinel-only qualification requires the sentinel transaction")
         if self.boundary_time == "00:00":
             raise ValueError("the experiment boundary cannot be midnight")
         if self.slave_before_flow == self.slave_after_flow:
@@ -349,14 +352,29 @@ class ScheduleFlowExperimentResult(BaseModel):
 
     operation_id: str
     sentinel_qualified: bool
-    outcome: ScheduleFlowOutcome
-    last_after_sample: ScheduleLinkageSample
+    outcome: ScheduleFlowOutcome | Literal["wire_qualified"]
+    last_after_sample: ScheduleLinkageSample | None
     schedule_transition_verified: bool
-    stable_slave_tuple_observed: Literal[True] = True
+    stable_slave_tuple_observed: bool = True
     stable_observation_seconds: float = Field(ge=0, le=300)
     temporary_schedule_restored: Literal[True] = True
     original_controls_restored: Literal[True] = True
     completed_at: datetime
+
+    @model_validator(mode="after")
+    def validate_result_shape(self) -> Self:
+        if self.outcome == "wire_qualified":
+            if (
+                not self.sentinel_qualified
+                or self.last_after_sample is not None
+                or self.schedule_transition_verified
+                or self.stable_slave_tuple_observed
+                or self.stable_observation_seconds != 0
+            ):
+                raise ValueError("wire qualification cannot contain field observation evidence")
+        elif self.last_after_sample is None or not self.stable_slave_tuple_observed:
+            raise ValueError("schedule-flow outcomes require stable field observation evidence")
+        return self
 
 
 PauseAuthorizer = Callable[
@@ -416,6 +434,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         self._last_schedule_stage: ScheduleFlowStage | None = None
         self._schedule_failure_recorded = False
         self._outer_pause_completed = 0
+        self._wire_qualification_verified = False
 
     async def run_experiment(
         self,
@@ -442,8 +461,24 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             self._last_schedule_stage = None
             self._schedule_failure_recorded = False
             self._outer_pause_completed = 0
+            self._wire_qualification_verified = False
             try:
                 outer_result = await super().run(spec.outer_linkage_spec())
+                if spec.sentinel_only:
+                    if not self._wire_qualification_verified:
+                        raise LinkageTransactionError(
+                            "schedule wire qualification was not fully verified"
+                        )
+                    return ScheduleFlowExperimentResult(
+                        operation_id=spec.operation_id,
+                        sentinel_qualified=True,
+                        outcome="wire_qualified",
+                        last_after_sample=None,
+                        schedule_transition_verified=False,
+                        stable_slave_tuple_observed=False,
+                        stable_observation_seconds=0,
+                        completed_at=outer_result.completed_at,
+                    )
                 if self._temporary_result is None or self._role_result is None:
                     raise LinkageTransactionError(
                         "schedule-flow experiment produced no verified result"
@@ -497,6 +532,12 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         """Return completed stable-boundary evidence for durable attended CLI handoff."""
 
         return self._role_result
+
+    @property
+    def wire_qualification_verified(self) -> bool:
+        """Whether sentinel proof and the safe outer baseline both verified this run."""
+
+        return self._wire_qualification_verified
 
     def _observe_role_sample(self, sample: ScheduleLinkageSample) -> None:
         self._last_role_sample = sample
@@ -722,6 +763,9 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                         best_effort=True,
                     )
                 raise
+
+        if spec.sentinel_only:
+            return
 
         async def observe(_record: TemporaryScheduleRecord) -> ObservationCompletion:
             role_error: BaseException | None = None
@@ -1116,12 +1160,15 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 raise LinkageTransactionError(
                     "schedule-flow experiment did not return to its safe outer baseline"
                 )
-
     async def _monitor_until_stop(
         self,
         record: LinkageTransactionRecord,
     ) -> tuple[LinkageStopReason, bool]:
-        del record
+        experiment = self._require_experiment(record)
+        if experiment.sentinel_only:
+            # Reaching the monitor proves sparse write/read/restore, the safe baseline readback,
+            # and the durable ACTIVE transition all completed before outer exact rollback starts.
+            self._wire_qualification_verified = True
         return LinkageStopReason.TIMEOUT, False
 
     async def _sentinel_spec(

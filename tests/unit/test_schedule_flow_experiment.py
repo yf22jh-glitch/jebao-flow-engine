@@ -513,6 +513,11 @@ def test_plan_rejects_an_experiment_that_cannot_prove_slave_independence(
         _spec(**updates)
 
 
+def test_sentinel_only_requires_sentinel_qualification() -> None:
+    with pytest.raises(ValidationError, match="requires the sentinel transaction"):
+        _spec(sentinel_only=True, sentinel_qualification=False)
+
+
 class _UnusedStore:
     def load(self):
         return None
@@ -630,6 +635,35 @@ async def test_nested_sequence_disarms_before_temporary_schedule_restore() -> No
     ]
 
 
+async def test_sentinel_only_never_enters_field_timer_or_role_paths() -> None:
+    events: list[str] = []
+    controller = _SequenceController(events)
+    spec = _spec(sentinel_only=True)
+    controller._experiment_spec = spec  # noqa: SLF001
+    schedule = _FakeScheduleController(events)
+    controller._schedule_controller = schedule  # type: ignore[assignment]  # noqa: SLF001
+
+    class RejectRoleController:
+        async def preflight(self, _spec):
+            raise AssertionError("sentinel-only must not enter role preflight")
+
+        async def run(self, _preflight):
+            raise AssertionError("sentinel-only must not enter role observation")
+
+    controller._role_controller = RejectRoleController()  # type: ignore[assignment]  # noqa: SLF001
+    record = cast(
+        LinkageTransactionRecord,
+        SimpleNamespace(operation_id=spec.operation_id),
+    )
+
+    await controller._activate_relationship(record)  # noqa: SLF001
+
+    assert schedule.calls == 1
+    assert events == ["sentinel:stage", "sentinel:restore"]
+    assert controller._temporary_result is None  # noqa: SLF001
+    assert controller._role_result is None  # noqa: SLF001
+
+
 async def test_role_failure_still_disarms_then_restores_temporary_schedule() -> None:
     events: list[str] = []
     controller = _SequenceController(events)
@@ -726,6 +760,36 @@ async def test_concurrent_call_cannot_replace_active_experiment_state(monkeypatc
     result = await task
     assert result.operation_id == "first"
     assert controller._experiment_spec is None  # noqa: SLF001
+
+
+async def test_completed_sentinel_only_returns_wire_qualified_without_field_sample(
+    monkeypatch,
+) -> None:
+    async def fake_parent_run(self, _outer_spec):
+        self._sentinel_result = cast(TemporaryScheduleResult, SimpleNamespace())
+        self._wire_qualification_verified = True
+        return SimpleNamespace(completed_at=datetime.now(UTC))
+
+    monkeypatch.setattr(TemporaryLinkageController, "run", fake_parent_run)
+    store = cast(object, _UnusedStore())
+    controller = ScheduleFlowExperimentController(
+        {},
+        cast(object, store),
+        cast(object, store),
+        cast(object, store),
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+    )
+
+    result = await controller.run_experiment(_spec(sentinel_only=True))
+
+    assert result.outcome == "wire_qualified"
+    assert result.sentinel_qualified is True
+    assert result.last_after_sample is None
+    assert result.schedule_transition_verified is False
+    assert result.stable_slave_tuple_observed is False
+    assert result.stable_observation_seconds == 0
 
 
 @pytest.mark.parametrize(

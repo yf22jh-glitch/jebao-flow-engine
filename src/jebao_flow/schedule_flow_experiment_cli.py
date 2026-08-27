@@ -126,6 +126,7 @@ def _fixed_spec(
     master_device_id: str,
     slave_device_id: str,
     boundary_time: str,
+    sentinel_only: bool = False,
 ) -> ScheduleFlowExperimentSpec:
     """Return the only field-test plan currently audited for physical execution."""
 
@@ -149,6 +150,7 @@ def _fixed_spec(
         maximum_clock_skew_seconds=2,
         clock_advance_tolerance_seconds=2,
         sentinel_qualification=True,
+        sentinel_only=sentinel_only,
     )
     requested = (
         spec.master_before_flow,
@@ -199,8 +201,16 @@ def _require_plan_supported(
     spec: ScheduleFlowExperimentSpec,
 ) -> None:
     requested = {
-        spec.master_device_id: (spec.master_before_flow, spec.master_after_flow),
-        spec.slave_device_id: (spec.slave_before_flow, spec.slave_after_flow),
+        spec.master_device_id: (
+            (spec.master_before_flow,)
+            if spec.sentinel_only
+            else (spec.master_before_flow, spec.master_after_flow)
+        ),
+        spec.slave_device_id: (
+            (spec.slave_before_flow,)
+            if spec.sentinel_only
+            else (spec.slave_before_flow, spec.slave_after_flow)
+        ),
     }
     for device_id, flows in requested.items():
         capabilities = devices[device_id].capabilities
@@ -448,6 +458,7 @@ async def _preflight(
                 master_device_id=args.master,
                 slave_device_id=args.slave,
                 boundary_time="12:00",
+                sentinel_only=getattr(args, "sentinel_only", False),
             )
             _require_plan_supported(devices, provisional)
             snapshots = await _capture_preview(devices, provisional.outer_linkage_spec())
@@ -462,6 +473,7 @@ async def _preflight(
             master_device_id=args.master,
             slave_device_id=args.slave,
             boundary_time=_next_boundary(clocks),
+            sentinel_only=getattr(args, "sentinel_only", False),
         )
         token = schedule_flow_confirmation_token(
             config.instance.id,
@@ -488,8 +500,11 @@ async def _preflight(
 
     print("Schedule-flow preflight passed; no control or schedule frame was sent.")
     print(f"Boundary: {spec.boundary_time} (device-local time)")
-    print("Plan: Constant master 31% / slave 32% -> Sine master 35% / slave 40%.")
-    print("Observation: 300s stable evidence inside a 600s bounded window.")
+    if spec.sentinel_only:
+        print("Plan: sparse unused-slot wire qualification only; no field or role activation.")
+    else:
+        print("Plan: Constant master 31% / slave 32% -> Sine master 35% / slave 40%.")
+        print("Observation: 300s stable evidence inside a 600s bounded window.")
     print(f"Confirmation token: {token}")
     return 0
 
@@ -501,6 +516,7 @@ def _spec_from_run_args(args: argparse.Namespace) -> ScheduleFlowExperimentSpec:
         master_device_id=args.master,
         slave_device_id=args.slave,
         boundary_time=args.boundary_time,
+        sentinel_only=getattr(args, "sentinel_only", False),
     )
 
 
@@ -524,10 +540,10 @@ def _snapshot_authorizer(
     intent_store: JsonHardwareTestIntentStore,
     expected_intent: HardwareTestIntent,
 ):
-    expected_operation_ids = {
-        f"{expected_intent.operation_id}_sentinel",
-        f"{expected_intent.operation_id}_schedule",
-    }
+    flow_spec = expected_intent.schedule_flow_spec
+    expected_operation_ids = {f"{expected_intent.operation_id}_sentinel"}
+    if flow_spec is None or not flow_spec.sentinel_only:
+        expected_operation_ids.add(f"{expected_intent.operation_id}_schedule")
 
     def authorize(
         spec: TemporaryScheduleSpec,
@@ -827,7 +843,10 @@ async def _run(
                     current,
                     HardwareTestIntentPhase.TERMINAL,
                     (
-                        current.schedule_flow_outcome.value
+                        "wire_qualified"
+                        if spec.sentinel_only
+                        and controller.wire_qualification_verified
+                        else current.schedule_flow_outcome.value
                         if current.schedule_flow_outcome is not None
                         else "restored"
                     ),
@@ -914,15 +933,35 @@ async def _run(
                 raise
 
         current = intent_store.load() or intent
-        result_already_durable = (
-            current.phase is HardwareTestIntentPhase.TERMINAL
-            and current.outcome == result.outcome.value
-            and current.schedule_flow_outcome is result.outcome
-            and current.schedule_flow_sample == result.last_after_sample
-            and current.schedule_transition_verified is result.schedule_transition_verified
-            and current.stable_slave_tuple_observed is result.stable_slave_tuple_observed
-            and current.stable_observation_seconds == result.stable_observation_seconds
+        result_outcome = (
+            "wire_qualified"
+            if result.outcome == "wire_qualified"
+            else result.outcome.value
         )
+        if result_outcome == "wire_qualified":
+            if not (
+                current.phase is HardwareTestIntentPhase.TERMINAL
+                and current.outcome == "wire_qualified"
+                and current.schedule_flow_outcome is None
+                and current.schedule_flow_sample is None
+                and current.schedule_transition_verified is None
+                and current.stable_slave_tuple_observed is None
+                and current.stable_observation_seconds is None
+            ):
+                raise ScheduleFlowCliError(
+                    "wire qualification was not durable before outer journal clear"
+                )
+            result_already_durable = True
+        else:
+            result_already_durable = (
+                current.phase is HardwareTestIntentPhase.TERMINAL
+                and current.outcome == result_outcome
+                and current.schedule_flow_outcome is result.outcome
+                and current.schedule_flow_sample == result.last_after_sample
+                and current.schedule_transition_verified is result.schedule_transition_verified
+                and current.stable_slave_tuple_observed is result.stable_slave_tuple_observed
+                and current.stable_observation_seconds == result.stable_observation_seconds
+            )
         if not result_already_durable:
             current = current.model_copy(
                 update={
@@ -937,13 +976,14 @@ async def _run(
             current = _updated_intent(
                 current,
                 HardwareTestIntentPhase.TERMINAL,
-                result.outcome.value,
+                result_outcome,
             )
             intent_store.save(current)
 
-    print(f"Schedule-flow result: {result.outcome.value}")
+    print(f"Schedule-flow result: {result_outcome}")
     _print_sample(result.last_after_sample)
-    print(f"Stable observation: {result.stable_observation_seconds:g}s")
+    if result_outcome != "wire_qualified":
+        print(f"Stable observation: {result.stable_observation_seconds:g}s")
     print("Exact schedules and original control states were restored.")
     return 0
 
@@ -1027,6 +1067,18 @@ def _load_recovery_state(
     flow_spec = intent.schedule_flow_spec
     if flow_spec is None:
         raise ScheduleFlowCliError("schedule-flow recovery spec is unavailable")
+    if flow_spec.sentinel_only:
+        if role is not None:
+            raise ScheduleFlowCliError(
+                "sentinel-only recovery cannot contain a role journal"
+            )
+        if (
+            temporary is not None
+            and temporary.spec.kind is not TemporaryScheduleKind.SENTINEL_QUALIFICATION
+        ):
+            raise ScheduleFlowCliError(
+                "sentinel-only recovery cannot contain a field schedule journal"
+            )
     if temporary is not None:
         try:
             _assert_digest_match(intent.schedule_image_digests, temporary.snapshots)
@@ -1391,10 +1443,20 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     preflight = commands.add_parser("preflight", help="read and arm the exact experiment")
     _add_identity_arguments(preflight)
+    preflight.add_argument(
+        "--sentinel-only",
+        action="store_true",
+        help="qualify only sparse schedule-wire write/read/restore behavior",
+    )
     run = commands.add_parser("run", help="run one exactly confirmed experiment")
     _add_identity_arguments(run)
     run.add_argument("--boundary-time", required=True, help="HH:MM printed by preflight")
     run.add_argument("--confirm", required=True, help="JFE token printed by preflight")
+    run.add_argument(
+        "--sentinel-only",
+        action="store_true",
+        help="run the sentinel-only plan armed by preflight",
+    )
     recover = commands.add_parser("recover", help="preview or confirm ordered recovery")
     recover.add_argument("--confirm", help="JFER token printed by status/recover preview")
     commands.add_parser("status", help="show only sanitized durable state")

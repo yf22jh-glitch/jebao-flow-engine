@@ -124,6 +124,30 @@ TERMINAL_SCHEDULE_FLOW_OUTCOMES = frozenset(
         "experiment_failed_restored",
         "recovered",
         "restored",
+        "wire_qualified",
+    }
+)
+_WIRE_QUALIFICATION_REQUIRED_STAGES = (
+    ScheduleFlowStage.SENTINEL_VERIFIED,
+    ScheduleFlowStage.SENTINEL_RESTORED,
+    ScheduleFlowStage.OUTER_RESTORED,
+)
+_WIRE_QUALIFICATION_FORBIDDEN_STAGES = frozenset(
+    {
+        ScheduleFlowStage.FIELD_SNAPSHOT_STARTED,
+        ScheduleFlowStage.FIELD_SNAPSHOT_COMPLETED,
+        ScheduleFlowStage.FIELD_WRITE_STARTED,
+        ScheduleFlowStage.FIELD_VERIFIED,
+        ScheduleFlowStage.TIMER_ON_ARM_STARTED,
+        ScheduleFlowStage.TIMER_ON_ARMED,
+        ScheduleFlowStage.ROLE_PREFLIGHT_STARTED,
+        ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED,
+        ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+        ScheduleFlowStage.ROLE_OBSERVATION_COMPLETED,
+        ScheduleFlowStage.ROLE_DISARM_STARTED,
+        ScheduleFlowStage.ROLE_DISARMED,
+        ScheduleFlowStage.FIELD_RESTORE_STARTED,
+        ScheduleFlowStage.FIELD_RESTORED,
     }
 )
 
@@ -448,6 +472,8 @@ class HardwareTestIntent(BaseModel):
         )
         if self.version < 3 and has_schedule_extension:
             raise ValueError("schedule-flow evidence requires a version-three intent")
+        if self.outcome == "wire_qualified" and self.version != 3:
+            raise ValueError("wire qualification requires a version-three intent")
         if self.version == 3:
             flow_spec = self.schedule_flow_spec
             if flow_spec is None or len(self.schedule_image_digests) != 2:
@@ -465,6 +491,26 @@ class HardwareTestIntent(BaseModel):
                 for digest in self.schedule_image_digests
             ):
                 raise ValueError("schedule-flow schedule and control bindings disagree")
+            result_metadata = (
+                self.schedule_flow_outcome,
+                self.schedule_flow_sample,
+                self.schedule_transition_verified,
+                self.stable_slave_tuple_observed,
+                self.stable_observation_seconds,
+            )
+            classified_outcomes = frozenset(outcome.value for outcome in ScheduleFlowOutcome)
+            if flow_spec.sentinel_only:
+                if any(value is not None for value in result_metadata):
+                    raise ValueError(
+                        "sentinel-only intents cannot contain field result metadata"
+                    )
+                if (
+                    self.phase is HardwareTestIntentPhase.TERMINAL
+                    and self.outcome in classified_outcomes
+                ):
+                    raise ValueError(
+                        "sentinel-only intents cannot use a schedule-flow classification"
+                    )
             previous_event: ScheduleFlowStageEvent | None = None
             for event in self.schedule_flow_stage_events:
                 if event.occurred_at < self.created_at:
@@ -497,6 +543,40 @@ class HardwareTestIntent(BaseModel):
                     raise ValueError(
                         "the reserved schedule-flow event slot requires OUTER_RESTORED"
                     )
+            if self.outcome == "wire_qualified":
+                if self.phase is not HardwareTestIntentPhase.TERMINAL:
+                    raise ValueError("wire qualification must be terminal")
+                if not flow_spec.sentinel_only:
+                    raise ValueError("wire qualification requires a sentinel-only spec")
+                stages = tuple(event.stage for event in self.schedule_flow_stage_events)
+                if any(
+                    stage in _WIRE_QUALIFICATION_FORBIDDEN_STAGES for stage in stages
+                ):
+                    raise ValueError("wire qualification cannot contain field or role stages")
+                if any(
+                    event.temporary_error_code is not None
+                    or event.failure_category is not None
+                    for event in self.schedule_flow_stage_events
+                ):
+                    raise ValueError("wire qualification cannot contain failure evidence")
+                cursor = -1
+                for required_stage in _WIRE_QUALIFICATION_REQUIRED_STAGES:
+                    try:
+                        cursor = stages.index(required_stage, cursor + 1)
+                    except ValueError:
+                        raise ValueError(
+                            "wire qualification lacks ordered durable stage evidence"
+                        ) from None
+                    required_event = self.schedule_flow_stage_events[cursor]
+                    if required_stage in {
+                        ScheduleFlowStage.SENTINEL_VERIFIED,
+                        ScheduleFlowStage.SENTINEL_RESTORED,
+                    } and required_event.completed_participants != 2:
+                        raise ValueError(
+                            "wire qualification requires both sentinel participants"
+                        )
+                if stages[-1] is not ScheduleFlowStage.OUTER_RESTORED:
+                    raise ValueError("wire qualification must end with outer restoration")
             if self.schedule_flow_sample is not None:
                 sample = self.schedule_flow_sample
                 if (
@@ -506,17 +586,17 @@ class HardwareTestIntent(BaseModel):
                     raise ValueError("schedule-flow sample has an invalid role topology")
             if self.schedule_flow_outcome is not None and self.schedule_flow_sample is None:
                 raise ValueError("schedule-flow outcome requires durable sample evidence")
-            result_metadata = (
+            classification_metadata = (
                 self.schedule_transition_verified,
                 self.stable_slave_tuple_observed,
                 self.stable_observation_seconds,
             )
             if self.schedule_flow_outcome is None and any(
-                value is not None for value in result_metadata
+                value is not None for value in classification_metadata
             ):
                 raise ValueError("schedule-flow result metadata requires an outcome")
             if self.schedule_flow_outcome is not None and any(
-                value is None for value in result_metadata
+                value is None for value in classification_metadata
             ):
                 raise ValueError("schedule-flow outcome requires complete result metadata")
             if self.schedule_flow_outcome is not None:
@@ -535,6 +615,18 @@ class HardwareTestIntent(BaseModel):
                     raise ValueError("schedule-flow outcome requires a stable slave tuple")
                 if self.stable_observation_seconds != flow_spec.post_boundary_stability_seconds:
                     raise ValueError("schedule-flow stable duration disagrees with full spec")
+            if (
+                not flow_spec.sentinel_only
+                and self.phase is HardwareTestIntentPhase.TERMINAL
+                and self.outcome in classified_outcomes
+                and (
+                    self.schedule_flow_outcome is None
+                    or self.outcome != self.schedule_flow_outcome.value
+                )
+            ):
+                raise ValueError(
+                    "terminal schedule-flow outcome disagrees with classified evidence"
+                )
         evidence = self.evidence
         if evidence is None:
             return self
@@ -1170,10 +1262,15 @@ def schedule_flow_confirmation_token(
 ) -> str:
     """Bind the attended experiment to controls, the full plan, and both exact images."""
 
+    schedule_flow_spec = spec.model_dump(mode="json")
+    if not spec.sentinel_only:
+        # Preserve confirmation and recovery authority for v3 intents armed before the
+        # sentinel-only field existed. A true value remains explicit and token-bound.
+        schedule_flow_spec.pop("sentinel_only")
     canonical = {
         "version": 1,
         "instance_id": instance_id,
-        "schedule_flow_spec": spec.model_dump(mode="json"),
+        "schedule_flow_spec": schedule_flow_spec,
         "snapshots": [
             snapshot.model_dump(mode="json")
             for snapshot in sorted(snapshots, key=lambda value: value.device_id)
