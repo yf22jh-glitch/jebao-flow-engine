@@ -534,6 +534,106 @@ def test_boundary_uses_freshest_device_clock_and_refuses_skew_or_midnight() -> N
         )
 
 
+async def test_schedule_context_starts_both_device_reads_concurrently() -> None:
+    started: list[str] = []
+    both_started = asyncio.Event()
+    clock = datetime(2026, 8, 27, 12, 10, 1)
+
+    class Device:
+        def __init__(self, device_id: str, seed: str, local_clock: datetime) -> None:
+            self.device_id = device_id
+            self.physical_binding = _binding(seed)
+            self.local_clock = local_clock
+
+        async def get_state(self):
+            started.append(self.device_id)
+            if len(started) == 2:
+                both_started.set()
+            await both_started.wait()
+            return SimpleNamespace(
+                online=True,
+                error=None,
+                timer_enabled=True,
+                schedule=SimpleNamespace(
+                    enabled=True,
+                    device_local_time=self.local_clock,
+                ),
+            )
+
+        async def read_schedule_image(self) -> bytes:
+            return bytes(48 * 9)
+
+    digests, clocks = await asyncio.wait_for(
+        cli._capture_schedule_context(  # noqa: SLF001
+            {
+                "master": Device("master", "01", clock),
+                "slave": Device("slave", "02", clock),
+            },
+            ("master", "slave"),
+        ),
+        timeout=1,
+    )
+
+    assert started == ["master", "slave"]
+    assert tuple(digest.device_id for digest in digests) == ("master", "slave")
+    assert clocks == (clock, clock)
+
+    started.clear()
+    both_started = asyncio.Event()
+    _digests, skewed = await cli._capture_schedule_context(  # noqa: SLF001
+        {
+            "master": Device("master", "01", clock),
+            "slave": Device("slave", "02", clock + timedelta(seconds=3)),
+        },
+        ("master", "slave"),
+    )
+    with pytest.raises(cli.ScheduleFlowCliError, match="two-second skew"):
+        cli._next_boundary(skewed)  # noqa: SLF001
+
+
+async def test_schedule_context_waits_for_the_sibling_read_before_raising() -> None:
+    sibling_started = asyncio.Event()
+    sibling_completed = asyncio.Event()
+    clock = datetime(2026, 8, 27, 12, 10, 1)
+
+    class FailingDevice:
+        device_id = "master"
+        physical_binding = _binding("01")
+
+        async def get_state(self):
+            await sibling_started.wait()
+            raise cli.ScheduleFlowCliError("simulated read failure")
+
+        async def read_schedule_image(self) -> bytes:
+            raise AssertionError("failed state must not continue to schedule read")
+
+    class CompletingDevice:
+        device_id = "slave"
+        physical_binding = _binding("02")
+
+        async def get_state(self):
+            sibling_started.set()
+            return SimpleNamespace(
+                online=True,
+                error=None,
+                timer_enabled=True,
+                schedule=SimpleNamespace(enabled=True, device_local_time=clock),
+            )
+
+        async def read_schedule_image(self) -> bytes:
+            await asyncio.sleep(0)
+            sibling_completed.set()
+            return bytes(48 * 9)
+
+    with pytest.raises(cli.ScheduleFlowCliError, match="simulated read failure"):
+        await cli._capture_schedule_context(  # noqa: SLF001
+            {"master": FailingDevice(), "slave": CompletingDevice()},
+            ("master", "slave"),
+        )
+
+    assert sibling_completed.is_set()
+
+
 def test_run_boundary_must_still_have_one_to_three_minutes_lead() -> None:
     cli._require_boundary_still_fresh(  # noqa: SLF001
         "12:14",

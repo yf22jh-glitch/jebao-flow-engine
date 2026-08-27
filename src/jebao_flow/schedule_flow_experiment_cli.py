@@ -250,9 +250,9 @@ async def _capture_schedule_context(
     devices: Mapping[str, JebaoDevice],
     device_ids: Sequence[str],
 ) -> tuple[tuple[HardwareTestScheduleImageDigest, ...], tuple[datetime, ...]]:
-    digests: list[HardwareTestScheduleImageDigest] = []
-    clocks: list[datetime] = []
-    for device_id in device_ids:
+    async def capture(
+        device_id: str,
+    ) -> tuple[HardwareTestScheduleImageDigest, datetime]:
         device = devices[device_id]
         state = await device.get_state()
         schedule = state.schedule
@@ -268,9 +268,23 @@ async def _capture_schedule_context(
                 "both controllers require fresh TimerON schedule state and device clocks"
             )
         image = await device.read_schedule_image()
-        digests.append(_schedule_digest(device_id, device, image))
-        clocks.append(schedule.device_local_time)
-    return tuple(digests), tuple(clocks)
+        return (
+            _schedule_digest(device_id, device, image),
+            schedule.device_local_time,
+        )
+
+    results = await asyncio.gather(
+        *(capture(device_id) for device_id in device_ids),
+        return_exceptions=True,
+    )
+    captures: list[tuple[HardwareTestScheduleImageDigest, datetime]] = []
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+        captures.append(result)
+    digests = tuple(digest for digest, _clock in captures)
+    clocks = tuple(clock for _digest, clock in captures)
+    return digests, clocks
 
 
 def _require_receipts(
