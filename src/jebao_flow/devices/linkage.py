@@ -118,6 +118,113 @@ class LinkageStopReason(StrEnum):
     TIMEOUT = "timeout"
 
 
+class LinkageDiagnosticEventKind(StrEnum):
+    """Redacted forward-progress evidence emitted by the bounded test controller."""
+
+    ACTIVE_ENTERED = "active_entered"
+    LIVE_SLAVE_WRITE_ATTEMPTED = "live_slave_write_attempted"
+    LIVE_SLAVE_ADAPTER_VERIFIED = "live_slave_adapter_verified"
+    LIVE_SLAVE_FULL_STATE_VERIFIED = "live_slave_full_state_verified"
+    LIVE_SLAVE_SAMPLE_VERIFIED = "live_slave_sample_verified"
+    FORWARD_FAILED = "forward_failed"
+    ROLLBACK_STARTED = "rollback_started"
+
+
+class LinkageForwardFailureCategory(StrEnum):
+    """Fixed, non-sensitive reason a forward diagnostic stopped before rollback."""
+
+    LIVE_SLAVE_POWER_NOT_VERIFIED = "live_slave_power_not_verified"
+    POWER_STATE_NOT_VERIFIED = "power_state_not_verified"
+    TRANSACTION_FAILED = "transaction_failed"
+    CANCELLED = "cancelled"
+    UNEXPECTED_FAILURE = "unexpected_failure"
+
+
+class LinkageRollbackParticipant(StrEnum):
+    MASTER = "master"
+    SLAVE = "slave"
+
+
+class LinkageRollbackStage(StrEnum):
+    SESSION_REFRESH = "session_refresh"
+    STATE_READ = "state_read"
+    DETACH = "detach"
+    CONTROL_RESTORE = "control_restore"
+    TIMER_RESTORE = "timer_restore"
+    SAFE_FALLBACK = "safe_fallback"
+    FINAL_VERIFICATION = "final_verification"
+
+
+class LinkageRollbackFailureCategory(StrEnum):
+    """Allow-listed rollback errors safe to persist and show to an operator."""
+
+    SESSION_REFRESH_FAILED = "session_refresh_failed"
+    STATE_READ_FAILED = "state_read_failed"
+    DETACH_FAILED = "detach_failed"
+    SLAVE_DETACH_UNCONFIRMED = "slave_detach_unconfirmed"
+    CONTROL_RESTORE_FAILED = "control_restore_failed"
+    TIMER_RESTORE_FAILED = "timer_restore_failed"
+    SAFE_FALLBACK_FAILED = "safe_fallback_failed"
+    SLAVE_SAFE_FALLBACK_UNCONFIRMED = "slave_safe_fallback_unconfirmed"
+    FINAL_VERIFICATION_FAILED = "final_verification_failed"
+
+
+_ROLLBACK_FAILURE_STAGE = {
+    LinkageRollbackFailureCategory.SESSION_REFRESH_FAILED: (
+        LinkageRollbackStage.SESSION_REFRESH
+    ),
+    LinkageRollbackFailureCategory.STATE_READ_FAILED: LinkageRollbackStage.STATE_READ,
+    LinkageRollbackFailureCategory.DETACH_FAILED: LinkageRollbackStage.DETACH,
+    LinkageRollbackFailureCategory.SLAVE_DETACH_UNCONFIRMED: LinkageRollbackStage.DETACH,
+    LinkageRollbackFailureCategory.CONTROL_RESTORE_FAILED: (
+        LinkageRollbackStage.CONTROL_RESTORE
+    ),
+    LinkageRollbackFailureCategory.TIMER_RESTORE_FAILED: LinkageRollbackStage.TIMER_RESTORE,
+    LinkageRollbackFailureCategory.SAFE_FALLBACK_FAILED: LinkageRollbackStage.SAFE_FALLBACK,
+    LinkageRollbackFailureCategory.SLAVE_SAFE_FALLBACK_UNCONFIRMED: (
+        LinkageRollbackStage.SAFE_FALLBACK
+    ),
+    LinkageRollbackFailureCategory.FINAL_VERIFICATION_FAILED: (
+        LinkageRollbackStage.FINAL_VERIFICATION
+    ),
+}
+
+
+class LinkageDiagnosticEvent(BaseModel):
+    """One redacted event; raw adapter errors and physical identities are never included."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: LinkageDiagnosticEventKind
+    occurred_at: datetime
+    forward_failure: LinkageForwardFailureCategory | None = None
+
+    @model_validator(mode="after")
+    def validate_failure(self) -> Self:
+        if self.kind is LinkageDiagnosticEventKind.FORWARD_FAILED:
+            if self.forward_failure is None:
+                raise ValueError("forward_failed events require a fixed failure category")
+        elif self.forward_failure is not None:
+            raise ValueError("only forward_failed events may include a failure category")
+        return self
+
+
+class LinkageRollbackFailure(BaseModel):
+    """Structured rollback evidence without a configured or physical device identifier."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    participant: LinkageRollbackParticipant
+    stage: LinkageRollbackStage
+    category: LinkageRollbackFailureCategory
+
+    @model_validator(mode="after")
+    def validate_stage(self) -> Self:
+        if self.stage is not _ROLLBACK_FAILURE_STAGE[self.category]:
+            raise ValueError("rollback failure category does not match its fixed stage")
+        return self
+
+
 class LinkageSafetyInterlock:
     """Explicit, latched gate shared with emergency-stop and maintenance control."""
 
@@ -296,6 +403,7 @@ class LinkageTransactionRecord(BaseModel):
     failed_device_ids: tuple[str, ...] = ()
     restored_device_ids: tuple[str, ...] = ()
     bootstrap_qualified_device_ids: tuple[str, ...] = ()
+    rollback_failures: tuple[LinkageRollbackFailure, ...] = ()
 
     @model_validator(mode="after")
     def validate_record(self) -> Self:
@@ -313,12 +421,17 @@ class LinkageTransactionRecord(BaseModel):
         restored_ids = set(self.restored_device_ids)
         failed_ids = set(self.failed_device_ids)
         bootstrap_qualified_ids = set(self.bootstrap_qualified_device_ids)
+        rollback_failure_keys = {
+            (failure.participant, failure.category) for failure in self.rollback_failures
+        }
         if len(restored_ids) != len(self.restored_device_ids):
             raise ValueError("restored_device_ids must not contain duplicates")
         if len(failed_ids) != len(self.failed_device_ids):
             raise ValueError("failed_device_ids must not contain duplicates")
         if len(bootstrap_qualified_ids) != len(self.bootstrap_qualified_device_ids):
             raise ValueError("bootstrap-qualified device IDs must not contain duplicates")
+        if len(rollback_failure_keys) != len(self.rollback_failures):
+            raise ValueError("rollback failures must not contain duplicates")
         if not restored_ids <= snapshot_ids:
             raise ValueError("restored_device_ids must reference transaction snapshots")
         if not failed_ids <= snapshot_ids:
@@ -516,6 +629,52 @@ class TemporaryLinkageController:
             return frozenset()
         return frozenset(snapshot.device_id for snapshot in record.snapshots)
 
+    def _on_diagnostic_event(self, event: LinkageDiagnosticEvent) -> None:
+        """Extension point for the attended harness; the production controller is a no-op."""
+
+    def _emit_diagnostic_event(
+        self,
+        kind: LinkageDiagnosticEventKind,
+        *,
+        forward_failure: LinkageForwardFailureCategory | None = None,
+    ) -> None:
+        self._on_diagnostic_event(
+            LinkageDiagnosticEvent(
+                kind=kind,
+                occurred_at=datetime.now(UTC),
+                forward_failure=forward_failure,
+            )
+        )
+
+    def _emit_rollback_event_best_effort(self) -> None:
+        """Never let optional evidence persistence interrupt compensating device writes."""
+
+        try:
+            self._emit_diagnostic_event(LinkageDiagnosticEventKind.ROLLBACK_STARTED)
+        except BaseException:
+            _LOGGER.warning("native-linkage rollback evidence could not be persisted")
+
+    @staticmethod
+    def _forward_failure_category(error: BaseException) -> LinkageForwardFailureCategory:
+        if isinstance(error, LinkageLiveSlavePowerVerificationError):
+            return LinkageForwardFailureCategory.LIVE_SLAVE_POWER_NOT_VERIFIED
+        if isinstance(error, PowerStateVerificationError):
+            return LinkageForwardFailureCategory.POWER_STATE_NOT_VERIFIED
+        if isinstance(error, asyncio.CancelledError):
+            return LinkageForwardFailureCategory.CANCELLED
+        if isinstance(error, LinkageTransactionError):
+            return LinkageForwardFailureCategory.TRANSACTION_FAILED
+        return LinkageForwardFailureCategory.UNEXPECTED_FAILURE
+
+    def _emit_forward_failure_best_effort(self, error: BaseException) -> None:
+        try:
+            self._emit_diagnostic_event(
+                LinkageDiagnosticEventKind.FORWARD_FAILED,
+                forward_failure=self._forward_failure_category(error),
+            )
+        except BaseException:
+            _LOGGER.warning("native-linkage forward failure evidence could not be persisted")
+
     async def run(self, spec: LinkageTestSpec) -> LinkageTestResult:
         """Run until manual stop or timeout, then restore before returning."""
 
@@ -571,6 +730,7 @@ class TemporaryLinkageController:
             ) from error
 
         if not self._safety_allows_operation():
+            self._emit_rollback_event_best_effort()
             await self._rollback_uninterruptibly(record)
         if self._stop_requested():
             self._store.clear()
@@ -591,14 +751,17 @@ class TemporaryLinkageController:
             await self._activate_relationship(record)
             await self._verify_active_relationship(record)
             record = self._transition(record, LinkageTransactionPhase.ACTIVE)
+            self._emit_diagnostic_event(LinkageDiagnosticEventKind.ACTIVE_ENTERED)
             stop_reason, slave_power_change_verified = await self._monitor_until_stop(record)
         except BaseException as error:
             if self._stop_requested() and self._safety_allows_operation():
                 stop_reason = LinkageStopReason.MANUAL
             else:
                 operation_error = error
+                self._emit_forward_failure_best_effort(error)
 
         try:
+            self._emit_rollback_event_best_effort()
             await self._rollback_uninterruptibly(record)
         except asyncio.CancelledError:
             raise
@@ -1139,6 +1302,11 @@ class TemporaryLinkageController:
                 self._require_forward_write(record)
                 expected_slave_power = record.spec.slave_power_after
                 slave = self._get_device(record.spec.slave_device_id)
+                # This fsynced evidence must precede the first possible 38%-style control frame.
+                # If persistence fails, the exception enters rollback before write_target starts.
+                self._emit_diagnostic_event(
+                    LinkageDiagnosticEventKind.LIVE_SLAVE_WRITE_ATTEMPTED
+                )
                 try:
                     await slave.write_target(
                         DeviceTarget(
@@ -1161,7 +1329,16 @@ class TemporaryLinkageController:
                         slave_power=expected_slave_power,
                         live_slave_power_change=True,
                     )
+                    # The adapter reported an uncertain completed write, but a subsequent full
+                    # two-device state read proved the requested relationship. Preserve that
+                    # narrower fact without claiming the adapter-level verification succeeded.
+                    self._emit_diagnostic_event(
+                        LinkageDiagnosticEventKind.LIVE_SLAVE_FULL_STATE_VERIFIED
+                    )
                     raise
+                self._emit_diagnostic_event(
+                    LinkageDiagnosticEventKind.LIVE_SLAVE_ADAPTER_VERIFIED
+                )
                 power_change_sent = True
                 _LOGGER.info(
                     "native-linkage requested live slave power change power=%s",
@@ -1175,7 +1352,14 @@ class TemporaryLinkageController:
                 live_slave_power_change=power_changed or power_change_sent,
             )
             if power_change_sent:
+                self._emit_diagnostic_event(
+                    LinkageDiagnosticEventKind.LIVE_SLAVE_FULL_STATE_VERIFIED
+                )
                 power_changed = True
+            elif power_changed:
+                self._emit_diagnostic_event(
+                    LinkageDiagnosticEventKind.LIVE_SLAVE_SAMPLE_VERIFIED
+                )
 
     async def _rollback_uninterruptibly(
         self,
@@ -1544,6 +1728,7 @@ class TemporaryLinkageController:
             # first calculated. Rebuild the set from the updated error lists so both devices and
             # the master's pause result become durable in the recovery record.
             failed = {device_id: values for device_id, values in errors.items() if values}
+            rollback_failures = self._structured_rollback_failures(record, failed)
             message = "; ".join(
                 f"{device_id}: {','.join(values)}" for device_id, values in sorted(failed.items())
             )
@@ -1559,6 +1744,7 @@ class TemporaryLinkageController:
                     "updated_at": datetime.now(UTC),
                     "error": message,
                     "failed_device_ids": tuple(sorted(failed)),
+                    "rollback_failures": rollback_failures,
                 }
             )
             self._store.save(recovery_record)
@@ -1569,6 +1755,42 @@ class TemporaryLinkageController:
         if not self._safety_allows_operation():
             await self._defer_restore_for_safety(record)
         self._store.clear()
+
+    @staticmethod
+    def _structured_rollback_failures(
+        record: LinkageTransactionRecord,
+        failures: Mapping[str, list[str]],
+    ) -> tuple[LinkageRollbackFailure, ...]:
+        """Convert only allow-listed internal labels into privacy-preserving evidence."""
+
+        participants = {
+            record.spec.master_device_id: LinkageRollbackParticipant.MASTER,
+            record.spec.slave_device_id: LinkageRollbackParticipant.SLAVE,
+        }
+        structured = list(record.rollback_failures)
+        seen: set[tuple[LinkageRollbackParticipant, LinkageRollbackFailureCategory]] = {
+            (failure.participant, failure.category) for failure in structured
+        }
+        for device_id, values in sorted(failures.items()):
+            participant = participants[device_id]
+            for value in values:
+                try:
+                    category = LinkageRollbackFailureCategory(value)
+                except ValueError:
+                    # Never persist an unexpected adapter/exception string through this path.
+                    continue
+                key = (participant, category)
+                if key in seen:
+                    continue
+                seen.add(key)
+                structured.append(
+                    LinkageRollbackFailure(
+                        participant=participant,
+                        stage=_ROLLBACK_FAILURE_STAGE[category],
+                        category=category,
+                    )
+                )
+        return tuple(structured)
 
     async def _verify_exact_restore(
         self,

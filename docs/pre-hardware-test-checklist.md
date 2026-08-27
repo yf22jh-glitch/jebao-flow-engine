@@ -36,7 +36,13 @@ Observer도 두 장비의 시험 전 `TimerON/independent/mode/power/frequency`�
 `LinkageRollbackError`와 `RECOVERY_REQUIRED/restore_failed`로 끝났습니다. typed primary failure는
 `none`이어서 slave 변경 실패로 단정할 수 없고 Async 영수증은 발급되지 않았습니다. attended
 recovery는 약 18초 안에 완료됐으며 Observer가 다시 시험 전 상태를 확인했습니다. 자동 rollback
-실패 단계를 영속 진단으로 보강하기 전에는 같은 실기를 반복하지 않습니다.
+실패 뒤에도 forward 진행과 원복 실패 단계를 보존하는 version 2 intent 진단을 구현했으며,
+전체 시뮬레이터·회귀 검증 후 같은 실기를 한 번만 반복합니다.
+
+재시험은 저출력 시간대를 기다리는 방식이 아닙니다. 활성 `TimerON` 상태와 전체 시간표를 먼저
+snapshot하고, schedule bootstrap이 `TimerOFF + independent + safe-low`로 시간표를 일시 정지한
+뒤 Async를 적용합니다. 종료 즉시 저장된 상태와 시간표를 exact restore하고 Observer로
+교차 확인합니다.
 
 ## 완료된 사전 검증
 

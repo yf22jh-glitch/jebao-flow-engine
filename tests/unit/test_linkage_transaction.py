@@ -10,6 +10,8 @@ import pytest
 from jebao_flow.devices import (
     DeviceControlSnapshot,
     LinkageApplyError,
+    LinkageDiagnosticEvent,
+    LinkageDiagnosticEventKind,
     LinkageJournalClaimError,
     LinkagePreflightError,
     LinkageRecoveryAuthority,
@@ -1106,6 +1108,71 @@ def _controller(
     )
 
 
+class _CancelRollbackEvidenceController(TemporaryLinkageController):
+    def _on_diagnostic_event(self, event: LinkageDiagnosticEvent) -> None:
+        if event.kind is LinkageDiagnosticEventKind.ROLLBACK_STARTED:
+            raise asyncio.CancelledError
+
+
+class _CancelForwardFailureEvidenceController(TemporaryLinkageController):
+    def _on_diagnostic_event(self, event: LinkageDiagnosticEvent) -> None:
+        if event.kind is LinkageDiagnosticEventKind.FORWARD_FAILED:
+            raise asyncio.CancelledError
+
+
+async def test_base_exception_from_rollback_evidence_never_blocks_restore(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=48, frequency=21)
+    slave = await _ready_device("slave", power=52, frequency=27)
+    store = JsonLinkageJournalStore(tmp_path / "cancelled-evidence.json")
+    controller = _CancelRollbackEvidenceController(
+        {"master": master, "slave": slave},
+        store,
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        restore_verification_backoff_seconds=0,
+        restore_verification_read_timeout_seconds=0.1,
+        restore_verification_total_timeout_seconds=0.3,
+    )
+
+    result = await controller.run(_spec(duration=0.02))
+
+    assert result.stop_reason is LinkageStopReason.TIMEOUT
+    assert store.load() is None
+    assert (await master.get_state()).power == 48
+    assert (await slave.get_state()).power == 52
+
+
+async def test_base_exception_from_forward_evidence_never_blocks_restore(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=48, frequency=21)
+    slave = await _ready_device(
+        "slave",
+        device_class=_FailOnceOnRelationshipDevice,
+        power=52,
+        frequency=27,
+    )
+    store = JsonLinkageJournalStore(tmp_path / "cancelled-forward-evidence.json")
+    controller = _CancelForwardFailureEvidenceController(
+        {"master": master, "slave": slave},
+        store,
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        restore_verification_backoff_seconds=0,
+        restore_verification_read_timeout_seconds=0.1,
+        restore_verification_total_timeout_seconds=0.3,
+    )
+
+    with pytest.raises(LinkageApplyError, match="failed and was restored"):
+        await controller.run(_spec(duration=0.02))
+
+    assert store.load() is None
+    assert (await master.get_state()).power == 48
+    assert (await slave.get_state()).power == 52
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+
+
 @pytest.mark.parametrize(
     ("argument", "value", "error_type"),
     [
@@ -1371,6 +1438,12 @@ async def test_slave_refresh_failure_uses_fresh_fallback_and_blocks_both_timer_o
     assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
     assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
     assert pending.failed_device_ids == ("master", "slave")
+    assert any(
+        failure.participant.value == "slave"
+        and failure.stage.value == "session_refresh"
+        and failure.category.value == "session_refresh_failed"
+        for failure in pending.rollback_failures
+    )
     assert slave.unauthenticated_write_attempts == 0
     assert slave.connect_calls == 3
     assert "connect-failed:slave" in events
@@ -1804,6 +1877,12 @@ async def test_schedule_bootstrap_fails_closed_if_timer_resume_changes_manual_fa
     assert pending is not None
     assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
     assert pending.failed_device_ids == ("master",)
+    assert any(
+        failure.participant.value == "master"
+        and failure.stage.value == "final_verification"
+        and failure.category.value == "final_verification_failed"
+        for failure in pending.rollback_failures
+    )
     master_state = await master.get_state()
     assert master_state.timer_enabled is False
     assert master_state.linkage is LinkageRole.INDEPENDENT

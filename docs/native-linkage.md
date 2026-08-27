@@ -50,7 +50,9 @@ typed primary failure는 `none`이어서 slave 변경 실패로 판정할 증거
 완료되지 않았으므로 Async qualification 영수증은 발급되지 않았습니다. 새 확인 토큰의 attended
 recovery는 약 18초 안에 성공했고 Observer가 위 시험 전 상태를 다시 정확히 확인했습니다.
 따라서 Async 독립 출력은 여전히 미검증이며, rollback 실패 단계를 영속·redacted evidence로
-남기는 진단을 보강하기 전에는 이 실기를 반복하지 않습니다.
+남기는 진단을 구현했습니다. 이 진단 빌드를 배포한 다음에는 저출력 시간대를 기다리지 않고,
+현재 TimerON 상태와 전체 시간표를 snapshot한 뒤 시간표를 일시 정지해 안전 출력에서 한 번만
+재검증하고 exact restore합니다.
 
 이 결과는 이전 짧은 실행에서 관찰한 native Linkage 레지스터 관계와 read-back 자체를 부정하지
 않지만, `async_slave`의 개별 `Flow` 유지나 물리 유량·파형을 입증하지도 않습니다. 따라서
@@ -58,6 +60,29 @@ slave별 gain/출력이 필요한 운영은 모든 펌프를 `independent`로 �
 사용합니다. 네이티브 페어는
 `experimental / unavailable / hardware_not_qualified`로 남기며 데몬 actuator, MQTT 명령,
 Home Assistant 버튼에는 연결하지 않습니다. 일반 `jebao-flowd`도 계속 Observer로 운용합니다.
+
+## 영속 진단 증거
+
+현장 one-shot intent version 2는 다음 진행 상태를 atomic replace와 fsync로 보존합니다.
+
+- 네이티브 관계의 ACTIVE 진입
+- live slave 출력 쓰기 시도 직전
+- LAN adapter의 쓰기·read-back 정상 반환
+- 두 장비 전체 상태 검증 성공과 이후 성공 sample 수·첫/마지막 시각
+- forward failure의 고정 분류
+- rollback 시작·완료
+- rollback 실패의 `master/slave + stage + allow-listed category`
+
+live 출력 쓰기 직전 evidence 저장이 실패하면 해당 출력 명령은 보내지 않고 rollback으로
+전환합니다. rollback 중 evidence 저장 실패는 물리 원복을 중단시키지 않으며, journal을 지우기
+전에 terminal evidence 저장이 실패하면 journal을 유지해 다음 attended recovery가 이어받습니다.
+MAC, vendor ID, IP, 인증정보와 예외 원문은 evidence와 status에 기록하지 않습니다.
+
+`full_state_verified`는 master/slave 모두의 online, error, power, mode, frequency, linkage,
+TimerON과 snapshot schedule fingerprint 검증을 통과했다는 뜻입니다. 자동 rollback이 나중에
+실패하더라도 이 forward 증거는 terminal intent에 남고, attended recovery 뒤에도 삭제되지
+않습니다. 기존 version 1 intent는 읽을 수 있지만 evidence 의미는 `unknown`이며, version 1의
+ARMED operation은 새 preflight 없이 실행할 수 없습니다.
 
 ## 지원 동작
 

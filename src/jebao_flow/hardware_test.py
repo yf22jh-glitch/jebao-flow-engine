@@ -25,7 +25,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from jebao_flow.config import AppConfig, DeviceConfig, DeviceType, RuntimeMode, load_config
 from jebao_flow.devices.base import JebaoDevice
@@ -37,12 +37,16 @@ from jebao_flow.devices.identity import (
 )
 from jebao_flow.devices.linkage import (
     DeviceControlSnapshot,
+    LinkageDiagnosticEvent,
+    LinkageDiagnosticEventKind,
+    LinkageForwardFailureCategory,
     LinkageJournalClaimError,
     LinkageJournalStore,
     LinkageLiveSlavePowerVerificationError,
     LinkageRecoveryAuthority,
     LinkageRecoveryReason,
     LinkageRollbackError,
+    LinkageRollbackFailure,
     LinkageSafetyInterlock,
     LinkageStopReason,
     LinkageTestSpec,
@@ -169,12 +173,87 @@ class HardwareTestPrimaryFailure(StrEnum):
     SLAVE_POWER_CHANGE_NOT_VERIFIED = "slave_power_change_not_verified"
 
 
+class HardwareTestVerifiedSample(BaseModel):
+    """Allow-listed state proven by a complete two-device read after the live step."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    verified_at: datetime
+    master_power: int = Field(ge=0, le=100)
+    slave_power: int = Field(ge=0, le=100)
+    slave_linkage: LinkageRole
+
+
+class HardwareTestEvidence(BaseModel):
+    """Crash-durable, privacy-preserving progress for one attended native-linkage run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    active_entered_at: datetime | None = None
+    live_slave_write_attempted_at: datetime | None = None
+    live_slave_adapter_verified_at: datetime | None = None
+    live_slave_full_state_verified_at: datetime | None = None
+    verified_sample_count: int = Field(default=0, ge=0)
+    first_verified_sample: HardwareTestVerifiedSample | None = None
+    last_verified_sample: HardwareTestVerifiedSample | None = None
+    forward_failure: LinkageForwardFailureCategory | None = None
+    rollback_started_at: datetime | None = None
+    rollback_completed_at: datetime | None = None
+    rollback_recovery_reasons: tuple[LinkageRecoveryReason, ...] = ()
+    rollback_failures: tuple[LinkageRollbackFailure, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_progress(self) -> HardwareTestEvidence:
+        attempted = self.live_slave_write_attempted_at
+        adapter = self.live_slave_adapter_verified_at
+        full_state = self.live_slave_full_state_verified_at
+        if attempted is not None and (
+            self.active_entered_at is None or attempted < self.active_entered_at
+        ):
+            raise ValueError("live slave write attempt must follow ACTIVE entry")
+        if adapter is not None and (attempted is None or adapter < attempted):
+            raise ValueError("adapter verification must follow a live slave write attempt")
+        if full_state is not None and (attempted is None or full_state < attempted):
+            raise ValueError("full-state verification must follow a live slave write attempt")
+        if adapter is not None and full_state is not None and full_state < adapter:
+            raise ValueError("full-state verification cannot precede adapter verification")
+        if self.verified_sample_count == 0:
+            if self.first_verified_sample is not None or self.last_verified_sample is not None:
+                raise ValueError("zero verified samples cannot include sample evidence")
+            if full_state is not None:
+                raise ValueError("full-state verification must count as a verified sample")
+        else:
+            if self.first_verified_sample is None or self.last_verified_sample is None:
+                raise ValueError("verified samples require first and last evidence")
+            if full_state is None:
+                raise ValueError("verified samples require initial full-state verification")
+            if self.first_verified_sample.verified_at != full_state:
+                raise ValueError("first verified sample must be the full-state verification")
+            if self.last_verified_sample.verified_at < self.first_verified_sample.verified_at:
+                raise ValueError("last verified sample cannot precede the first sample")
+        if self.rollback_completed_at is not None:
+            if (
+                self.rollback_started_at is None
+                or self.rollback_completed_at < self.rollback_started_at
+            ):
+                raise ValueError("rollback completion must follow rollback start")
+        if (
+            self.rollback_failures or self.rollback_recovery_reasons
+        ) and self.rollback_started_at is None:
+            raise ValueError("rollback diagnostics require a rollback start timestamp")
+        if len(set(self.rollback_recovery_reasons)) != len(
+            self.rollback_recovery_reasons
+        ):
+            raise ValueError("rollback recovery reasons must not contain duplicates")
+        return self
+
+
 class HardwareTestIntent(BaseModel):
     """Durable one-shot intent that prevents a service restart from replaying a test."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: int = Field(default=1, ge=1, le=1)
+    version: int = Field(default=1, ge=1, le=2)
     instance_id: str
     operation_id: str
     phase: HardwareTestIntentPhase
@@ -185,6 +264,43 @@ class HardwareTestIntent(BaseModel):
     updated_at: datetime
     outcome: str | None = None
     primary_failure: HardwareTestPrimaryFailure | None = None
+    evidence: HardwareTestEvidence | None = None
+
+    @model_validator(mode="after")
+    def validate_versioned_evidence(self) -> HardwareTestIntent:
+        if self.version == 1 and self.evidence is not None:
+            raise ValueError("version-one intents cannot contain diagnostic evidence")
+        if self.version == 2 and self.evidence is None:
+            raise ValueError("version-two intents require diagnostic evidence")
+        evidence = self.evidence
+        if evidence is None:
+            return self
+        has_live_evidence = any(
+            value is not None
+            for value in (
+                evidence.live_slave_write_attempted_at,
+                evidence.live_slave_adapter_verified_at,
+                evidence.live_slave_full_state_verified_at,
+                evidence.first_verified_sample,
+                evidence.last_verified_sample,
+            )
+        ) or evidence.verified_sample_count > 0
+        if self.spec.slave_power_after is None and has_live_evidence:
+            raise ValueError("live-slave evidence requires a configured live power step")
+        if self.spec.slave_power_after is not None:
+            for sample in (
+                evidence.first_verified_sample,
+                evidence.last_verified_sample,
+            ):
+                if sample is None:
+                    continue
+                if (
+                    sample.master_power != self.spec.master_power
+                    or sample.slave_power != self.spec.slave_power_after
+                    or sample.slave_linkage is not self.spec.slave_role
+                ):
+                    raise ValueError("verified sample does not match the confirmed test spec")
+        return self
 
 
 class JsonHardwareTestIntentStore:
@@ -321,9 +437,14 @@ class _DiagnosticTemporaryLinkageController(TemporaryLinkageController):
         *,
         safety_interlock: LinkageSafetyInterlock,
         on_primary_failure: Callable[[HardwareTestPrimaryFailure], None],
+        on_diagnostic_event: Callable[[LinkageDiagnosticEvent], None],
     ) -> None:
         super().__init__(devices, store, safety_interlock=safety_interlock)
         self._on_primary_failure = on_primary_failure
+        self._diagnostic_event_sink = on_diagnostic_event
+
+    def _on_diagnostic_event(self, event: LinkageDiagnosticEvent) -> None:
+        self._diagnostic_event_sink(event)
 
     async def _monitor_until_stop(
         self,
@@ -762,6 +883,9 @@ def recovery_confirmation_token(
             "expires_at": revision.expires_at.isoformat(),
             "failed_device_ids": list(revision.failed_device_ids),
             "restored_device_ids": list(revision.restored_device_ids),
+            "rollback_failures": [
+                failure.model_dump(mode="json") for failure in revision.rollback_failures
+            ],
         }
     else:
         revision_data = {
@@ -1174,6 +1298,108 @@ def _updated_intent(
     )
 
 
+def _evidence_after_event(
+    evidence: HardwareTestEvidence,
+    event: LinkageDiagnosticEvent,
+    spec: LinkageTestSpec,
+) -> HardwareTestEvidence:
+    """Apply one controller event monotonically without persisting raw adapter data."""
+
+    update: dict[str, object] = {}
+    if event.kind is LinkageDiagnosticEventKind.ACTIVE_ENTERED:
+        if evidence.active_entered_at is None:
+            update["active_entered_at"] = event.occurred_at
+    elif event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_WRITE_ATTEMPTED:
+        if evidence.live_slave_write_attempted_at is None:
+            update["live_slave_write_attempted_at"] = event.occurred_at
+    elif event.kind is LinkageDiagnosticEventKind.LIVE_SLAVE_ADAPTER_VERIFIED:
+        if evidence.live_slave_adapter_verified_at is None:
+            update["live_slave_adapter_verified_at"] = event.occurred_at
+    elif event.kind in {
+        LinkageDiagnosticEventKind.LIVE_SLAVE_FULL_STATE_VERIFIED,
+        LinkageDiagnosticEventKind.LIVE_SLAVE_SAMPLE_VERIFIED,
+    }:
+        if spec.slave_power_after is None:
+            raise HardwareTestError("live-slave evidence has no configured target")
+        sample = HardwareTestVerifiedSample(
+            verified_at=event.occurred_at,
+            master_power=spec.master_power,
+            slave_power=spec.slave_power_after,
+            slave_linkage=spec.slave_role,
+        )
+        update["verified_sample_count"] = evidence.verified_sample_count + 1
+        update["last_verified_sample"] = sample
+        if evidence.first_verified_sample is None:
+            update["first_verified_sample"] = sample
+        if evidence.live_slave_full_state_verified_at is None:
+            update["live_slave_full_state_verified_at"] = event.occurred_at
+    elif event.kind is LinkageDiagnosticEventKind.FORWARD_FAILED:
+        if evidence.forward_failure is None:
+            update["forward_failure"] = event.forward_failure
+    elif event.kind is LinkageDiagnosticEventKind.ROLLBACK_STARTED:
+        if evidence.rollback_started_at is None:
+            update["rollback_started_at"] = event.occurred_at
+    else:  # pragma: no cover - enum exhaustiveness guard
+        raise AssertionError(f"unsupported diagnostic event: {event.kind}")
+    if not update:
+        return evidence
+    payload = evidence.model_dump(mode="python")
+    payload.update(update)
+    return HardwareTestEvidence.model_validate(payload)
+
+
+def _evidence_with_rollback_failures(
+    evidence: HardwareTestEvidence,
+    record: LinkageTransactionRecord,
+    *,
+    observed_at: datetime | None = None,
+) -> HardwareTestEvidence:
+    if not record.rollback_failures and record.recovery_reason is None:
+        return evidence
+    existing = {
+        (failure.participant, failure.stage, failure.category)
+        for failure in evidence.rollback_failures
+    }
+    merged = list(evidence.rollback_failures)
+    for failure in record.rollback_failures:
+        key = (failure.participant, failure.stage, failure.category)
+        if key not in existing:
+            existing.add(key)
+            merged.append(failure)
+    payload = evidence.model_dump(mode="python")
+    reasons = list(evidence.rollback_recovery_reasons)
+    if record.recovery_reason is not None and record.recovery_reason not in reasons:
+        reasons.append(record.recovery_reason)
+    payload.update(
+        {
+            "rollback_started_at": evidence.rollback_started_at
+            or observed_at
+            or record.updated_at,
+            "rollback_recovery_reasons": tuple(reasons),
+            "rollback_failures": tuple(merged),
+        }
+    )
+    return HardwareTestEvidence.model_validate(payload)
+
+
+def _evidence_with_rollback_completed(
+    evidence: HardwareTestEvidence,
+    *,
+    completed_at: datetime,
+) -> HardwareTestEvidence:
+    if evidence.rollback_started_at is None:
+        # A PREPARED journal may be cleared before the first physical write. Do not describe
+        # that no-compensation closure as a completed rollback.
+        return evidence
+    payload = evidence.model_dump(mode="python")
+    payload.update(
+        {
+            "rollback_completed_at": completed_at,
+        }
+    )
+    return HardwareTestEvidence.model_validate(payload)
+
+
 async def _preflight(
     config: AppConfig,
     spec: LinkageTestSpec,
@@ -1225,6 +1451,7 @@ async def _preflight(
         now = datetime.now(UTC)
         intent_store.save(
             HardwareTestIntent(
+                version=2,
                 instance_id=config.instance.id,
                 operation_id=spec.operation_id,
                 phase=HardwareTestIntentPhase.ARMED,
@@ -1233,6 +1460,7 @@ async def _preflight(
                 snapshots=snapshots,
                 created_at=existing.created_at if existing is not None else now,
                 updated_at=now,
+                evidence=HardwareTestEvidence(),
             )
         )
     _print_preview(config, selected, spec, snapshots, token)
@@ -1362,30 +1590,79 @@ async def _run_native_linkage(
             raise ConfirmationMismatchError(
                 "confirmation token does not match; no control frame was sent"
             )
+        if intent.version != 2 or intent.evidence is None:
+            raise HardwareTestError(
+                "legacy armed preflight has no durable diagnostics; cancel it and preflight "
+                "again before any control frame is sent"
+            )
+
+        def persist_intent_successor(successor: HardwareTestIntent) -> None:
+            """Track an atomic replace even when a trailing fsync reports an error."""
+
+            nonlocal intent
+            try:
+                intent_store.save(successor)
+            except BaseException:
+                try:
+                    persisted = intent_store.load()
+                except BaseException:
+                    raise
+                if persisted == successor:
+                    intent = successor
+                raise
+            intent = successor
+
         devices = await _build_devices(config, selected, writable=True)
-        intent = _updated_intent(intent, HardwareTestIntentPhase.STARTED, None)
-        intent_store.save(intent)
+        persist_intent_successor(
+            _updated_intent(intent, HardwareTestIntentPhase.STARTED, None)
+        )
 
         def persist_primary_failure(failure: HardwareTestPrimaryFailure) -> None:
-            nonlocal intent
             if intent.primary_failure is not None:
                 return
-            intent = intent.model_copy(
-                update={
-                    "primary_failure": failure,
-                    "updated_at": datetime.now(UTC),
-                }
+            persist_intent_successor(
+                intent.model_copy(
+                    update={
+                        "primary_failure": failure,
+                        "updated_at": datetime.now(UTC),
+                    }
+                )
             )
-            intent_store.save(intent)
+
+        def persist_diagnostic_event(event: LinkageDiagnosticEvent) -> None:
+            evidence = intent.evidence
+            if evidence is None:
+                raise HardwareTestError("diagnostic intent evidence is unavailable")
+            successor_evidence = _evidence_after_event(evidence, event, spec)
+            if successor_evidence == evidence:
+                return
+            persist_intent_successor(
+                intent.model_copy(
+                    update={
+                        "evidence": successor_evidence,
+                        "updated_at": datetime.now(UTC),
+                    }
+                )
+            )
 
         def mark_terminal_before_clear() -> None:
-            nonlocal intent
-            intent = _updated_intent(
-                intent,
+            evidence = intent.evidence
+            if evidence is None:
+                raise HardwareTestError("diagnostic intent evidence is unavailable")
+            completed_at = datetime.now(UTC)
+            successor = _updated_intent(
+                intent.model_copy(
+                    update={
+                        "evidence": _evidence_with_rollback_completed(
+                            evidence,
+                            completed_at=completed_at,
+                        )
+                    }
+                ),
                 HardwareTestIntentPhase.TERMINAL,
                 "restored",
             )
-            intent_store.save(intent)
+            persist_intent_successor(successor)
 
         confirming_store = ConfirmingLinkageJournalStore(
             journal_store,
@@ -1401,6 +1678,7 @@ async def _run_native_linkage(
             confirming_store,
             safety_interlock=interlock,
             on_primary_failure=persist_primary_failure,
+            on_diagnostic_event=persist_diagnostic_event,
         )
         fallback_now = datetime.now(UTC)
         fallback_record = LinkageTransactionRecord(
@@ -1429,10 +1707,28 @@ async def _run_native_linkage(
             except BaseException:
                 pending = journal_store.load()
                 current_intent = intent_store.load()
+                if (
+                    current_intent is not None
+                    and current_intent.instance_id == config.instance.id
+                    and current_intent.operation_id == spec.operation_id
+                ):
+                    intent = current_intent
                 if pending is not None:
-                    intent_store.save(
+                    evidence = intent.evidence
+                    if evidence is None:
+                        raise HardwareTestError(
+                            "diagnostic intent evidence is unavailable"
+                        ) from None
+                    persist_intent_successor(
                         _updated_intent(
-                            intent,
+                            intent.model_copy(
+                                update={
+                                    "evidence": _evidence_with_rollback_failures(
+                                        evidence,
+                                        pending,
+                                    )
+                                }
+                            ),
                             HardwareTestIntentPhase.RECOVERY_REQUIRED,
                             "recovery_required",
                         )
@@ -1441,7 +1737,7 @@ async def _run_native_linkage(
                     current_intent is None
                     or current_intent.phase is not HardwareTestIntentPhase.TERMINAL
                 ):
-                    intent_store.save(
+                    persist_intent_successor(
                         _updated_intent(
                             intent,
                             HardwareTestIntentPhase.TERMINAL,
@@ -1465,6 +1761,8 @@ async def _run_native_linkage(
         if current_intent is None or current_intent.phase is not HardwareTestIntentPhase.TERMINAL:
             # This is normally already durable via the journal wrapper's before-clear hook.
             intent_store.save(_updated_intent(intent, HardwareTestIntentPhase.TERMINAL, "restored"))
+        else:
+            intent = current_intent
         if spec.bootstrap_active_schedule:
             created = confirming_store.created_record
             if created is None or created.snapshots != intent.snapshots:
@@ -1643,6 +1941,54 @@ def _status(
     print(f"Recovery journal: {journal_status}")
     print(f"Recovery reason: {recovery_reason}")
     print(f"Primary failure: {primary_failure}")
+    evidence = intent.evidence if intent is not None else None
+    if evidence is None:
+        print("Diagnostic evidence: unknown (legacy or absent)")
+    else:
+        if evidence.live_slave_full_state_verified_at is not None:
+            live_stage = "full_state_verified"
+        elif evidence.live_slave_adapter_verified_at is not None:
+            live_stage = "adapter_verified"
+        elif evidence.live_slave_write_attempted_at is not None:
+            live_stage = "write_attempted"
+        elif intent.spec.slave_power_after is None:
+            live_stage = "not_requested"
+        else:
+            live_stage = "not_attempted"
+        forward_failure = (
+            evidence.forward_failure.value
+            if evidence.forward_failure is not None
+            else "none"
+        )
+        rollback_state = (
+            "completed"
+            if evidence.rollback_completed_at is not None
+            else "started"
+            if evidence.rollback_started_at is not None
+            else "not_started"
+        )
+        rollback_diagnostics = ", ".join(
+            f"{failure.participant.value}/{failure.stage.value}/{failure.category.value}"
+            for failure in evidence.rollback_failures
+        )
+        print(
+            "Diagnostic evidence: "
+            f"active={'yes' if evidence.active_entered_at is not None else 'no'}, "
+            f"live_change={live_stage}, samples={evidence.verified_sample_count}, "
+            f"forward_failure={forward_failure}"
+        )
+        print(
+            "Rollback evidence: "
+            f"state={rollback_state}, "
+            "reasons="
+            + (
+                ",".join(reason.value for reason in evidence.rollback_recovery_reasons)
+                if evidence.rollback_recovery_reasons
+                else "none"
+            )
+            + ", failures="
+            + (rollback_diagnostics or "none")
+        )
     print(
         "Automatic recovery blockers: "
         + (", ".join(automatic_blockers) if automatic_blockers else "none")
@@ -1938,27 +2284,79 @@ async def _recover_linkage(
                     "recovery confirmation token does not match; no control frame was sent"
                 )
 
-        if intent is not None:
-            intent = _updated_intent(
-                intent,
-                HardwareTestIntentPhase.RECOVERY_REQUIRED,
-                "recovery_started",
+        if intent is None:
+            recovery_started_at = datetime.now(UTC)
+            evidence = HardwareTestEvidence(
+                rollback_started_at=(
+                    recovery_started_at
+                    if record.phase is not LinkageTransactionPhase.PREPARED
+                    else None
+                )
             )
-            intent_store.save(intent)
+            evidence = _evidence_with_rollback_failures(evidence, record)
+            intent = HardwareTestIntent(
+                version=2,
+                instance_id=config.instance.id,
+                operation_id=spec.operation_id,
+                phase=HardwareTestIntentPhase.RECOVERY_REQUIRED,
+                confirmation_token=preview_confirmation_token(
+                    config.instance.id,
+                    spec,
+                    snapshots,
+                ),
+                spec=spec,
+                snapshots=snapshots,
+                created_at=record.created_at,
+                updated_at=recovery_started_at,
+                outcome="recovery_started",
+                evidence=evidence,
+            )
+        else:
+            if intent.version == 2:
+                evidence = intent.evidence
+                if evidence is None:
+                    raise HardwareTestError("diagnostic intent evidence is unavailable")
+                intent = intent.model_copy(
+                    update={
+                        "evidence": _evidence_with_rollback_failures(
+                            evidence,
+                            record,
+                        )
+                    }
+                )
+        intent = _updated_intent(
+            intent,
+            HardwareTestIntentPhase.RECOVERY_REQUIRED,
+            "recovery_started",
+        )
+        intent_store.save(intent)
 
         before_clear: Callable[[], None] | None = None
-        if intent is not None:
 
-            def mark_recovery_terminal_before_clear() -> None:
-                intent_store.save(
-                    _updated_intent(
-                        intent,
-                        HardwareTestIntentPhase.TERMINAL,
-                        "recovered",
-                    )
+        def mark_recovery_terminal_before_clear() -> None:
+            nonlocal intent
+            successor = intent
+            if successor.version == 2:
+                evidence = successor.evidence
+                if evidence is None:
+                    raise HardwareTestError("diagnostic intent evidence is unavailable")
+                latest = journal_store.load()
+                if latest is not None:
+                    evidence = _evidence_with_rollback_failures(evidence, latest)
+                evidence = _evidence_with_rollback_completed(
+                    evidence,
+                    completed_at=datetime.now(UTC),
                 )
+                successor = successor.model_copy(update={"evidence": evidence})
+            successor = _updated_intent(
+                successor,
+                HardwareTestIntentPhase.TERMINAL,
+                "recovered",
+            )
+            intent_store.save(successor)
+            intent = successor
 
-            before_clear = mark_recovery_terminal_before_clear
+        before_clear = mark_recovery_terminal_before_clear
 
         recovery_store = ConfirmingLinkageJournalStore(
             journal_store,
@@ -2003,6 +2401,29 @@ async def _recover_linkage(
             except Exception:
                 recovered = False
             pending_after_attempt = journal_store.load()
+            if intent.version == 2 and pending_after_attempt is not None:
+                evidence = intent.evidence
+                if evidence is None:
+                    raise HardwareTestError("diagnostic intent evidence is unavailable")
+                merged_evidence = _evidence_with_rollback_failures(
+                    evidence,
+                    pending_after_attempt,
+                )
+                if merged_evidence != evidence:
+                    # Remember each durable recovery reason before a later controller attempt
+                    # transitions the journal back to ROLLING_BACK. Diagnostic persistence must
+                    # never block the physical restore, so a store failure is retried by the
+                    # terminal-before-clear hook while the in-memory successor stays available.
+                    intent = intent.model_copy(
+                        update={
+                            "evidence": merged_evidence,
+                            "updated_at": datetime.now(UTC),
+                        }
+                    )
+                    try:
+                        intent_store.save(intent)
+                    except BaseException:
+                        pass
             if _safety_latch_present(canonical_safety_latch_path(config)):
                 await _enforce_outer_recovery_safety_stop(
                     config,
@@ -2057,12 +2478,26 @@ async def _recover_linkage(
 
         if not recovered or journal_store.load() is not None:
             if intent is not None:
-                intent_store.save(
-                    _updated_intent(
-                        intent,
-                        HardwareTestIntentPhase.RECOVERY_REQUIRED,
-                        "recovery_required",
+                pending = journal_store.load()
+                if intent.version == 2 and pending is not None:
+                    evidence = intent.evidence
+                    if evidence is None:
+                        raise HardwareTestError("diagnostic intent evidence is unavailable")
+                    intent = intent.model_copy(
+                        update={
+                            "evidence": _evidence_with_rollback_failures(
+                                evidence,
+                                pending,
+                            )
+                        }
                     )
+                intent = _updated_intent(
+                    intent,
+                    HardwareTestIntentPhase.RECOVERY_REQUIRED,
+                    "recovery_required",
+                )
+                intent_store.save(
+                    intent
                 )
             if schedule_change_detected:
                 raise HardwareTestError(
@@ -2078,25 +2513,7 @@ async def _recover_linkage(
                 f"exact recovery did not complete after {_RECOVERY_ATTEMPTS} bounded attempts"
             )
 
-    if intent is None:
-        now = datetime.now(UTC)
-        intent = HardwareTestIntent(
-            instance_id=config.instance.id,
-            operation_id=spec.operation_id,
-            phase=HardwareTestIntentPhase.TERMINAL,
-            confirmation_token=preview_confirmation_token(
-                config.instance.id,
-                spec,
-                snapshots,
-            ),
-            spec=spec,
-            snapshots=snapshots,
-            created_at=record.created_at,
-            updated_at=now,
-            outcome="recovered",
-        )
-    else:
-        intent = _updated_intent(intent, HardwareTestIntentPhase.TERMINAL, "recovered")
+    intent = _updated_intent(intent, HardwareTestIntentPhase.TERMINAL, "recovered")
     intent_store.save(intent)
     print("The unfinished native-linkage operation was restored and closed.")
     return 0

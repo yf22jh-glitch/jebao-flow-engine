@@ -14,6 +14,10 @@ from jebao_flow.config import AppConfig
 from jebao_flow.devices import (
     LinkageRecoveryReason,
     LinkageRollbackError,
+    LinkageRollbackFailure,
+    LinkageRollbackFailureCategory,
+    LinkageRollbackParticipant,
+    LinkageRollbackStage,
     LinkageSafetyInterlock,
     LinkageStopReason,
     LinkageTestSpec,
@@ -345,6 +349,8 @@ def test_preflight_is_read_only_private_and_arms_exact_snapshot(
     intent_path = hardware_test.canonical_intent_path(config)
     intent = hardware_test.JsonHardwareTestIntentStore(intent_path).load()
     assert intent is not None
+    assert intent.version == 2
+    assert intent.evidence == hardware_test.HardwareTestEvidence()
     assert intent.phase is hardware_test.HardwareTestIntentPhase.ARMED
     assert stat.S_IMODE(intent_path.stat().st_mode) == 0o600
     assert hardware_test.canonical_journal_path(config).parent == (
@@ -427,6 +433,27 @@ def test_schedule_bootstrap_skips_prior_receipts_steps_async_slave_and_restores(
         assert receipt is not None
         assert (receipt.original_power, receipt.step_power) == (31, 30)
     assert hardware_test.canonical_journal_path(config).exists() is False
+    intent = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    ).load()
+    assert intent is not None
+    evidence = intent.evidence
+    assert evidence is not None
+    assert evidence.active_entered_at is not None
+    assert evidence.live_slave_write_attempted_at is not None
+    assert evidence.live_slave_adapter_verified_at is not None
+    assert evidence.live_slave_full_state_verified_at is not None
+    assert evidence.verified_sample_count >= 1
+    assert evidence.first_verified_sample is not None
+    assert evidence.last_verified_sample is not None
+    assert evidence.first_verified_sample.slave_power == 38
+    assert evidence.last_verified_sample.slave_power == 38
+    assert evidence.last_verified_sample.slave_linkage is LinkageRole.ASYNC_SLAVE
+    assert evidence.forward_failure is None
+    assert evidence.rollback_started_at is not None
+    assert evidence.rollback_completed_at is not None
+    assert evidence.rollback_completed_at >= evidence.rollback_started_at
+    assert evidence.rollback_failures == ()
 
 
 def test_schedule_bootstrap_early_stop_restores_but_issues_no_receipts(
@@ -541,6 +568,113 @@ def test_schedule_bootstrap_early_stop_restores_but_issues_no_receipts(
     )
 
 
+def test_live_slave_attempt_evidence_precedes_physical_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    args = _args("preflight")
+    args[args.index("sync_slave")] = "async_slave"
+    args[args.index("0.02")] = "0.08"
+    args.extend(("--slave-power-after", "38", "--power-change-after", "0.02"))
+    assert hardware_test.main(args) == 0
+    token = _token(capsys.readouterr().out)
+
+    slave = devices["pro_right"]
+    original_write = slave.write_target
+    observed_attempt = False
+
+    async def assert_durable_attempt_before_write(
+        target: DeviceTarget,
+        **kwargs: object,
+    ) -> None:
+        nonlocal observed_attempt
+        if target.power == 38:
+            intent = hardware_test.JsonHardwareTestIntentStore(
+                hardware_test.canonical_intent_path(config)
+            ).load()
+            assert intent is not None
+            assert intent.evidence is not None
+            assert intent.evidence.live_slave_write_attempted_at is not None
+            assert intent.evidence.live_slave_adapter_verified_at is None
+            observed_attempt = True
+        await original_write(target, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(slave, "write_target", assert_durable_attempt_before_write)
+    run_args = [*args]
+    run_args[0] = "run-native-linkage"
+
+    assert hardware_test.main([*run_args, "--confirm", token]) == 0
+    assert observed_attempt is True
+
+
+@pytest.mark.parametrize("replace_completed", [False, True])
+def test_live_slave_attempt_persistence_failure_prevents_physical_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    replace_completed: bool,
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    args = _args("preflight")
+    args[args.index("sync_slave")] = "async_slave"
+    args[args.index("0.02")] = "0.08"
+    args.extend(("--slave-power-after", "38", "--power-change-after", "0.02"))
+    assert hardware_test.main(args) == 0
+    token = _token(capsys.readouterr().out)
+
+    original_save = hardware_test.JsonHardwareTestIntentStore.save
+    failed_once = False
+
+    def fail_before_attempt_replace(
+        store: hardware_test.JsonHardwareTestIntentStore,
+        intent: hardware_test.HardwareTestIntent,
+    ) -> None:
+        nonlocal failed_once
+        evidence = intent.evidence
+        if (
+            not failed_once
+            and evidence is not None
+            and evidence.live_slave_write_attempted_at is not None
+        ):
+            failed_once = True
+            if replace_completed:
+                original_save(store, intent)
+            raise OSError("secret persistence failure must not be exposed")
+        original_save(store, intent)
+
+    monkeypatch.setattr(
+        hardware_test.JsonHardwareTestIntentStore,
+        "save",
+        fail_before_attempt_replace,
+    )
+    run_args = [*args]
+    run_args[0] = "run-native-linkage"
+
+    assert hardware_test.main([*run_args, "--confirm", token]) == 2
+    assert failed_once is True
+    assert not any(
+        command.name == "power" and command.value == 38
+        for command in devices["pro_right"].commands
+    )
+    assert "secret persistence failure" not in capsys.readouterr().err
+    intent = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    ).load()
+    assert intent is not None
+    assert intent.evidence is not None
+    assert (intent.evidence.live_slave_write_attempted_at is not None) is replace_completed
+    assert intent.evidence.live_slave_adapter_verified_at is None
+    assert intent.evidence.live_slave_full_state_verified_at is None
+    assert intent.evidence.forward_failure is not None
+    assert intent.evidence.rollback_completed_at is not None
+
+
 def test_live_slave_failure_survives_masking_rollback_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -579,6 +713,13 @@ def test_live_slave_failure_survives_masking_rollback_failure(
         record: LinkageTransactionRecord,
     ) -> None:
         pending = self._store.load() or record  # noqa: SLF001
+        rollback_failures = self._structured_rollback_failures(  # noqa: SLF001
+            pending,
+            {
+                "pro_left": ["timer_restore_failed"],
+                "pro_right": ["detach_failed"],
+            },
+        )
         self._store.save(  # noqa: SLF001
             pending.model_copy(
                 update={
@@ -588,6 +729,7 @@ def test_live_slave_failure_survives_masking_rollback_failure(
                     "error": "restore_failed",
                     "failed_device_ids": ("pro_left", "pro_right"),
                     "restored_device_ids": (),
+                    "rollback_failures": rollback_failures,
                 }
             )
         )
@@ -617,10 +759,27 @@ def test_live_slave_failure_survives_masking_rollback_failure(
         intent.primary_failure
         is hardware_test.HardwareTestPrimaryFailure.SLAVE_POWER_CHANGE_NOT_VERIFIED
     )
+    evidence = intent.evidence
+    assert evidence is not None
+    assert evidence.live_slave_write_attempted_at is not None
+    assert evidence.live_slave_adapter_verified_at is not None
+    assert evidence.live_slave_full_state_verified_at is None
+    assert evidence.forward_failure is not None
+    assert evidence.rollback_started_at is not None
+    assert evidence.rollback_completed_at is None
+    assert {
+        (failure.participant.value, failure.stage.value, failure.category.value)
+        for failure in evidence.rollback_failures
+    } == {
+        ("master", "timer_restore", "timer_restore_failed"),
+        ("slave", "detach", "detach_failed"),
+    }
 
     assert hardware_test.main(["status"]) == 0
     status_output = capsys.readouterr().out
     assert "Primary failure: slave_power_change_not_verified" in status_output
+    assert "master/timer_restore/timer_restore_failed" in status_output
+    assert "slave/detach/detach_failed" in status_output
     assert "secret-device-id" not in status_output
 
 
@@ -679,6 +838,104 @@ def test_driver_live_slave_power_readback_failure_is_persisted(
         intent.primary_failure
         is hardware_test.HardwareTestPrimaryFailure.SLAVE_POWER_CHANGE_NOT_VERIFIED
     )
+
+
+def test_verified_live_change_and_rollback_failure_survive_attended_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    args = _args("preflight")
+    args[args.index("sync_slave")] = "async_slave"
+    args[args.index("0.02")] = "0.08"
+    args.extend(("--slave-power-after", "38", "--power-change-after", "0.02"))
+    assert hardware_test.main(args) == 0
+    token = _token(capsys.readouterr().out)
+
+    original_rollback = TemporaryLinkageController._rollback_uninterruptibly
+
+    async def fail_automatic_rollback(
+        self: TemporaryLinkageController,
+        record: LinkageTransactionRecord,
+    ) -> None:
+        pending = self._store.load() or record  # noqa: SLF001
+        rollback_failures = self._structured_rollback_failures(  # noqa: SLF001
+            pending,
+            {"pro_right": ["session_refresh_failed"]},
+        )
+        self._store.save(  # noqa: SLF001
+            pending.model_copy(
+                update={
+                    "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+                    "recovery_reason": LinkageRecoveryReason.RESTORE_FAILED,
+                    "updated_at": datetime.now(UTC),
+                    "error": "pro_right: session_refresh_failed",
+                    "failed_device_ids": ("pro_right",),
+                    "restored_device_ids": (),
+                    "rollback_failures": rollback_failures,
+                }
+            )
+        )
+        raise LinkageRollbackError("sensitive transport detail")
+
+    monkeypatch.setattr(
+        TemporaryLinkageController,
+        "_rollback_uninterruptibly",
+        fail_automatic_rollback,
+    )
+    run_args = [*args]
+    run_args[0] = "run-native-linkage"
+    assert hardware_test.main([*run_args, "--confirm", token]) == 2
+    assert "sensitive transport detail" not in capsys.readouterr().err
+
+    intent_store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    failed_intent = intent_store.load()
+    assert failed_intent is not None
+    failed_evidence = failed_intent.evidence
+    assert failed_evidence is not None
+    assert failed_intent.primary_failure is None
+    assert failed_evidence.live_slave_adapter_verified_at is not None
+    assert failed_evidence.live_slave_full_state_verified_at is not None
+    assert failed_evidence.verified_sample_count >= 1
+    assert failed_evidence.forward_failure is None
+    assert failed_evidence.rollback_completed_at is None
+    assert [
+        (
+            failure.participant.value,
+            failure.stage.value,
+            failure.category.value,
+        )
+        for failure in failed_evidence.rollback_failures
+    ] == [("slave", "session_refresh", "session_refresh_failed")]
+
+    monkeypatch.setattr(
+        TemporaryLinkageController,
+        "_rollback_uninterruptibly",
+        original_rollback,
+    )
+    assert hardware_test.main(["recover-linkage"]) == 0
+    recovery_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 0
+    capsys.readouterr()
+
+    recovered_intent = intent_store.load()
+    assert recovered_intent is not None
+    assert recovered_intent.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
+    assert recovered_intent.outcome == "recovered"
+    recovered_evidence = recovered_intent.evidence
+    assert recovered_evidence is not None
+    assert recovered_evidence.live_slave_full_state_verified_at == (
+        failed_evidence.live_slave_full_state_verified_at
+    )
+    assert recovered_evidence.verified_sample_count == failed_evidence.verified_sample_count
+    assert recovered_evidence.rollback_failures == failed_evidence.rollback_failures
+    assert recovered_evidence.rollback_completed_at is not None
+    assert hardware_test.canonical_journal_path(config).exists() is False
 
 
 @pytest.mark.parametrize(
@@ -816,6 +1073,26 @@ def test_unrelated_post_change_failure_does_not_set_primary_failure(
     assert intent.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
     assert intent.outcome == "restored"
     assert intent.primary_failure is None
+    evidence = intent.evidence
+    assert evidence is not None
+    assert evidence.live_slave_write_attempted_at is not None
+    assert (evidence.live_slave_adapter_verified_at is not None) is (
+        failure_kind
+        not in {
+            "driver_power_error_then_converges",
+            "driver_power_error_with_slave_error",
+            "driver_power_error_with_schedule_change",
+            "slave_write_error",
+        }
+    )
+    assert (evidence.live_slave_full_state_verified_at is not None) is (
+        failure_kind == "driver_power_error_then_converges"
+    )
+    assert evidence.verified_sample_count == (
+        1 if failure_kind == "driver_power_error_then_converges" else 0
+    )
+    assert evidence.forward_failure is not None
+    assert evidence.rollback_completed_at is not None
 
 
 def test_native_intent_loads_version_one_without_primary_failure(
@@ -830,7 +1107,9 @@ def test_native_intent_loads_version_one_without_primary_failure(
     capsys.readouterr()
     path = hardware_test.canonical_intent_path(config)
     payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["version"] = 1
     payload.pop("primary_failure")
+    payload.pop("evidence")
     path.write_text(json.dumps(payload), encoding="utf-8")
     path.chmod(0o600)
 
@@ -839,6 +1118,7 @@ def test_native_intent_loads_version_one_without_primary_failure(
     assert intent is not None
     assert intent.version == 1
     assert intent.primary_failure is None
+    assert intent.evidence is None
 
 
 @pytest.mark.parametrize("unsafe_kind", ["fifo", "hardlink", "mode"])
@@ -1563,6 +1843,137 @@ def test_attended_recovery_retries_after_its_own_journal_successor(
     assert recovered_intent is not None
     assert recovered_intent.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
     assert recovered_intent.outcome == "recovered"
+
+
+def test_absent_intent_recovery_preserves_first_attempt_failure_after_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    intent_store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    intent = intent_store.load()
+    assert intent is not None
+    now = datetime.now(UTC)
+    journal_store = JsonLinkageJournalStore(hardware_test.canonical_journal_path(config))
+    journal_store.create(
+        LinkageTransactionRecord(
+            operation_id=intent.operation_id,
+            phase=LinkageTransactionPhase.ACTIVE,
+            spec=intent.spec,
+            snapshots=intent.snapshots,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=10),
+        )
+    )
+    hardware_test.canonical_intent_path(config).unlink()
+
+    assert hardware_test.main(["recover-linkage"]) == 0
+    recovery_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+    original_recover_once = hardware_test._recover_once
+    expected_failure = LinkageRollbackFailure(
+        participant=LinkageRollbackParticipant.SLAVE,
+        stage=LinkageRollbackStage.CONTROL_RESTORE,
+        category=LinkageRollbackFailureCategory.CONTROL_RESTORE_FAILED,
+    )
+    attempts = 0
+
+    async def fail_with_evidence_then_recover(*args: object, **kwargs: object) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            recovery_store = args[2]
+            assert isinstance(
+                recovery_store,
+                hardware_test.ConfirmingLinkageJournalStore,
+            )
+            pending = recovery_store.load()
+            assert pending is not None
+            recovery_store.save(
+                pending.model_copy(
+                    update={
+                        "phase": LinkageTransactionPhase.RECOVERY_REQUIRED,
+                        "recovery_reason": LinkageRecoveryReason.RESTORE_FAILED,
+                        "updated_at": datetime.now(UTC),
+                        "error": "control_restore_failed",
+                        "failed_device_ids": ("pro_right",),
+                        "rollback_failures": (expected_failure,),
+                    }
+                )
+            )
+            return False
+        return await original_recover_once(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hardware_test, "_recover_once", fail_with_evidence_then_recover)
+    monkeypatch.setattr(hardware_test, "_RECOVERY_RETRY_SECONDS", 0)
+
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 0
+
+    assert attempts == 2
+    assert journal_store.load() is None
+    terminal = intent_store.load()
+    assert terminal is not None
+    assert terminal.version == 2
+    assert terminal.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
+    assert terminal.outcome == "recovered"
+    assert terminal.evidence is not None
+    assert terminal.evidence.rollback_completed_at is not None
+    assert terminal.evidence.rollback_failures == (expected_failure,)
+    assert terminal.evidence.rollback_recovery_reasons == (
+        LinkageRecoveryReason.RESTORE_FAILED,
+    )
+
+
+def test_absent_intent_prepared_recovery_records_no_physical_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    devices = {"pro_left": _device("pro_left", 34), "pro_right": _device("pro_right", 36)}
+    _install_fakes(monkeypatch, config, devices)
+    assert hardware_test.main(_args("preflight")) == 0
+    capsys.readouterr()
+    intent_store = hardware_test.JsonHardwareTestIntentStore(
+        hardware_test.canonical_intent_path(config)
+    )
+    intent = intent_store.load()
+    assert intent is not None
+    now = datetime.now(UTC)
+    journal_store = JsonLinkageJournalStore(hardware_test.canonical_journal_path(config))
+    journal_store.create(
+        LinkageTransactionRecord(
+            operation_id=intent.operation_id,
+            phase=LinkageTransactionPhase.PREPARED,
+            spec=intent.spec,
+            snapshots=intent.snapshots,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=10),
+        )
+    )
+    hardware_test.canonical_intent_path(config).unlink()
+
+    assert hardware_test.main(["recover-linkage"]) == 0
+    recovery_token = _token(capsys.readouterr().out, "Recovery confirmation token")
+    assert hardware_test.main(["recover-linkage", "--confirm", recovery_token]) == 0
+
+    assert all(device.commands == [] for device in devices.values())
+    assert journal_store.load() is None
+    terminal = intent_store.load()
+    assert terminal is not None
+    assert terminal.version == 2
+    assert terminal.phase is hardware_test.HardwareTestIntentPhase.TERMINAL
+    assert terminal.evidence is not None
+    assert terminal.evidence.rollback_started_at is None
+    assert terminal.evidence.rollback_completed_at is None
 
 
 def test_schedule_change_stops_same_confirmation_retry_and_recovery_first(
