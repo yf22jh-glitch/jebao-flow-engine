@@ -12,7 +12,9 @@ recovery 뒤 Observer가 시험 전 상태를 재확인했습니다. 영수증�
 Linkage는 아직 qualified 기능이 아닙니다. 다른 제품군의 쓰기 가능 항목은 여전히 스키마 선언일
 뿐이며, Pro에서도 물리 유량과 파형은 검증하지 않았습니다. 뒤이은 저출력 Sync 세 건도 영수증
 0/2였고, 마지막 slave detach 실패는 attended recovery로 원복한 뒤 rollback의 slave-first fresh
-session 경계를 코드와 시뮬레이터에 추가했으나 아직 실기 재검증 전입니다.
+session 경계를 코드와 시뮬레이터에 추가했습니다. 수정 뒤 네 번째 저출력 Sync는 자동 exact
+restore와 영수증 2/2까지 성공했습니다. 후속 Async slave 38% 진단은 자동 rollback 실패 뒤
+attended recovery로 원복돼, Async 독립 출력과 물리 파형은 계속 미검증입니다.
 
 | 제품군 | 수량 | 분류 | 상태 읽기 | 제한 레지스터 write |
 |---|---:|---|---|---|

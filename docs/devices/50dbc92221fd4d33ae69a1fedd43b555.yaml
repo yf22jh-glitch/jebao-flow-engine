@@ -56,4 +56,6 @@ evidence:
     - A restarted read-only observer reconfirmed the pre-test TimerON states.
     - Three later low-power Sync qualification attempts also issued zero of two receipts.
     - The last attempt exposed ACTIVE-session reuse at slave detach; attended recovery restored both snapshots.
-    - A slave-first fresh rollback-session boundary is simulator-tested but not yet hardware requalified.
+    - A later 31/31 low-power Sync run validated the slave-first boundary, exact restore, and two receipts.
+    - The following Async 35/33 to slave-38 diagnostic still required attended recovery after rollback failed.
+    - The Async intent recorded no typed primary failure, so independent slave Flow remains unqualified.

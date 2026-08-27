@@ -80,7 +80,10 @@ slave별 gain/출력 지원을 입증하지도 않습니다.
 slave detach에서 자동 rollback이 실패했지만, attended recovery와 Observer 확인으로 두 장비를
 시험 전 상태로 복원했습니다. 현재 코드는 rollback 첫 reconciliation보다 앞서 slave→master 새
 인증 세션을 강제하고 refresh/detach 실패 시 fresh 안전 fallback을 사용하도록 수정됐으며 테스트
-571개를 통과했습니다. 이 수정은 아직 실기 미검증이므로 네이티브 Linkage 잠금은 유지합니다.
+571개를 통과했습니다. 수정 배포 뒤 저출력 Sync 31%/31%는 자동 exact restore와 qualification
+영수증 2/2까지 성공했습니다. 그러나 후속 Async 35%/33%→slave 38% 진단은 자동 rollback이
+실패했고, attended recovery와 Observer 교차 확인으로만 원복을 완료했습니다. typed primary
+failure가 없어 Async 독립 출력은 여전히 미검증이며 네이티브 Linkage 잠금은 유지합니다.
 실제 wiring에서는 fail-closed Linkage safety interlock을 비상정지·정비 latch와 공유해야
 하며, journal lease를 획득하지 못한 다른 daemon은 시험이나 startup recovery를 실행하지
 않습니다.

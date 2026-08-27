@@ -26,8 +26,17 @@ fresh authenticated read-only 세션과 deadline 기반 capped backoff로 수정
 새 토큰의 attended recovery는 약 11초 안에 성공했고 Observer는 두 장비의 시험 전 상태를 정확히
 확인했습니다. 이 결과로 ACTIVE 세션을 rollback 첫 read/detach에 재사용하는 결함을 찾아
 slave→master fresh authenticated session 경계를 추가했습니다. refresh/detach 실패의 강제 fresh
-fallback까지 포함한 테스트 571개와 독립 감사 P0/P1 0건을 통과했지만, 이 마지막 수정은 아직
-실기 재검증 전입니다.
+fallback까지 포함한 테스트 571개와 독립 감사 P0/P1 0건을 통과했습니다. 이 시점에는 마지막
+수정도 아직 실기 재검증 전이었습니다.
+
+마지막 수정 배포 뒤 네 번째 저출력 Sync operation은 31%/31%, `--duration 60`으로 자동 종료와
+exact restore까지 성공했고 journal `none`, 래치 clear, qualification 영수증 2/2를 확인했습니다.
+Observer도 두 장비의 시험 전 `TimerON/independent/mode/power/frequency`와 정확히 일치했습니다.
+이어 실행한 150초 Async 진단은 35%/33%로 시작해 60초 뒤 slave 38%를 요청했지만
+`LinkageRollbackError`와 `RECOVERY_REQUIRED/restore_failed`로 끝났습니다. typed primary failure는
+`none`이어서 slave 변경 실패로 단정할 수 없고 Async 영수증은 발급되지 않았습니다. attended
+recovery는 약 18초 안에 완료됐으며 Observer가 다시 시험 전 상태를 확인했습니다. 자동 rollback
+실패 단계를 영속 진단으로 보강하기 전에는 같은 실기를 반복하지 않습니다.
 
 ## 완료된 사전 검증
 
@@ -48,7 +57,9 @@ fallback까지 포함한 테스트 571개와 독립 감사 P0/P1 0건을 통과�
 - TimerON convergence 수정 뒤 세 번째 60초 Sync는 slave detach에서 실패했으며, attended
   recovery 및 Observer 원상태 확인 뒤 영수증 0/2 유지
 - rollback 첫 read/write 전 slave→master 새 인증 세션과 실패 시 fresh fallback을 구현했으나
-  실기 재검증 전
+  네 번째 저출력 Sync에서 자동 exact restore와 영수증 2/2 확인
+- 후속 Async 35%/33%→slave 38% 진단은 자동 rollback 실패, attended exact recovery 성공,
+  typed primary failure 없음, Async 영수증 없음
 - `async_slave` Flow 개별 유지 기능은 지원 기능으로 인정하지 않으며, 독립 유지와 물리 유량 모두 미검증
 - `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 동작은 미실행·미검증
 - 네이티브 Linkage의 Pro 4역할과 `TimerON` encode/decode 단위 테스트

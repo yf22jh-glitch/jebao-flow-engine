@@ -33,10 +33,11 @@ by `constant`, `pulse`, or `sine`. Other native modes remain read-only until the
 The 45% ceiling is checked against the decoded manual fallback `Flow` and schedule data during
 preflight, before authorization, journal creation, or any Linkage write. A high fallback value,
 current slot, or next slot therefore fails read-only.
-The diagnostic also remains unavailable until both qualification receipts exist; the 2026-08-27
-field run produced zero of two receipts, so no schedule-boundary write was attempted. Whether an
-`async_slave` applies its own `AutoMode` and `AutoFlow` together at a slot boundary therefore
-remains unverified on hardware.
+The diagnostic remains unavailable until both qualification receipts exist. A later 2026-08-27
+low-power Sync bootstrap issued two receipts, but the following Async live-Flow diagnostic failed
+automatic rollback and required attended recovery. Schedule-linkage therefore remains
+operationally locked despite those receipts. Whether an `async_slave` applies its own `AutoMode`
+and `AutoFlow` together at a slot boundary remains unverified on hardware.
 
 ## Attended flow
 

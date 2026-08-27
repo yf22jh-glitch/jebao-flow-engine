@@ -34,8 +34,23 @@ recovery는 약 11초 안에 성공했으며, 재시작한 Observer가 두 장�
 찾았습니다. rollback 시작 전에 slave→master 순서로 새 인증 세션을 강제하고, session refresh나
 detach 실패 뒤 fallback도 오염된 세션을 재사용하지 않도록 수정했습니다. normal rollback과
 attended recovery, stale exact 조기 clear, 반쪽 인증, detach 실패를 포함한 테스트 571개가
-통과했고 독립 감사도 P0/P1 0건이었습니다. 이 마지막 수정은 아직 실기 재검증 전이며, 위 세
-실행 모두 물리 수류·파형의 성공 관찰로 해석하지 않습니다.
+통과했고 독립 감사도 P0/P1 0건이었습니다. 이 시점에는 마지막 수정도 실기 재검증 전이었으며,
+위 세 실행 모두 물리 수류·파형의 성공 관찰로 해석하지 않습니다.
+
+이 수정 배포 뒤 네 번째 새 저출력 Sync operation은 `--bootstrap-active-schedule`, 31%/31%,
+`--duration 60`으로 자동 종료와 exact restore까지 성공했습니다. journal은 `none`, 안전 래치는
+clear였고 두 물리 바인딩의 qualification 영수증 2/2가 발급됐습니다. 재시작한 Observer도 두
+장비의 시험 전 `TimerON/independent/mode/power/frequency`를 정확히 확인했습니다. 이 결과는
+slave-first fresh rollback session 경계의 Sync 현장 검증이지만 물리 파형 검증은 아닙니다.
+
+그다음 Async operation은 35%/33%로 시작해 60초 후 slave만 38%로 요청하는 150초 진단으로
+실행했습니다. 프로세스는 `LinkageRollbackError`로 끝나
+`RECOVERY_REQUIRED/restore_failed`와 `timer_on_snapshot` blocker를 남겼습니다. 영속 intent의
+typed primary failure는 `none`이어서 slave 변경 실패로 판정할 증거는 없지만, 자동 rollback이
+완료되지 않았으므로 Async qualification 영수증은 발급되지 않았습니다. 새 확인 토큰의 attended
+recovery는 약 18초 안에 성공했고 Observer가 위 시험 전 상태를 다시 정확히 확인했습니다.
+따라서 Async 독립 출력은 여전히 미검증이며, rollback 실패 단계를 영속·redacted evidence로
+남기는 진단을 보강하기 전에는 이 실기를 반복하지 않습니다.
 
 이 결과는 이전 짧은 실행에서 관찰한 native Linkage 레지스터 관계와 read-back 자체를 부정하지
 않지만, `async_slave`의 개별 `Flow` 유지나 물리 유량·파형을 입증하지도 않습니다. 따라서
@@ -145,9 +160,9 @@ snapshot과 일치해야 exact recovery로 인정합니다. 어느 단계에서�
 ## 현재 판정과 남은 실기 게이트
 
 1. 2026-08-27 실패 operation은 재실행하지 않으며, 후속 시험에는 새 operation ID를 사용
-2. fresh read-only TimerON convergence와 slave-first rollback session 교체 수정은 실기 재검증 전
-3. 진단 primary failure가 rollback 실패에 가려지지 않는 영속 상태와 45% 스케줄 게이트 검증
-4. 새 qualification 영수증 2/2 확보 전에는 schedule-linkage를 실행하지 않음
+2. slave-first rollback session 교체는 저출력 Sync에서 자동 exact restore까지 현장 검증 완료
+3. Async 자동 rollback 실패의 단계·장비별 redacted category를 attended recovery 전 영속화
+4. Sync qualification 영수증 2/2가 있어도 Async rollback 원인 규명 전 schedule-linkage 금지
 5. `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 동작은 계속 미검증
 6. `sync_slave`와 `async_slave`의 물리 파형 및 Frequency 의미를 현장에서 별도 확인
 7. 장비 한 대 전원 제거와 프로세스 강제 종료 후 복구 확인
