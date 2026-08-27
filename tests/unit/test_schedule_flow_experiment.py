@@ -902,9 +902,11 @@ async def test_role_cancellation_evidence_waits_for_disarm_and_schedule_restore(
     entered = asyncio.Event()
     controller = _SequenceController(events)
     physically_disarmed = False
+    cancellation_failure: ScheduleLinkageRunProgressEvent | None = None
 
     class BlockingRoleController(_FakeRoleController):
         async def run(self, _preflight) -> ScheduleLinkageResult:
+            nonlocal cancellation_failure
             self.events.append("roles:run")
             controller._observe_role_progress(  # noqa: SLF001
                 ScheduleLinkageRunProgressEvent(
@@ -913,7 +915,16 @@ async def test_role_cancellation_evidence_waits_for_disarm_and_schedule_restore(
                 )
             )
             entered.set()
-            await asyncio.Event().wait()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_failure = ScheduleLinkageRunProgressEvent(
+                    kind=ScheduleLinkageRunProgressKind.FAILED,
+                    occurred_at=datetime.now(UTC),
+                    failure=ScheduleLinkageRunFailure.MONITOR,
+                )
+                controller._observe_role_progress(cancellation_failure)  # noqa: SLF001
+                raise
             raise AssertionError("unreachable")
 
     async def prove_disarmed(_record: LinkageTransactionRecord) -> None:
@@ -948,29 +959,24 @@ async def test_role_cancellation_evidence_waits_for_disarm_and_schedule_restore(
     assert post_arm
     assert all(post_arm)
     assert events[-2:] == ["timer:off", "temporary:restore"]
+    assert controller.last_role_failure == cancellation_failure
 
 
 async def test_disarm_failure_never_flushes_queued_external_evidence() -> None:
     events: list[str] = []
     delivered: list[ScheduleFlowStageEvent] = []
     controller = _SequenceController(events)
+    role_failure = ScheduleLinkageRunProgressEvent(
+        kind=ScheduleLinkageRunProgressKind.FAILED,
+        occurred_at=datetime.now(UTC),
+        failure=ScheduleLinkageRunFailure.MASTER_ADAPTER_WRITE,
+    )
 
     class ProgressRoleController(_FakeRoleController):
         async def run(self, _preflight) -> ScheduleLinkageResult:
             self.events.append("roles:run")
-            controller._observe_role_progress(  # noqa: SLF001
-                ScheduleLinkageRunProgressEvent(
-                    kind=ScheduleLinkageRunProgressKind.MASTER_ADAPTER_WRITE_COMPLETED,
-                    occurred_at=datetime.now(UTC),
-                )
-            )
-            return cast(
-                ScheduleLinkageResult,
-                SimpleNamespace(
-                    schedule_transition_verified=True,
-                    stop_reason=ScheduleLinkageStopReason.BOUNDARY_VERIFIED,
-                ),
-            )
+            controller._observe_role_progress(role_failure)  # noqa: SLF001
+            raise RuntimeError("simulated role failure")
 
     async def fail_disarm(_record: LinkageTransactionRecord) -> None:
         events.append("timer:off:failed")
@@ -995,6 +1001,7 @@ async def test_disarm_failure_never_flushes_queued_external_evidence() -> None:
     ]
     assert controller._defer_external_evidence_delivery is True  # noqa: SLF001
     assert controller._deferred_stage_events  # noqa: SLF001
+    assert controller.last_role_failure == role_failure
 
 
 async def test_sentinel_only_never_enters_field_timer_or_role_paths() -> None:

@@ -72,6 +72,7 @@ from jebao_flow.devices.schedule_flow_experiment import (
 )
 from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageRunProgressEvent,
+    ScheduleLinkageRunProgressKind,
     ScheduleLinkageSample,
     schedule_linkage_run_progress_rank,
 )
@@ -413,6 +414,7 @@ class HardwareTestIntent(BaseModel):
     schedule_transition_verified: bool | None = None
     stable_slave_tuple_observed: bool | None = None
     stable_observation_seconds: float | None = Field(default=None, ge=0, le=300)
+    schedule_flow_role_failure: ScheduleLinkageRunProgressEvent | None = None
     schedule_flow_stage_events: tuple[ScheduleFlowStageEvent, ...] = Field(
         default=(),
         max_length=SCHEDULE_FLOW_STAGE_EVENT_LIMIT,
@@ -430,6 +432,7 @@ class HardwareTestIntent(BaseModel):
             or self.schedule_transition_verified is not None
             or self.stable_slave_tuple_observed is not None
             or self.stable_observation_seconds is not None
+            or self.schedule_flow_role_failure is not None
             or bool(self.schedule_flow_stage_events)
             or (
                 self.version in {2, 3}
@@ -472,6 +475,7 @@ class HardwareTestIntent(BaseModel):
             or self.schedule_transition_verified is not None
             or self.stable_slave_tuple_observed is not None
             or self.stable_observation_seconds is not None
+            or self.schedule_flow_role_failure is not None
             or self.schedule_flow_stage_events
         )
         if self.version < 3 and has_schedule_extension:
@@ -508,6 +512,10 @@ class HardwareTestIntent(BaseModel):
                     raise ValueError(
                         "sentinel-only intents cannot contain field result metadata"
                     )
+                if self.schedule_flow_role_failure is not None:
+                    raise ValueError(
+                        "sentinel-only intents cannot contain role failure evidence"
+                    )
                 if (
                     self.phase is HardwareTestIntentPhase.TERMINAL
                     and self.outcome in classified_outcomes
@@ -515,8 +523,30 @@ class HardwareTestIntent(BaseModel):
                     raise ValueError(
                         "sentinel-only intents cannot use a schedule-flow classification"
                     )
+            role_failure = self.schedule_flow_role_failure
+            if role_failure is not None:
+                if role_failure.kind is not ScheduleLinkageRunProgressKind.FAILED:
+                    raise ValueError(
+                        "schedule-flow role failure checkpoint must be a failed event"
+                    )
+                if not self.created_at <= role_failure.occurred_at <= self.updated_at:
+                    raise ValueError(
+                        "schedule-flow role failure timestamp must be within the intent lifetime"
+                    )
+                if self.schedule_flow_outcome is not None:
+                    raise ValueError(
+                        "schedule-flow role failure cannot accompany a classified outcome"
+                    )
+                if (
+                    self.phase is HardwareTestIntentPhase.TERMINAL
+                    and self.outcome not in {"experiment_failed_restored", "recovered"}
+                ):
+                    raise ValueError(
+                        "terminal role failure checkpoint requires a failure or recovery outcome"
+                    )
             previous_event: ScheduleFlowStageEvent | None = None
             previous_role_progress: ScheduleLinkageRunProgressEvent | None = None
+            latest_staged_role_failure: ScheduleLinkageRunProgressEvent | None = None
             for event in self.schedule_flow_stage_events:
                 if event.occurred_at < self.created_at:
                     raise ValueError("schedule-flow stage cannot precede the confirmed intent")
@@ -547,6 +577,16 @@ class HardwareTestIntent(BaseModel):
                     ):
                         raise ValueError("schedule-linkage role progress must be monotonic")
                     previous_role_progress = event.role_progress
+                    if event.role_progress.kind is ScheduleLinkageRunProgressKind.FAILED:
+                        latest_staged_role_failure = event.role_progress
+            if (
+                role_failure is not None
+                and latest_staged_role_failure is not None
+                and role_failure != latest_staged_role_failure
+            ):
+                raise ValueError(
+                    "schedule-flow role failure checkpoint disagrees with stage evidence"
+                )
             if len(self.schedule_flow_stage_events) > SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT:
                 terminal_event = self.schedule_flow_stage_events[-1]
                 if (

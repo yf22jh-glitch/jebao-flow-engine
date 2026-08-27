@@ -830,9 +830,12 @@ async def _run(
                 )
                 latest = controller.last_role_sample
                 role_result = controller.last_role_result
+                role_failure = controller.last_role_failure
                 result_updates: dict[str, Any] = {}
                 if latest is not None:
                     result_updates["schedule_flow_sample"] = latest
+                if role_failure is not None:
+                    result_updates["schedule_flow_role_failure"] = role_failure
                 if role_result is not None and latest is not None and latest.phase == "after":
                     outcome = classify_schedule_flow_sample(spec, latest)
                     result_updates.update(
@@ -865,7 +868,15 @@ async def _run(
                             pending_evidence,
                             completed_at=completed_at,
                         ),
-                        "updated_at": max(datetime.now(UTC), intent.updated_at),
+                        "updated_at": max(
+                            datetime.now(UTC),
+                            intent.updated_at,
+                            *(
+                                (role_failure.occurred_at,)
+                                if role_failure is not None
+                                else ()
+                            ),
+                        ),
                     }
                 )
                 successor = _updated_intent(
@@ -875,6 +886,8 @@ async def _run(
                         "wire_qualified"
                         if spec.sentinel_only
                         and controller.wire_qualification_verified
+                        else "experiment_failed_restored"
+                        if role_failure is not None
                         else current.schedule_flow_outcome.value
                         if current.schedule_flow_outcome is not None
                         else "restored"
@@ -943,6 +956,18 @@ async def _run(
                             "updated_at": max(datetime.now(UTC), current.updated_at),
                         }
                     )
+                role_failure = controller.last_role_failure
+                if role_failure is not None:
+                    current = current.model_copy(
+                        update={
+                            "schedule_flow_role_failure": role_failure,
+                            "updated_at": max(
+                                datetime.now(UTC),
+                                current.updated_at,
+                                role_failure.occurred_at,
+                            ),
+                        }
+                    )
                 successor = _updated_intent(
                     current,
                     (
@@ -952,13 +977,19 @@ async def _run(
                     ),
                     "recovery_required" if pending else "experiment_failed_restored",
                 )
-                try:
-                    intent_store.save(successor)
-                except Exception:
-                    # The composed controller has already completed or durably journaled its
-                    # rollback. Preserve the physical failure instead of masking it with an
-                    # evidence-only persistence error.
-                    pass
+                if role_failure is not None:
+                    # This is the only durable checkpoint for a failure observed while external
+                    # evidence delivery was gated. Refuse to lose it silently; nested/outer
+                    # journals retain recovery authority if the atomic successor cannot commit.
+                    _persist_successor(intent_store, current, successor)
+                else:
+                    try:
+                        intent_store.save(successor)
+                    except Exception:
+                        # The composed controller has already completed or durably journaled its
+                        # rollback. Preserve the physical failure instead of masking it with an
+                        # evidence-only persistence error.
+                        pass
                 raise
 
         current = intent_store.load() or intent
@@ -1212,7 +1243,7 @@ def _status(
             )
             failure_text = f"{latest_failure.stage.value}/{classification}"
         print(f"Schedule-flow failure: {failure_text}")
-        latest_role_progress = next(
+        latest_role_progress = intent.schedule_flow_role_failure or next(
             (
                 event.role_progress
                 for event in reversed(intent.schedule_flow_stage_events)
@@ -1228,7 +1259,7 @@ def _status(
                 else "none"
             )
         )
-        latest_role_failure = next(
+        latest_role_failure = intent.schedule_flow_role_failure or next(
             (
                 event.role_progress
                 for event in reversed(intent.schedule_flow_stage_events)

@@ -34,6 +34,8 @@ from jebao_flow.devices.schedule_flow_experiment import (
 )
 from jebao_flow.devices.schedule_linkage import (
     ScheduleAutoEvidence,
+    ScheduleLinkageDriftDimension,
+    ScheduleLinkageRunFailure,
     ScheduleLinkageRunProgressEvent,
     ScheduleLinkageRunProgressKind,
     ScheduleLinkageSample,
@@ -193,6 +195,15 @@ def _after_sample(*, master_flow: int = 35, slave_flow: int = 40) -> ScheduleLin
         slave_manual_power=32,
         master_linkage=LinkageRole.MASTER,
         slave_linkage=LinkageRole.ASYNC_SLAVE,
+    )
+
+
+def _role_failure(occurred_at: datetime) -> ScheduleLinkageRunProgressEvent:
+    return ScheduleLinkageRunProgressEvent(
+        kind=ScheduleLinkageRunProgressKind.FAILED,
+        occurred_at=occurred_at,
+        failure=ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH,
+        drift_dimensions=(ScheduleLinkageDriftDimension.BEFORE_AUTO_FREQUENCY,),
     )
 
 
@@ -866,6 +877,134 @@ def test_v3_role_progress_is_monotonic_in_model_and_append_path() -> None:
         )
 
 
+def test_v3_role_failure_checkpoint_is_backward_compatible_and_privacy_bounded() -> None:
+    legacy_payload = _intent().model_dump(mode="json")
+    legacy_payload.pop("schedule_flow_role_failure")
+
+    assert HardwareTestIntent.model_validate(legacy_payload).schedule_flow_role_failure is None
+
+    started = _intent(phase=HardwareTestIntentPhase.STARTED)
+    occurred_at = started.created_at + timedelta(microseconds=1)
+    checkpoint = _role_failure(occurred_at)
+    validated = HardwareTestIntent.model_validate(
+        started.model_dump(mode="python")
+        | {
+            "updated_at": occurred_at,
+            "schedule_flow_role_failure": checkpoint,
+        }
+    )
+
+    assert validated.schedule_flow_role_failure == checkpoint
+    assert validated.has_diagnostic_progress is True
+    encoded = checkpoint.model_dump_json()
+    assert set(checkpoint.model_dump(exclude_none=True)) == {
+        "kind",
+        "occurred_at",
+        "failure",
+        "drift_dimensions",
+    }
+    assert "device_id" not in encoded
+    assert "physical_binding" not in encoded
+    assert "raw_exception" not in encoded
+    with pytest.raises(ValidationError):
+        HardwareTestIntent.model_validate(
+            started.model_dump(mode="python")
+            | {
+                "updated_at": occurred_at,
+                "schedule_flow_role_failure": checkpoint.model_dump(mode="python")
+                | {"raw_exception": "secret 198.51.100.77"},
+            }
+        )
+
+
+def test_v3_role_failure_checkpoint_rejects_invalid_lifecycle_or_shape() -> None:
+    started = _intent(phase=HardwareTestIntentPhase.STARTED)
+    payload = started.model_dump(mode="python")
+    checkpoint = _role_failure(started.created_at)
+
+    with pytest.raises(ValidationError, match="must be a failed event"):
+        HardwareTestIntent.model_validate(
+            payload
+            | {
+                "schedule_flow_role_failure": ScheduleLinkageRunProgressEvent(
+                    kind=ScheduleLinkageRunProgressKind.FRESH_CAPTURE_STARTED,
+                    occurred_at=started.created_at,
+                )
+            }
+        )
+    with pytest.raises(ValidationError, match="within the intent lifetime"):
+        HardwareTestIntent.model_validate(
+            payload
+            | {
+                "schedule_flow_role_failure": checkpoint.model_copy(
+                    update={"occurred_at": started.created_at - timedelta(microseconds=1)}
+                )
+            }
+        )
+    with pytest.raises(ValidationError, match="armed intents cannot contain"):
+        armed = _intent()
+        HardwareTestIntent.model_validate(
+            armed.model_dump(mode="python")
+            | {"schedule_flow_role_failure": _role_failure(armed.created_at)}
+        )
+    with pytest.raises(ValidationError, match="sentinel-only intents"):
+        sentinel = _intent(
+            phase=HardwareTestIntentPhase.STARTED,
+            sentinel_only=True,
+        )
+        HardwareTestIntent.model_validate(
+            sentinel.model_dump(mode="python")
+            | {
+                "schedule_flow_role_failure": _role_failure(sentinel.created_at),
+            }
+        )
+    with pytest.raises(ValidationError, match="failure or recovery outcome"):
+        HardwareTestIntent.model_validate(
+            payload
+            | {
+                "phase": HardwareTestIntentPhase.TERMINAL,
+                "outcome": "restored",
+                "schedule_flow_role_failure": checkpoint,
+            }
+        )
+    classified = _intent(
+        phase=HardwareTestIntentPhase.TERMINAL,
+        outcome=ScheduleFlowOutcome.PER_SLOT_POWER_VERIFIED.value,
+        sample=_after_sample(),
+        include_result=True,
+    )
+    with pytest.raises(ValidationError, match="cannot accompany a classified outcome"):
+        HardwareTestIntent.model_validate(
+            classified.model_dump(mode="python")
+            | {"schedule_flow_role_failure": _role_failure(classified.created_at)}
+        )
+
+
+def test_v3_role_failure_checkpoint_must_match_flushed_stage_evidence() -> None:
+    started = _intent(phase=HardwareTestIntentPhase.STARTED)
+    checkpoint = _role_failure(started.created_at)
+    staged_failure = ScheduleLinkageRunProgressEvent(
+        kind=ScheduleLinkageRunProgressKind.FAILED,
+        occurred_at=started.created_at,
+        failure=ScheduleLinkageRunFailure.MASTER_ADAPTER_WRITE,
+    )
+
+    with pytest.raises(ValidationError, match="disagrees with stage evidence"):
+        HardwareTestIntent.model_validate(
+            started.model_dump(mode="python")
+            | {
+                "schedule_flow_role_failure": checkpoint,
+                "schedule_flow_stage_events": (
+                    ScheduleFlowStageEvent(
+                        stage=ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+                        occurred_at=started.created_at,
+                        role_progress=staged_failure,
+                    ),
+                ),
+            }
+        )
+
+
 def test_terminal_stage_has_a_reserved_slot_and_coalesces_replay() -> None:
     intent = _intent(phase=HardwareTestIntentPhase.STARTED)
     failures = tuple(
@@ -1079,6 +1218,34 @@ def test_status_is_sanitized_but_prints_effective_sample(capsys) -> None:
     assert "Stable observation: 300s" in output
     assert "vendor-" not in output
     assert intent.schedule_image_digests[0].image_sha256 not in output
+
+
+def test_status_prints_durable_role_failure_without_gated_stage_events(capsys) -> None:
+    base = _intent(
+        phase=HardwareTestIntentPhase.RECOVERY_REQUIRED,
+        outcome="recovery_required",
+    )
+    intent = HardwareTestIntent.model_validate(
+        base.model_dump(mode="python")
+        | {"schedule_flow_role_failure": _role_failure(base.created_at)}
+    )
+    store = SimpleNamespace(load=lambda: intent)
+    empty = SimpleNamespace(load=lambda: None)
+
+    assert cli._status(  # noqa: SLF001
+        SimpleNamespace(instance=SimpleNamespace(id="main")),
+        store,
+        empty,
+        empty,
+        empty,
+    ) == 0
+    output = capsys.readouterr().out
+    assert "Role run stage: failed" in output
+    assert (
+        "Role run failure: confirmation_mismatch/before_auto_frequency" in output
+    )
+    assert "device_id" not in output
+    assert "physical_binding" not in output
 
 
 def test_status_treats_authentic_terminal_v2_as_no_schedule_flow(capsys) -> None:
@@ -1470,6 +1637,43 @@ class _Guard:
         self.permitted = True
 
 
+def _install_run_environment(monkeypatch, armed: HardwareTestIntent):
+    config = SimpleNamespace(instance=SimpleNamespace(id="main"))
+    args = SimpleNamespace(
+        operation_id="scheduled_flow_001",
+        qualification_operation_id="qualified_pair_001",
+        master="master",
+        slave="slave",
+        boundary_time="12:34",
+        confirm=armed.confirmation_token,
+    )
+    monkeypatch.setattr(cli, "_assert_no_verification_conflict", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "_validate_config",
+        lambda _config, _ids: {"master": object(), "slave": object()},
+    )
+    monkeypatch.setattr(cli, "PhysicalDeviceLease", _LeaseFactory)
+    monkeypatch.setattr(cli, "_safety_latch_present", lambda _path: False)
+    monkeypatch.setattr(cli, "_require_receipts", lambda *_args: None)
+    monkeypatch.setattr(cli, "_require_plan_supported", lambda *_args: None)
+
+    async def build(_config, _selected, *, writable):
+        assert writable is True
+        return {"master": object(), "slave": object()}
+
+    async def capture_context(_devices, _device_ids):
+        return armed.schedule_image_digests, (
+            datetime(2026, 8, 27, 12, 31, 1),
+            datetime(2026, 8, 27, 12, 31, 2),
+        )
+
+    monkeypatch.setattr(cli, "_build_devices", build)
+    monkeypatch.setattr(cli, "_connected", _connected)
+    monkeypatch.setattr(cli, "_capture_schedule_context", capture_context)
+    return config, args
+
+
 @pytest.mark.asyncio
 async def test_sentinel_only_terminal_is_durable_before_outer_clear(
     monkeypatch,
@@ -1533,6 +1737,7 @@ async def test_sentinel_only_terminal_is_durable_before_outer_clear(
             self.observe_stage = stage_event_observer
             self.last_role_sample = None
             self.last_role_result = None
+            self.last_role_failure = None
             self.wire_qualification_verified = True
 
         async def run_experiment(self, spec):
@@ -1664,6 +1869,7 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
             self.observe_stage = stage_event_observer
             self.last_role_sample = None
             self.last_role_result = None
+            self.last_role_failure = None
 
         async def run_experiment(self, spec):
             now = datetime.now(UTC)
@@ -1750,6 +1956,172 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("clear_outer", (True, False))
+async def test_run_checkpoints_gated_role_failure_in_existing_terminal_saves(
+    monkeypatch,
+    clear_outer: bool,
+) -> None:
+    armed = _intent()
+
+    class ValidatingIntentStore(_MutableIntentStore):
+        def __init__(self, intent: HardwareTestIntent) -> None:
+            super().__init__(intent)
+            self.saved: list[HardwareTestIntent] = []
+
+        def save(self, intent) -> None:
+            validated = HardwareTestIntent.model_validate(intent.model_dump(mode="python"))
+            self.saved.append(validated)
+            super().save(validated)
+
+    intent_store = ValidatingIntentStore(armed)
+    clear_observations: list[str] = []
+
+    class CheckpointCheckingOuterStore(_OuterStore):
+        def clear(self) -> None:
+            terminal = intent_store.load()
+            assert terminal.phase is HardwareTestIntentPhase.TERMINAL
+            assert terminal.outcome == "experiment_failed_restored"
+            assert terminal.schedule_flow_role_failure is not None
+            clear_observations.append("checkpoint-before-outer-clear")
+            super().clear()
+
+    outer_store = CheckpointCheckingOuterStore()
+    schedule_store = _OuterStore()
+    role_store = _OuterStore()
+    config, args = _install_run_environment(monkeypatch, armed)
+
+    class Controller:
+        def __init__(self, _devices, outer, *_args, **_kwargs):
+            self.outer = outer
+            self.last_role_sample = None
+            self.last_role_result = None
+            self.last_role_failure = None
+
+        async def run_experiment(self, _spec):
+            assert [saved.phase for saved in intent_store.saved] == [
+                HardwareTestIntentPhase.STARTED
+            ]
+            self.last_role_failure = _role_failure(datetime.now(UTC))
+            # No gated observer callback or intent save happened between role failure capture
+            # and either of the existing post-compensation persistence barriers below.
+            assert len(intent_store.saved) == 1
+            if clear_outer:
+                self.outer.clear()
+            else:
+                # A surviving nested journal represents disarm failure: the outer clear hook is
+                # unavailable, so the existing exception successor is the checkpoint barrier.
+                role_store.record = object()
+            raise RuntimeError(
+                "vendor-master-secret 198.51.100.77 raw role exception"
+            )
+
+    monkeypatch.setattr(cli, "ScheduleFlowExperimentController", Controller)
+
+    with pytest.raises(RuntimeError, match="raw role exception"):
+        await cli._run(  # noqa: SLF001
+            config,
+            args,
+            intent_store,
+            outer_store,
+            schedule_store,
+            role_store,
+            SimpleNamespace(),
+            _Guard(),
+        )
+
+    terminal = intent_store.load()
+    assert terminal is not None
+    assert terminal.phase is (
+        HardwareTestIntentPhase.TERMINAL
+        if clear_outer
+        else HardwareTestIntentPhase.RECOVERY_REQUIRED
+    )
+    assert terminal.outcome == (
+        "experiment_failed_restored" if clear_outer else "recovery_required"
+    )
+    assert terminal.schedule_flow_role_failure is not None
+    assert (
+        terminal.schedule_flow_role_failure.failure
+        is ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH
+    )
+    assert clear_observations == (
+        ["checkpoint-before-outer-clear"] if clear_outer else []
+    )
+    encoded = terminal.model_dump_json()
+    assert "vendor-master-secret" not in encoded
+    assert "198.51.100.77" not in encoded
+    assert "raw role exception" not in encoded
+
+
+@pytest.mark.asyncio
+async def test_role_failure_checkpoint_save_failure_preserves_all_journals_and_propagates(
+    monkeypatch,
+) -> None:
+    armed = _intent()
+
+    class RejectCheckpointIntentStore(_MutableIntentStore):
+        checkpoint_attempts = 0
+
+        def save(self, intent) -> None:
+            if intent.schedule_flow_role_failure is not None:
+                self.checkpoint_attempts += 1
+                raise OSError("simulated durable role checkpoint failure")
+            super().save(intent)
+
+    intent_store = RejectCheckpointIntentStore(armed)
+    outer_store = _OuterStore()
+    schedule_store = _OuterStore()
+    role_store = _OuterStore()
+    config, args = _install_run_environment(monkeypatch, armed)
+
+    class Controller:
+        def __init__(self, _devices, outer, *_args, **_kwargs):
+            self.outer = outer
+            self.last_role_sample = None
+            self.last_role_result = None
+            self.last_role_failure = None
+
+        async def run_experiment(self, spec):
+            now = datetime.now(UTC)
+            self.outer.create(
+                LinkageTransactionRecord(
+                    operation_id=spec.operation_id,
+                    phase=LinkageTransactionPhase.PREPARED,
+                    spec=spec.outer_linkage_spec(),
+                    snapshots=armed.snapshots,
+                    created_at=now,
+                    updated_at=now,
+                    expires_at=now + timedelta(seconds=armed.spec.duration_seconds),
+                )
+            )
+            schedule_store.record = "schedule-recovery-authority"
+            role_store.record = "role-recovery-authority"
+            self.last_role_failure = _role_failure(now)
+            raise RuntimeError("simulated physical role failure")
+
+    monkeypatch.setattr(cli, "ScheduleFlowExperimentController", Controller)
+
+    with pytest.raises(OSError, match="durable role checkpoint failure"):
+        await cli._run(  # noqa: SLF001
+            config,
+            args,
+            intent_store,
+            outer_store,
+            schedule_store,
+            role_store,
+            SimpleNamespace(),
+            _Guard(),
+        )
+
+    assert intent_store.checkpoint_attempts == 1
+    assert intent_store.load().phase is HardwareTestIntentPhase.STARTED
+    assert intent_store.load().schedule_flow_role_failure is None
+    assert outer_store.load() is not None
+    assert schedule_store.load() == "schedule-recovery-authority"
+    assert role_store.load() == "role-recovery-authority"
+
+
+@pytest.mark.asyncio
 async def test_pause_failure_durably_records_outer_category_and_completed_restore(
     monkeypatch,
 ) -> None:
@@ -1823,6 +2195,7 @@ async def test_pause_failure_durably_records_outer_category_and_completed_restor
             self.stage_event_observer = stage_event_observer
             self.last_role_sample = None
             self.last_role_result = None
+            self.last_role_failure = None
 
         async def run_experiment(self, _spec):
             now = datetime.now(UTC)
@@ -1946,7 +2319,10 @@ async def test_recover_uses_composed_order_and_terminalizes_before_outer_clear(
     )
     started = HardwareTestIntent.model_validate(
         base.model_dump(mode="python")
-        | {"schedule_flow_stage_events": retained_failures}
+        | {
+            "schedule_flow_role_failure": _role_failure(base.created_at),
+            "schedule_flow_stage_events": retained_failures,
+        }
     )
     now = datetime.now(UTC)
     outer_record = LinkageTransactionRecord(
@@ -2009,5 +2385,6 @@ async def test_recover_uses_composed_order_and_terminalizes_before_outer_clear(
     assert terminal.schedule_flow_stage_events[:-1] == retained_failures
     assert terminal.schedule_flow_stage_events[-1].stage is ScheduleFlowStage.OUTER_RESTORED
     assert len(terminal.schedule_flow_stage_events) == SCHEDULE_FLOW_STAGE_EVENT_LIMIT
+    assert terminal.schedule_flow_role_failure == started.schedule_flow_role_failure
     assert outer_store.load() is None
     assert "restored in order" in capsys.readouterr().out

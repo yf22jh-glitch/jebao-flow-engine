@@ -40,6 +40,7 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageRecord,
     ScheduleLinkageResult,
     ScheduleLinkageRunProgressEvent,
+    ScheduleLinkageRunProgressKind,
     ScheduleLinkageSample,
     ScheduleLinkageSpec,
 )
@@ -443,6 +444,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         self._role_result: ScheduleLinkageResult | None = None
         self._role_error: BaseException | None = None
         self._last_role_sample: ScheduleLinkageSample | None = None
+        self._last_role_failure: ScheduleLinkageRunProgressEvent | None = None
         self._experiment_entry_lock = asyncio.Lock()
         self._schedule_restore_blocked = False
         self._last_schedule_stage: ScheduleFlowStage | None = None
@@ -475,6 +477,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             self._role_result = None
             self._role_error = None
             self._last_role_sample = None
+            self._last_role_failure = None
             self._schedule_restore_blocked = False
             self._last_schedule_stage = None
             self._schedule_failure_recorded = False
@@ -556,6 +559,12 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         return self._role_result
 
     @property
+    def last_role_failure(self) -> ScheduleLinkageRunProgressEvent | None:
+        """Return the redacted inner failure retained across composed rollback."""
+
+        return self._last_role_failure
+
+    @property
     def wire_qualification_verified(self) -> bool:
         """Whether sentinel proof and the safe outer baseline both verified this run."""
 
@@ -576,6 +585,14 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
     def _observe_role_progress(self, event: ScheduleLinkageRunProgressEvent) -> None:
         """Embed the inner controller's already-redacted milestone in outer evidence."""
 
+        if (
+            event.kind is ScheduleLinkageRunProgressKind.FAILED
+            and self._last_role_failure is None
+        ):
+            # This assignment is deliberately the only special handling inside the armed
+            # window. Durable observers remain gated until exact disarm; the existing terminal
+            # intent save checkpoints this already-redacted event after compensation.
+            self._last_role_failure = event
         self._emit_stage(
             ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
             role_progress=event,
