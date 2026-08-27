@@ -1365,18 +1365,18 @@ def test_attended_duration_is_capped_at_ten_seconds() -> None:
         hardware_test._spec_from_args(args)
 
 
-def test_schedule_bootstrap_allows_two_minutes_but_caps_at_three() -> None:
+def test_schedule_bootstrap_allows_five_minutes_but_caps_at_ten() -> None:
     values = _args("preflight")
     values[values.index("sync_slave")] = "async_slave"
-    values[values.index("0.02")] = "120"
+    values[values.index("0.02")] = "300"
     values.extend(("--bootstrap-active-schedule",))
     args = hardware_test.build_parser().parse_args(values)
 
-    assert hardware_test._spec_from_args(args).duration_seconds == 120
+    assert hardware_test._spec_from_args(args).duration_seconds == 300
 
-    too_long = ["180.01" if value == "120" else value for value in values]
+    too_long = ["600.01" if value == "300" else value for value in values]
     too_long_args = hardware_test.build_parser().parse_args(too_long)
-    with pytest.raises(hardware_test.HardwareTestError, match="180 seconds"):
+    with pytest.raises(hardware_test.HardwareTestError, match="600 seconds"):
         hardware_test._spec_from_args(too_long_args)
 
 

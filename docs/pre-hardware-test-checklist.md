@@ -235,7 +235,7 @@ fresh state가 snapshot과 두 번 연속 exact 일치할 때만 복구 완료�
 TimerOFF fallback을 우선합니다.
 
 Async 슬레이브 출력 변경이 실제로 독립 유지되는지 확인하는 2분 예시는 다음과 같습니다. 전체
-bootstrap 실행은 최대 180초이고 임시 시험·qualification target은 45% 이하로 제한됩니다. 마지막
+bootstrap 실행은 최대 600초이고 임시 시험·qualification target은 45% 이하로 제한됩니다. 마지막
 atomic 원복 frame만 journal에 저장된 원래 수동 fallback 값을 그대로 사용합니다.
 
 > 아래는 실행 형식을 보존한 예시입니다. 2026-08-27에 사용한 operation ID와 확인 토큰은 폐기됐고
