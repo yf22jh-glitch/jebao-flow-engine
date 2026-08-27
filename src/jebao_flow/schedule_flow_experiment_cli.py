@@ -47,6 +47,7 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageSample,
     ScheduleLinkageSnapshot,
     ScheduleLinkageSpec,
+    schedule_linkage_run_progress_rank,
 )
 from jebao_flow.devices.schedule_transaction import (
     ScheduleImageSnapshot,
@@ -427,6 +428,20 @@ def _append_schedule_stage_event(
             and event.completed_participants < previous.completed_participants
         ):
             raise ScheduleFlowCliError("schedule-flow participant evidence regressed")
+    if event.role_progress is not None:
+        previous_role_progress = next(
+            (
+                previous.role_progress
+                for previous in reversed(events)
+                if previous.role_progress is not None
+            ),
+            None,
+        )
+        if previous_role_progress is not None and (
+            schedule_linkage_run_progress_rank(event.role_progress.kind)
+            < schedule_linkage_run_progress_rank(previous_role_progress.kind)
+        ):
+            raise ScheduleFlowCliError("schedule-linkage role evidence regressed")
     return (*events, event)
 
 
@@ -1183,6 +1198,40 @@ def _status(
             )
             failure_text = f"{latest_failure.stage.value}/{classification}"
         print(f"Schedule-flow failure: {failure_text}")
+        latest_role_progress = next(
+            (
+                event.role_progress
+                for event in reversed(intent.schedule_flow_stage_events)
+                if event.role_progress is not None
+            ),
+            None,
+        )
+        print(
+            "Role run stage: "
+            + (
+                latest_role_progress.kind.value
+                if latest_role_progress is not None
+                else "none"
+            )
+        )
+        latest_role_failure = next(
+            (
+                event.role_progress
+                for event in reversed(intent.schedule_flow_stage_events)
+                if event.role_progress is not None
+                and event.role_progress.failure is not None
+            ),
+            None,
+        )
+        role_failure_text = "none"
+        if latest_role_failure is not None and latest_role_failure.failure is not None:
+            role_failure_text = latest_role_failure.failure.value
+            if latest_role_failure.drift_dimensions:
+                role_failure_text += "/" + ",".join(
+                    dimension.value
+                    for dimension in latest_role_failure.drift_dimensions
+                )
+        print(f"Role run failure: {role_failure_text}")
         _print_sample(intent.schedule_flow_sample)
         if intent.phase is not HardwareTestIntentPhase.TERMINAL or any(
             value is not None for value in (outer, temporary, role)

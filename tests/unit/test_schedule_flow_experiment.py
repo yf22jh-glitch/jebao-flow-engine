@@ -30,7 +30,11 @@ from jebao_flow.devices.schedule_flow_experiment import (
 )
 from jebao_flow.devices.schedule_linkage import (
     ScheduleAutoEvidence,
+    ScheduleLinkageDriftDimension,
     ScheduleLinkageResult,
+    ScheduleLinkageRunFailure,
+    ScheduleLinkageRunProgressEvent,
+    ScheduleLinkageRunProgressKind,
     ScheduleLinkageSample,
     ScheduleLinkageStopReason,
 )
@@ -118,6 +122,73 @@ def test_outer_diagnostic_events_are_forwarded_without_exception_payloads() -> N
         "occurred_at",
         "forward_failure",
     }
+
+
+def test_role_progress_is_embedded_without_identity_or_raw_value_fields() -> None:
+    now = datetime.now(UTC)
+    progress = ScheduleLinkageRunProgressEvent(
+        kind=ScheduleLinkageRunProgressKind.FAILED,
+        occurred_at=now,
+        failure=ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH,
+        drift_dimensions=(ScheduleLinkageDriftDimension.BEFORE_AUTO_FREQUENCY,),
+    )
+    event = ScheduleFlowStageEvent(
+        stage=ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+        occurred_at=now,
+        role_progress=progress,
+    )
+
+    encoded = event.model_dump_json()
+
+    assert event.role_progress == progress
+    assert "confirmation_mismatch" in encoded
+    assert "before_auto_frequency" in encoded
+    assert "device_id" not in encoded
+    assert "requested_value" not in encoded
+
+
+def test_role_progress_cannot_be_attached_to_an_unrelated_outer_stage() -> None:
+    now = datetime.now(UTC)
+    progress = ScheduleLinkageRunProgressEvent(
+        kind=ScheduleLinkageRunProgressKind.FRESH_CAPTURE_STARTED,
+        occurred_at=now,
+    )
+
+    with pytest.raises(ValidationError, match="restricted to the role observation"):
+        ScheduleFlowStageEvent(
+            stage=ScheduleFlowStage.TIMER_ON_ARMED,
+            occurred_at=now,
+            role_progress=progress,
+        )
+
+
+def test_inner_role_progress_is_forwarded_with_its_exact_timestamp() -> None:
+    events: list[ScheduleFlowStageEvent] = []
+    store = cast(object, _UnusedStore())
+    controller = ScheduleFlowExperimentController(
+        {},
+        cast(object, store),
+        cast(object, store),
+        cast(object, store),
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+        stage_event_observer=events.append,
+    )
+    progress = ScheduleLinkageRunProgressEvent(
+        kind=ScheduleLinkageRunProgressKind.FRESH_CAPTURE_STARTED,
+        occurred_at=datetime.now(UTC),
+    )
+
+    controller._observe_role_progress(progress)  # noqa: SLF001
+
+    assert events == [
+        ScheduleFlowStageEvent(
+            stage=ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+            occurred_at=progress.occurred_at,
+            role_progress=progress,
+        )
+    ]
 
 
 def test_plan_builds_two_distinguishable_segments_and_clears_every_other_slot() -> None:
@@ -364,6 +435,44 @@ async def test_pause_receipt_expiry_before_slave_frame_fails_without_requalifica
     assert all(target.power != 30 for target in master.targets)
 
 
+async def test_timer_on_arm_is_proven_on_fresh_streams_and_leaves_clean_sessions() -> None:
+    events: list[str] = []
+    master = _PauseDevice("master", power=31, events=events)
+    slave = _PauseDevice("slave", power=32, events=events)
+    store = cast(object, _UnusedStore())
+    controller = ScheduleFlowExperimentController(
+        {"master": cast(object, master), "slave": cast(object, slave)},
+        cast(object, store),
+        cast(object, store),
+        cast(object, store),
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        pause_authorizer=lambda _spec, _snapshots: None,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+    )
+    spec = _spec()
+    record = _pause_record(spec, master, slave)
+    _arm_pause_controller(controller, spec)
+
+    await controller._arm_temporary_schedule(record)  # noqa: SLF001
+
+    assert [target.timer_enabled for target in master.targets] == [True]
+    assert [target.timer_enabled for target in slave.targets] == [True]
+    assert events == [
+        "master:write:31",
+        "slave:write:32",
+        "master:disconnect",
+        "slave:disconnect",
+        "master:connect",
+        "slave:connect",
+        "master:read",
+        "slave:read",
+        "master:disconnect",
+        "slave:disconnect",
+        "master:connect",
+        "slave:connect",
+    ]
+
+
 async def test_pause_receipt_expiry_in_last_moment_guard_prevents_frame_send() -> None:
     events: list[str] = []
     authorization_count = 0
@@ -573,6 +682,7 @@ class _SequenceController(ScheduleFlowExperimentController):
             safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
             pause_authorizer=lambda _spec, _snapshots: None,
             prerequisite_authorizer=lambda _spec, _snapshots: None,
+            role_preflight_settle_seconds=0,
         )
         self.events = events
 
@@ -633,6 +743,258 @@ async def test_nested_sequence_disarms_before_temporary_schedule_restore() -> No
         ScheduleFlowStage.ROLE_DISARM_STARTED,
         ScheduleFlowStage.ROLE_DISARMED,
     ]
+
+
+async def test_role_window_stage_persistence_waits_for_exact_disarm() -> None:
+    events: list[str] = []
+    delivered: list[tuple[str, bool]] = []
+    controller = _SequenceController(events)
+    physically_disarmed = False
+
+    def persist_stage(event: ScheduleFlowStageEvent) -> None:
+        label = (
+            f"role:{event.role_progress.kind}"
+            if event.role_progress is not None
+            else f"stage:{event.stage}"
+        )
+        delivered.append((label, physically_disarmed))
+        if event.role_progress is not None:
+            # A durable observer may fail or stall.  Once disarmed this remains diagnostic-only
+            # and must not prevent restoration of the temporary schedule.
+            raise RuntimeError("simulated diagnostic persistence failure")
+
+    def persist_sample(_sample: ScheduleLinkageSample) -> None:
+        delivered.append(("sample", physically_disarmed))
+        raise RuntimeError("simulated sample persistence failure")
+
+    def persist_diagnostic(_event: LinkageDiagnosticEvent) -> None:
+        delivered.append(("diagnostic", physically_disarmed))
+        raise RuntimeError("simulated diagnostic evidence failure")
+
+    class ProgressRoleController(_FakeRoleController):
+        async def run(self, _preflight) -> ScheduleLinkageResult:
+            self.events.append("roles:run")
+            controller._observe_role_progress(  # noqa: SLF001
+                ScheduleLinkageRunProgressEvent(
+                    kind=ScheduleLinkageRunProgressKind.MASTER_ADAPTER_WRITE_STARTED,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            self.events.append("roles:master-write")
+            controller._observe_role_progress(  # noqa: SLF001
+                ScheduleLinkageRunProgressEvent(
+                    kind=ScheduleLinkageRunProgressKind.MASTER_ADAPTER_WRITE_COMPLETED,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            controller._observe_role_sample(_after_sample(phase="before"))  # noqa: SLF001
+            controller._on_diagnostic_event(  # noqa: SLF001
+                LinkageDiagnosticEvent(
+                    kind=LinkageDiagnosticEventKind.ACTIVE_ENTERED,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            assert not any(
+                label.startswith("role:") or label in {"sample", "diagnostic"}
+                for label, _safe in delivered
+            )
+            return cast(
+                ScheduleLinkageResult,
+                SimpleNamespace(
+                    schedule_transition_verified=True,
+                    stop_reason=ScheduleLinkageStopReason.BOUNDARY_VERIFIED,
+                ),
+            )
+
+    async def prove_disarmed(_record: LinkageTransactionRecord) -> None:
+        nonlocal physically_disarmed
+        events.append("timer:off")
+        assert not any(
+            label.startswith("role:") or label in {"sample", "diagnostic"}
+            for label, _safe in delivered
+        )
+        physically_disarmed = True
+
+    spec = _spec(sentinel_qualification=False)
+    controller._experiment_spec = spec  # noqa: SLF001
+    controller._external_stage_event_observer = persist_stage  # noqa: SLF001
+    controller._external_role_sample_observer = persist_sample  # noqa: SLF001
+    controller._external_diagnostic_event_observer = persist_diagnostic  # noqa: SLF001
+    controller._schedule_controller = _FakeScheduleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._role_controller = ProgressRoleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._disarm_temporary_schedule_uninterruptibly = prove_disarmed  # type: ignore[method-assign]  # noqa: SLF001
+    record = cast(
+        LinkageTransactionRecord,
+        SimpleNamespace(operation_id=spec.operation_id),
+    )
+
+    await controller._activate_relationship(record)  # noqa: SLF001
+
+    deferred = [
+        (label, safe)
+        for label, safe in delivered
+        if label.startswith("role:")
+        or label
+        in {
+            "sample",
+            "diagnostic",
+            f"stage:{ScheduleFlowStage.ROLE_OBSERVATION_COMPLETED}",
+            f"stage:{ScheduleFlowStage.ROLE_DISARM_STARTED}",
+        }
+    ]
+    assert deferred
+    assert all(safe for _event, safe in deferred)
+    assert events[-1] == "temporary:restore"
+
+
+async def test_role_failure_evidence_is_delivered_only_after_exact_disarm() -> None:
+    events: list[str] = []
+    delivered: list[tuple[ScheduleFlowStageEvent, bool]] = []
+    controller = _SequenceController(events)
+    physically_disarmed = False
+
+    class FailingRoleController(_FakeRoleController):
+        async def run(self, _preflight) -> ScheduleLinkageResult:
+            self.events.append("roles:run")
+            controller._observe_role_progress(  # noqa: SLF001
+                ScheduleLinkageRunProgressEvent(
+                    kind=ScheduleLinkageRunProgressKind.FAILED,
+                    occurred_at=datetime.now(UTC),
+                    failure=ScheduleLinkageRunFailure.MASTER_ADAPTER_WRITE,
+                )
+            )
+            raise RuntimeError("simulated role failure")
+
+    async def prove_disarmed(_record: LinkageTransactionRecord) -> None:
+        nonlocal physically_disarmed
+        events.append("timer:off")
+        physically_disarmed = True
+
+    spec = _spec(sentinel_qualification=False)
+    controller._experiment_spec = spec  # noqa: SLF001
+    controller._external_stage_event_observer = (  # noqa: SLF001
+        lambda event: delivered.append((event, physically_disarmed))
+    )
+    controller._schedule_controller = _FakeScheduleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._role_controller = FailingRoleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._disarm_temporary_schedule_uninterruptibly = prove_disarmed  # type: ignore[method-assign]  # noqa: SLF001
+    record = cast(
+        LinkageTransactionRecord,
+        SimpleNamespace(operation_id=spec.operation_id),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated role failure"):
+        await controller._activate_relationship(record)  # noqa: SLF001
+
+    post_arm = [
+        safe
+        for event, safe in delivered
+        if event.stage is not ScheduleFlowStage.TIMER_ON_ARM_STARTED
+    ]
+    assert post_arm
+    assert all(post_arm)
+    assert events[-1] == "temporary:restore"
+
+
+async def test_role_cancellation_evidence_waits_for_disarm_and_schedule_restore() -> None:
+    events: list[str] = []
+    delivered: list[tuple[ScheduleFlowStageEvent, bool]] = []
+    entered = asyncio.Event()
+    controller = _SequenceController(events)
+    physically_disarmed = False
+
+    class BlockingRoleController(_FakeRoleController):
+        async def run(self, _preflight) -> ScheduleLinkageResult:
+            self.events.append("roles:run")
+            controller._observe_role_progress(  # noqa: SLF001
+                ScheduleLinkageRunProgressEvent(
+                    kind=ScheduleLinkageRunProgressKind.MASTER_ADAPTER_WRITE_STARTED,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    async def prove_disarmed(_record: LinkageTransactionRecord) -> None:
+        nonlocal physically_disarmed
+        events.append("timer:off")
+        physically_disarmed = True
+
+    spec = _spec(sentinel_qualification=False)
+    controller._experiment_spec = spec  # noqa: SLF001
+    controller._external_stage_event_observer = (  # noqa: SLF001
+        lambda event: delivered.append((event, physically_disarmed))
+    )
+    controller._schedule_controller = _FakeScheduleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._role_controller = BlockingRoleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._disarm_temporary_schedule_uninterruptibly = prove_disarmed  # type: ignore[method-assign]  # noqa: SLF001
+    record = cast(
+        LinkageTransactionRecord,
+        SimpleNamespace(operation_id=spec.operation_id),
+    )
+    task = asyncio.create_task(controller._activate_relationship(record))  # noqa: SLF001
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    post_arm = [
+        safe
+        for event, safe in delivered
+        if event.stage is not ScheduleFlowStage.TIMER_ON_ARM_STARTED
+    ]
+    assert post_arm
+    assert all(post_arm)
+    assert events[-2:] == ["timer:off", "temporary:restore"]
+
+
+async def test_disarm_failure_never_flushes_queued_external_evidence() -> None:
+    events: list[str] = []
+    delivered: list[ScheduleFlowStageEvent] = []
+    controller = _SequenceController(events)
+
+    class ProgressRoleController(_FakeRoleController):
+        async def run(self, _preflight) -> ScheduleLinkageResult:
+            self.events.append("roles:run")
+            controller._observe_role_progress(  # noqa: SLF001
+                ScheduleLinkageRunProgressEvent(
+                    kind=ScheduleLinkageRunProgressKind.MASTER_ADAPTER_WRITE_COMPLETED,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            return cast(
+                ScheduleLinkageResult,
+                SimpleNamespace(
+                    schedule_transition_verified=True,
+                    stop_reason=ScheduleLinkageStopReason.BOUNDARY_VERIFIED,
+                ),
+            )
+
+    async def fail_disarm(_record: LinkageTransactionRecord) -> None:
+        events.append("timer:off:failed")
+        raise RuntimeError("simulated exact disarm failure")
+
+    spec = _spec(sentinel_qualification=False)
+    controller._experiment_spec = spec  # noqa: SLF001
+    controller._external_stage_event_observer = delivered.append  # noqa: SLF001
+    controller._schedule_controller = _FakeScheduleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._role_controller = ProgressRoleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._disarm_temporary_schedule_uninterruptibly = fail_disarm  # type: ignore[method-assign]  # noqa: SLF001
+    record = cast(
+        LinkageTransactionRecord,
+        SimpleNamespace(operation_id=spec.operation_id),
+    )
+
+    with pytest.raises(RuntimeError, match="exact disarm failure"):
+        await controller._activate_relationship(record)  # noqa: SLF001
+
+    assert [event.stage for event in delivered] == [
+        ScheduleFlowStage.TIMER_ON_ARM_STARTED
+    ]
+    assert controller._defer_external_evidence_delivery is True  # noqa: SLF001
+    assert controller._deferred_stage_events  # noqa: SLF001
 
 
 async def test_sentinel_only_never_enters_field_timer_or_role_paths() -> None:
@@ -1101,10 +1463,15 @@ async def test_attended_recovery_orders_roles_timer_schedule_then_outer(monkeypa
 async def test_schedule_only_recovery_reports_its_actual_disarm(monkeypatch) -> None:
     events: list[str] = []
     stage_events: list[ScheduleFlowStageEvent] = []
+    physically_disarmed = False
     outer_record = cast(LinkageTransactionRecord, _disarm_record("schedule_only"))
     outer_store = _MutableStore(outer_record)
     schedule_store = _MutableStore(object())
     role_store = _MutableStore(None)
+    def persist_stage(event: ScheduleFlowStageEvent) -> None:
+        assert physically_disarmed is True
+        stage_events.append(event)
+
     controller = ScheduleFlowExperimentController(
         {},
         cast(object, outer_store),
@@ -1113,7 +1480,7 @@ async def test_schedule_only_recovery_reports_its_actual_disarm(monkeypatch) -> 
         safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
         pause_authorizer=lambda _spec, _snapshots: None,
         prerequisite_authorizer=lambda _spec, _snapshots: None,
-        stage_event_observer=stage_events.append,
+        stage_event_observer=persist_stage,
     )
     controller._schedule_controller = _RecoverSchedule(  # type: ignore[assignment]  # noqa: SLF001
         events,
@@ -1127,7 +1494,9 @@ async def test_schedule_only_recovery_reports_its_actual_disarm(monkeypatch) -> 
     )
 
     async def disarm(_record) -> None:
+        nonlocal physically_disarmed
         events.append("timer:off_verified")
+        physically_disarmed = True
 
     async def recover_outer(self, *, authority) -> bool:
         del self, authority

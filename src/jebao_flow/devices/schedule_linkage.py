@@ -107,6 +107,117 @@ class ScheduleLinkageStopReason(StrEnum):
     MANUAL = "manual"
 
 
+class ScheduleLinkageRunProgressKind(StrEnum):
+    """Allow-listed, identity-free milestones for one role activation run."""
+
+    FRESH_CAPTURE_STARTED = "fresh_capture_started"
+    FRESH_CAPTURE_COMPLETED = "fresh_capture_completed"
+    AUTHORIZATION_STARTED = "authorization_started"
+    AUTHORIZATION_COMPLETED = "authorization_completed"
+    CONFIRMATION_STARTED = "confirmation_started"
+    CONFIRMATION_VERIFIED = "confirmation_verified"
+    JOURNAL_STARTED = "journal_started"
+    JOURNAL_CREATED = "journal_created"
+    FIRST_WRITE_GATE_STARTED = "first_write_gate_started"
+    FIRST_WRITE_GATE_VERIFIED = "first_write_gate_verified"
+    MASTER_INTENT_STARTED = "master_intent_started"
+    MASTER_INTENT_PERSISTED = "master_intent_persisted"
+    MASTER_ADAPTER_WRITE_STARTED = "master_adapter_write_started"
+    MASTER_ADAPTER_WRITE_COMPLETED = "master_adapter_write_completed"
+    MASTER_PAIR_VERIFICATION_STARTED = "master_pair_verification_started"
+    MASTER_PAIR_VERIFIED = "master_pair_verified"
+    SLAVE_INTENT_STARTED = "slave_intent_started"
+    SLAVE_INTENT_PERSISTED = "slave_intent_persisted"
+    SLAVE_ADAPTER_WRITE_STARTED = "slave_adapter_write_started"
+    SLAVE_ADAPTER_WRITE_COMPLETED = "slave_adapter_write_completed"
+    SLAVE_PAIR_VERIFICATION_STARTED = "slave_pair_verification_started"
+    SLAVE_PAIR_VERIFIED = "slave_pair_verified"
+    MONITOR_STARTED = "monitor_started"
+    MONITOR_COMPLETED = "monitor_completed"
+    FAILED = "failed"
+
+
+class ScheduleLinkageRunFailure(StrEnum):
+    """Coarse failure locations safe to persist outside the role transaction."""
+
+    FRESH_CAPTURE = "fresh_capture"
+    AUTHORIZATION = "authorization"
+    CONFIRMATION = "confirmation"
+    CONFIRMATION_MISMATCH = "confirmation_mismatch"
+    JOURNAL = "journal"
+    FIRST_WRITE_GATE = "first_write_gate"
+    MASTER_INTENT = "master_intent"
+    MASTER_ADAPTER_WRITE = "master_adapter_write"
+    MASTER_PAIR_VERIFICATION = "master_pair_verification"
+    SLAVE_INTENT = "slave_intent"
+    SLAVE_ADAPTER_WRITE = "slave_adapter_write"
+    SLAVE_PAIR_VERIFICATION = "slave_pair_verification"
+    MONITOR = "monitor"
+
+
+class ScheduleLinkageDriftDimension(StrEnum):
+    """Allow-listed dimensions only; no identity or before/after value is disclosed."""
+
+    PHYSICAL_BINDING = "physical_binding"
+    ENABLED = "enabled"
+    POWER = "power"
+    MODE = "mode"
+    FREQUENCY = "frequency"
+    TIMER_ENABLED = "timer_enabled"
+    LINKAGE = "linkage"
+    SCHEDULE_FINGERPRINT = "schedule_fingerprint"
+    BOUNDARY = "boundary"
+    BEFORE_AUTO_MODE = "before_auto_mode"
+    BEFORE_AUTO_FLOW = "before_auto_flow"
+    BEFORE_AUTO_FREQUENCY = "before_auto_frequency"
+    BEFORE_AUTO_FEED_TIME = "before_auto_feed_time"
+    NEXT_AUTO_TUPLE = "next_auto_tuple"
+    CONFIRMATION_TOKEN = "confirmation_token"
+
+
+class ScheduleLinkageRunProgressEvent(BaseModel):
+    """Best-effort run telemetry containing neither device IDs, values, nor exceptions."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: ScheduleLinkageRunProgressKind
+    occurred_at: datetime
+    failure: ScheduleLinkageRunFailure | None = None
+    drift_dimensions: tuple[ScheduleLinkageDriftDimension, ...] = Field(
+        default=(),
+        max_length=len(ScheduleLinkageDriftDimension),
+    )
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> Self:
+        if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
+            raise ValueError("schedule-linkage progress timestamps must be timezone-aware")
+        if self.kind is ScheduleLinkageRunProgressKind.FAILED:
+            if self.failure is None:
+                raise ValueError("failed schedule-linkage progress requires an allow-listed stage")
+        elif self.failure is not None:
+            raise ValueError("only failed schedule-linkage progress may include a failure")
+        if self.drift_dimensions:
+            if self.failure is not ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH:
+                raise ValueError("drift dimensions are restricted to confirmation mismatch")
+            canonical = tuple(
+                dimension
+                for dimension in ScheduleLinkageDriftDimension
+                if dimension in self.drift_dimensions
+            )
+            if self.drift_dimensions != canonical:
+                raise ValueError("drift dimensions must be unique and canonically ordered")
+        elif self.failure is ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH:
+            raise ValueError("confirmation mismatch requires at least one drift dimension")
+        return self
+
+
+def schedule_linkage_run_progress_rank(kind: ScheduleLinkageRunProgressKind) -> int:
+    """Return the canonical monotonic rank used by durable outer-stage validation."""
+
+    return tuple(ScheduleLinkageRunProgressKind).index(kind)
+
+
 class ScheduleLinkageSpec(BaseModel):
     """One bounded, previously-qualified async boundary observation."""
 
@@ -350,6 +461,7 @@ PrerequisiteAuthorizer = Callable[
     None,
 ]
 SampleObserver = Callable[[ScheduleLinkageSample], None]
+ScheduleLinkageRunProgressObserver = Callable[[ScheduleLinkageRunProgressEvent], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +488,94 @@ def schedule_linkage_confirmation_token(
     }
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _schedule_linkage_drift_dimensions(
+    expected: tuple[ScheduleLinkageSnapshot, ...],
+    actual: tuple[ScheduleLinkageSnapshot, ...],
+    *,
+    token_matches: bool,
+) -> tuple[ScheduleLinkageDriftDimension, ...]:
+    """Classify confirmation drift without retaining identities or compared values."""
+
+    dimensions: set[ScheduleLinkageDriftDimension] = set()
+    for before, after in zip(expected, actual, strict=True):
+        if before.physical_binding != after.physical_binding:
+            dimensions.add(ScheduleLinkageDriftDimension.PHYSICAL_BINDING)
+        for dimension, before_value, after_value in (
+            (ScheduleLinkageDriftDimension.ENABLED, before.enabled, after.enabled),
+            (ScheduleLinkageDriftDimension.POWER, before.power, after.power),
+            (ScheduleLinkageDriftDimension.MODE, before.mode, after.mode),
+            (ScheduleLinkageDriftDimension.FREQUENCY, before.frequency, after.frequency),
+            (
+                ScheduleLinkageDriftDimension.TIMER_ENABLED,
+                before.timer_enabled,
+                after.timer_enabled,
+            ),
+            (ScheduleLinkageDriftDimension.LINKAGE, before.linkage, after.linkage),
+            (
+                ScheduleLinkageDriftDimension.SCHEDULE_FINGERPRINT,
+                before.schedule_fingerprint,
+                after.schedule_fingerprint,
+            ),
+        ):
+            if before_value != after_value:
+                dimensions.add(dimension)
+        before_expectation = before.expectation
+        after_expectation = after.expectation
+        if (
+            before_expectation.current_slot,
+            before_expectation.next_slot,
+            before_expectation.boundary_at,
+            before_expectation.after_valid_until,
+        ) != (
+            after_expectation.current_slot,
+            after_expectation.next_slot,
+            after_expectation.boundary_at,
+            after_expectation.after_valid_until,
+        ):
+            dimensions.add(ScheduleLinkageDriftDimension.BOUNDARY)
+        for dimension, before_value, after_value in (
+            (
+                ScheduleLinkageDriftDimension.BEFORE_AUTO_MODE,
+                before_expectation.before.mode,
+                after_expectation.before.mode,
+            ),
+            (
+                ScheduleLinkageDriftDimension.BEFORE_AUTO_FLOW,
+                before_expectation.before.flow,
+                after_expectation.before.flow,
+            ),
+            (
+                ScheduleLinkageDriftDimension.BEFORE_AUTO_FREQUENCY,
+                before_expectation.before.frequency,
+                after_expectation.before.frequency,
+            ),
+            (
+                ScheduleLinkageDriftDimension.BEFORE_AUTO_FEED_TIME,
+                before_expectation.before.feed_time,
+                after_expectation.before.feed_time,
+            ),
+        ):
+            if before_value != after_value:
+                dimensions.add(dimension)
+        if (
+            before_expectation.after_mode,
+            before_expectation.after_flow,
+            before_expectation.after_frequency,
+        ) != (
+            after_expectation.after_mode,
+            after_expectation.after_flow,
+            after_expectation.after_frequency,
+        ):
+            dimensions.add(ScheduleLinkageDriftDimension.NEXT_AUTO_TUPLE)
+    if not token_matches and not dimensions:
+        dimensions.add(ScheduleLinkageDriftDimension.CONFIRMATION_TOKEN)
+    return tuple(
+        dimension
+        for dimension in ScheduleLinkageDriftDimension
+        if dimension in dimensions
+    )
 
 
 def _wall_seconds(value: str) -> int:
@@ -578,6 +778,8 @@ class ScheduleActiveLinkageController:
         monotonic_clock: Callable[[], float] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         sample_observer: SampleObserver | None = None,
+        progress_observer: ScheduleLinkageRunProgressObserver | None = None,
+        refresh_sessions_before_critical_reads: bool = False,
     ) -> None:
         self._devices = dict(devices)
         self._store = store
@@ -586,12 +788,18 @@ class ScheduleActiveLinkageController:
         self._monotonic_clock = monotonic_clock
         self._sleep = sleep
         self._sample_observer = sample_observer
+        self._progress_observer = progress_observer
+        self._refresh_sessions_before_critical_reads = (
+            refresh_sessions_before_critical_reads
+        )
         self._run_lock = asyncio.Lock()
         self._active_operation_id: str | None = None
         self._safety_epoch: int | None = None
         self._stop_event: asyncio.Event | None = None
         self._forward_deadline: float | None = None
         self._observation_deadline: float | None = None
+        self._run_failure: ScheduleLinkageRunFailure | None = None
+        self._run_drift_dimensions: tuple[ScheduleLinkageDriftDimension, ...] = ()
 
     @property
     def active_operation_id(self) -> str | None:
@@ -653,7 +861,10 @@ class ScheduleActiveLinkageController:
                 record = self._store.load()
                 if record is None:
                     return False
-                self._validate_recovery_bindings(record)
+                self._validate_recovery_bindings(
+                    record,
+                    permit_disconnected=self._refresh_sessions_before_critical_reads,
+                )
                 self._active_operation_id = record.operation_id
                 self._stop_event = asyncio.Event()
                 if not record.linkage_write_intent_device_ids:
@@ -733,17 +944,51 @@ class ScheduleActiveLinkageController:
         record: ScheduleLinkageRecord | None = None
         journal_created = False
         try:
+            self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.FRESH_CAPTURE_STARTED
+            )
+            await self._refresh_pair_sessions_if_enabled(spec)
             fresh = await self._capture_pair(spec)
             self._assert_observation_deadline()
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.FRESH_CAPTURE_COMPLETED
+            )
+            self._run_failure = ScheduleLinkageRunFailure.AUTHORIZATION
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.AUTHORIZATION_STARTED
+            )
             self._authorize(spec, fresh)
             self._assert_observation_deadline()
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.AUTHORIZATION_COMPLETED
+            )
+            self._run_failure = ScheduleLinkageRunFailure.CONFIRMATION
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.CONFIRMATION_STARTED
+            )
             fresh_token = schedule_linkage_confirmation_token(spec, fresh)
-            if fresh != preflight.snapshots or not _constant_time_equal(
-                fresh_token, preflight.confirmation_token
-            ):
+            token_matches = _constant_time_equal(
+                fresh_token,
+                preflight.confirmation_token,
+            )
+            if fresh != preflight.snapshots or not token_matches:
+                self._run_failure = ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH
+                self._run_drift_dimensions = _schedule_linkage_drift_dimensions(
+                    preflight.snapshots,
+                    fresh,
+                    token_matches=token_matches,
+                )
                 raise ScheduleLinkagePreflightError(
                     "schedule evidence changed after confirmation; no role write was sent"
                 )
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.CONFIRMATION_VERIFIED
+            )
+            self._run_failure = ScheduleLinkageRunFailure.JOURNAL
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.JOURNAL_STARTED
+            )
             record = ScheduleLinkageRecord(
                 operation_id=spec.operation_id,
                 phase=ScheduleLinkagePhase.PREPARED,
@@ -756,10 +1001,20 @@ class ScheduleActiveLinkageController:
             self._store.create(record)
             journal_created = True
             record = self._transition(record, ScheduleLinkagePhase.APPLYING)
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.JOURNAL_CREATED
+            )
             # The final gate is after the durable APPLYING record and directly before the first
             # durable write intent.  The device-level guard then checks the monotonic budget at
             # the last possible moment without retransmitting the control frame.
+            self._run_failure = ScheduleLinkageRunFailure.FIRST_WRITE_GATE
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.FIRST_WRITE_GATE_STARTED
+            )
             clock_anchor = await self._assert_first_write_gate(record)
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.FIRST_WRITE_GATE_VERIFIED
+            )
             if self._stop_requested():
                 self._store.clear()
                 return ScheduleLinkageResult(
@@ -780,9 +1035,17 @@ class ScheduleActiveLinkageController:
                 LinkageRole.ASYNC_SLAVE,
                 clock_anchor,
             )
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR
             record = self._transition(record, ScheduleLinkagePhase.ACTIVE)
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.MONITOR_STARTED
+            )
             stop_reason, verified = await self._monitor_boundary(record, clock_anchor)
+            self._emit_progress_best_effort(
+                ScheduleLinkageRunProgressKind.MONITOR_COMPLETED
+            )
         except BaseException as operation_error:
+            self._emit_failure_best_effort()
             if record is None or not journal_created:
                 raise
             try:
@@ -821,6 +1084,8 @@ class ScheduleActiveLinkageController:
             self._safety_epoch = None
             self._forward_deadline = None
             self._observation_deadline = None
+            self._run_failure = None
+            self._run_drift_dimensions = ()
 
     async def _capture_pair(
         self,
@@ -994,6 +1259,7 @@ class ScheduleActiveLinkageController:
         self,
         record: ScheduleLinkageRecord,
     ) -> _ClockAnchor:
+        await self._refresh_pair_sessions_if_enabled(record.spec)
         states = await self._read_pair(record.spec)
         sampled_at = self._monotonic()
         self._assert_observation_deadline(sampled_at)
@@ -1032,6 +1298,38 @@ class ScheduleActiveLinkageController:
         role: LinkageRole,
         previous_anchor: _ClockAnchor,
     ) -> tuple[ScheduleLinkageRecord, _ClockAnchor]:
+        if role is LinkageRole.MASTER:
+            intent_failure = ScheduleLinkageRunFailure.MASTER_INTENT
+            intent_started = ScheduleLinkageRunProgressKind.MASTER_INTENT_STARTED
+            intent_persisted = ScheduleLinkageRunProgressKind.MASTER_INTENT_PERSISTED
+            adapter_failure = ScheduleLinkageRunFailure.MASTER_ADAPTER_WRITE
+            adapter_started = (
+                ScheduleLinkageRunProgressKind.MASTER_ADAPTER_WRITE_STARTED
+            )
+            adapter_completed = (
+                ScheduleLinkageRunProgressKind.MASTER_ADAPTER_WRITE_COMPLETED
+            )
+            pair_failure = ScheduleLinkageRunFailure.MASTER_PAIR_VERIFICATION
+            pair_started = (
+                ScheduleLinkageRunProgressKind.MASTER_PAIR_VERIFICATION_STARTED
+            )
+            pair_verified = ScheduleLinkageRunProgressKind.MASTER_PAIR_VERIFIED
+        else:
+            intent_failure = ScheduleLinkageRunFailure.SLAVE_INTENT
+            intent_started = ScheduleLinkageRunProgressKind.SLAVE_INTENT_STARTED
+            intent_persisted = ScheduleLinkageRunProgressKind.SLAVE_INTENT_PERSISTED
+            adapter_failure = ScheduleLinkageRunFailure.SLAVE_ADAPTER_WRITE
+            adapter_started = ScheduleLinkageRunProgressKind.SLAVE_ADAPTER_WRITE_STARTED
+            adapter_completed = (
+                ScheduleLinkageRunProgressKind.SLAVE_ADAPTER_WRITE_COMPLETED
+            )
+            pair_failure = ScheduleLinkageRunFailure.SLAVE_PAIR_VERIFICATION
+            pair_started = (
+                ScheduleLinkageRunProgressKind.SLAVE_PAIR_VERIFICATION_STARTED
+            )
+            pair_verified = ScheduleLinkageRunProgressKind.SLAVE_PAIR_VERIFIED
+        self._run_failure = intent_failure
+        self._emit_progress_best_effort(intent_started)
         intents = (*record.linkage_write_intent_device_ids, device_id)
         record = record.model_copy(
             update={
@@ -1040,7 +1338,14 @@ class ScheduleActiveLinkageController:
             }
         )
         self._store.save(record)
+        self._emit_progress_best_effort(intent_persisted)
+        self._run_failure = adapter_failure
+        self._emit_progress_best_effort(adapter_started)
         await self._get_device(device_id).write_linkage(role, guard=self._forward_write_allowed)
+        self._emit_progress_best_effort(adapter_completed)
+        self._run_failure = pair_failure
+        self._emit_progress_best_effort(pair_started)
+        await self._refresh_pair_sessions_if_enabled(record.spec)
         states = await self._read_pair(record.spec)
         sampled_at = self._monotonic()
         self._assert_observation_deadline(sampled_at)
@@ -1068,6 +1373,7 @@ class ScheduleActiveLinkageController:
             update={"linked_device_ids": linked, "updated_at": self._record_now(record)}
         )
         self._store.save(record)
+        self._emit_progress_best_effort(pair_verified)
         return record, self._clock_anchor(states, sampled_at)
 
     async def _monitor_boundary(
@@ -1282,6 +1588,85 @@ class ScheduleActiveLinkageController:
         except BaseException:
             _LOGGER.warning("schedule-linkage sample evidence could not be persisted")
 
+    async def _refresh_pair_sessions_if_enabled(
+        self,
+        spec: ScheduleLinkageSpec,
+    ) -> None:
+        """Optionally force two fresh sessions without exposing half-refreshed cancellation."""
+
+        if not self._refresh_sessions_before_critical_reads:
+            return
+        task = asyncio.create_task(self._refresh_pair_sessions(spec))
+        cancellation_received = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancellation_received = True
+        task.result()
+        if cancellation_received:
+            raise asyncio.CancelledError
+
+    async def _refresh_pair_sessions(self, spec: ScheduleLinkageSpec) -> None:
+        """Attempt both disconnects and both reconnects before reporting any failure."""
+
+        devices = tuple(
+            self._get_device(device_id)
+            for device_id in (spec.master_device_id, spec.slave_device_id)
+        )
+        disconnect_results = await asyncio.gather(
+            *(device.disconnect() for device in devices),
+            return_exceptions=True,
+        )
+        connect_results = await asyncio.gather(
+            *(device.connect() for device in devices),
+            return_exceptions=True,
+        )
+        failure = next(
+            (
+                result
+                for result in (*disconnect_results, *connect_results)
+                if isinstance(result, BaseException)
+            ),
+            None,
+        )
+        if failure is not None:
+            raise failure
+
+    def _emit_progress_best_effort(
+        self,
+        kind: ScheduleLinkageRunProgressKind,
+    ) -> None:
+        observer = self._progress_observer
+        if observer is None:
+            return
+        try:
+            observer(
+                ScheduleLinkageRunProgressEvent(
+                    kind=kind,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+        except BaseException:
+            _LOGGER.warning("schedule-linkage run progress could not be persisted")
+
+    def _emit_failure_best_effort(self) -> None:
+        observer = self._progress_observer
+        failure = self._run_failure
+        if observer is None or failure is None:
+            return
+        try:
+            observer(
+                ScheduleLinkageRunProgressEvent(
+                    kind=ScheduleLinkageRunProgressKind.FAILED,
+                    occurred_at=datetime.now(UTC),
+                    failure=failure,
+                    drift_dimensions=self._run_drift_dimensions,
+                )
+            )
+        except BaseException:
+            _LOGGER.warning("schedule-linkage run failure could not be persisted")
+
     async def _rollback_uninterruptibly(self, record: ScheduleLinkageRecord) -> None:
         task = asyncio.create_task(self._rollback(record))
         cancellation_received = False
@@ -1427,6 +1812,8 @@ class ScheduleActiveLinkageController:
         intended = set(record.linkage_write_intent_device_ids)
         detached = set(record.detached_device_ids)
         try:
+            await self._refresh_pair_sessions_if_enabled(record.spec)
+            self._validate_recovery_bindings(record)
             states = await asyncio.gather(
                 *(
                     self._get_device(snapshot.device_id).get_state()
@@ -1616,10 +2003,18 @@ class ScheduleActiveLinkageController:
                 f"device {device.device_id!r} has no known product key"
             )
 
-    def _validate_recovery_bindings(self, record: ScheduleLinkageRecord) -> None:
+    def _validate_recovery_bindings(
+        self,
+        record: ScheduleLinkageRecord,
+        *,
+        permit_disconnected: bool = False,
+    ) -> None:
         for snapshot in record.snapshots:
             device = self._get_device(snapshot.device_id)
-            if not device.connected or device.physical_binding != snapshot.physical_binding:
+            if (
+                (not permit_disconnected and not device.connected)
+                or device.physical_binding != snapshot.physical_binding
+            ):
                 raise ScheduleLinkagePreflightError(
                     f"device {snapshot.device_id!r} no longer matches its recovery binding"
                 )
@@ -1765,6 +2160,7 @@ __all__ = [
     "ScheduleBoundaryExpectation",
     "ScheduleLinkageApplyError",
     "ScheduleLinkageBusyError",
+    "ScheduleLinkageDriftDimension",
     "ScheduleLinkageError",
     "ScheduleLinkageJournalClaimError",
     "ScheduleLinkageJournalStore",
@@ -1774,9 +2170,14 @@ __all__ = [
     "ScheduleLinkageRecord",
     "ScheduleLinkageResult",
     "ScheduleLinkageRollbackError",
+    "ScheduleLinkageRunFailure",
+    "ScheduleLinkageRunProgressEvent",
+    "ScheduleLinkageRunProgressKind",
+    "ScheduleLinkageRunProgressObserver",
     "ScheduleLinkageSample",
     "ScheduleLinkageSnapshot",
     "ScheduleLinkageSpec",
     "ScheduleLinkageStopReason",
     "schedule_linkage_confirmation_token",
+    "schedule_linkage_run_progress_rank",
 ]

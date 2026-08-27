@@ -39,6 +39,7 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageJournalStore,
     ScheduleLinkageRecord,
     ScheduleLinkageResult,
+    ScheduleLinkageRunProgressEvent,
     ScheduleLinkageSample,
     ScheduleLinkageSpec,
 )
@@ -73,6 +74,7 @@ WallTime = Annotated[
 
 _FIELD_SCHEDULE_END = "23:59"
 _FIELD_SCHEDULE_END_SECONDS = 23 * 60 * 60 + 59 * 60
+_ROLE_PREFLIGHT_SETTLE_SECONDS = 1.0
 
 SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT = 64
 SCHEDULE_FLOW_STAGE_EVENT_LIMIT = SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT + 1
@@ -285,6 +287,7 @@ class ScheduleFlowStageEvent(BaseModel):
     completed_participants: int | None = Field(default=None, ge=0, le=2)
     temporary_error_code: TemporaryScheduleErrorCode | None = None
     failure_category: ScheduleFlowFailureCategory | None = None
+    role_progress: ScheduleLinkageRunProgressEvent | None = None
 
     @model_validator(mode="after")
     def validate_payload(self) -> Self:
@@ -292,6 +295,11 @@ class ScheduleFlowStageEvent(BaseModel):
             raise ValueError("schedule-flow stage timestamps must be timezone-aware")
         if self.temporary_error_code is not None and self.failure_category is not None:
             raise ValueError("a schedule-flow stage may contain only one failure classification")
+        if self.role_progress is not None:
+            if self.stage is not ScheduleFlowStage.ROLE_OBSERVATION_STARTED:
+                raise ValueError("role progress is restricted to the role observation stage")
+            if self.role_progress.occurred_at != self.occurred_at:
+                raise ValueError("role progress and outer stage timestamps must match")
         return self
 
 
@@ -400,7 +408,10 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         diagnostic_event_observer: Callable[[LinkageDiagnosticEvent], None] | None = None,
         stage_event_observer: Callable[[ScheduleFlowStageEvent], None] | None = None,
         schedule_snapshot_authorizer: SnapshotAuthorizer | None = None,
+        role_preflight_settle_seconds: float = _ROLE_PREFLIGHT_SETTLE_SECONDS,
     ) -> None:
+        if role_preflight_settle_seconds < 0:
+            raise ValueError("role preflight settle interval cannot be negative")
         super().__init__(devices, outer_store, safety_interlock=safety_interlock)
         self._experiment_devices = dict(devices)
         self._schedule_store = schedule_store
@@ -418,11 +429,14 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             prerequisite_authorizer=prerequisite_authorizer,
             safety_interlock=safety_interlock,
             sample_observer=self._observe_role_sample,
+            progress_observer=self._observe_role_progress,
+            refresh_sessions_before_critical_reads=True,
         )
         self._external_role_sample_observer = role_sample_observer
         self._external_diagnostic_event_observer = diagnostic_event_observer
         self._external_stage_event_observer = stage_event_observer
         self._authorize_pause = pause_authorizer
+        self._role_preflight_settle_seconds = role_preflight_settle_seconds
         self._experiment_spec: ScheduleFlowExperimentSpec | None = None
         self._sentinel_result: TemporaryScheduleResult | None = None
         self._temporary_result: TemporaryScheduleResult | None = None
@@ -435,6 +449,10 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         self._schedule_failure_recorded = False
         self._outer_pause_completed = 0
         self._wire_qualification_verified = False
+        self._defer_external_evidence_delivery = False
+        self._deferred_stage_events: list[ScheduleFlowStageEvent] = []
+        self._deferred_diagnostic_events: list[LinkageDiagnosticEvent] = []
+        self._deferred_role_samples: dict[str, ScheduleLinkageSample] = {}
 
     async def run_experiment(
         self,
@@ -462,6 +480,10 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             self._schedule_failure_recorded = False
             self._outer_pause_completed = 0
             self._wire_qualification_verified = False
+            self._defer_external_evidence_delivery = False
+            self._deferred_stage_events.clear()
+            self._deferred_diagnostic_events.clear()
+            self._deferred_role_samples.clear()
             try:
                 outer_result = await super().run(spec.outer_linkage_spec())
                 if spec.sentinel_only:
@@ -541,14 +563,34 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
 
     def _observe_role_sample(self, sample: ScheduleLinkageSample) -> None:
         self._last_role_sample = sample
-        if self._external_role_sample_observer is not None:
-            self._external_role_sample_observer(sample)
+        observer = self._external_role_sample_observer
+        if observer is None:
+            return
+        if self._defer_external_evidence_delivery:
+            # The monitor may sample many times.  Only the latest immutable evidence for each
+            # phase is needed by the durable CLI intent, keeping this safety queue bounded by two.
+            self._deferred_role_samples[sample.phase] = sample
+            return
+        observer(sample)
+
+    def _observe_role_progress(self, event: ScheduleLinkageRunProgressEvent) -> None:
+        """Embed the inner controller's already-redacted milestone in outer evidence."""
+
+        self._emit_stage(
+            ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+            role_progress=event,
+        )
 
     def _on_diagnostic_event(self, event: LinkageDiagnosticEvent) -> None:
         """Forward only the parent's already-redacted diagnostic event to the harness."""
 
-        if self._external_diagnostic_event_observer is not None:
-            self._external_diagnostic_event_observer(event)
+        observer = self._external_diagnostic_event_observer
+        if observer is None:
+            return
+        if self._defer_external_evidence_delivery:
+            self._deferred_diagnostic_events.append(event)
+            return
+        observer(event)
 
     def _emit_stage(
         self,
@@ -557,6 +599,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         completed_participants: int | None = None,
         temporary_error_code: TemporaryScheduleErrorCode | None = None,
         failure_category: ScheduleFlowFailureCategory | None = None,
+        role_progress: ScheduleLinkageRunProgressEvent | None = None,
         best_effort: bool = False,
     ) -> None:
         """Emit one typed milestone; compensating paths never depend on its observer."""
@@ -575,11 +618,22 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             return
         event = ScheduleFlowStageEvent(
             stage=stage,
-            occurred_at=datetime.now(UTC),
+            occurred_at=(
+                role_progress.occurred_at
+                if role_progress is not None
+                else datetime.now(UTC)
+            ),
             completed_participants=completed_participants,
             temporary_error_code=temporary_error_code,
             failure_category=failure_category,
+            role_progress=role_progress,
         )
+        if self._defer_external_evidence_delivery:
+            # Persisted CLI observers fsync the outer intent. Never run one after TimerON can be
+            # armed and before the composed controller proves TimerOFF+independent and closes
+            # the role journal. The typed state machines bound this in-memory event sequence.
+            self._deferred_stage_events.append(event)
+            return
         if not best_effort:
             observer(event)
             return
@@ -588,6 +642,40 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         except Exception:
             # TimerOFF, exact schedule restoration and outer control restoration must continue.
             pass
+
+    def _flush_deferred_external_evidence(self) -> None:
+        """Deliver evidence only after exact composed disarm and role closure are proven."""
+
+        stage_events = tuple(self._deferred_stage_events)
+        diagnostic_events = tuple(self._deferred_diagnostic_events)
+        role_samples = tuple(self._deferred_role_samples.values())
+        self._deferred_stage_events.clear()
+        self._deferred_diagnostic_events.clear()
+        self._deferred_role_samples.clear()
+        self._defer_external_evidence_delivery = False
+
+        stage_observer = self._external_stage_event_observer
+        if stage_observer is not None:
+            for event in stage_events:
+                try:
+                    stage_observer(event)
+                except BaseException:
+                    # Evidence durability cannot hold up exact schedule restoration.
+                    pass
+        diagnostic_observer = self._external_diagnostic_event_observer
+        if diagnostic_observer is not None:
+            for event in diagnostic_events:
+                try:
+                    diagnostic_observer(event)
+                except BaseException:
+                    pass
+        sample_observer = self._external_role_sample_observer
+        if sample_observer is not None:
+            for sample in role_samples:
+                try:
+                    sample_observer(sample)
+                except BaseException:
+                    pass
 
     def _observe_temporary_schedule_progress(
         self,
@@ -771,6 +859,10 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             role_error: BaseException | None = None
             try:
                 self._emit_stage(ScheduleFlowStage.TIMER_ON_ARM_STARTED)
+                # This assignment has no suspension point after the externally persisted start
+                # event.  From the first possible TimerON write onward, no filesystem-backed
+                # observer may delay cancellation, disarm, or rollback.
+                self._defer_external_evidence_delivery = True
                 await self._arm_temporary_schedule(record)
                 self._emit_stage(ScheduleFlowStage.TIMER_ON_ARMED)
                 self._emit_stage(ScheduleFlowStage.ROLE_PREFLIGHT_STARTED)
@@ -778,6 +870,14 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                     spec.role_observation_spec()
                 )
                 self._emit_stage(ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED)
+                if self._role_preflight_settle_seconds:
+                    # Keep one quiet interval between two independently refreshed snapshots.
+                    # The nested run remains fail-closed if any TimerON or schedule evidence
+                    # changes during this read-only settling period.
+                    await self._run_forward_operation(
+                        record,
+                        asyncio.sleep(self._role_preflight_settle_seconds),
+                    )
                 self._emit_stage(ScheduleFlowStage.ROLE_OBSERVATION_STARTED)
                 self._role_result = await self._role_controller.run(preflight)
                 self._emit_stage(ScheduleFlowStage.ROLE_OBSERVATION_COMPLETED)
@@ -830,6 +930,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                     ScheduleFlowStage.ROLE_DISARMED,
                     best_effort=True,
                 )
+                self._flush_deferred_external_evidence()
             self._role_error = role_error
             return ObservationCompletion.DISARM_VERIFIED
 
@@ -1021,6 +1122,8 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         if self._schedule_store.load() is not None or self._role_store.load() is not None:
             raise LinkageRollbackError("nested schedule recovery remains incomplete")
         self._schedule_restore_blocked = False
+        if self._defer_external_evidence_delivery:
+            self._flush_deferred_external_evidence()
         return recovered
 
     async def _disarm_nested_recovery_controls(
@@ -1029,6 +1132,9 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
     ) -> None:
         """Report the real TimerOFF proof used by role and schedule-only recovery."""
 
+        # A fresh process may enter recovery while TimerON/native roles are still active.  Gate
+        # its first reported milestone before any external fsync callback can delay safe disarm.
+        self._defer_external_evidence_delivery = True
         self._emit_stage(
             ScheduleFlowStage.ROLE_DISARM_STARTED,
             best_effort=True,
@@ -1193,24 +1299,59 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         )
 
     async def _arm_temporary_schedule(self, record: LinkageTransactionRecord) -> None:
+        targets: list[tuple[str, DeviceTarget]] = []
         for device_id, power in (
             (record.spec.master_device_id, record.spec.master_power),
             (record.spec.slave_device_id, record.spec.slave_power),
         ):
+            target = DeviceTarget(
+                enabled=True,
+                power=power,
+                mode=record.spec.mode,
+                frequency=record.spec.frequency,
+                linkage=LinkageRole.INDEPENDENT,
+                timer_enabled=True,
+            )
+            targets.append((device_id, target))
             self._require_forward_write(record)
             await self._run_forward_operation(
                 record,
                 self._get_device(device_id).write_target(
-                    DeviceTarget(
-                        enabled=True,
-                        power=power,
-                        mode=record.spec.mode,
-                        frequency=record.spec.frequency,
-                        linkage=LinkageRole.INDEPENDENT,
-                        timer_enabled=True,
-                    ),
+                    target,
                     guard=lambda current=record: self._forward_write_allowed(current),
                 ),
+            )
+
+        # A successful multi-DP write can leave the paired 0x03 reply behind when its 0x04
+        # report satisfied the adapter readback first.  Prove both complete TimerON targets on
+        # newly authenticated streams, then replace those streams once more so the role
+        # preflight cannot consume either proof read's queued companion frame.
+        device_ids = tuple(device_id for device_id, _ in targets)
+        await self._replace_device_sessions(record, device_ids)
+        for device_id, target in targets:
+            state = await self._run_forward_operation(
+                record,
+                self._get_device(device_id).get_state(),
+            )
+            self._assert_target(device_id, state, target)
+        await self._replace_device_sessions(record, device_ids)
+
+    async def _replace_device_sessions(
+        self,
+        record: LinkageTransactionRecord,
+        device_ids: tuple[str, ...],
+    ) -> None:
+        """Replace authenticated streams without changing any physical control state."""
+
+        for device_id in device_ids:
+            await self._run_forward_operation(
+                record,
+                self._get_device(device_id).disconnect(),
+            )
+        for device_id in device_ids:
+            await self._run_forward_operation(
+                record,
+                self._get_device(device_id).connect(),
             )
 
     async def _disarm_temporary_schedule_uninterruptibly(

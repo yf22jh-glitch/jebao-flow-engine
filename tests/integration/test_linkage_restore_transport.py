@@ -19,10 +19,15 @@ from jebao_flow.devices import (
     LinkageTransactionPhase,
     LinkageTransactionRecord,
     PhysicalDeviceBinding,
+    ScheduleActiveLinkageController,
+    ScheduleLinkagePhase,
+    ScheduleLinkageRunProgressKind,
+    ScheduleLinkageSpec,
+    ScheduleLinkageStopReason,
     TemporaryLinkageController,
     schedule_structure_fingerprint,
 )
-from jebao_flow.persistence import JsonLinkageJournalStore
+from jebao_flow.persistence import JsonLinkageJournalStore, JsonScheduleLinkageJournalStore
 from jebao_flow.protocol.codec import MAGIC, GizwitsCommand, encode_frame, read_frame
 from jebao_flow.protocol.control import build_control_payload
 from jebao_flow.protocol.errors import ProtocolConnectionError
@@ -50,6 +55,46 @@ def _raw_state(
     raw[2] = power
     raw[3] = frequency
     return bytes(raw)
+
+
+def _scheduled_role_state(
+    *,
+    power: int,
+    before_flow: int,
+    after_flow: int,
+    after_frequency: int,
+    linkage: LinkageRole = LinkageRole.INDEPENDENT,
+) -> bytes:
+    """Build the two-slot TimerON image used by the role controller field path."""
+
+    raw = bytearray(
+        _raw_state(
+            power=power,
+            frequency=20,
+            linkage=linkage,
+            timer_enabled=True,
+        )
+    )
+    raw[6] = LOCAL_WAVEMAKER_PRO.by_name("AutoMode").enum_values.index("constant")
+    raw[7] = before_flow
+    raw[8] = 5
+    raw[10] = 15
+    raw[11:443] = bytes([0xEE]) * 432
+    raw[11:20] = bytes((0, 0, 18, 11, 2, before_flow, 0, 0, 0))
+    raw[20:29] = bytes(
+        (18, 11, 23, 59, 1, after_flow, after_frequency, 0, 0)
+    )
+    raw[443:451] = bytes((20, 26, 8, 27, 0, 18, 10, 0))
+    return bytes(raw)
+
+
+def _with_linkage(raw_state: bytes, linkage: LinkageRole) -> bytes:
+    changed = bytearray(raw_state)
+    role_index = LOCAL_WAVEMAKER_PRO.by_name("Linkage").enum_values.index(
+        linkage.value
+    )
+    changed[0] = (changed[0] & ~0x0C) | (role_index << 2)
+    return bytes(changed)
 
 
 def _binding(device_id: str) -> PhysicalDeviceBinding:
@@ -359,6 +404,7 @@ def _device(
     server: _LocalGizwitsPump,
     *,
     minimum_command_interval_ms: int = 100,
+    readback_delay_ms: int = 0,
     ack_loss_retry_delay_seconds: float = 0.5,
     created_sessions: list[GizwitsSession] | None = None,
 ) -> LanJebaoDevice:
@@ -368,7 +414,7 @@ def _device(
         LOCAL_WAVEMAKER_PRO.product_key,
         power_limits=PowerLimits(min_power=30, max_power=75),
         minimum_command_interval_ms=minimum_command_interval_ms,
-        readback_delay_ms=0,
+        readback_delay_ms=readback_delay_ms,
         readback_attempts=1,
         allow_hardware_writes=True,
         physical_binding=_binding(device_id),
@@ -491,6 +537,122 @@ async def test_ack_loss_report_reply_pair_is_retired_before_next_fresh_read_with
         for _connection, payload, _sent_at in server.control_payload_events
     ) == 1
     assert server.errors == []
+
+
+async def test_schedule_role_activation_refreshes_report_reply_streams_and_detaches(
+    tmp_path: Path,
+) -> None:
+    master_independent = _scheduled_role_state(
+        power=31,
+        before_flow=31,
+        after_flow=35,
+        after_frequency=30,
+    )
+    slave_independent = _scheduled_role_state(
+        power=32,
+        before_flow=32,
+        after_flow=40,
+        after_frequency=30,
+    )
+    master_server = _LocalGizwitsPump(
+        master_independent,
+        state_action=STATE_REPORT_ACTION,
+        pair_report_with_reply=True,
+    )
+    slave_server = _LocalGizwitsPump(
+        slave_independent,
+        state_action=STATE_REPORT_ACTION,
+        pair_report_with_reply=True,
+    )
+    await master_server.start()
+    await slave_server.start()
+    master = _device(
+        "master",
+        master_server,
+        minimum_command_interval_ms=1000,
+        readback_delay_ms=500,
+    )
+    slave = _device(
+        "slave",
+        slave_server,
+        minimum_command_interval_ms=1000,
+        readback_delay_ms=500,
+    )
+    linkage_attribute = LOCAL_WAVEMAKER_PRO.linkage_attribute
+    if linkage_attribute is None:  # pragma: no cover - Pro always exposes Linkage
+        raise AssertionError("test profile has no linkage attribute")
+    for server, independent, role in (
+        (master_server, master_independent, LinkageRole.MASTER),
+        (slave_server, slave_independent, LinkageRole.ASYNC_SLAVE),
+    ):
+        linked = _with_linkage(independent, role)
+        server.register_control(
+            build_control_payload(
+                LOCAL_WAVEMAKER_PRO,
+                {linkage_attribute: role.value},
+            ),
+            linked,
+        )
+        server.register_control(
+            build_control_payload(
+                LOCAL_WAVEMAKER_PRO,
+                {linkage_attribute: LinkageRole.INDEPENDENT.value},
+            ),
+            independent,
+        )
+
+    progress = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "role-report-reply.json")
+    controller = ScheduleActiveLinkageController(
+        {"master": master, "slave": slave},
+        store,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+    )
+    spec = ScheduleLinkageSpec(
+        operation_id="role_report_reply",
+        qualification_operation_id="qualified_pair",
+        master_device_id="master",
+        slave_device_id="slave",
+        observation_window_seconds=130,
+        verification_interval_seconds=0.1,
+        minimum_lead_seconds=45,
+        ambiguous_band_seconds=0.1,
+    )
+
+    try:
+        await master.connect()
+        await slave.connect()
+        preflight = await controller.preflight(spec)
+        run = asyncio.create_task(controller.run(preflight))
+        async with asyncio.timeout(5):
+            while True:
+                record = store.load()
+                if record is not None and record.phase is ScheduleLinkagePhase.ACTIVE:
+                    break
+                await asyncio.sleep(0.005)
+        assert await controller.stop(spec.operation_id) is True
+        result = await run
+
+        assert result.stop_reason is ScheduleLinkageStopReason.MANUAL
+        assert store.load() is None
+        assert progress[-2].kind is ScheduleLinkageRunProgressKind.MONITOR_STARTED
+        assert progress[-1].kind is ScheduleLinkageRunProgressKind.MONITOR_COMPLETED
+        assert master_server.current_state == master_independent
+        assert slave_server.current_state == slave_independent
+        assert len(master_server.control_payload_events) == 2
+        assert len(slave_server.control_payload_events) == 2
+        assert master_server.accepted_connections >= 5
+        assert slave_server.accepted_connections >= 5
+        assert master_server.errors == []
+        assert slave_server.errors == []
+    finally:
+        await master.disconnect()
+        await slave.disconnect()
+        await master_server.close()
+        await slave_server.close()
 
 
 async def test_schedule_ack_loss_accepts_fresh_state_report_without_control_replay() -> None:

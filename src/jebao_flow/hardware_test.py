@@ -70,7 +70,11 @@ from jebao_flow.devices.schedule_flow_experiment import (
     classify_schedule_flow_sample,
     schedule_flow_stage_rank,
 )
-from jebao_flow.devices.schedule_linkage import ScheduleLinkageSample
+from jebao_flow.devices.schedule_linkage import (
+    ScheduleLinkageRunProgressEvent,
+    ScheduleLinkageSample,
+    schedule_linkage_run_progress_rank,
+)
 from jebao_flow.hardware_guard import DeploymentHardwareGuard
 from jebao_flow.hardware_safety import (
     HardwareSafetyRootError,
@@ -512,6 +516,7 @@ class HardwareTestIntent(BaseModel):
                         "sentinel-only intents cannot use a schedule-flow classification"
                     )
             previous_event: ScheduleFlowStageEvent | None = None
+            previous_role_progress: ScheduleLinkageRunProgressEvent | None = None
             for event in self.schedule_flow_stage_events:
                 if event.occurred_at < self.created_at:
                     raise ValueError("schedule-flow stage cannot precede the confirmed intent")
@@ -533,6 +538,15 @@ class HardwareTestIntent(BaseModel):
                             "schedule-flow participant progress must be monotonic"
                         )
                 previous_event = event
+                if event.role_progress is not None:
+                    if previous_role_progress is not None and (
+                        schedule_linkage_run_progress_rank(event.role_progress.kind)
+                        < schedule_linkage_run_progress_rank(
+                            previous_role_progress.kind
+                        )
+                    ):
+                        raise ValueError("schedule-linkage role progress must be monotonic")
+                    previous_role_progress = event.role_progress
             if len(self.schedule_flow_stage_events) > SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT:
                 terminal_event = self.schedule_flow_stage_events[-1]
                 if (

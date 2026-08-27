@@ -32,7 +32,12 @@ from jebao_flow.devices.schedule_flow_experiment import (
     ScheduleFlowStageEvent,
     classify_schedule_flow_sample,
 )
-from jebao_flow.devices.schedule_linkage import ScheduleAutoEvidence, ScheduleLinkageSample
+from jebao_flow.devices.schedule_linkage import (
+    ScheduleAutoEvidence,
+    ScheduleLinkageRunProgressEvent,
+    ScheduleLinkageRunProgressKind,
+    ScheduleLinkageSample,
+)
 from jebao_flow.devices.schedule_transaction import (
     DeviceSchedulePatch,
     ScheduleImageSnapshot,
@@ -725,6 +730,39 @@ def test_v3_stage_events_are_monotonic_bounded_and_identity_free() -> None:
                     ),
                 )
             }
+        )
+
+
+def test_v3_role_progress_is_monotonic_in_model_and_append_path() -> None:
+    intent = _intent(phase=HardwareTestIntentPhase.STARTED)
+    first_at = intent.created_at + timedelta(microseconds=1)
+    later_at = intent.created_at + timedelta(microseconds=2)
+    later_progress = ScheduleFlowStageEvent(
+        stage=ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+        occurred_at=first_at,
+        role_progress=ScheduleLinkageRunProgressEvent(
+            kind=ScheduleLinkageRunProgressKind.AUTHORIZATION_COMPLETED,
+            occurred_at=first_at,
+        ),
+    )
+    regressed_progress = ScheduleFlowStageEvent(
+        stage=ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+        occurred_at=later_at,
+        role_progress=ScheduleLinkageRunProgressEvent(
+            kind=ScheduleLinkageRunProgressKind.FRESH_CAPTURE_STARTED,
+            occurred_at=later_at,
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="role progress must be monotonic"):
+        HardwareTestIntent.model_validate(
+            intent.model_dump(mode="python")
+            | {"schedule_flow_stage_events": (later_progress, regressed_progress)}
+        )
+    with pytest.raises(cli.ScheduleFlowCliError, match="role evidence regressed"):
+        cli._append_schedule_stage_event(  # noqa: SLF001
+            (later_progress,),
+            regressed_progress,
         )
 
 
