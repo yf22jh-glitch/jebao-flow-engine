@@ -265,6 +265,43 @@ class _ApplyThenRaiseAndDelayTimerResumeDevice(_RecordingDevice):
         return state
 
 
+class _SuccessfulWriteWithDelayedTimerResumeDevice(_RecordingDevice):
+    """ACK TimerON once, then expose several stale decoded states before convergence."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.pre_resume_state = None
+        self.stale_resume_reads = 0
+        self.resume_read_count = 0
+        self.connect_calls = 0
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        await super().connect()
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        pre_write_state = self._state  # noqa: SLF001
+        await super().write_target(target, guard=guard)
+        if target.timer_enabled is False:
+            self.pre_resume_state = None
+            self.stale_resume_reads = 0
+        elif target.timer_enabled is True:
+            self.pre_resume_state = pre_write_state
+            # More than the former four-read ceiling reproduces the field failure without a
+            # transport error or uncertain write outcome.
+            self.stale_resume_reads = 5
+
+    async def get_state(self):
+        state = await super().get_state()
+        if self.stale_resume_reads and self.pre_resume_state is not None:
+            self.stale_resume_reads -= 1
+            self.resume_read_count += 1
+            return self.pre_resume_state.model_copy(update={"observed_at": state.observed_at})
+        if self.pre_resume_state is not None:
+            self.resume_read_count += 1
+        return state
+
+
 class _ApplyThenHangRestoreWriteDevice(_RecordingDevice):
     """Apply one armed restore frame, then model an ACK wait until cancellation."""
 
@@ -538,6 +575,7 @@ class _ReadFailureThenHangingReconnectDevice(_RecordingDevice):
         super().__init__(device_id)
         self.fail_resume_read = False
         self.hang_reconnect_once = False
+        self.fresh_connects_before_hang = 0
         self.reconnect_started = asyncio.Event()
         self.reconnect_cancelled = asyncio.Event()
         self.never_set = asyncio.Event()
@@ -546,7 +584,9 @@ class _ReadFailureThenHangingReconnectDevice(_RecordingDevice):
 
     async def connect(self) -> None:
         self.connect_calls += 1
-        if self.hang_reconnect_once:
+        if self.hang_reconnect_once and self.fresh_connects_before_hang:
+            self.fresh_connects_before_hang -= 1
+        elif self.hang_reconnect_once:
             self.hang_reconnect_once = False
             self.reconnect_started.set()
             try:
@@ -565,6 +605,9 @@ class _ReadFailureThenHangingReconnectDevice(_RecordingDevice):
         if target.timer_enabled is True:
             self.fail_resume_read = True
             self.hang_reconnect_once = True
+            # TimerON verification now deliberately starts on a fresh session. Let that session
+            # authenticate, fail its first read, then hang the one allowed recovery reconnect.
+            self.fresh_connects_before_hang = 1
 
     async def get_state(self):
         if self.fail_resume_read:
@@ -654,6 +697,7 @@ class _HalfAuthenticatedSafetyReconnectDevice(_RecordingDevice):
         self.authenticated = False
         self.fail_resume_read = False
         self.half_auth_reconnect = False
+        self.fresh_connects_before_half_auth = 0
         self.half_auth_started = asyncio.Event()
         self.half_auth_cancelled = asyncio.Event()
         self.half_auth_closed = asyncio.Event()
@@ -664,7 +708,9 @@ class _HalfAuthenticatedSafetyReconnectDevice(_RecordingDevice):
 
     async def connect(self) -> None:
         self.connect_calls += 1
-        if self.half_auth_reconnect:
+        if self.half_auth_reconnect and self.fresh_connects_before_half_auth:
+            self.fresh_connects_before_half_auth -= 1
+        elif self.half_auth_reconnect:
             self.half_auth_reconnect = False
             self._connected = True  # noqa: SLF001
             self.authenticated = False
@@ -696,6 +742,9 @@ class _HalfAuthenticatedSafetyReconnectDevice(_RecordingDevice):
         if target.timer_enabled is True:
             self.fail_resume_read = True
             self.half_auth_reconnect = True
+            # Preserve this fixture's read-failure -> half-authenticated recovery sequence after
+            # the mandatory successful-write TimerON verification reconnect.
+            self.fresh_connects_before_half_auth = 1
 
     async def get_state(self):
         if self.fail_resume_read:
@@ -1563,6 +1612,70 @@ async def test_schedule_bootstrap_reconciles_apply_then_raise_with_delayed_timer
     assert len(timer_on_commands) == 1
 
 
+async def test_successful_timer_on_restore_waits_past_stale_decoded_states_without_replay(
+    tmp_path: Path,
+) -> None:
+    master = await _ready_device("master", power=70, frequency=34)
+    slave = await _ready_device(
+        "slave",
+        device_class=_SuccessfulWriteWithDelayedTimerResumeDevice,
+        power=65,
+        frequency=32,
+    )
+    master.commands.clear()
+    slave.commands.clear()
+    store = JsonLinkageJournalStore(tmp_path / "successful-delayed-timer-resume.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        restore_backoff_seconds=0.001,
+        restore_total_timeout_seconds=0.1,
+    )
+    spec = LinkageTestSpec(
+        operation_id="successful_delayed_timer_resume",
+        master_device_id="master",
+        slave_device_id="slave",
+        slave_role=LinkageRole.ASYNC_SLAVE,
+        mode="constant",
+        master_power=35,
+        slave_power=33,
+        frequency=20,
+        duration_seconds=5,
+        verification_interval_seconds=0.005,
+        bootstrap_active_schedule=True,
+    )
+
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    assert await controller.stop(spec.operation_id) is True
+    result = await task
+
+    assert result.stop_reason is LinkageStopReason.MANUAL
+    assert store.load() is None
+    # Five stale observations plus the required exact/exact streak occur before the final
+    # transaction reconciliation performs its own independent exact reads.
+    assert slave.resume_read_count >= 7
+    assert slave.stale_resume_reads == 0
+    # TimerON verification always starts on one fresh read-only session, without replaying the
+    # armed restore frame, and then keeps waiting through decoded convergence on that session.
+    assert slave.connect_calls == 2
+    timer_on_commands = [
+        command
+        for command in slave.commands
+        if command.name == "timer_enabled" and command.value is True
+    ]
+    assert len(timer_on_commands) == 1
+    slave_state = await slave.get_state()
+    assert (
+        slave_state.power,
+        slave_state.mode,
+        slave_state.frequency,
+        slave_state.linkage,
+        slave_state.timer_enabled,
+    ) == (65, "constant", 32, LinkageRole.INDEPENDENT, True)
+
+
 async def test_restore_read_failure_reconnects_once_and_requires_fresh_exact_streak(
     tmp_path: Path,
 ) -> None:
@@ -1599,8 +1712,8 @@ async def test_restore_read_failure_reconnects_once_and_requires_fresh_exact_str
     assert result.stop_reason is LinkageStopReason.MANUAL
     assert store.load() is None
     assert slave.verification_reads == 5
-    assert slave.disconnect_calls == 1
-    assert slave.connect_calls == 2
+    assert slave.disconnect_calls == 2
+    assert slave.connect_calls == 3
     timer_on_commands = [
         command
         for command in slave.commands
@@ -1658,10 +1771,11 @@ async def test_second_hard_restore_read_fails_without_third_verification_reconne
     assert pending.failed_device_ids == ("slave",)
     assert pending.restored_device_ids == ("master",)
     assert slave.resume_read_attempts == 2
-    assert slave.resume_read_connection_counts == [1, 2]
-    # Initial session + one read-only verification reconnect + one safe-fallback reconnect.
-    assert slave.connect_calls == 3
-    assert slave.disconnect_calls == 2
+    assert slave.resume_read_connection_counts == [2, 3]
+    # Initial session + mandatory TimerON verification session + one failed-read recovery
+    # session + one safe-fallback reconnect.
+    assert slave.connect_calls == 4
+    assert slave.disconnect_calls == 3
     assert slave.safe_fallback_writes == 1
     timer_on_commands = [
         command
@@ -1831,8 +1945,8 @@ async def test_safety_trip_during_half_authenticated_restore_connect_closes_and_
     assert slave.half_auth_cancelled.is_set()
     assert slave.half_auth_closed.is_set()
     assert slave.unauthenticated_write_attempts == 0
-    assert slave.connect_calls == 3
-    assert slave.disconnect_calls == 2
+    assert slave.connect_calls == 4
+    assert slave.disconnect_calls == 3
     pending = store.load()
     assert pending is not None
     assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
@@ -2032,7 +2146,13 @@ async def test_schedule_bootstrap_exhausts_fresh_reads_without_retransmitting_ti
     master.commands.clear()
     slave.commands.clear()
     store = JsonLinkageJournalStore(tmp_path / "never-converges.json")
-    controller = _controller(master, slave, store)
+    controller = _controller(
+        master,
+        slave,
+        store,
+        restore_backoff_seconds=0.001,
+        restore_total_timeout_seconds=0.1,
+    )
     spec = LinkageTestSpec(
         operation_id="scheduled_never_converges",
         master_device_id="master",
@@ -2058,7 +2178,7 @@ async def test_schedule_bootstrap_exhausts_fresh_reads_without_retransmitting_ti
     assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
     assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
     assert pending.failed_device_ids == ("slave",)
-    assert slave.resume_read_count == 4
+    assert slave.resume_read_count >= 8
     assert (await slave.get_state()).timer_enabled is False
     timer_on_commands = [
         command
@@ -2275,7 +2395,7 @@ async def test_schedule_bootstrap_bounds_hanging_restore_reads(tmp_path: Path) -
     assert pending is not None
     assert pending.failed_device_ids == ("slave",)
     assert slave.hanging_read_attempts == 2
-    assert slave.connect_calls == 3
+    assert slave.connect_calls == 4
     assert (await slave.get_state()).timer_enabled is False
     timer_on_commands = [
         command
@@ -2435,8 +2555,8 @@ async def test_safety_trip_during_restore_reconnect_wins_and_stops_devices(
         await asyncio.wait_for(task, timeout=1)
 
     assert slave.reconnect_cancelled.is_set()
-    assert slave.disconnect_calls == 1
-    assert slave.connect_calls == 3
+    assert slave.disconnect_calls == 2
+    assert slave.connect_calls == 4
     pending = store.load()
     assert pending is not None
     assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK

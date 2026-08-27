@@ -7,6 +7,22 @@ Observer 교차 확인으로 시험 전 상태는 복원했지만, qualification
 진입 조건도 충족하지 못했습니다. 같은 실행은 반복하지 않습니다. 물리 유량·파형과 TimerON
 시간표 경계 동작은 새 사전 조건을 모두 충족하고 사용자가 수조를 직접 볼 수 있을 때만 검증합니다.
 
+복구 코드 `7e8c41b`를 배포한 뒤 같은 날 수행한 후속 저출력 Sync 시험도 자격 판정에는
+도달하지 못했습니다. 첫 새 operation은 `--bootstrap-active-schedule`, `sync_slave`, 31%/31%,
+실행 중 출력 변경 없음, `--duration 10` 조건에서 `LinkageApplyError`로 끝났지만 트랜잭션은
+`terminal/restored`, journal은 `none`이 됐고 Observer가 원래
+`TimerON/independent/mode/power`를 정확히 확인했습니다. qualification 영수증은 계속 0/2입니다.
+이때 duration이 ACTIVE 시간만이 아니라 bootstrap 전체 deadline으로 쓰여 너무 짧았을 가능성이
+있습니다. 두 번째 새 operation은 동일한 저출력 Sync와 `--duration 60`으로 실행했으나 자동
+rollback이 `RECOVERY_REQUIRED/restore_failed`와 `timer_on` blocker를 남겼습니다. 새 토큰의
+attended recovery로 이를 닫은 뒤 Observer가 다시 원래 상태를 정확히 확인했으며, 영수증은
+여전히 0/2입니다. 어느 실행도 물리 수류·파형의 성공 관찰 증거로 사용하지 않습니다.
+
+후속 코드 감사에서는 TimerON restore write 성공 뒤에도 기존 세션을 사용하면서 decoded mismatch를
+4회, 약 1.75초 동안만 확인해 명목상 64초 convergence 창을 사용하지 못한 경로를 찾았습니다.
+fresh authenticated read-only 세션과 deadline 기반 capped backoff로 수정했고 테스트 568개와
+독립 감사 P0/P1 0건을 통과했지만, 이 수정은 아직 실기 재검증 전입니다.
+
 ## 완료된 사전 검증
 
 - 격리 IoT VLAN의 장비 6대 discovery 및 TCP 12416 연결
@@ -21,6 +37,9 @@ Observer 교차 확인으로 시험 전 상태는 복원했지만, qualification
   최초 자동 원복 확인 실패 뒤 attended exact recovery 성공
 - TimerON Async 장기 실행은 slave 출력 변경 구간 직후 실패했고 qualification 영수증 0/2
 - 자동 exact restore 미완료 뒤 새 토큰의 attended recovery 및 Observer 원상태 교차 확인
+- 복구 코드 `7e8c41b` 배포 뒤 저출력 Sync 후속 시험 두 건도 영수증 0/2로 종료:
+  10초 실행은 자동 복원 성공, 60초 실행은 attended recovery 뒤 원상태 확인
+- TimerON restore convergence의 old-session/약 1.75초 조기 종료 경로를 수정했으나 실기 재검증 전
 - `async_slave` Flow 개별 유지 기능은 지원 기능으로 인정하지 않으며, 독립 유지와 물리 유량 모두 미검증
 - `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 동작은 미실행·미검증
 - 네이티브 Linkage의 Pro 4역할과 `TimerON` encode/decode 단위 테스트

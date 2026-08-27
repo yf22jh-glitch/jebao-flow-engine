@@ -11,6 +11,22 @@ CLI와 recovery-only supervisor입니다. 2026-08-27에는 활성 TimerON 시간
 같은 실행을 반복하지 않고 새 확인 토큰의 attended recovery를 수행해 두 snapshot을 복원했으며,
 재시작한 읽기 전용 Observer도 시험 전 TimerON 상태를 다시 확인했습니다.
 
+복구 코드 `7e8c41b` 배포 뒤 수행한 후속 저출력 Sync도 아직 성공 증거가 아닙니다. 첫 새
+operation은 `--bootstrap-active-schedule`, `sync_slave`, 31%/31%, 실행 중 출력 변경 없음,
+`--duration 10`으로 실행해 `LinkageApplyError`로 끝났습니다. 다만 트랜잭션은
+`terminal/restored`, journal은 `none`이 됐고 Observer가 원래
+`TimerON/independent/mode/power`를 정확히 확인했습니다. qualification 영수증은 0/2였으며,
+duration이 bootstrap 전체 deadline으로 적용돼 너무 짧았을 가능성이 있습니다. 두 번째 새
+operation은 같은 저출력 Sync를 `--duration 60`으로 실행했지만 자동 rollback 뒤
+`RECOVERY_REQUIRED/restore_failed`와 `timer_on` blocker가 남았습니다. 새 토큰의 attended
+recovery로 닫은 뒤 Observer가 원래 상태를 정확히 확인했고 영수증은 계속 0/2입니다.
+
+후속 코드 감사에서는 성공한 TimerON restore write 뒤 기존 세션으로 decoded mismatch를 4회,
+약 1.75초만 확인해 명목상 64초 convergence 창을 사용하지 못하는 경로를 찾았습니다. 이를
+fresh authenticated read-only 세션과 deadline 기반 capped backoff로 수정했고 테스트 568개,
+독립 감사 P0/P1 0건을 통과했습니다. 다만 수정 후 실기 재검증은 아직 수행하지 않았으며, 위 두
+실행 모두 물리 수류·파형의 성공 관찰로 해석하지 않습니다.
+
 이 결과는 이전 짧은 실행에서 관찰한 native Linkage 레지스터 관계와 read-back 자체를 부정하지
 않지만, `async_slave`의 개별 `Flow` 유지나 물리 유량·파형을 입증하지도 않습니다. 따라서
 slave별 gain/출력이 필요한 운영은 모든 펌프를 `independent`로 둔 소프트웨어 그룹을
@@ -115,8 +131,10 @@ snapshot과 일치해야 exact recovery로 인정합니다. 어느 단계에서�
 ## 현재 판정과 남은 실기 게이트
 
 1. 2026-08-27 실패 operation은 재실행하지 않으며, 후속 시험에는 새 operation ID를 사용
-2. 진단 primary failure가 rollback 실패에 가려지지 않는 영속 상태와 45% 스케줄 게이트 검증
-3. 새 qualification 영수증 2/2 확보 전에는 schedule-linkage를 실행하지 않음
-4. `sync_slave`와 `async_slave`의 물리 파형 및 Frequency 의미를 현장에서 별도 확인
-5. 장비 한 대 전원 제거와 프로세스 강제 종료 후 복구 확인
-6. 모든 결과가 통과한 뒤에만 MQTT/HA 네이티브 시험 UI 승격 검토
+2. fresh authenticated read-only restore convergence 수정은 아직 실기 재검증 전
+3. 진단 primary failure가 rollback 실패에 가려지지 않는 영속 상태와 45% 스케줄 게이트 검증
+4. 새 qualification 영수증 2/2 확보 전에는 schedule-linkage를 실행하지 않음
+5. `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 동작은 계속 미검증
+6. `sync_slave`와 `async_slave`의 물리 파형 및 Frequency 의미를 현장에서 별도 확인
+7. 장비 한 대 전원 제거와 프로세스 강제 종료 후 복구 확인
+8. 모든 결과가 통과한 뒤에만 MQTT/HA 네이티브 시험 UI 승격 검토

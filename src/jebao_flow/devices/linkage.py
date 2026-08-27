@@ -377,7 +377,10 @@ class TemporaryLinkageController:
     """Apply one bounded relationship and guarantee journaled compensating restore."""
 
     _AUTOMATIC_RECOVERY_GRACE_SECONDS = 30.0
-    _RESTORE_VERIFICATION_DECODED_READ_ATTEMPTS = 4
+    # Keep decoded-state polling active for the full convergence window. The exponent cap keeps
+    # later reads periodic instead of letting exponential backoff consume the remainder after
+    # only a handful of valid-but-stale controller replies.
+    _RESTORE_VERIFICATION_MAX_BACKOFF_EXPONENT = 4
     _DEFAULT_RESTORE_VERIFICATION_BACKOFF_SECONDS = 0.25
     _DEFAULT_RESTORE_VERIFICATION_READ_TIMEOUT_SECONDS = 5.5
     # The LAN driver can legitimately spend up to 30 seconds in a complete guarded write and
@@ -386,9 +389,9 @@ class TemporaryLinkageController:
     # reserved for proving the final TimerON state.
     _DEFAULT_RESTORE_WRITE_TIMEOUT_SECONDS = 31.0
     _DEFAULT_RESTORE_CONNECTION_TIMEOUT_SECONDS = 16.0
-    # A connected hard-read failure can require 5.5 seconds for the failed read, 16 seconds each
-    # for disconnect and fresh authentication, four 5.5-second decoded reads, and bounded
-    # mismatch backoff. Keep the whole 61.25-second path inside one monotonic convergence window.
+    # A connected hard-read failure can consume 5.5 seconds before one bounded session
+    # replacement. Keep the remaining periodic decoded reads and capped mismatch backoff inside
+    # one monotonic 64-second convergence window rather than imposing a smaller attempt limit.
     _DEFAULT_RESTORE_VERIFICATION_CONVERGENCE_TIMEOUT_SECONDS = 64.0
     _REQUIRED_WRITABLE = frozenset(
         {
@@ -1447,7 +1450,11 @@ class TemporaryLinkageController:
                 await self._verify_exact_restore(
                     snapshot,
                     device,
-                    force_fresh_session=write_uncertain,
+                    # TimerON hands authority back to the controller's schedule. Verify that
+                    # boundary on a new authenticated read-only session even when the write ACK
+                    # arrived, so buffered pre-resume states cannot satisfy exact restore. The
+                    # final armed frame above is still sent exactly once.
+                    force_fresh_session=write_uncertain or snapshot.timer_enabled,
                 )
                 record = self._mark_device_restored(record, snapshot.device_id)
                 errors[snapshot.device_id].clear()
@@ -1578,7 +1585,7 @@ class TemporaryLinkageController:
         exact_streak = 0
         transport_recovery_used = False
 
-        while decoded_reads < self._RESTORE_VERIFICATION_DECODED_READ_ATTEMPTS:
+        while True:
             self._require_restore_safety()
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -1635,16 +1642,21 @@ class TemporaryLinkageController:
                     # Confirm it immediately rather than sleeping while schedule authority runs.
                     continue
 
-            if decoded_reads < self._RESTORE_VERIFICATION_DECODED_READ_ATTEMPTS:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                delay = min(
-                    self._restore_verification_backoff_seconds
-                    * (2 ** (decoded_reads - 1)),
-                    remaining,
-                )
-                await self._wait_for_restore_retry(delay)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            delay = min(
+                self._restore_verification_backoff_seconds
+                * (
+                    2
+                    ** min(
+                        decoded_reads - 1,
+                        self._RESTORE_VERIFICATION_MAX_BACKOFF_EXPONENT,
+                    )
+                ),
+                remaining,
+            )
+            await self._wait_for_restore_retry(delay)
 
         raise LinkageRollbackError(
             f"device {snapshot.device_id!r} exact restore was not confirmed by bounded reads"

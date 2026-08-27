@@ -443,11 +443,12 @@ async def test_timer_on_restore_survives_two_quarantined_streams_without_replay(
             linkage=LinkageRole.INDEPENDENT,
             timer_enabled=True,
         )
-        assert master_server.accepted_connections == 1
-        assert master_server.passcode_requests == 1
-        assert master_server.login_requests == 1
+        assert master_server.accepted_connections == 2
+        assert master_server.passcode_requests == 2
+        assert master_server.login_requests == 2
         assert master_server.control_sequences == [1, 2]
         assert master_server.timer_on_control_sequences == [2]
+        assert master_server.state_requests_by_connection == {1: 5, 2: 4}
         assert master_server.state_request_count == 9
 
         assert slave_server.accepted_connections == 3
