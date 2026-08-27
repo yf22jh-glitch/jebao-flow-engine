@@ -76,6 +76,11 @@ startup recovery wiring이 끝나기 전에는 이 경계를 해제하지 않습
 완료되지 않아 영수증 0/2 상태로 끝났습니다. 새 토큰의 attended recovery는 성공했으며 Observer가
 시험 전 TimerON 상태를 다시 확인했습니다. 이 결과는 Linkage 레지스터 관계 자체를 부정하지 않지만,
 slave별 gain/출력 지원을 입증하지도 않습니다.
+후속 저출력 Sync 세 건도 영수증 0/2였습니다. 마지막 실행은 TimerON convergence 수정 뒤에도
+slave detach에서 자동 rollback이 실패했지만, attended recovery와 Observer 확인으로 두 장비를
+시험 전 상태로 복원했습니다. 현재 코드는 rollback 첫 reconciliation보다 앞서 slave→master 새
+인증 세션을 강제하고 refresh/detach 실패 시 fresh 안전 fallback을 사용하도록 수정됐으며 테스트
+571개를 통과했습니다. 이 수정은 아직 실기 미검증이므로 네이티브 Linkage 잠금은 유지합니다.
 실제 wiring에서는 fail-closed Linkage safety interlock을 비상정지·정비 latch와 공유해야
 하며, journal lease를 획득하지 못한 다른 daemon은 시험이나 startup recovery를 실행하지
 않습니다.

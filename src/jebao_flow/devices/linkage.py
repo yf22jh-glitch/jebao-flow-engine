@@ -730,23 +730,11 @@ class TemporaryLinkageController:
                 # proves no compensation is needed and must not disturb a schedule that
                 # legitimately advanced while the daemon was offline.
                 self._store.clear()
-            elif self._safety_allows_operation():
-                schedule_change_ids: set[str] = set()
-                read_failure_ids: set[str] = set()
-                record = await self._reconcile_exactly_restored_devices(
-                    record,
-                    schedule_change_ids=schedule_change_ids,
-                    read_failure_ids=read_failure_ids,
-                )
-                if len(record.restored_device_ids) == len(record.snapshots):
-                    self._store.clear()
-                else:
-                    await self._rollback_uninterruptibly(
-                        record,
-                        schedule_change_ids=schedule_change_ids,
-                        read_failure_ids=read_failure_ids,
-                    )
             else:
+                # Normal rollback and restart recovery must establish the same fresh transport
+                # boundary before trusting any exact-state evidence.  Let _rollback() own that
+                # boundary and its first reconciliation instead of accepting stale frames from
+                # the session created by this recovery process.
                 await self._rollback_uninterruptibly(record)
         finally:
             self._active_operation_id = None
@@ -1243,9 +1231,12 @@ class TemporaryLinkageController:
 
         schedule_change_ids = set() if schedule_change_ids is None else set(schedule_change_ids)
         read_failure_ids = set() if read_failure_ids is None else set(read_failure_ids)
+        session_refresh_failure_ids = await self._replace_rollback_sessions(record)
         record = await self._reconcile_exactly_restored_devices(
             record,
-            excluded_device_ids=frozenset(schedule_change_ids | read_failure_ids),
+            excluded_device_ids=frozenset(
+                schedule_change_ids | read_failure_ids | session_refresh_failure_ids
+            ),
             schedule_change_ids=schedule_change_ids,
             read_failure_ids=read_failure_ids,
         )
@@ -1261,6 +1252,7 @@ class TemporaryLinkageController:
         detach_order = (record.spec.slave_device_id, record.spec.master_device_id)
         restore_blocked_ids: set[str] = set()
         safe_fallback_attempted_ids: set[str] = set()
+        reconnect_required_ids = set(read_failure_ids | session_refresh_failure_ids)
         detach_targets: dict[str, DeviceTarget] = {}
 
         async def block_after_slave_detach_failure(
@@ -1293,8 +1285,16 @@ class TemporaryLinkageController:
         for device_id in detach_order:
             if device_id in already_restored:
                 continue
-            if device_id in read_failure_ids:
-                errors[device_id].append("state_read_failed")
+            if device_id in read_failure_ids or device_id in session_refresh_failure_ids:
+                errors[device_id].append(
+                    "state_read_failed"
+                    if device_id in read_failure_ids
+                    else "session_refresh_failed"
+                )
+                # A failed transport boundary is not evidence that the prior linked session is
+                # safe for exact restore. Permit one independently fresh safe-low detach only,
+                # keep this device out of TimerON, and require a later attended recovery pass.
+                restore_blocked_ids.add(device_id)
                 safe_fallback_attempted_ids.add(device_id)
                 detached = await self._try_safe_fallback(
                     self._get_device(device_id),
@@ -1303,8 +1303,28 @@ class TemporaryLinkageController:
                 )
                 if not detached:
                     errors[device_id].append("detach_failed")
-                    if device_id == record.spec.slave_device_id:
-                        await block_after_slave_detach_failure()
+                if device_id == record.spec.slave_device_id and (
+                    not detached or device_id in session_refresh_failure_ids
+                ):
+                    # Even a confirmed fallback cannot prove what happened during a failed
+                    # slave session refresh. A later read failure is narrower: once its forced
+                    # fresh fallback is confirmed, the independently detached master may resume.
+                    await block_after_slave_detach_failure()
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+                continue
+            if device_id in restore_blocked_ids:
+                # A preceding slave failure deliberately blocks both armed restores. Put the
+                # peer into one confirmed safe-low independent state and do not duplicate that
+                # same fallback later merely because exact restoration remains deferred.
+                safe_fallback_attempted_ids.add(device_id)
+                detached = await self._try_safe_fallback(
+                    self._get_device(device_id),
+                    record.spec.frequency,
+                )
+                if not detached:
+                    errors[device_id].append("detach_failed")
+                    reconnect_required_ids.add(device_id)
                 if not self._safety_allows_operation():
                     await self._defer_restore_for_safety(record)
                 continue
@@ -1327,6 +1347,7 @@ class TemporaryLinkageController:
                 if not self._safety_allows_operation():
                     await self._defer_restore_for_safety(record)
                 errors[device_id].append("detach_failed")
+                reconnect_required_ids.add(device_id)
                 restore_blocked_ids.add(device_id)
                 if device_id == record.spec.slave_device_id:
                     await block_after_slave_detach_failure()
@@ -1509,7 +1530,7 @@ class TemporaryLinkageController:
                     fallback_confirmed = await self._try_safe_fallback(
                         self._get_device(device_id),
                         record.spec.frequency,
-                        force_reconnect=device_id in read_failure_ids,
+                        force_reconnect=device_id in reconnect_required_ids,
                     )
                     if not fallback_confirmed:
                         errors[device_id].append("safe_fallback_failed")
@@ -1686,6 +1707,44 @@ class TemporaryLinkageController:
                 asyncio.get_running_loop().time() + self._restore_connection_timeout_seconds,
             ),
         )
+
+    async def _replace_restore_session(self, device: JebaoDevice) -> None:
+        """Authenticate a clean session before the first compensating detach write.
+
+        Disconnect and authentication retain their independently audited bounds.  This helper
+        performs no state read and sends no device target; the caller owns the one detach frame
+        and its decoded read-back.
+        """
+
+        self._require_restore_safety()
+        if device.connected:
+            await self._disconnect_restore_session(
+                device,
+                timeout_seconds=self._restore_connection_timeout_seconds,
+            )
+        await self._ensure_restore_connection(
+            device,
+            deadline=(
+                asyncio.get_running_loop().time()
+                + self._restore_connection_timeout_seconds
+            ),
+        )
+
+    async def _replace_rollback_sessions(
+        self,
+        record: LinkageTransactionRecord,
+    ) -> set[str]:
+        """Replace slave then master sessions before trusting rollback evidence."""
+
+        failed: set[str] = set()
+        for device_id in (record.spec.slave_device_id, record.spec.master_device_id):
+            try:
+                await self._replace_restore_session(self._get_device(device_id))
+            except Exception:
+                if not self._safety_allows_operation():
+                    await self._defer_restore_for_safety(record)
+                failed.add(device_id)
+        return failed
 
     @staticmethod
     def _remaining_restore_timeout(deadline: float, *, ceiling: float) -> float:

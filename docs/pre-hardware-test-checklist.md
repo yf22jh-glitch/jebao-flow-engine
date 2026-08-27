@@ -20,8 +20,14 @@ attended recovery로 이를 닫은 뒤 Observer가 다시 원래 상태를 정�
 
 후속 코드 감사에서는 TimerON restore write 성공 뒤에도 기존 세션을 사용하면서 decoded mismatch를
 4회, 약 1.75초 동안만 확인해 명목상 64초 convergence 창을 사용하지 못한 경로를 찾았습니다.
-fresh authenticated read-only 세션과 deadline 기반 capped backoff로 수정했고 테스트 568개와
-독립 감사 P0/P1 0건을 통과했지만, 이 수정은 아직 실기 재검증 전입니다.
+fresh authenticated read-only 세션과 deadline 기반 capped backoff로 수정한 뒤 세 번째 새
+저출력 Sync operation을 31%/31%, `--duration 60`으로 실행했으나, 더 앞선 slave detach에서
+자동 rollback이 실패해 다시 `RECOVERY_REQUIRED/restore_failed`, 영수증 0/2로 끝났습니다.
+새 토큰의 attended recovery는 약 11초 안에 성공했고 Observer는 두 장비의 시험 전 상태를 정확히
+확인했습니다. 이 결과로 ACTIVE 세션을 rollback 첫 read/detach에 재사용하는 결함을 찾아
+slave→master fresh authenticated session 경계를 추가했습니다. refresh/detach 실패의 강제 fresh
+fallback까지 포함한 테스트 571개와 독립 감사 P0/P1 0건을 통과했지만, 이 마지막 수정은 아직
+실기 재검증 전입니다.
 
 ## 완료된 사전 검증
 
@@ -39,7 +45,10 @@ fresh authenticated read-only 세션과 deadline 기반 capped backoff로 수정
 - 자동 exact restore 미완료 뒤 새 토큰의 attended recovery 및 Observer 원상태 교차 확인
 - 복구 코드 `7e8c41b` 배포 뒤 저출력 Sync 후속 시험 두 건도 영수증 0/2로 종료:
   10초 실행은 자동 복원 성공, 60초 실행은 attended recovery 뒤 원상태 확인
-- TimerON restore convergence의 old-session/약 1.75초 조기 종료 경로를 수정했으나 실기 재검증 전
+- TimerON convergence 수정 뒤 세 번째 60초 Sync는 slave detach에서 실패했으며, attended
+  recovery 및 Observer 원상태 확인 뒤 영수증 0/2 유지
+- rollback 첫 read/write 전 slave→master 새 인증 세션과 실패 시 fresh fallback을 구현했으나
+  실기 재검증 전
 - `async_slave` Flow 개별 유지 기능은 지원 기능으로 인정하지 않으며, 독립 유지와 물리 유량 모두 미검증
 - `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 동작은 미실행·미검증
 - 네이티브 Linkage의 Pro 4역할과 `TimerON` encode/decode 단위 테스트

@@ -478,6 +478,112 @@ class _StaleExactThenMismatchReconcileDevice(_RecordingDevice):
         return await super().get_state()
 
 
+class _RollbackSessionBoundaryDevice(_RecordingDevice):
+    """Expose stale exact state only on the ACTIVE transport and trace rollback I/O."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.session_generation = 0
+        self.connect_calls = 0
+        self.disconnect_calls = 0
+        self.rollback_armed = False
+        self.stale_exact_state = None
+        self.stale_reads = 0
+        self.linkage_session: int | None = None
+        self.rejected_old_session_detaches = 0
+        self.transport_events: list[str] | None = None
+        self.rollback_writes: list[tuple[int, DeviceTarget]] = []
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        await super().connect()
+        self.session_generation += 1
+        if self.rollback_armed and self.transport_events is not None:
+            self.transport_events.append(
+                f"connect:{self.device_id}:{self.session_generation}"
+            )
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        if self.rollback_armed and self.transport_events is not None:
+            self.transport_events.append(
+                f"disconnect:{self.device_id}:{self.session_generation}"
+            )
+        await super().disconnect()
+
+    async def get_state(self):
+        state = await super().get_state()
+        if self.rollback_armed and self.transport_events is not None:
+            self.transport_events.append(
+                f"read:{self.device_id}:{self.session_generation}"
+            )
+        if (
+            self.rollback_armed
+            and self.session_generation == 1
+            and self.stale_exact_state is not None
+        ):
+            self.stale_reads += 1
+            return self.stale_exact_state.model_copy(update={"observed_at": state.observed_at})
+        return state
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        safe_detach = (
+            target.timer_enabled is False
+            and target.linkage is LinkageRole.INDEPENDENT
+            and target.mode == "constant"
+            and target.power == self.capabilities.power_limits.min_power
+        )
+        if self.rollback_armed:
+            self.rollback_writes.append((self.session_generation, target))
+            if self.transport_events is not None:
+                kind = "detach" if safe_detach else "timer_on" if target.timer_enabled else "other"
+                self.transport_events.append(
+                    f"write:{kind}:{self.device_id}:{self.session_generation}"
+                )
+            if safe_detach and self.session_generation == self.linkage_session:
+                self.rejected_old_session_detaches += 1
+                raise RuntimeError("simulated ACTIVE-session detach rejection")
+        await super().write_target(target, guard=guard)
+        if target.linkage in {
+            LinkageRole.MASTER,
+            LinkageRole.SYNC_SLAVE,
+            LinkageRole.ASYNC_SLAVE,
+        }:
+            self.linkage_session = self.session_generation
+
+
+class _FailArmedRollbackRefreshDevice(_RollbackSessionBoundaryDevice):
+    """Fail one proactive authentication half-open, then allow a fresh safe fallback."""
+
+    def __init__(self, device_id: str) -> None:
+        super().__init__(device_id)
+        self.fail_next_connect = False
+        self.authenticated = False
+        self.unauthenticated_write_attempts = 0
+
+    async def connect(self) -> None:
+        if self.fail_next_connect:
+            self.connect_calls += 1
+            self.fail_next_connect = False
+            self._connected = True  # noqa: SLF001 - model a half-authenticated TCP stream
+            self.authenticated = False
+            if self.transport_events is not None:
+                self.transport_events.append(f"connect-failed:{self.device_id}")
+            raise RuntimeError("simulated rollback authentication failure")
+        await super().connect()
+        self.authenticated = True
+
+    async def disconnect(self) -> None:
+        await super().disconnect()
+        self.authenticated = False
+
+    async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
+        if self.connected and not self.authenticated:
+            self.unauthenticated_write_attempts += 1
+            raise RuntimeError("simulated unauthenticated rollback write")
+        await super().write_target(target, guard=guard)
+
+
 class _ReadFailureThenFreshSequenceDevice(_RecordingDevice):
     """Lose one read, then expose stale-exact/mismatch/exact/exact on a fresh session."""
 
@@ -847,15 +953,30 @@ class _FailOnceBeforeSafeDetachDevice(_RecordingDevice):
     def __init__(self, device_id: str) -> None:
         super().__init__(device_id)
         self.fail_safe_detach = False
+        self.session_generation = 0
+        self.connect_calls = 0
+        self.disconnect_calls = 0
+        self.safe_detach_attempt_sessions: list[int] = []
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        await super().connect()
+        self.session_generation += 1
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        await super().disconnect()
 
     async def write_target(self, target: DeviceTarget, *, guard=None) -> None:
-        if (
-            self.fail_safe_detach
-            and target.timer_enabled is False
+        safe_detach = (
+            target.timer_enabled is False
             and target.linkage is LinkageRole.INDEPENDENT
             and target.mode == "constant"
             and target.power == self.capabilities.power_limits.min_power
-        ):
+        )
+        if safe_detach:
+            self.safe_detach_attempt_sessions.append(self.session_generation)
+        if self.fail_safe_detach and safe_detach:
             self.fail_safe_detach = False
             raise RuntimeError("simulated safe detach failure before apply")
         await super().write_target(target, guard=guard)
@@ -1138,6 +1259,137 @@ async def test_temporary_linkage_applies_distinct_power_and_restores_on_manual_s
         )
         assert final_timer.value is True
         assert final_timer.issued_at == device.commands[-1].issued_at
+
+
+async def test_normal_rollback_replaces_active_sessions_slave_first_before_any_io(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    master = await _ready_device(
+        "master",
+        device_class=_RollbackSessionBoundaryDevice,
+        power=48,
+        frequency=21,
+    )
+    slave = await _ready_device(
+        "slave",
+        device_class=_RollbackSessionBoundaryDevice,
+        power=52,
+        frequency=27,
+    )
+    for device in (master, slave):
+        device.stale_exact_state = await device.get_state()
+        device.transport_events = events
+    store = JsonLinkageJournalStore(tmp_path / "fresh-normal-rollback.json")
+    controller = _controller(master, slave, store)
+    spec = _spec(role=LinkageRole.ASYNC_SLAVE, duration=5)
+
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    for device in (master, slave):
+        device.rollback_armed = True
+    assert await controller.stop(spec.operation_id) is True
+    result = await task
+
+    assert result.stop_reason is LinkageStopReason.MANUAL
+    assert store.load() is None
+    assert events[:4] == [
+        "disconnect:slave:1",
+        "connect:slave:2",
+        "disconnect:master:1",
+        "connect:master:2",
+    ]
+    first_rollback_io = next(
+        index
+        for index, event in enumerate(events)
+        if event.startswith(("read:", "write:"))
+    )
+    assert first_rollback_io >= 4
+    assert [event for event in events if event.startswith("write:detach:")][:2] == [
+        "write:detach:slave:2",
+        "write:detach:master:2",
+    ]
+    for device in (master, slave):
+        assert device.stale_reads == 0
+        assert device.rejected_old_session_detaches == 0
+        detach_sessions = [
+            session
+            for session, target in device.rollback_writes
+            if target.timer_enabled is False
+            and target.linkage is LinkageRole.INDEPENDENT
+            and target.mode == "constant"
+            and target.power == device.capabilities.power_limits.min_power
+        ]
+        timer_on_sessions = [
+            session
+            for session, target in device.rollback_writes
+            if target.timer_enabled is True
+        ]
+        assert detach_sessions == [2]
+        assert timer_on_sessions == [2]
+        assert device.connect_calls == 3
+
+    assert (await master.get_state()).power == 48
+    assert (await slave.get_state()).power == 52
+    assert (await master.get_state()).timer_enabled is True
+    assert (await slave.get_state()).timer_enabled is True
+
+
+async def test_slave_refresh_failure_uses_fresh_fallback_and_blocks_both_timer_on(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    master = await _ready_device(
+        "master",
+        device_class=_RollbackSessionBoundaryDevice,
+        power=48,
+        frequency=21,
+    )
+    slave = await _ready_device(
+        "slave",
+        device_class=_FailArmedRollbackRefreshDevice,
+        power=52,
+        frequency=27,
+    )
+    for device in (master, slave):
+        device.transport_events = events
+    store = JsonLinkageJournalStore(tmp_path / "failed-slave-session-refresh.json")
+    controller = _controller(master, slave, store)
+    spec = _spec(role=LinkageRole.ASYNC_SLAVE, duration=5)
+
+    task = asyncio.create_task(controller.run(spec))
+    await _wait_until_active(controller, store)
+    for device in (master, slave):
+        device.rollback_armed = True
+    slave.fail_next_connect = True
+    assert await controller.stop(spec.operation_id) is True
+    with pytest.raises(LinkageRollbackError, match="session_refresh_failed"):
+        await task
+
+    pending = store.load()
+    assert pending is not None
+    assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
+    assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
+    assert pending.failed_device_ids == ("master", "slave")
+    assert slave.unauthenticated_write_attempts == 0
+    assert slave.connect_calls == 3
+    assert "connect-failed:slave" in events
+    for device in (master, slave):
+        safe_fallback_sessions = [
+            session
+            for session, target in device.rollback_writes
+            if target.timer_enabled is False
+            and target.linkage is LinkageRole.INDEPENDENT
+            and target.mode == "constant"
+            and target.power == device.capabilities.power_limits.min_power
+        ]
+        assert safe_fallback_sessions == [2]
+        assert not any(target.timer_enabled is True for _, target in device.rollback_writes)
+        state = await device.get_state()
+        assert state.enabled is True
+        assert state.power == device.capabilities.power_limits.min_power
+        assert state.linkage is LinkageRole.INDEPENDENT
+        assert state.timer_enabled is False
 
 
 async def test_timeout_restores_and_journal_precedes_first_device_write(tmp_path: Path) -> None:
@@ -1603,7 +1855,7 @@ async def test_schedule_bootstrap_reconciles_apply_then_raise_with_delayed_timer
     ) == (65, "constant", 32, LinkageRole.INDEPENDENT, True)
     assert slave.restore_ack_lost is True
     assert slave.stale_resume_reads == 0
-    assert slave.connect_calls == 2
+    assert slave.connect_calls == 3
     timer_on_commands = [
         command
         for command in slave.commands
@@ -1659,7 +1911,7 @@ async def test_successful_timer_on_restore_waits_past_stale_decoded_states_witho
     assert slave.stale_resume_reads == 0
     # TimerON verification always starts on one fresh read-only session, without replaying the
     # armed restore frame, and then keeps waiting through decoded convergence on that session.
-    assert slave.connect_calls == 2
+    assert slave.connect_calls == 3
     timer_on_commands = [
         command
         for command in slave.commands
@@ -1712,8 +1964,8 @@ async def test_restore_read_failure_reconnects_once_and_requires_fresh_exact_str
     assert result.stop_reason is LinkageStopReason.MANUAL
     assert store.load() is None
     assert slave.verification_reads == 5
-    assert slave.disconnect_calls == 2
-    assert slave.connect_calls == 3
+    assert slave.disconnect_calls == 3
+    assert slave.connect_calls == 4
     timer_on_commands = [
         command
         for command in slave.commands
@@ -1771,9 +2023,9 @@ async def test_second_hard_restore_read_fails_without_third_verification_reconne
     assert pending.failed_device_ids == ("slave",)
     assert pending.restored_device_ids == ("master",)
     assert slave.resume_read_attempts == 2
-    assert slave.resume_read_connection_counts == [2, 3]
-    # Initial session + mandatory TimerON verification session + one failed-read recovery
-    # session + one safe-fallback reconnect.
+    assert slave.resume_read_connection_counts == [3, 4]
+    # Initial session + proactive rollback session + mandatory TimerON verification session +
+    # one failed-read recovery session. The confirmed recovery session is safe for fallback.
     assert slave.connect_calls == 4
     assert slave.disconnect_calls == 3
     assert slave.safe_fallback_writes == 1
@@ -1836,8 +2088,8 @@ async def test_uncertain_connected_timer_write_forces_fresh_read_only_session(
     assert slave.restore_write_cancelled.is_set()
     # The uncertain write forces one fresh session; the following hard read is independently
     # allowed one further session recovery. Neither path replays the TimerON target.
-    assert slave.disconnect_calls == 2
-    assert slave.connect_calls == 3
+    assert slave.disconnect_calls == 3
+    assert slave.connect_calls == 4
     assert slave.fresh_reads_after_cancel >= 2
     timer_on_commands = [
         command
@@ -1945,8 +2197,8 @@ async def test_safety_trip_during_half_authenticated_restore_connect_closes_and_
     assert slave.half_auth_cancelled.is_set()
     assert slave.half_auth_closed.is_set()
     assert slave.unauthenticated_write_attempts == 0
-    assert slave.connect_calls == 4
-    assert slave.disconnect_calls == 3
+    assert slave.connect_calls == 5
+    assert slave.disconnect_calls == 4
     pending = store.load()
     assert pending is not None
     assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
@@ -2008,7 +2260,7 @@ async def test_safety_trip_during_applied_hanging_timer_restore_cancels_and_stop
         await asyncio.wait_for(task, timeout=1)
 
     assert slave.restore_write_cancelled.is_set()
-    assert slave.connect_calls == 2
+    assert slave.connect_calls == 3
     pending = store.load()
     assert pending is not None
     assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
@@ -2063,7 +2315,7 @@ async def test_applied_hanging_timer_restore_timeout_reconnects_and_reads_withou
     assert store.load() is None
     assert slave.restore_write_started.is_set()
     assert slave.restore_write_cancelled.is_set()
-    assert slave.connect_calls == 2
+    assert slave.connect_calls == 3
     assert slave.fresh_reads_after_cancel >= 1
     timer_on_commands = [
         command
@@ -2116,7 +2368,7 @@ async def test_safety_trip_during_applied_hanging_detach_write_cancels_and_stops
         await asyncio.wait_for(task, timeout=1)
 
     assert slave.restore_write_cancelled.is_set()
-    assert slave.connect_calls == 2
+    assert slave.connect_calls == 3
     pending = store.load()
     assert pending is not None
     assert pending.phase is LinkageTransactionPhase.RECOVERY_REQUIRED
@@ -2395,7 +2647,7 @@ async def test_schedule_bootstrap_bounds_hanging_restore_reads(tmp_path: Path) -
     assert pending is not None
     assert pending.failed_device_ids == ("slave",)
     assert slave.hanging_read_attempts == 2
-    assert slave.connect_calls == 4
+    assert slave.connect_calls == 5
     assert (await slave.get_state()).timer_enabled is False
     timer_on_commands = [
         command
@@ -2555,8 +2807,8 @@ async def test_safety_trip_during_restore_reconnect_wins_and_stops_devices(
         await asyncio.wait_for(task, timeout=1)
 
     assert slave.reconnect_cancelled.is_set()
-    assert slave.disconnect_calls == 2
-    assert slave.connect_calls == 4
+    assert slave.disconnect_calls == 3
+    assert slave.connect_calls == 5
     pending = store.load()
     assert pending is not None
     assert pending.recovery_reason is LinkageRecoveryReason.SAFETY_INTERLOCK
@@ -3151,6 +3403,121 @@ async def test_startup_recovery_never_resumes_an_unfinished_transaction(
         assert slave.commands == []
 
 
+async def test_attended_recovery_reopens_stale_restored_markers_on_fresh_sessions(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    master = await _ready_device(
+        "master",
+        device_class=_RollbackSessionBoundaryDevice,
+        power=46,
+        frequency=22,
+    )
+    slave = await _ready_device(
+        "slave",
+        device_class=_RollbackSessionBoundaryDevice,
+        power=54,
+        frequency=28,
+    )
+    spec = _spec(role=LinkageRole.ASYNC_SLAVE, duration=5)
+    master_snapshot_state = await master.get_state()
+    slave_snapshot_state = await slave.get_state()
+    snapshots = (
+        DeviceControlSnapshot.from_state(
+            "master",
+            master_snapshot_state,
+            physical_binding=master.physical_binding,
+        ),
+        DeviceControlSnapshot.from_state(
+            "slave",
+            slave_snapshot_state,
+            physical_binding=slave.physical_binding,
+        ),
+    )
+    await master.write_target(
+        DeviceTarget(
+            enabled=True,
+            power=60,
+            mode="sine",
+            frequency=30,
+            linkage=LinkageRole.MASTER,
+            timer_enabled=False,
+        )
+    )
+    await slave.write_target(
+        DeviceTarget(
+            enabled=True,
+            power=42,
+            mode="sine",
+            frequency=30,
+            linkage=LinkageRole.ASYNC_SLAVE,
+            timer_enabled=False,
+        )
+    )
+    for device, stale_state in (
+        (master, master_snapshot_state),
+        (slave, slave_snapshot_state),
+    ):
+        device.stale_exact_state = stale_state
+        device.transport_events = events
+        device.rollback_armed = True
+        device.rollback_writes.clear()
+        device.commands.clear()
+
+    now = datetime.now().astimezone()
+    store = JsonLinkageJournalStore(tmp_path / "stale-restored-markers.json")
+    store.create(
+        LinkageTransactionRecord(
+            operation_id=spec.operation_id,
+            phase=LinkageTransactionPhase.RECOVERY_REQUIRED,
+            recovery_reason=LinkageRecoveryReason.RESTORE_FAILED,
+            spec=spec,
+            snapshots=snapshots,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + timedelta(seconds=5),
+            restored_device_ids=("master", "slave"),
+        )
+    )
+
+    assert (
+        await _controller(master, slave, store).recover_pending(
+            authority=LinkageRecoveryAuthority.ATTENDED
+        )
+        is True
+    )
+
+    assert store.load() is None
+    assert events[:4] == [
+        "disconnect:slave:1",
+        "connect:slave:2",
+        "disconnect:master:1",
+        "connect:master:2",
+    ]
+    for device in (master, slave):
+        assert device.stale_reads == 0
+        assert device.rejected_old_session_detaches == 0
+        assert [
+            session
+            for session, target in device.rollback_writes
+            if target.timer_enabled is True
+        ] == [2]
+    master_state = await master.get_state()
+    slave_state = await slave.get_state()
+    assert (
+        master_state.power,
+        master_state.frequency,
+        master_state.linkage,
+        master_state.timer_enabled,
+    ) == (46, 22, LinkageRole.INDEPENDENT, True)
+    assert (
+        slave_state.power,
+        slave_state.frequency,
+        slave_state.linkage,
+        slave_state.timer_enabled,
+    ) == (54, 28, LinkageRole.INDEPENDENT, True)
+
+
 async def test_recovery_preserves_first_observed_transient_schedule_change(
     tmp_path: Path,
 ) -> None:
@@ -3307,7 +3674,7 @@ async def test_recovery_never_reuses_a_device_after_state_read_failure(tmp_path:
     assert pending.recovery_reason is LinkageRecoveryReason.RESTORE_FAILED
     assert pending.failed_device_ids == ("slave",)
     assert slave.recovery_reads == 1
-    assert slave.disconnect_calls == 1
+    assert slave.disconnect_calls == 2
     slave_detach_complete = next(
         index
         for index, event in enumerate(events)
@@ -3396,7 +3763,7 @@ async def test_recovery_reconciliation_rejects_one_stale_exact_before_mismatch(
     assert len(timer_on_commands) == 1
 
 
-async def test_safety_trip_cancels_hanging_forced_disconnect_and_stops_devices(
+async def test_safety_trip_cancels_hanging_proactive_disconnect_and_stops_devices(
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
@@ -3425,7 +3792,6 @@ async def test_safety_trip_cancels_hanging_forced_disconnect_and_stops_devices(
 
     task = asyncio.create_task(controller.run(spec))
     await _wait_until_active(controller, store)
-    slave.fail_next_state = True
     assert await controller.stop(spec.operation_id) is True
     await asyncio.wait_for(slave.disconnect_started.wait(), timeout=1)
     assert slave.connected is True
@@ -3435,7 +3801,9 @@ async def test_safety_trip_cancels_hanging_forced_disconnect_and_stops_devices(
     with pytest.raises(LinkageRollbackError, match="safety interlock"):
         await asyncio.wait_for(task, timeout=1)
 
-    assert slave.state_read_failures == 1
+    # Safety interrupts the new proactive disconnect before any rollback read can use the
+    # original ACTIVE stream.
+    assert slave.state_read_failures == 0
     assert slave.disconnect_calls == 1
     assert slave.disconnect_cancelled.is_set()
     assert slave.connect_calls == 2
@@ -3525,6 +3893,9 @@ async def test_pending_slave_detach_failure_pauses_already_restored_master(
     assert master_state.linkage is LinkageRole.INDEPENDENT
     assert slave_state.timer_enabled is False
     assert slave_state.linkage is LinkageRole.INDEPENDENT
+    assert slave.safe_detach_attempt_sessions == [2, 3]
+    assert slave.connect_calls == 3
+    assert slave.disconnect_calls == 2
     assert not any(
         command.name == "timer_enabled" and command.value is True
         for command in master.commands

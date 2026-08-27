@@ -10,7 +10,9 @@
 TimerON Async 장기 시험은 슬레이브 출력 변경 구간 직후 안전 실패했고, 새 토큰의 attended
 recovery 뒤 Observer가 시험 전 상태를 재확인했습니다. 영수증은 0/2이므로 네이티브·스케줄
 Linkage는 아직 qualified 기능이 아닙니다. 다른 제품군의 쓰기 가능 항목은 여전히 스키마 선언일
-뿐이며, Pro에서도 물리 유량과 파형은 검증하지 않았습니다.
+뿐이며, Pro에서도 물리 유량과 파형은 검증하지 않았습니다. 뒤이은 저출력 Sync 세 건도 영수증
+0/2였고, 마지막 slave detach 실패는 attended recovery로 원복한 뒤 rollback의 slave-first fresh
+session 경계를 코드와 시뮬레이터에 추가했으나 아직 실기 재검증 전입니다.
 
 | 제품군 | 수량 | 분류 | 상태 읽기 | 제한 레지스터 write |
 |---|---:|---|---|---|

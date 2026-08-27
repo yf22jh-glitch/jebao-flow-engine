@@ -23,8 +23,18 @@ recovery로 닫은 뒤 Observer가 원래 상태를 정확히 확인했고 영�
 
 후속 코드 감사에서는 성공한 TimerON restore write 뒤 기존 세션으로 decoded mismatch를 4회,
 약 1.75초만 확인해 명목상 64초 convergence 창을 사용하지 못하는 경로를 찾았습니다. 이를
-fresh authenticated read-only 세션과 deadline 기반 capped backoff로 수정했고 테스트 568개,
-독립 감사 P0/P1 0건을 통과했습니다. 다만 수정 후 실기 재검증은 아직 수행하지 않았으며, 위 두
+fresh authenticated read-only 세션과 deadline 기반 capped backoff로 수정한 뒤 세 번째 새
+저출력 Sync operation을 31%/31%, `--duration 60`으로 실행했습니다. 이번에는 TimerON
+convergence보다 앞선 slave detach 단계에서 실패해 두 장비가
+`RECOVERY_REQUIRED/restore_failed`로 남았고 영수증은 다시 0/2였습니다. 새 토큰의 attended
+recovery는 약 11초 안에 성공했으며, 재시작한 Observer가 두 장비 모두 시험 전
+`TimerON/independent/mode/power`와 정확히 일치함을 확인했습니다.
+
+세 번째 실행으로 ACTIVE 세션을 첫 rollback reconciliation과 detach에 재사용하는 별도 결함을
+찾았습니다. rollback 시작 전에 slave→master 순서로 새 인증 세션을 강제하고, session refresh나
+detach 실패 뒤 fallback도 오염된 세션을 재사용하지 않도록 수정했습니다. normal rollback과
+attended recovery, stale exact 조기 clear, 반쪽 인증, detach 실패를 포함한 테스트 571개가
+통과했고 독립 감사도 P0/P1 0건이었습니다. 이 마지막 수정은 아직 실기 재검증 전이며, 위 세
 실행 모두 물리 수류·파형의 성공 관찰로 해석하지 않습니다.
 
 이 결과는 이전 짧은 실행에서 관찰한 native Linkage 레지스터 관계와 read-back 자체를 부정하지
@@ -51,6 +61,10 @@ Home Assistant 버튼에는 연결하지 않습니다. 일반 `jebao-flowd`도 �
 - 정확한 복구가 끝나지 않으면 `RECOVERY_REQUIRED` 저널을 유지하고 새 시험 차단
 - 마지막 TimerON 원복 frame의 결과가 불확실하면 같은 target을 다시 보내지 않고, 오염된 TCP
   세션을 폐기한 뒤 read-only fresh state에서 두 번 연속 exact 일치를 확인할 때만 완료
+- rollback은 첫 reconciliation보다 먼저 slave→master 순서로 ACTIVE 세션을 폐기하고 새 인증
+  세션을 만들며, detach와 TimerON은 이 경계 이후의 세션에서만 각 한 번 전송
+- session refresh 실패는 해당 장비 exact restore를 차단하고 새 연결의 안전 저속
+  `independent + TimerOFF` fallback만 허용하며, slave refresh 실패 시 master TimerON도 차단
 - 기본 복구 상한은 guarded write 31초, connect/disconnect 16초, fresh read 1회 5.5초,
   연결 이후 convergence 64초로 분리하며 safety interlock이 걸리면 각 상한보다 먼저 중단
 - snapshot 이후 스케줄 구조 변경을 한 번이라도 관측하면 즉시 `schedule_changed` 사유를
@@ -131,7 +145,7 @@ snapshot과 일치해야 exact recovery로 인정합니다. 어느 단계에서�
 ## 현재 판정과 남은 실기 게이트
 
 1. 2026-08-27 실패 operation은 재실행하지 않으며, 후속 시험에는 새 operation ID를 사용
-2. fresh authenticated read-only restore convergence 수정은 아직 실기 재검증 전
+2. fresh read-only TimerON convergence와 slave-first rollback session 교체 수정은 실기 재검증 전
 3. 진단 primary failure가 rollback 실패에 가려지지 않는 영속 상태와 45% 스케줄 게이트 검증
 4. 새 qualification 영수증 2/2 확보 전에는 schedule-linkage를 실행하지 않음
 5. `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 동작은 계속 미검증

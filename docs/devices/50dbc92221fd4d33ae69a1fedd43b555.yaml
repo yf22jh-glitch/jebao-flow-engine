@@ -54,3 +54,6 @@ evidence:
     - The run issued zero of two qualification receipts and did not authorize schedule-linkage.
     - Automatic exact restore remained incomplete; a fresh attended recovery restored both snapshots.
     - A restarted read-only observer reconfirmed the pre-test TimerON states.
+    - Three later low-power Sync qualification attempts also issued zero of two receipts.
+    - The last attempt exposed ACTIVE-session reuse at slave detach; attended recovery restored both snapshots.
+    - A slave-first fresh rollback-session boundary is simulator-tested but not yet hardware requalified.

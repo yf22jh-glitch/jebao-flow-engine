@@ -70,8 +70,10 @@ class _LocalGizwitsPump:
         self.login_requests = 0
         self.control_sequences: list[int] = []
         self.timer_on_control_sequences: list[int] = []
+        self.control_events: list[tuple[int, int, bool, bool]] = []
         self.state_requests_by_connection: dict[int, int] = {}
         self.errors: list[Exception] = []
+        self._post_timer_fault_origin: int | None = None
         self._server: asyncio.Server | None = None
         self._writers: set[asyncio.StreamWriter] = set()
         self._handlers: set[asyncio.Task[None]] = set()
@@ -124,6 +126,7 @@ class _LocalGizwitsPump:
         self.accepted_connections += 1
         connection_number = self.accepted_connections
         self.state_requests_by_connection[connection_number] = 0
+        authenticated = False
         try:
             while True:
                 request = await read_frame(reader)
@@ -142,9 +145,16 @@ class _LocalGizwitsPump:
                     self.login_requests += 1
                     writer.write(encode_frame(GizwitsCommand.LOGIN_RESPONSE, b"\x00"))
                     await writer.drain()
+                    authenticated = True
                     continue
                 if request.command == GizwitsCommand.SERIAL_CONTROL_REQUEST:
-                    should_close = await self._handle_control(request.payload, reader, writer)
+                    should_close = await self._handle_control(
+                        connection_number,
+                        authenticated,
+                        request.payload,
+                        reader,
+                        writer,
+                    )
                     if should_close:
                         return
                     continue
@@ -175,6 +185,8 @@ class _LocalGizwitsPump:
 
     async def _handle_control(
         self,
+        connection_number: int,
+        authenticated: bool,
         request_payload: bytes,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
@@ -190,8 +202,18 @@ class _LocalGizwitsPump:
             raise AssertionError("unexpected control payload") from error
         self.control_sequences.append(sequence)
 
-        if control_payload == self.timer_on_payload:
+        is_timer_on = control_payload == self.timer_on_payload
+        self.control_events.append(
+            (connection_number, sequence, is_timer_on, authenticated)
+        )
+
+        if is_timer_on:
             self.timer_on_control_sequences.append(sequence)
+            if self.fail_first_fresh_state:
+                # Bind the injected read fault to the TimerON event, not an absolute connection
+                # number. Proactive rollback refresh now owns connection 2; verification must
+                # fail only on a later read-only session.
+                self._post_timer_fault_origin = connection_number
             if self.lose_timer_on_reply:
                 self.lose_timer_on_reply = False
                 # Apply the target but strand the client between magic and frame length. The
@@ -217,8 +239,13 @@ class _LocalGizwitsPump:
         writer: asyncio.StreamWriter,
     ) -> bool:
         self.state_requests_by_connection[connection_number] += 1
-        if connection_number == 2 and self.fail_first_fresh_state:
+        if (
+            self.fail_first_fresh_state
+            and self._post_timer_fault_origin is not None
+            and connection_number != self._post_timer_fault_origin
+        ):
             self.fail_first_fresh_state = False
+            self._post_timer_fault_origin = None
             # The first read-only verification session also loses its frame boundary. The
             # controller may authenticate one more fresh session, but must not resend TimerON.
             writer.write(MAGIC)
@@ -443,21 +470,29 @@ async def test_timer_on_restore_survives_two_quarantined_streams_without_replay(
             linkage=LinkageRole.INDEPENDENT,
             timer_enabled=True,
         )
-        assert master_server.accepted_connections == 2
-        assert master_server.passcode_requests == 2
-        assert master_server.login_requests == 2
+        assert master_server.accepted_connections == 3
+        assert master_server.passcode_requests == 3
+        assert master_server.login_requests == 3
         assert master_server.control_sequences == [1, 2]
         assert master_server.timer_on_control_sequences == [2]
-        assert master_server.state_requests_by_connection == {1: 5, 2: 4}
-        assert master_server.state_request_count == 9
+        assert master_server.control_events == [
+            (2, 1, False, True),
+            (2, 2, True, True),
+        ]
+        assert master_server.state_requests_by_connection == {1: 0, 2: 4, 3: 4}
+        assert master_server.state_request_count == 8
 
-        assert slave_server.accepted_connections == 3
-        assert slave_server.passcode_requests == 3
-        assert slave_server.login_requests == 3
+        assert slave_server.accepted_connections == 4
+        assert slave_server.passcode_requests == 4
+        assert slave_server.login_requests == 4
         assert slave_server.control_sequences == [1, 2]
         assert slave_server.timer_on_control_sequences == [2]
-        assert slave_server.state_requests_by_connection == {1: 4, 2: 1, 3: 4}
-        assert slave_server.state_request_count == 9
+        assert slave_server.control_events == [
+            (2, 1, False, True),
+            (2, 2, True, True),
+        ]
+        assert slave_server.state_requests_by_connection == {1: 0, 2: 3, 3: 1, 4: 4}
+        assert slave_server.state_request_count == 8
         assert master_server.errors == []
         assert slave_server.errors == []
     finally:
