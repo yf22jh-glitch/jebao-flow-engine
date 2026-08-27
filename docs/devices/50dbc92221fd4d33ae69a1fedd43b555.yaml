@@ -59,3 +59,5 @@ evidence:
     - A later 31/31 low-power Sync run validated the slave-first boundary, exact restore, and two receipts.
     - The following Async 35/33 to slave-38 diagnostic still required attended recovery after rollback failed.
     - The Async intent recorded no typed primary failure, so independent slave Flow remains unqualified.
+    - A version-2 repeat proved only that the slave-38 write path was attempted; adapter and full-state verification both remained absent.
+    - Attended recovery restored the original TimerON values, and fresh Observer reads matched all 14 valid schedule slots and both saved fingerprints.

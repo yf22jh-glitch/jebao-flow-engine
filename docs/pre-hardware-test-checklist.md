@@ -37,12 +37,18 @@ Observer도 두 장비의 시험 전 `TimerON/independent/mode/power/frequency`�
 `none`이어서 slave 변경 실패로 단정할 수 없고 Async 영수증은 발급되지 않았습니다. attended
 recovery는 약 18초 안에 완료됐으며 Observer가 다시 시험 전 상태를 확인했습니다. 자동 rollback
 실패 뒤에도 forward 진행과 원복 실패 단계를 보존하는 version 2 intent 진단을 구현했으며,
-전체 시뮬레이터·회귀 검증 후 같은 실기를 한 번만 반복합니다.
+cross-store 불일치까지 fail-closed로 보강한 전체 테스트 586개와 독립 감사 P0/P1 0건을
+통과했습니다.
 
-재시험은 저출력 시간대를 기다리는 방식이 아닙니다. 활성 `TimerON` 상태와 전체 시간표를 먼저
+재시험은 저출력 시간대를 기다리지 않았습니다. 활성 `TimerON` 상태와 전체 시간표를 먼저
 snapshot하고, schedule bootstrap이 `TimerOFF + independent + safe-low`로 시간표를 일시 정지한
-뒤 Async를 적용합니다. 종료 즉시 저장된 상태와 시간표를 exact restore하고 Observer로
-교차 확인합니다.
+뒤 Async를 적용했습니다. version 2 evidence는 slave 38% `write_attempted=yes`만 기록했고
+`adapter_verified=no`, `full_state_verified=no`, `samples=0`이므로 출력 변경 성공 증거는 없습니다.
+자동 rollback의 typed failure는 slave detach/control restore/final verification/safe fallback과
+master control restore/final verification이었습니다. 새 토큰의 attended recovery는 성공했고,
+Observer가 시험 전 Constant 30%/32와 Random 89%/34, 두 장비의 TimerON/Independent,
+schedule enabled, 14 slots, invalid 0 및 snapshot schedule fingerprint 일치를 교차 확인했습니다.
+private 현장 설정은 다시 `dry_run: true`로 잠갔습니다.
 
 ## 완료된 사전 검증
 
@@ -66,6 +72,8 @@ snapshot하고, schedule bootstrap이 `TimerOFF + independent + safe-low`로 시
   네 번째 저출력 Sync에서 자동 exact restore와 영수증 2/2 확인
 - 후속 Async 35%/33%→slave 38% 진단은 자동 rollback 실패, attended exact recovery 성공,
   typed primary failure 없음, Async 영수증 없음
+- version 2 재진단도 38% write 시도 뒤 adapter/full-state 검증 0건으로 실패했고, attended
+  recovery와 Observer가 원래 TimerON 상태·14개 스케줄·지문을 exact 확인
 - `async_slave` Flow 개별 유지 기능은 지원 기능으로 인정하지 않으며, 독립 유지와 물리 유량 모두 미검증
 - `async_slave` 상태의 시간표 경계에서 `AutoMode`와 `AutoFlow`가 함께 바뀌는 동작은 미실행·미검증
 - 네이티브 Linkage의 Pro 4역할과 `TimerON` encode/decode 단위 테스트

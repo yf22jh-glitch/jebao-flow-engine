@@ -50,9 +50,27 @@ typed primary failure는 `none`이어서 slave 변경 실패로 판정할 증거
 완료되지 않았으므로 Async qualification 영수증은 발급되지 않았습니다. 새 확인 토큰의 attended
 recovery는 약 18초 안에 성공했고 Observer가 위 시험 전 상태를 다시 정확히 확인했습니다.
 따라서 Async 독립 출력은 여전히 미검증이며, rollback 실패 단계를 영속·redacted evidence로
-남기는 진단을 구현했습니다. 이 진단 빌드를 배포한 다음에는 저출력 시간대를 기다리지 않고,
-현재 TimerON 상태와 전체 시간표를 snapshot한 뒤 시간표를 일시 정지해 안전 출력에서 한 번만
-재검증하고 exact restore합니다.
+남기는 진단을 구현했습니다.
+
+version 2 진단과 cross-store fail-closed 보강은 전체 테스트 586개와 독립 감사 P0/P1 0건을
+통과했습니다. 이 빌드로 저출력 시간대를 기다리지 않고 현재 TimerON 상태와 전체 시간표를
+snapshot한 뒤, bootstrap이 시간표를 `TimerOFF + independent + safe-low`로 일시 정지한 상태에서
+같은 Async 조건을 한 번만 재검증했습니다. 시험 전 상태는 한 장비가 Constant 30%/32, 다른
+장비가 Random 89%/34였고, 둘 다 TimerON/Independent와 유효한 14개 스케줄 슬롯이었습니다.
+
+재검증 intent에는 `ACTIVE`와 slave 38% `write_attempted`가 남았지만
+`adapter_verified=no`, `full_state_verified=no`, `samples=0`, typed primary failure `none`이었습니다.
+즉 LAN write/read-back 경로에 진입한 것은 확실하지만 38% frame의 전달·적용과 Async 독립 유지는
+어느 것도 입증되지 않았습니다. 자동 rollback은 `restore_failed`로 끝났고, allow-listed 진단에는
+slave detach/control restore/final verification/safe fallback과 master control restore/final
+verification 실패가 남았습니다. 추가 시험 명령 없이 새 토큰의 attended recovery를 수행해 약
+14초 안에 journal을 닫았습니다. 재시작한 Observer는 두 장비의 원래
+`TimerON/Independent/Mode/Flow/Frequency`, schedule enabled, 14 slots, invalid 0을 fresh read로
+확인했고 두 schedule fingerprint도 snapshot과 일치했습니다.
+
+따라서 현재 결론은 “38% 변경 성공”이 아니라 “변경 시도 뒤 adapter 검증 전에 실패”입니다.
+같은 실기는 반복하지 않으며, 원인을 더 좁히려면 예외 원문 대신 transport/send/read-back 단계를
+추가 allow-listed category로 나눈 새 진단이 먼저 필요합니다.
 
 이 결과는 이전 짧은 실행에서 관찰한 native Linkage 레지스터 관계와 read-back 자체를 부정하지
 않지만, `async_slave`의 개별 `Flow` 유지나 물리 유량·파형을 입증하지도 않습니다. 따라서

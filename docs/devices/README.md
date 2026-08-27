@@ -14,7 +14,9 @@ Linkage는 아직 qualified 기능이 아닙니다. 다른 제품군의 쓰기 �
 0/2였고, 마지막 slave detach 실패는 attended recovery로 원복한 뒤 rollback의 slave-first fresh
 session 경계를 코드와 시뮬레이터에 추가했습니다. 수정 뒤 네 번째 저출력 Sync는 자동 exact
 restore와 영수증 2/2까지 성공했습니다. 후속 Async slave 38% 진단은 자동 rollback 실패 뒤
-attended recovery로 원복돼, Async 독립 출력과 물리 파형은 계속 미검증입니다.
+attended recovery로 원복됐습니다. version 2 evidence를 적용한 한 번의 재진단도 write 시도만
+남고 adapter/full-state 검증 0건으로 끝났으며, attended recovery와 Observer가 원래 TimerON
+상태·14개 스케줄·지문을 확인했습니다. Async 독립 출력과 물리 파형은 계속 미검증입니다.
 
 | 제품군 | 수량 | 분류 | 상태 읽기 | 제한 레지스터 write |
 |---|---:|---|---|---|
