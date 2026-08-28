@@ -127,6 +127,7 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         self.fail_ordinary_state_read_numbers: set[int] = set()
         self.ordinary_state_read_failures: dict[int, BaseException] = {}
         self.ordinary_state_read_time_advances: dict[int, float] = {}
+        self.ordinary_state_read_time_advance_seconds = 0.0
         self.pause_ordinary_state_read_numbers: set[int] = set()
         self.ordinary_state_read_paused = asyncio.Event()
         self.resume_ordinary_state_read = asyncio.Event()
@@ -193,9 +194,9 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         if not self._explicit_state_read_active:
             self.ordinary_state_read_count += 1
             read_number = self.ordinary_state_read_count
-            self.virtual_time.value += self.ordinary_state_read_time_advances.pop(
-                read_number,
-                0.0,
+            self.virtual_time.value += (
+                self.ordinary_state_read_time_advance_seconds
+                + self.ordinary_state_read_time_advances.pop(read_number, 0.0)
             )
             if read_number in self.pause_ordinary_state_read_numbers:
                 self.pause_ordinary_state_read_numbers.discard(read_number)
@@ -4163,7 +4164,7 @@ async def test_staged_monitor_subtracts_slow_acquisition_from_heartbeat_cadence(
         next_entry_end="18:16",
     )
     master.heartbeat_time_advance_seconds = 1.0
-    master.explicit_state_read_time_advance_seconds = 1.0
+    master.ordinary_state_read_time_advance_seconds = 1.0
 
     async def exact_sleep(seconds: float) -> None:
         master.virtual_time.sleep_count += 1
