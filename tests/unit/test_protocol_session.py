@@ -9,7 +9,21 @@ from jebao_flow.protocol.errors import (
     ProtocolTimeoutError,
     UnexpectedResponseError,
 )
-from jebao_flow.protocol.session import STATE_REPLY_ACTION, STATE_REPORT_ACTION, GizwitsSession
+from jebao_flow.protocol.session import (
+    STATE_REPLY_ACTION,
+    STATE_REPORT_ACTION,
+    GizwitsSession,
+    ReadOnlyGizwitsSession,
+)
+
+
+def test_read_only_session_has_no_public_control_api_and_legacy_export_is_compatible() -> None:
+    from jebao_flow.protocol import GizwitsSession as PackageSession
+    from jebao_flow.protocol.control_session import GizwitsSession as ControlSession
+
+    assert not hasattr(ReadOnlyGizwitsSession("127.0.0.1"), "send_raw_control")
+    assert GizwitsSession is ControlSession
+    assert PackageSession is ControlSession
 
 
 async def test_quarantine_drops_logical_connection_without_waiting_for_tcp_close() -> None:
@@ -128,6 +142,74 @@ async def test_session_authenticates_skips_unsolicited_and_reads_state() -> None
         (GizwitsCommand.SERIAL_TRANSMIT_REQUEST, b"\x02"),
         (GizwitsCommand.HEARTBEAT_REQUEST, b""),
         (GizwitsCommand.SERIAL_CONTROL_REQUEST, b"\x00\x00\x00\x01\x01\x80\x00"),
+    ]
+
+
+async def test_state_capture_retains_explicit_reply_action_and_rejects_report_provenance() -> None:
+    received: list[tuple[int, bytes]] = []
+
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            passcode = b"private"
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.PASSCODE_RESPONSE,
+                    struct.pack(">H", len(passcode)) + passcode,
+                )
+            )
+            await writer.drain()
+
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            writer.write(encode_frame(GizwitsCommand.LOGIN_RESPONSE, b"\x00"))
+            await writer.drain()
+
+            request = await read_frame(reader)
+            received.append((request.command, request.payload))
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+                    bytes([STATE_REPORT_ACTION]) + b"report",
+                )
+            )
+            canonical = encode_frame(
+                GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+                bytes([STATE_REPLY_ACTION]) + b"explicit",
+            )
+            noncanonical = MAGIC + bytes((canonical[4] | 0x80, 0)) + canonical[5:]
+            writer.write(noncanonical)
+            await writer.drain()
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    session = GizwitsSession("127.0.0.1", port=port)
+    try:
+        await session.connect()
+        await session.authenticate()
+        capture = await session.read_raw_state_capture()
+    finally:
+        await session.disconnect()
+        server.close()
+        await server.wait_closed()
+
+    assert capture.action == STATE_REPLY_ACTION
+    assert capture.status_payload == b"explicit"
+    assert capture.serial_payload == bytes([STATE_REPLY_ACTION]) + b"explicit"
+    canonical = encode_frame(
+        GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+        bytes([STATE_REPLY_ACTION]) + b"explicit",
+    )
+    assert capture.wire_frame == MAGIC + bytes((canonical[4] | 0x80, 0)) + canonical[5:]
+    assert received == [
+        (GizwitsCommand.PASSCODE_REQUEST, b""),
+        (GizwitsCommand.LOGIN_REQUEST, b"\x00\x07private"),
+        (GizwitsCommand.SERIAL_TRANSMIT_REQUEST, b"\x02"),
     ]
 
 

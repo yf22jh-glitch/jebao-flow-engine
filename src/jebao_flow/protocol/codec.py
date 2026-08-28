@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 
 from jebao_flow.protocol.errors import (
@@ -43,6 +43,7 @@ class GizwitsFrame:
     command: int
     payload: bytes = b""
     flag: int = 0
+    wire_bytes: bytes | None = field(default=None, repr=False, compare=False)
 
 
 def encode_varint(value: int) -> bytes:
@@ -126,7 +127,12 @@ def decode_frame(
 
     body = data[body_start:body_end]
     command = struct.unpack(">H", body[1:3])[0]
-    return GizwitsFrame(command=command, payload=body[3:], flag=body[0])
+    return GizwitsFrame(
+        command=command,
+        payload=body[3:],
+        flag=body[0],
+        wire_bytes=bytes(data),
+    )
 
 
 async def read_frame(

@@ -6,8 +6,16 @@ import asyncio
 import logging
 import struct
 from collections.abc import Callable, Collection
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from jebao_flow.protocol.codec import GizwitsCommand, GizwitsFrame, encode_frame, read_frame
+from jebao_flow.protocol.codec import (
+    GizwitsCommand,
+    GizwitsFrame,
+    decode_frame,
+    encode_frame,
+    read_frame,
+)
 from jebao_flow.protocol.errors import (
     AuthenticationError,
     ProtocolConnectionError,
@@ -16,12 +24,30 @@ from jebao_flow.protocol.errors import (
     UnexpectedResponseError,
 )
 
+if TYPE_CHECKING:
+    from jebao_flow.protocol.control_session import GizwitsSession
+
 CONTROL_ACTION = 0x01
 READ_STATE_ACTION = 0x02
 STATE_REPLY_ACTION = 0x03
 STATE_REPORT_ACTION = 0x04
 DEFAULT_CONTROL_PORT = 12416
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RawStateCapture:
+    """One exact state-reply wire frame plus its decoded serial payload."""
+
+    wire_frame: bytes
+    action: int
+    status_payload: bytes
+
+    @property
+    def serial_payload(self) -> bytes:
+        """Return the exact action+status payload received inside the Gizwits envelope."""
+
+        return bytes((self.action,)) + self.status_payload
 
 
 def _is_async_state_report(frame: GizwitsFrame) -> bool:
@@ -40,7 +66,7 @@ def _is_async_state_report(frame: GizwitsFrame) -> bool:
     )
 
 
-class GizwitsSession:
+class ReadOnlyGizwitsSession:
     """Serializes request/response exchanges over one authenticated TCP stream.
 
     This class deliberately exposes raw status and control payloads. Product-specific schema
@@ -165,6 +191,16 @@ class GizwitsSession:
         )
 
     async def read_raw_state(self, *, accept_reports: bool = True) -> bytes:
+        capture = await self.read_raw_state_capture(accept_reports=accept_reports)
+        return capture.status_payload
+
+    async def read_raw_state_capture(
+        self,
+        *,
+        accept_reports: bool = False,
+    ) -> RawStateCapture:
+        """Read state while retaining whether the serial payload was a reply or report."""
+
         self._require_authenticated()
 
         accepted_actions = {STATE_REPLY_ACTION, STATE_REPORT_ACTION}
@@ -189,35 +225,20 @@ class GizwitsSession:
         action = response.payload[0]
         if action not in {STATE_REPLY_ACTION, STATE_REPORT_ACTION}:
             raise UnexpectedResponseError(f"unexpected state action 0x{action:02x}")
-        return response.payload[1:]
-
-    async def send_raw_control(self, control_payload: bytes) -> bytes:
-        """Send a schema-encoded control payload and return the raw ack body.
-
-        Callers must apply capability and safety validation before invoking this method, then read
-        actual state to verify the change. This method is intentionally absent from the diagnostic
-        CLI.
-        """
-
-        self._require_authenticated()
-        if not control_payload or control_payload[0] != CONTROL_ACTION:
-            raise ValueError("control payload must begin with action 0x01")
-
-        self._sequence = (self._sequence + 1) & 0xFFFFFFFF
-        sequence = self._sequence
-        response = await self._exchange(
-            GizwitsCommand.SERIAL_CONTROL_REQUEST,
-            struct.pack(">I", sequence) + control_payload,
-            expected={GizwitsCommand.SERIAL_CONTROL_RESPONSE},
+        if response.wire_bytes is None:
+            raise UnexpectedResponseError("state response is missing its original wire frame")
+        captured = decode_frame(response.wire_bytes)
+        if (
+            captured.command != response.command
+            or captured.flag != response.flag
+            or captured.payload != response.payload
+        ):
+            raise UnexpectedResponseError("state response wire frame does not match decoded state")
+        return RawStateCapture(
+            wire_frame=response.wire_bytes,
+            action=action,
+            status_payload=response.payload[1:],
         )
-        if len(response.payload) < 4:
-            raise UnexpectedResponseError("control response is missing its sequence number")
-        response_sequence = struct.unpack(">I", response.payload[:4])[0]
-        if response_sequence != sequence:
-            raise UnexpectedResponseError(
-                f"control response sequence mismatch: expected {sequence}, got {response_sequence}"
-            )
-        return response.payload[4:]
 
     async def _exchange(
         self,
@@ -367,3 +388,26 @@ class GizwitsSession:
         self._require_connection()
         if not self._authenticated:
             raise AuthenticationError("Gizwits session is not authenticated")
+
+
+def __getattr__(name: str) -> object:
+    """Resolve the legacy write-capable session only for callers that request it."""
+
+    if name == "GizwitsSession":
+        from jebao_flow.protocol.control_session import GizwitsSession
+
+        globals()[name] = GizwitsSession
+        return GizwitsSession
+    raise AttributeError(name)
+
+
+__all__ = [
+    "CONTROL_ACTION",
+    "DEFAULT_CONTROL_PORT",
+    "GizwitsSession",
+    "READ_STATE_ACTION",
+    "RawStateCapture",
+    "ReadOnlyGizwitsSession",
+    "STATE_REPLY_ACTION",
+    "STATE_REPORT_ACTION",
+]
