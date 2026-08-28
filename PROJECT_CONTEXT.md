@@ -41,6 +41,13 @@ Home Assistant 엔티티와 데몬의 MQTT 계약만 사용합니다.
 - Desired State와 Actual State를 분리합니다.
 - 빠른 파형은 장비 내장 mode/frequency를 사용합니다.
 - 장비별 최소 명령 간격을 적용하고 동일 값은 재전송하지 않습니다.
+- 그룹 실행기는 장비별 단일 worker와 한 칸 pending queue를 사용하고, 멤버별 control epoch와
+  전체 target이 모두 같을 때만 중복으로 판단합니다.
+- 전송 전 실패가 증명된 경우만 평상시 명시적으로 재시도합니다. 종료 중 이미 승인된 OFF에
+  한해 한 번의 제한 재시도를 허용합니다. ACK timeout처럼 실제 적용 여부가 불명확한 실패는
+  자동·수동 재전송을 모두 막고 Actual State 재조정을 요구합니다.
+- 중복 제거되지 않은 canonical OFF는 장비별 safety barrier를 소유합니다. 새 일반 명령과 세대
+  변경은 이를 취소할 수 없고, 데몬 종료 시에도 배수하며 미확정 결과는 오류로 노출합니다.
 - 모든 값은 그룹과 물리 장비 제한을 모두 통과합니다.
 - 연결 복구 직후 최대 출력으로 점프하지 않고 램프를 적용합니다.
 - MQTT 연결 중단만으로 운전을 멈추지 않습니다.
@@ -69,8 +76,10 @@ Observer는 5초 기본 주기로 실제 전원·출력·모드·주파수와 �
 앱·클라우드·장비 자체 중 하나로 단정하지 않고 `external_or_native`로 기록합니다.
 
 네이티브 Linkage 트랜잭션 코어와 제한된 현장 실행·attended recovery까지 완료됐습니다.
-현재 데몬에는 실제 actuator가 없으므로 `control`로 설정해도 MQTT 명령을 fail-closed로
-거부하며, Sync/Async 시험 API를 Home Assistant에 광고하지 않습니다. 실기 write 검증과
+소프트웨어 독립 그룹용 순수 planner와 protocol-neutral dispatcher는 구현됐지만, 현재 데몬에는
+이를 MQTT·앱·실제 LAN port에 연결한 command executor가 없습니다. 따라서 `control`로 설정해도
+MQTT 명령을 fail-closed로 거부하며, Sync/Async 시험 API를 Home Assistant에 광고하지 않습니다.
+불명확한 write barrier를 해제할 Actual State reconciler도 미연결입니다. 실기 write 검증과
 startup recovery wiring이 끝나기 전에는 이 경계를 해제하지 않습니다.
 2026-08-27 Async 장기 시험은 슬레이브 출력 변경 시점 직후 안전 실패했고 자동 exact restore가
 완료되지 않아 영수증 0/2 상태로 끝났습니다. 새 토큰의 attended recovery는 성공했으며 Observer가
@@ -116,6 +125,11 @@ drift는 즉시 거부하며, 재시도 전후 stop·safety epoch·deadline을 �
 그룹 상태는 `STOPPED`, `STARTING`, `RUNNING`, `FEEDING`, `MAINTENANCE`, `DEGRADED`,
 `ERROR`, `EMERGENCY_STOP` 중 하나입니다. 비상 정지는 명시적인 사용자 동작으로만
 해제합니다.
+
+`STOPPED`와 `EMERGENCY_STOP`은 파형 계산과 무관하게 모든 멤버의 canonical OFF 목표를
+생성합니다. 사용자가 요청한 `STARTING`과 `MAINTENANCE`는 hold 상태로서 일반 운전 write를
+만들지 않습니다. 가용성 판정으로 파생된 `STARTING`에서는 설정상 비활성 멤버의 canonical OFF만
+허용합니다. `STOP_GROUP` 장애 정책도 파형 계산을 거치지 않고 온라인 멤버의 OFF 목표를 만듭니다.
 
 멤버 오프라인 기본 정책은 `continue_limited`이며 남은 장비의 최대 출력을 별도로
 제한합니다. 이후 `stop_group`, `continue`, `fallback_constant`도 지원합니다.

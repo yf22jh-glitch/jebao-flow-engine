@@ -45,6 +45,11 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 소프트웨어 `Sync`/`Anti Phase` 패턴과 같은 기능으로 취급하지 않습니다. 현재 native 페어는
 실기 자격 미충족으로 잠겨 있습니다.
 
+`software_independent`용 순수 tick planner와 protocol-neutral 비동기 dispatcher는 구현되어
+있습니다. 다만 아직 MQTT·앱·실제 LAN port에 연결하지 않았으므로 데몬의
+`command_executor_ready`는 계속 `false`이고 Observer/control fail-closed 경계도 유지됩니다.
+불명확한 write 이후 barrier를 해제할 Actual State reconciler도 아직 연결하지 않았습니다.
+
 ## 현재 포함된 것
 
 - Pydantic 기반 YAML 설정 모델과 교차 검증
@@ -70,6 +75,13 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 - 비동기 가상 장비 시뮬레이터
 - Constant, Sync, Anti Phase 및 VorTech 계열에서 영감을 얻은 그룹 패턴 계산기
 - 3대 수류모터의 `left`/`right`/`crossflow` 역할과 개별 `gain`/`phase`
+- 단일 monotonic 시각에서 세 멤버의 목표를 계산하고 오프라인 정책, 장비별 출력 범위와 절대
+  step, 수동 override와 패턴 epoch를 적용하는 write-free 그룹 planner
+- 장비별 worker와 한 칸 pending queue로 latest-wins를 보장하고, 멤버별 control epoch와 전체
+  target으로 중복을 억제하며, 실패를 장비별로 격리하는 protocol-neutral dispatcher
+- 이미 승인된 canonical OFF는 새 일반 명령이나 세대 변경으로 취소하지 않고, 종료 중에도
+  끝까지 배수합니다. 전송 전 실패만 한 번 제한적으로 재시도하고 결과가 끝내 불명확하면 정상
+  종료로 숨기지 않습니다.
 - 그룹 제어와 개별 제어를 함께 지원하는 명시적 `manual_override` 상태
 - 그룹 및 장비 출력 제한
 - 버전이 있는 MQTT 그룹·장비 상태/명령 계약과 중복 요청 방지
@@ -145,6 +157,9 @@ UDP 브로드캐스트 검색을 사용할 수 있도록 host network를 기본�
 - 빠른 펄스는 장비 내장 모드를 사용합니다.
 - 출력은 그룹과 장비 양쪽 제한을 통과해야 합니다.
 - 동일 값 중복 전송과 과도한 명령 전송을 막습니다.
+- 전송 전 실패로 증명된 경우만 평상시 명시적으로 재시도하며, 종료 중 이미 승인된 OFF는 한 번만
+  제한 재시도합니다. ACK가 불명확하거나 write 도중 외부 상태 무효화가 겹치면 actual-state
+  재조정 전까지 같은 명령을 다시 보내지 않습니다.
 - 재접속 후에는 저장 상태를 단계적으로 복원합니다.
 - MQTT 또는 Home Assistant가 중단돼도 현재 패턴은 계속 실행합니다.
 - 비상 정지는 자동으로 해제하지 않습니다.
