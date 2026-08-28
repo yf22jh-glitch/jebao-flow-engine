@@ -983,7 +983,14 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             except BaseException as error:
                 role_error = error
                 current = self._last_schedule_stage
-                if current in {
+                if current is ScheduleFlowStage.TIMER_ON_ARM_STARTED:
+                    # The pre-write TimerON gate already classifies every semantic refusal with
+                    # the redacted ScheduleLinkageRunFailure vocabulary.  Preserve that safe
+                    # classification after exact rollback; otherwise a field failure collapses
+                    # to the broad ``timer_on_arm`` category and cannot be diagnosed without
+                    # repeating physical writes merely to add instrumentation.
+                    self._remember_role_preflight_failure(error, settled=False)
+                elif current in {
                     ScheduleFlowStage.ROLE_PREFLIGHT_STARTED,
                     ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED,
                 }:

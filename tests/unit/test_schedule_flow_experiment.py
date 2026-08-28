@@ -2178,6 +2178,11 @@ async def test_timer_arm_budget_failure_restores_schedule_without_control_write(
 
     assert captured.value.failure is ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW
     assert events == ["temporary:stage", "temporary:restore"]
+    assert controller.last_role_failure is not None
+    assert (
+        controller.last_role_failure.failure
+        is ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW
+    )
 
 
 class _ScheduleReader:
