@@ -153,6 +153,14 @@ operation으로 다룹니다. 절차와 안전 순서는 `docs/hardware-readines
 - 실기 1회 = `docs/runs/YYYY-MM-DD-<run-id>.md` 파일 1개. 규칙·예외·템플릿은
   [`docs/runs/README.md`](docs/runs/README.md).
 - **실기 결과 파일이 커밋되기 전에는 `src/` 아래 파일을 수정하지 않습니다.**
+- 위 문장은 **실기 실행 뒤의 순서**를 고정합니다. 아직 실행 가능한 collector가 없어 선행
+  실기 결과 자체를 만들 수 없는 경우에는, 다음 조건을 모두 만족하는 **첫 write-free
+  read-only collector 구현 1회**만 예외로 허용합니다.
+  - 장비 write API와 동결된 native ASYNC 하네스를 import·호출·노출하지 않음
+  - clean child worktree에서 구현하고 격리된 `src/tests +3412/-260`을 가져오지 않음
+  - static import-graph 검사와 transport 테스트로 control frame 0회를 검증
+  - pilot 실기 뒤에는 그 결과 파일을 먼저 커밋할 때까지 다시 `src/`를 수정하지 않음
+  이 예외는 복원 도구, actuator, 일반 기능 개발에는 적용되지 않습니다.
 - **기존 기록의 사실 기술은 수정하지 않습니다.** 정정은 덧붙이기로만 합니다.
   비밀값이 실수로 들어간 경우만 예외로 제거합니다.
 - `README.md`·`PROJECT_CONTEXT.md` 상태 블록은 `docs/runs/`를 **링크만** 하고 서사를
