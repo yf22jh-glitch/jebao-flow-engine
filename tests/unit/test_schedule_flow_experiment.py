@@ -2185,6 +2185,42 @@ async def test_timer_arm_budget_failure_restores_schedule_without_control_write(
     )
 
 
+async def test_timer_on_write_failure_is_not_mislabeled_as_preflight() -> None:
+    events: list[str] = []
+
+    class ArmFailureController(_SequenceController):
+        async def _arm_temporary_schedule(
+            self,
+            record: LinkageTransactionRecord,
+            *,
+            monotonic_deadline: float,
+        ) -> None:
+            del record, monotonic_deadline
+            self.events.append("timer:on:failed")
+            raise RuntimeError("simulated TimerON write failure")
+
+    controller = ArmFailureController(events)
+    spec = _spec(sentinel_qualification=False)
+    controller._experiment_spec = spec  # noqa: SLF001
+    controller._schedule_controller = _FakeScheduleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._role_controller = _FakeRoleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    record = cast(
+        LinkageTransactionRecord,
+        SimpleNamespace(operation_id=spec.operation_id),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated TimerON write failure"):
+        await controller._activate_relationship(record)  # noqa: SLF001
+
+    assert events == [
+        "temporary:stage",
+        "timer:on:failed",
+        "timer:off",
+        "temporary:restore",
+    ]
+    assert controller.last_role_failure is None
+
+
 class _ScheduleReader:
     def __init__(self, device_id: str) -> None:
         self.device_id = device_id

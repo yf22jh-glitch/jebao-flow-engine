@@ -934,7 +934,14 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 # convergence, and guarded role-write reserve.  A refusal here has sent no
                 # TimerON or role frame; the surrounding schedule transaction still restores its
                 # exact staged image in the ordinary inverse order.
-                await self._assert_timer_arm_budget(record)
+                try:
+                    await self._assert_timer_arm_budget(record)
+                except Exception as error:
+                    # Preserve only the read-only, pre-write gate classification.  Once the
+                    # following flag is set, TimerON may have been sent and an arm/ACK failure
+                    # must not be mislabeled as a role-preflight refusal.
+                    self._remember_role_preflight_failure(error, settled=False)
+                    raise
                 # This assignment has no suspension point between the successful gate and the
                 # first operation that may send TimerON. From here onward inverse TimerOFF is
                 # mandatory even if the first arm attempt has an uncertain outcome.
@@ -983,14 +990,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             except BaseException as error:
                 role_error = error
                 current = self._last_schedule_stage
-                if current is ScheduleFlowStage.TIMER_ON_ARM_STARTED:
-                    # The pre-write TimerON gate already classifies every semantic refusal with
-                    # the redacted ScheduleLinkageRunFailure vocabulary.  Preserve that safe
-                    # classification after exact rollback; otherwise a field failure collapses
-                    # to the broad ``timer_on_arm`` category and cannot be diagnosed without
-                    # repeating physical writes merely to add instrumentation.
-                    self._remember_role_preflight_failure(error, settled=False)
-                elif current in {
+                if current in {
                     ScheduleFlowStage.ROLE_PREFLIGHT_STARTED,
                     ScheduleFlowStage.ROLE_PREFLIGHT_COMPLETED,
                 }:
