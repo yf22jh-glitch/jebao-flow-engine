@@ -271,6 +271,21 @@ def test_emergency_stop_advances_every_member_control_epoch() -> None:
     )
 
 
+def test_stopped_to_emergency_reasserts_every_member_control_epoch() -> None:
+    manager = GroupManager(_group(), _limits(), clock=lambda: 100.0)
+    _ready(manager)
+    manager.update_runtime(GroupRuntime(state=GroupState.STOPPED), now=101.0)
+    stopped = _decisions(manager.plan_tick(now=101.0))
+
+    manager.update_runtime(GroupRuntime(state=GroupState.EMERGENCY_STOP), now=102.0)
+    emergency = _decisions(manager.plan_tick(now=102.0))
+
+    assert all(
+        emergency[device_id].control_epoch > stopped[device_id].control_epoch
+        for device_id in stopped
+    )
+
+
 def test_repeated_emergency_stop_keeps_the_same_control_epoch() -> None:
     manager = GroupManager(_group(), _limits(), clock=lambda: 100.0)
     _ready(manager)
@@ -438,6 +453,48 @@ def test_device_max_and_step_adjustments_are_preserved_for_diagnostics() -> None
     assert (decision.requested_power, decision.normalized_power) == (65, 60)
     assert decision.clamp_reasons == ("device_max", "step_floor")
     assert decision.limits_used == DeviceActuationLimits(32, 62, 5)
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        GroupRuntime(state=GroupState.RUNNING, min_power=80),
+        GroupRuntime(state=GroupState.RUNNING, max_power=30),
+    ],
+)
+def test_one_sided_runtime_limit_is_composed_with_group_default(
+    runtime: GroupRuntime,
+) -> None:
+    manager = GroupManager(_group(), _limits(), clock=lambda: 100.0)
+    original_runtime = manager.runtime
+
+    with pytest.raises(GroupPlanningError, match="group 'main_flow' effective"):
+        manager.update_runtime(runtime, now=101.0)
+
+    assert manager.runtime == original_runtime
+    manager.plan_tick(now=100.5)
+
+
+def test_all_planner_controlled_members_failing_reports_error_with_an_override() -> None:
+    manager = GroupManager(
+        _group(pattern=PatternKind.CONSTANT),
+        {
+            "left": DeviceActuationLimits(min_power=32, max_power=33, power_step=5),
+            "right": DeviceActuationLimits(min_power=32, max_power=33, power_step=5),
+            "crossflow": DeviceActuationLimits(min_power=32, max_power=33, power_step=5),
+        },
+        clock=lambda: 100.0,
+    )
+    _ready(manager)
+    manager.set_manual_override("right")
+
+    plan = manager.plan_tick(now=100.0)
+    decisions = _decisions(plan)
+
+    assert decisions["right"].action is MemberAction.SKIP_MANUAL_OVERRIDE
+    assert decisions["left"].planning_failure == "no_valid_enabled_power"
+    assert decisions["crossflow"].planning_failure == "no_valid_enabled_power"
+    assert plan.derived_status is GroupState.ERROR
 
 
 def test_unknown_startup_holds_on_writes_and_reports_starting() -> None:

@@ -510,7 +510,10 @@ def _derive_status(
         return GroupState.ERROR if offline_count else GroupState.STARTING
     if failure_policy_stopped:
         return GroupState.ERROR
-    if planning_failure_count >= max(1, active_member_count - offline_count - unknown_count):
+    planner_controlled_count = (
+        active_member_count - offline_count - unknown_count - manual_override_count
+    )
+    if planner_controlled_count > 0 and planning_failure_count >= planner_controlled_count:
         return GroupState.ERROR
     if offline_count or unknown_count or planning_failure_count or manual_override_count:
         return GroupState.DEGRADED
@@ -563,6 +566,17 @@ def validate_runtime_consistency(
         raise GroupPlanningError("disabled groups must be stopped or emergency-stopped")
     if not require_pattern:
         return
+    effective_min_power = (
+        group.default.min_power if runtime.min_power is None else runtime.min_power
+    )
+    effective_max_power = (
+        group.default.max_power if runtime.max_power is None else runtime.max_power
+    )
+    if effective_min_power > effective_max_power:
+        raise GroupPlanningError(
+            f"group {group.id!r} effective minimum power {effective_min_power} "
+            f"exceeds effective maximum power {effective_max_power}"
+        )
     pattern = runtime.pattern or group.default.pattern
     if pattern not in PatternCalculator.supported_patterns():
         raise GroupPlanningError(f"pattern {pattern.value!r} is not implemented by the planner")
