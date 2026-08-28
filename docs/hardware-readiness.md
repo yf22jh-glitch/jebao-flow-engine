@@ -40,6 +40,10 @@ Capability 문서, 홈서버의 private 설정, 읽기 전용 discovery/probe �
       `accept_reports` 기본값이 `True`이고 `cli.py`가 기본값으로 호출하므로 unsolicited
       report를 상태로 받아들일 수 있습니다. **따라서 generic probe는 측정용 collector로
       부적합합니다** (읽기 전용 관측 절차 §선행조건 1)
+- [x] 전용 write-free collector가 fresh identity binding, explicit reply, exact wire,
+      UTC·monotonic timing, pair gap과 fsync series를 보존하고 18 pair / 36 raw-frame
+      실장비 pilot 및 오프라인 재검증을 통과
+      ([실행 기록](runs/2026-08-28-pilot-2bd1bf97.md))
 - [x] 동일 physical binding은 MAC과 vendor device ID의 SHA-256 binding으로 저널에 고정
 - [ ] 일반 unsolicited status push의 모델별 전달 주기와 신뢰도 실측
 - [ ] 제조사가 보장하는 모델별 최소 출력, 출력 step과 `Flow=0` 의미 확인
@@ -58,7 +62,13 @@ Pro의 complete state frame 하나는 온전한 디코딩 단위지만, 펌웨�
 > **증거 등급 (c) reconstructed operator observation.** 위 두 항목은 서로 다른 출처의 관측이고
 > (필드 stagger는 retry4, 22~25초는 별도 읽기 전용 capture), **어느 쪽도 보존된 raw
 > 메타데이터가 연결돼 있지 않습니다.** 설계의 근거로는 쓰되, 판정 기준의 강제값으로는
-> 쓰지 않습니다 — 새 collector pilot의 preserved raw로 재산출한 뒤에만 그렇게 씁니다.
+> 쓰지 않습니다. 이 legacy 값의 후속 증거와 한계는 바로 아래에 분리해 기록합니다.
+
+후속 write-free pilot은 두 역할에서 장비 시계 값 변화 사이의 host 간격 중앙값을 각각
+약 22.48초로 보존했습니다. 장비 시계 값은 등급 (a) raw, host monotonic 간격과 파생 통계는
+등급 (b) artifact입니다. 다만 실제 sample 간격 자체가 약 21.9초라 결과가 한두 sample step으로
+alias되므로 **장비의 고정 갱신 주기를 확정하거나 그 숫자를 manifest 강제값으로 쓰지 않습니다.**
+정확한 범위와 한계는 [pilot 실행 기록](runs/2026-08-28-pilot-2bd1bf97.md)을 따릅니다.
 
 따라서 안전 필드의 변경은 즉시 실패시켜도, 이미 소유한 schedule 전환의 허용된 A→B 필드와
 시계 표시는 bounded read-only convergence 또는 한 번 발급한 monotonic clock receipt로
@@ -225,8 +235,10 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 |---|---|
 | ASYNC 대상 두 Pro를 정확히 식별했는가 | PASS |
 | 필요한 로컬 transport와 Pro wire schema가 있는가 | PASS |
-| schedule image를 읽고 exact restore할 수 있는가 | PASS |
+| 동결 write 하네스가 자신이 저장한 schedule image를 exact restore할 수 있는가 | PASS — 기존 하네스 capability 범위 |
+| 앱이 만든 제3자 baseline을 복원할 승인된 exact restore 수단과 권한이 있는가 | **BLOCKING / 미확보** — 선행조건 2 |
 | native MASTER/SLAVE 역할 write와 Sync 복구가 검증됐는가 | PASS |
+| 최소 write-free read-only collector가 실기 검증됐는가 | PASS — 18/18 pair, 36/36 explicit reply, offline verify PASS |
 | (Q2) ASYNC에서 slave가 자기 B 슬롯의 출력을 독립 적용하는가 | **UNKNOWN (PARKED, 2026-08-28)** — 아래 §park 참조 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |
@@ -234,8 +246,9 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | 앱 없는 Wi-Fi provisioning과 control-mode reconnect restore가 준비됐는가 | NOT IMPLEMENTED |
 
 현재 전체 실행 판정은 **NO-GO**입니다. 동결된 write 하네스(부록 A)로는 실행하지 않습니다.
-대안인 읽기 전용 관측도 현재 **NO-GO / BLOCKED**이며, 선행조건 1(최소 read-only collector)과
-선행조건 2(검증된 복원 수단)가 충족되기 전에는 시작하지 않습니다.
+대안인 읽기 전용 관측도 현재 **NO-GO / BLOCKED**입니다. 선행조건 1(최소 read-only
+collector)은 완료됐지만 선행조건 2(검증된 복원 수단)가 미확보이므로 앱 live-write와
+measurement epoch를 시작하지 않습니다.
 
 `UNKNOWN`을 코드의 가정으로 채우지 않습니다. 성공 판정은 실제 장비가 서로 다른 B 출력을
 300초 유지한 durable sample로만 내립니다. 그 전에 중단되면 원복 성공과 기능 검증 실패를
@@ -294,8 +307,9 @@ Q1도 `UNKNOWN`입니다. 당시 "유지되지 않음"으로 기록됐다가 del
 
 ## 읽기 전용 관측 절차 — 현재 판정 **NO-GO / BLOCKED**
 
-Q2를 `jebao-flow` write 없이 판정하려는 절차입니다. **아래 선행조건이 충족되기 전에는
-실행하지 않습니다.** 지금 이 절차는 설계이지 실행 가능한 계획이 아닙니다.
+Q2를 `jebao-flow` write 없이 판정하려는 절차입니다. **남은 선행조건 2가 충족되기 전에는
+앱 live-write와 measurement epoch를 실행하지 않습니다.** 선행조건 1의 collector만 현재
+실행 가능하며, 그 transport·timing pilot은 완료됐습니다.
 
 ### "write 0회"의 정확한 범위
 
@@ -324,7 +338,7 @@ live-write operation**이며, 그 승인 범위 안에서 에이전트가 원격
 `AutoFlow`는 펌웨어가 보고한 유효 출력입니다. 물리 유량까지 증명하지는 않지만, 동결된 write
 하네스도 그 범위 이상은 증명하지 못합니다.
 
-## 선행조건 1 — 최소 read-only collector (미구현, BLOCKING)
+## 선행조건 1 — 최소 read-only collector (완료, 2026-08-28)
 
 **기존 `jebao-flowctl probe`로는 이 관측을 실행할 수 없습니다.** 세 가지가 이 문서의
 원칙과 충돌합니다.
@@ -337,17 +351,22 @@ live-write operation**이며, 그 승인 범위 안에서 에이전트가 원격
   explicit reply로 검증" 원칙과 정면으로 충돌합니다.
 - **출력에 수집 시각이 없습니다.** 경계 판정에 필요한 시간축을 만들 수 없습니다.
 
-따라서 관측 전에 최소 read-only collector가 필요합니다. 요건은 다음과 같습니다.
+따라서 전용 최소 read-only collector를 구현했습니다. 요건과 실기 확인 결과는 다음과 같습니다.
 (동결된 write 하네스와 무관한 별도의 읽기 전용 도구입니다.)
 
-- [ ] **매 fresh session과 매 sample마다 expected identity binding 검증** — private baseline의
+- [x] **매 fresh session과 매 sample마다 expected identity binding 검증** — private baseline의
       물리 바인딩과 일치하지 않으면 그 sample을 무효로 처리하고 기록합니다. 세션 시작 시
       한 번만 확인하는 것으로는 부족합니다(주소 재할당·재연결 중 대상이 바뀔 수 있음)
-- [ ] **`accept_reports=False`**로 explicit reply만 상태로 인정
-- [ ] 샘플마다 **UTC 시각과 monotonic clock을 함께** 기록
-- [ ] 샘플의 **시작·종료 시각**을 각각 기록 (읽기에 걸린 시간을 알 수 있어야 함)
-- [ ] **장비별 완료 시각과 pair 간 gap** 기록 — 순차 읽기이므로 A와 B는 같은 시각이 아님
-- [ ] atomic write + fsync **manifest**와 각 raw 산출물의 **digest**
+- [x] **`accept_reports=False`**로 explicit reply만 상태로 인정
+- [x] 샘플마다 **UTC 시각과 monotonic clock을 함께** 기록
+- [x] 샘플의 **시작·종료 시각**을 각각 기록 (읽기에 걸린 시간을 알 수 있어야 함)
+- [x] **장비별 완료 시각과 pair 간 gap** 기록 — 순차 읽기이므로 A와 B는 같은 시각이 아님
+- [x] atomic write + fsync **manifest**와 각 raw 산출물의 **digest**
+
+실기 근거는 [`docs/runs/2026-08-28-pilot-2bd1bf97.md`](runs/2026-08-28-pilot-2bd1bf97.md)입니다.
+두 역할의 18/18 pair와 36/36 explicit reply가 accepted였고 같은 commit의 offline verifier가
+원본 프레임, ordinal·attempt 집합, digest, identity binding과 terminal marker를 재검증했습니다.
+이 완료는 **collector 선행조건만** 닫으며, Q2나 선행조건 2를 닫지 않습니다.
 
 manifest와 raw 산출물은 gitignored private 경로에 둡니다. 공개 문서·`docs/runs/`에는
 **실제 MAC이나 device ID를 적지 않고**, opaque artifact id 또는 안전한 상대 논리 경로,
@@ -425,7 +444,8 @@ manifest 뒤에 옵니다.
 
 ### phase 0 — 앱 write 이전 준비
 
-- [ ] 선행조건 1(collector)과 2(복원 수단)가 모두 충족됨
+- [x] 선행조건 1(collector) 완료 — [pilot 실행 기록](runs/2026-08-28-pilot-2bd1bf97.md)
+- [ ] 선행조건 2(검증된 복원 수단) 충족
 - [ ] private 설정을 `dry_run: true`, 모든 장비 `allow_hardware_writes: false`로 잠금
 - [ ] **설정 파일 변경만으로는 부족합니다.** 이미 로드된 프로세스는 멈추지 않으므로,
       write 가능한 프로세스가 실제로 떠 있지 않은지 확인합니다
@@ -529,12 +549,17 @@ manifest 뒤에 옵니다.
 | 최대 허용 pair gap | **상한** — 이보다 큰 gap의 경계는 무효 |
 | freshness | **허용 범위** — 경계 전후 샘플이 들어와야 하는 창 |
 
-**근거 없이 정하지 않습니다.** 각 값은 **새 collector pilot이 남긴 preserved raw**에서
-도출하고, 그 pilot artifact의 **opaque id와 digest를 manifest에 연결**합니다.
+**근거 없이 정하지 않습니다.** 각 값은 **collector pilot artifact bundle의 등급 (a) raw와
+등급 (b) host timing·manifest**에서 도출하고, 그 bundle의 **opaque id와 digest를 manifest에
+연결**합니다. 첫 pilot은
+요청 cadence 20초에서 실제 pair 시작 간격 21.2~22.5초, host-side pair completion gap
+10.6~11.2초를 보존했습니다. 단일 395.191초 실행이라 tail margin과 300초보다 큰 안정 구간
+하한을 제공하지 않으므로 숫자를 그대로 manifest 상한·하한으로 복사하지 않습니다.
 
-§실측된 비원자 상태 갱신의 22~25초는 현재 등급 (c)이고 보존 raw 메타데이터가 연결돼 있지
-않으므로, **판정 기준의 강제값으로 쓰지 않습니다.** 설계 참고로만 쓰고, 실제 강제값은
-pilot의 preserved raw로 재산출합니다. 임의의 숫자를 발명하지 않습니다.
+§실측된 비원자 상태 갱신의 legacy 22~25초는 등급 (c)이지만 후속 pilot이 장비 시계 값과
+host timing을 각각 등급 (a)/(b)로 보존했습니다. 다만 약 21.9초 sample cadence에 alias돼
+실제 장비 주기를 분해하지 못하므로 **22.48초를 고정 주기나 강제값으로 쓰지 않습니다.**
+임의의 숫자를 발명하지 않습니다.
 
 ### 유효한 경계의 조건
 
@@ -574,7 +599,7 @@ pilot의 preserved raw로 재산출합니다. 임의의 숫자를 발명하지 �
 3. 3번째 경계 이후 **안정 구간** 동안 그 상태가 유지됨
 4. 모든 경계가 §유효한 경계의 조건을 만족
 
-**안정 구간 = `max(300초, pilot preserved raw에서 유도한 하한)`.** manifest가 이 값을
+**안정 구간 = `max(300초, pilot artifact bundle에서 유도한 하한)`.** manifest가 이 값을
 300초 아래로 줄일 수 없습니다. pilot에서 유도한 하한이 300초보다 크면 그 값을 씁니다.
 
 ### 최종 판정 매핑

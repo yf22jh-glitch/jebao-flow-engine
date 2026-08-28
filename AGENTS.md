@@ -161,6 +161,8 @@ operation으로 다룹니다. 절차와 안전 순서는 `docs/hardware-readines
   - static import-graph 검사와 transport 테스트로 control frame 0회를 검증
   - pilot 실기 뒤에는 그 결과 파일을 먼저 커밋할 때까지 다시 `src/`를 수정하지 않음
   이 예외는 복원 도구, actuator, 일반 기능 개발에는 적용되지 않습니다.
+  **이 일회 예외는 `f699cfb` collector와 `9dcc19e` pilot 기록으로 사용 완료됐습니다.**
+  다시 적용하거나 두 번째 collector 선행 구현의 근거로 쓰지 않습니다.
 - **기존 기록의 사실 기술은 수정하지 않습니다.** 정정은 덧붙이기로만 합니다.
   비밀값이 실수로 들어간 경우만 예외로 제거합니다.
 - `README.md`·`PROJECT_CONTEXT.md` 상태 블록은 `docs/runs/`를 **링크만** 하고 서사를
@@ -197,10 +199,12 @@ operation으로 다룹니다. 절차와 안전 순서는 `docs/hardware-readines
 
 **트랙 A — 증거 (Q2 판정) · 현재 `NO-GO / BLOCKED`**
 
-두 선행조건이 충족되기 전에는 어떤 단계도 시작하지 않습니다.
+남은 선행조건이 충족되기 전에는 앱 live-write나 measurement epoch를 시작하지 않습니다.
 
-1. **선행조건** — (i) write-free read-only collector 구현, (ii) 검증된 exact restore 수단과
-   권한 확보. 둘 다 현재 미확보입니다.
+1. **선행조건** — (i) write-free read-only collector 구현과 실기 pilot은 완료
+   ([`docs/runs/2026-08-28-pilot-2bd1bf97.md`](docs/runs/2026-08-28-pilot-2bd1bf97.md)),
+   (ii) 검증된 exact restore 수단과 권한은 아직 미확보입니다. 따라서 트랙 A는 계속
+   `NO-GO / BLOCKED`입니다.
 2. **independent control epoch** — 대조군. 슬레이브 시간표가 `independent`에서 그 자체로
    동작하는지 유효 경계 3회로 확인합니다.
 3. **앱 ASYNC 전환과 덮어쓰기 확인** — 전환 후 슬레이브 슬롯 출력이 남아 있는지 확인합니다.
