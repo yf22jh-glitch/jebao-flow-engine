@@ -76,6 +76,8 @@ class RawSession(Protocol):
 
     async def authenticate(self) -> bytes: ...
 
+    async def heartbeat(self) -> None: ...
+
     async def read_raw_state(self, *, accept_reports: bool = True) -> bytes: ...
 
     async def send_raw_control(self, control_payload: bytes) -> bytes: ...
@@ -280,6 +282,25 @@ class LanJebaoDevice(JebaoDevice):
 
     async def get_explicit_state(self) -> DeviceState:
         return await self._get_state(accept_reports=False)
+
+    async def heartbeat(self) -> None:
+        """Exchange one GAgent heartbeat without emitting a device-control frame."""
+
+        async with self._io_lock:
+            if self._session_retired:
+                raise DeviceConnectionError(
+                    f"retired session for {self._device_id!r} must be replaced before heartbeat"
+                )
+            try:
+                await self._session.heartbeat()
+            except asyncio.CancelledError:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            except Exception:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
 
     async def _get_state(self, *, accept_reports: bool | None) -> DeviceState:
         async with self._io_lock:

@@ -677,6 +677,9 @@ class FakeRawSession:
     async def authenticate(self):
         return b"private-passcode"
 
+    async def heartbeat(self):
+        return None
+
     async def read_raw_state(self):
         return bytes(452)
 

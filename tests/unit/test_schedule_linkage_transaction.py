@@ -32,6 +32,7 @@ from jebao_flow.persistence.schedule_linkage import (
     JsonScheduleLinkageJournalStore,
     ScheduleLinkageJournalError,
 )
+from jebao_flow.protocol.errors import ProtocolConnectionError
 from jebao_flow.protocol.models import DeviceSchedule, DeviceTarget, LinkageRole, ScheduleEntry
 from jebao_flow.protocol.schedule_wire import decode_local_wavemaker_pro_slot_wire
 
@@ -126,12 +127,20 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         self.explicit_state_read_count = 0
         self.fail_explicit_state_reads_remaining = 0
         self.fail_explicit_state_read_numbers: set[int] = set()
+        self.explicit_state_read_failures: dict[int, BaseException] = {}
+        self.explicit_state_read_time_advances: dict[int, float] = {}
+        self.explicit_state_read_time_advance_seconds = 0.0
         self.explicit_clock_offsets: list[float] = []
         self.unsolicited_clock_offsets_by_role: dict[LinkageRole, list[float]] = {}
         self._explicit_state_read_active = False
         self.pause_explicit_state_read_numbers: set[int] = set()
         self.explicit_state_read_paused = asyncio.Event()
         self.resume_explicit_state_read = asyncio.Event()
+        self.heartbeat_count = 0
+        self.fail_heartbeat_numbers: set[int] = set()
+        self.heartbeat_started_at: list[float] = []
+        self.heartbeat_time_advance_seconds = 0.0
+        self.heartbeat_time_advances: dict[int, float] = {}
         self._failed_after: set[LinkageRole] = set()
         self._failed_before: set[LinkageRole] = set()
         self.entries: tuple[ScheduleEntry, ...] = (
@@ -307,16 +316,23 @@ class _ScheduleDevice(SimulatedJebaoDevice):
     async def get_explicit_state(self):
         self.explicit_state_read_count += 1
         read_number = self.explicit_state_read_count
+        self.virtual_time.value += self.explicit_state_read_time_advances.pop(
+            read_number,
+            0.0,
+        )
+        self.virtual_time.value += self.explicit_state_read_time_advance_seconds
         if read_number in self.pause_explicit_state_read_numbers:
             self.pause_explicit_state_read_numbers.discard(read_number)
             self.explicit_state_read_paused.set()
             await self.resume_explicit_state_read.wait()
         if read_number in self.fail_explicit_state_read_numbers:
             self.fail_explicit_state_read_numbers.remove(read_number)
-            raise RuntimeError("simulated explicit state read failure")
+            raise ProtocolConnectionError("simulated explicit state read failure")
+        if read_number in self.explicit_state_read_failures:
+            raise self.explicit_state_read_failures.pop(read_number)
         if self.fail_explicit_state_reads_remaining:
             self.fail_explicit_state_reads_remaining -= 1
-            raise RuntimeError("simulated explicit state read failure")
+            raise ProtocolConnectionError("simulated explicit state read failure")
         self._explicit_state_read_active = True
         try:
             state = await self.get_state()
@@ -338,6 +354,19 @@ class _ScheduleDevice(SimulatedJebaoDevice):
                 )
             }
         )
+
+    async def heartbeat(self) -> None:
+        self.heartbeat_count += 1
+        self.heartbeat_started_at.append(self.virtual_time.value)
+        self.virtual_time.value += self.heartbeat_time_advance_seconds
+        self.virtual_time.value += self.heartbeat_time_advances.pop(
+            self.heartbeat_count,
+            0.0,
+        )
+        if self.heartbeat_count in self.fail_heartbeat_numbers:
+            self.fail_heartbeat_numbers.remove(self.heartbeat_count)
+            raise ProtocolConnectionError("simulated heartbeat failure")
+        await super().heartbeat()
 
     async def set_enabled(self, enabled: bool) -> None:
         self.calls.append(("enabled", enabled))
@@ -3230,6 +3259,46 @@ async def test_staged_slave_pair_retry_does_not_retry_semantic_drift(
     _assert_only_linkage_calls(master, slave)
 
 
+async def test_staged_slave_pair_does_not_retry_decoded_schema_failure(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair(
+        boundary_time="18:13",
+        next_entry_end="18:16",
+    )
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-slave-schema-no-retry.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(
+        _staged_spec(observation_window_seconds=240)
+    )
+    slave.explicit_state_read_failures[5] = ValueError(
+        "simulated decoded schema mismatch"
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(preflight)
+
+    assert (
+        ScheduleLinkageRunProgressKind.SLAVE_PAIR_STATE_READ_RETRY_STARTED
+        not in {event.kind for event in progress}
+    )
+    assert progress[-1].failure is ScheduleLinkageRunFailure.SLAVE_PAIR_STATE_READ
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
+
+
 async def test_staged_slave_pair_retry_requires_complete_pre_boundary_budget(
     tmp_path: Path,
 ) -> None:
@@ -3905,7 +3974,488 @@ async def test_staged_monitor_uses_explicit_reads_and_accepts_mixed_auto_refresh
     )
     assert slave.explicit_state_read_count == master.explicit_state_read_count
     assert master.explicit_state_read_count > master.session_connect_count
+    assert master.heartbeat_count == master.explicit_state_read_count - 3
+    assert slave.heartbeat_count == slave.explicit_state_read_count - 3
     assert store.load() is None
+
+
+async def test_staged_monitor_keeps_long_lived_pair_alive_without_control_rewrites(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair(
+        boundary_time="18:15",
+        next_entry_end="18:20",
+    )
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-long-heartbeat.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    result = await controller.run(
+        await controller.preflight(
+            _staged_spec(observation_window_seconds=360)
+        )
+    )
+
+    assert result.schedule_transition_verified is True
+    assert master.heartbeat_count == slave.heartbeat_count
+    assert master.heartbeat_count > 250
+    assert [call[1] for call in master.calls] == [
+        LinkageRole.MASTER,
+        LinkageRole.INDEPENDENT,
+    ]
+    assert [call[1] for call in slave.calls] == [
+        LinkageRole.ASYNC_SLAVE,
+        LinkageRole.INDEPENDENT,
+    ]
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_monitor_subtracts_slow_acquisition_from_heartbeat_cadence(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair(
+        boundary_time="18:13",
+        next_entry_end="18:16",
+    )
+    master.heartbeat_time_advance_seconds = 1.0
+    master.explicit_state_read_time_advance_seconds = 1.0
+
+    async def exact_sleep(seconds: float) -> None:
+        master.virtual_time.sleep_count += 1
+        await asyncio.sleep(0)
+        master.virtual_time.value += seconds
+
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-heartbeat-cadence.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        sleep=exact_sleep,
+    )
+
+    result = await controller.run(
+        await controller.preflight(
+            _staged_spec(
+                observation_window_seconds=240,
+                verification_interval_seconds=4,
+            )
+        )
+    )
+
+    monitor_heartbeats = master.heartbeat_started_at[2:]
+    assert result.schedule_transition_verified is True
+    assert len(monitor_heartbeats) > 10
+    assert all(
+        later - earlier <= 4.0
+        for earlier, later in zip(
+            monitor_heartbeats,
+            monitor_heartbeats[1:],
+            strict=False,
+        )
+    )
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_monitor_retries_one_transport_read_on_fresh_pair(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-monitor-read-retry.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_explicit_state_read_numbers.add(20)
+
+    result = await controller.run(preflight)
+
+    retry_kind = ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED
+    assert result.schedule_transition_verified is True
+    assert [event.kind for event in progress].count(retry_kind) == 1
+    assert master.session_connect_count == slave.session_connect_count
+    assert [call[1] for call in master.calls] == [
+        LinkageRole.MASTER,
+        LinkageRole.INDEPENDENT,
+    ]
+    assert [call[1] for call in slave.calls] == [
+        LinkageRole.ASYNC_SLAVE,
+        LinkageRole.INDEPENDENT,
+    ]
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_monitor_retries_one_heartbeat_failure_on_fresh_pair(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-monitor-heartbeat-retry.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_heartbeat_numbers.add(10)
+
+    result = await controller.run(preflight)
+
+    retry_kind = ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED
+    assert result.schedule_transition_verified is True
+    assert [event.kind for event in progress].count(retry_kind) == 1
+    assert master.session_connect_count == slave.session_connect_count
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_monitor_second_transport_failure_restores_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-monitor-retry-exhausted.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_explicit_state_read_numbers.update({20, 21})
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(preflight)
+
+    retry_kind = ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED
+    assert [event.kind for event in progress].count(retry_kind) == 1
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MONITOR_STATE_READ
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_monitor_does_not_retry_schema_or_semantic_read_failure(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-monitor-semantic-read.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.explicit_state_read_failures[6] = ValueError(
+        "simulated decoded schema mismatch"
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(preflight)
+
+    retry_kind = ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED
+    assert retry_kind not in {event.kind for event in progress}
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MONITOR_STATE_READ
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_preflight_heartbeat_failure_sends_no_role_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    slave.fail_heartbeat_numbers.add(1)
+    controller = _controller(
+        master,
+        slave,
+        JsonScheduleLinkageJournalStore(tmp_path / "staged-preflight-heartbeat.json"),
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkagePreflightError) as caught:
+        await controller.preflight(_staged_spec())
+
+    assert caught.value.failure is ScheduleLinkageRunFailure.PREFLIGHT_HEARTBEAT
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_staged_monitor_persistent_heartbeat_failure_restores_once(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-monitor-heartbeat-exhausted.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_heartbeat_numbers.update({10, 11})
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(preflight)
+
+    retry_kind = ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED
+    assert [event.kind for event in progress].count(retry_kind) == 1
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MONITOR_HEARTBEAT
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_monitor_retry_requires_complete_observation_budget(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-monitor-retry-deadline.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.explicit_state_read_time_advances[20] = 60
+    slave.fail_explicit_state_read_numbers.add(20)
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(preflight)
+
+    assert (
+        ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED
+        not in {event.kind for event in progress}
+    )
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MONITOR_DEADLINE
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize("overrun_stage", ["heartbeat", "state_read"])
+async def test_staged_monitor_successful_acquisition_deadline_is_typed(
+    tmp_path: Path,
+    overrun_stage: str,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"staged-monitor-{overrun_stage}-deadline.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    if overrun_stage == "heartbeat":
+        master.heartbeat_time_advances[3] = 90
+    else:
+        master.explicit_state_read_time_advances[6] = 90
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(preflight)
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MONITOR_DEADLINE
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_monitor_retry_stop_preempts_refresh_and_restores(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    retry_wait_started = asyncio.Event()
+    never_resume = asyncio.Event()
+
+    async def block_retry_wait(seconds: float) -> None:
+        if seconds == 2.0:
+            retry_wait_started.set()
+            await never_resume.wait()
+            return
+        await master.virtual_time.sleep(seconds)
+
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-monitor-retry-stop.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        sleep=block_retry_wait,
+    )
+    spec = _staged_spec()
+    preflight = await controller.preflight(spec)
+    slave.fail_explicit_state_read_numbers.add(20)
+    run_task = asyncio.create_task(controller.run(preflight))
+    await asyncio.wait_for(retry_wait_started.wait(), timeout=1)
+
+    assert await controller.stop(spec.operation_id) is True
+    result = await asyncio.wait_for(run_task, timeout=1)
+
+    assert result.stop_reason is ScheduleLinkageStopReason.MANUAL
+    assert result.schedule_transition_verified is False
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_monitor_retry_safety_trip_during_pair_refresh_restores(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-monitor-retry-safety.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        safety_interlock=interlock,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_explicit_state_read_numbers.add(20)
+    master.pause_before_connect_numbers.add(6)
+    run_task = asyncio.create_task(controller.run(preflight))
+    await asyncio.wait_for(master.connect_paused.wait(), timeout=1)
+
+    interlock.trip()
+    master.resume_connect.set()
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await asyncio.wait_for(run_task, timeout=1)
+
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_monitor_retry_cancellation_during_second_read_restores(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-monitor-retry-cancel.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_explicit_state_read_numbers.add(20)
+    slave.pause_explicit_state_read_numbers.add(21)
+    run_task = asyncio.create_task(controller.run(preflight))
+    await asyncio.wait_for(slave.explicit_state_read_paused.wait(), timeout=1)
+
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(run_task, timeout=1)
+
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_monitor_retry_rechecks_exact_durable_active_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-monitor-retry-durable.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    original_confirms = store.confirms_lease_successor
+    confirmation_calls = 0
+
+    def reject_second_confirmation(record: ScheduleLinkageRecord) -> bool:
+        nonlocal confirmation_calls
+        confirmation_calls += 1
+        if confirmation_calls == 2:
+            return False
+        return original_confirms(record)
+
+    monkeypatch.setattr(store, "confirms_lease_successor", reject_second_confirmation)
+    slave.fail_explicit_state_read_numbers.add(20)
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(preflight)
+
+    assert confirmation_calls >= 2
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MONITOR
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
 
 
 @pytest.mark.parametrize("failure", ["unknown", "after_then_before"])

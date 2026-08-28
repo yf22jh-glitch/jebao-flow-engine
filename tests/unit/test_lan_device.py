@@ -84,6 +84,7 @@ class _FakeSession:
     read_failures_remaining = 0
     read_failures_disconnect = False
     send_failure: Exception | None = None
+    heartbeat_failure: BaseException | None = None
 
     def __init__(self, address: str) -> None:
         self.instance_id = len(self.__class__.instances)
@@ -91,6 +92,7 @@ class _FakeSession:
         self.connected = False
         self.connect_calls = 0
         self.authenticate_calls = 0
+        self.heartbeat_calls = 0
         self.sent: list[bytes] = []
         self.read_accept_reports: list[bool] = []
         self.events: list[str] = []
@@ -118,6 +120,13 @@ class _FakeSession:
         self.events.append("authenticate")
         self.__class__.timeline.append(f"{self.instance_id}:authenticate")
         return b"never-logged"
+
+    async def heartbeat(self) -> None:
+        self.heartbeat_calls += 1
+        self.events.append("heartbeat")
+        self.__class__.timeline.append(f"{self.instance_id}:heartbeat")
+        if self.__class__.heartbeat_failure is not None:
+            raise self.__class__.heartbeat_failure
 
     async def read_raw_state(self, *, accept_reports: bool = True) -> bytes:
         self.read_accept_reports.append(accept_reports)
@@ -149,6 +158,7 @@ def _reset_fake_session() -> None:
     _FakeSession.read_failures_remaining = 0
     _FakeSession.read_failures_disconnect = False
     _FakeSession.send_failure = None
+    _FakeSession.heartbeat_failure = None
 
 
 def _device(
@@ -216,6 +226,65 @@ async def test_explicit_state_read_rejects_unsolicited_reports() -> None:
 
     assert ordinary == explicit.model_copy(update={"observed_at": ordinary.observed_at})
     assert _FakeSession.instances[0].read_accept_reports == [True, False]
+
+
+async def test_heartbeat_is_serialized_read_only_transport_traffic() -> None:
+    device = _device()
+    await device.connect()
+
+    await device.heartbeat()
+
+    session = _FakeSession.instances[0]
+    assert session.heartbeat_calls == 1
+    assert session.sent == []
+    assert session.connected is True
+
+
+async def test_heartbeat_rejects_retired_session_without_transport_traffic() -> None:
+    device = _device()
+    await device.connect()
+    session = _FakeSession.instances[0]
+    await device.disconnect()
+
+    with pytest.raises(DeviceConnectionError, match="retired session"):
+        await device.heartbeat()
+
+    assert session.heartbeat_calls == 0
+    assert session.sent == []
+
+
+async def test_heartbeat_failure_retires_and_quarantines_session() -> None:
+    _FakeSession.heartbeat_failure = ProtocolTimeoutError("private heartbeat failure")
+    device = _device()
+    await device.connect()
+    failed = _FakeSession.instances[0]
+
+    with pytest.raises(ProtocolTimeoutError, match="private heartbeat failure"):
+        await device.heartbeat()
+
+    assert failed.heartbeat_calls == 1
+    assert failed.events[-1] == "quarantine"
+    assert failed.connected is False
+    assert failed.sent == []
+    with pytest.raises(DeviceConnectionError, match="retired session"):
+        await device.heartbeat()
+
+
+async def test_cancelled_heartbeat_retires_and_quarantines_session() -> None:
+    _FakeSession.heartbeat_failure = asyncio.CancelledError()
+    device = _device()
+    await device.connect()
+    cancelled = _FakeSession.instances[0]
+
+    with pytest.raises(asyncio.CancelledError):
+        await device.heartbeat()
+
+    assert cancelled.heartbeat_calls == 1
+    assert cancelled.events[-1] == "quarantine"
+    assert cancelled.connected is False
+    assert cancelled.sent == []
+    with pytest.raises(DeviceConnectionError, match="retired session"):
+        await device.heartbeat()
 
 
 async def test_explicit_disconnect_replaces_the_session_object_on_reconnect() -> None:

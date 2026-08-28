@@ -30,9 +30,10 @@ from pydantic import (
     model_validator,
 )
 
-from jebao_flow.devices.base import JebaoDevice
+from jebao_flow.devices.base import DeviceConnectionError, JebaoDevice
 from jebao_flow.devices.identity import PhysicalDeviceBinding, physical_identity_key
 from jebao_flow.devices.linkage import LinkageSafetyInterlock, schedule_structure_fingerprint
+from jebao_flow.protocol.errors import ProtocolError
 from jebao_flow.protocol.models import (
     Capability,
     DeviceSchedule,
@@ -71,6 +72,7 @@ _ROLE_FREQUENCY_CONVERGENCE_ADMISSION_WINDOW_SECONDS = 20.0
 _ROLE_FREQUENCY_CONVERGENCE_MAX_INTERVAL_SECONDS = 5.0
 _ROLE_FREQUENCY_CONVERGENCE_REQUIRED_EXACT_READS = 2
 _STAGED_TRANSPORT_RETRY_DELAY_SECONDS = 2.0
+_STAGED_MONITOR_HEARTBEAT_MAX_INTERVAL_SECONDS = 4.0
 # Read-only field sampling observed Pro NowTime advance in independent 22-25 second batches.
 # Treat 30 seconds as a conservative early-boundary allowance: a larger hidden lag can only make
 # the attended experiment fail closed, never authorize an early Auto transition as schedule-led.
@@ -160,6 +162,7 @@ class ScheduleLinkageRunProgressKind(StrEnum):
     SLAVE_PAIR_STATE_READ_RETRY_STARTED = "slave_pair_state_read_retry_started"
     SLAVE_PAIR_VERIFIED = "slave_pair_verified"
     MONITOR_STARTED = "monitor_started"
+    MONITOR_TRANSPORT_RETRY_STARTED = "monitor_transport_retry_started"
     MONITOR_COMPLETED = "monitor_completed"
     FAILED = "failed"
 
@@ -172,6 +175,7 @@ class ScheduleLinkageRunFailure(StrEnum):
     PREFLIGHT_SAFETY_INTERLOCK = "preflight_safety_interlock"
     PREFLIGHT_CAPABILITY = "preflight_capability"
     PREFLIGHT_SESSION_REFRESH = "preflight_session_refresh"
+    PREFLIGHT_HEARTBEAT = "preflight_heartbeat"
     PREFLIGHT_EXPLICIT_STATE_READ = "preflight_explicit_state_read"
     PREFLIGHT_STATE_READ = "preflight_state_read"
     PREFLIGHT_CLOCK = "preflight_clock"
@@ -187,6 +191,7 @@ class ScheduleLinkageRunFailure(StrEnum):
     PREFLIGHT_UNEXPECTED = "preflight_unexpected"
     FRESH_CAPTURE = "fresh_capture"
     FRESH_CAPTURE_SESSION_REFRESH = "fresh_capture_session_refresh"
+    FRESH_CAPTURE_HEARTBEAT = "fresh_capture_heartbeat"
     FRESH_CAPTURE_EXPLICIT_STATE_READ = "fresh_capture_explicit_state_read"
     FRESH_CAPTURE_VALIDATION = "fresh_capture_validation"
     FRESH_CAPTURE_DEADLINE = "fresh_capture_deadline"
@@ -228,6 +233,10 @@ class ScheduleLinkageRunFailure(StrEnum):
     SLAVE_PAIR_MASTER_AUTO = "slave_pair_master_auto"
     SLAVE_PAIR_SLAVE_AUTO = "slave_pair_slave_auto"
     MONITOR = "monitor"
+    MONITOR_HEARTBEAT = "monitor_heartbeat"
+    MONITOR_STATE_READ = "monitor_state_read"
+    MONITOR_SESSION_REFRESH = "monitor_session_refresh"
+    MONITOR_DEADLINE = "monitor_deadline"
     CANCELLED = "cancelled"
 
 
@@ -362,6 +371,12 @@ def schedule_linkage_run_progress_rank(kind: ScheduleLinkageRunProgressKind) -> 
     """Return the canonical monotonic rank used by durable outer-stage validation."""
 
     return tuple(ScheduleLinkageRunProgressKind).index(kind)
+
+
+def _is_retryable_transport_failure(error: BaseException) -> bool:
+    """Return whether a fresh session can safely resolve an acquisition failure."""
+
+    return isinstance(error, (DeviceConnectionError, ProtocolError, OSError))
 
 
 class ScheduleLinkageSpec(BaseModel):
@@ -1475,6 +1490,23 @@ class ScheduleActiveLinkageController:
             self._validate_capabilities(master, LinkageRole.MASTER)
             self._validate_capabilities(slave, LinkageRole.ASYNC_SLAVE)
             try:
+                await self._heartbeat_pair(spec)
+            except BaseException as error:
+                # Heartbeat is read-only, but an incomplete exchange leaves the paired streams
+                # unsuitable for any later owner. Retire both before returning the refusal.
+                try:
+                    await self._refresh_pair_sessions_uninterruptibly(spec)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as cleanup_error:
+                    del cleanup_error
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                raise ScheduleLinkagePreflightError(
+                    "schedule-linkage preflight heartbeat failed",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_HEARTBEAT,
+                ) from error
+            try:
                 states = await self._read_pair_explicit_states(spec)
             except BaseException as error:
                 # Explicit reply failure/cancellation retires at least one LAN session. Complete
@@ -1548,6 +1580,7 @@ class ScheduleActiveLinkageController:
                 or error.failure
                 not in {
                     ScheduleLinkageRunFailure.PREFLIGHT_SESSION_REFRESH,
+                    ScheduleLinkageRunFailure.PREFLIGHT_HEARTBEAT,
                     ScheduleLinkageRunFailure.PREFLIGHT_EXPLICIT_STATE_READ,
                 }
             ):
@@ -1615,6 +1648,8 @@ class ScheduleActiveLinkageController:
     ) -> ScheduleLinkageRunFailure:
         if failure is ScheduleLinkageRunFailure.PREFLIGHT_SESSION_REFRESH:
             return ScheduleLinkageRunFailure.FRESH_CAPTURE_SESSION_REFRESH
+        if failure is ScheduleLinkageRunFailure.PREFLIGHT_HEARTBEAT:
+            return ScheduleLinkageRunFailure.FRESH_CAPTURE_HEARTBEAT
         if failure is ScheduleLinkageRunFailure.PREFLIGHT_EXPLICIT_STATE_READ:
             return ScheduleLinkageRunFailure.FRESH_CAPTURE_EXPLICIT_STATE_READ
         if failure is ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW:
@@ -1984,6 +2019,52 @@ class ScheduleActiveLinkageController:
             await asyncio.gather(*read_tasks, return_exceptions=True)
         return dict(zip(ids, states, strict=True))
 
+    async def _heartbeat_pair(self, spec: ScheduleLinkageSpec) -> None:
+        """Exchange paired read-only keepalives without leaving an uncertain peer running."""
+
+        ids = (spec.master_device_id, spec.slave_device_id)
+        heartbeat_tasks = tuple(
+            asyncio.create_task(self._get_device(device_id).heartbeat())
+            for device_id in ids
+        )
+        try:
+            await asyncio.gather(*heartbeat_tasks)
+        finally:
+            for task in heartbeat_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*heartbeat_tasks, return_exceptions=True)
+
+    async def _heartbeat_pair_guarded(self, spec: ScheduleLinkageSpec) -> None:
+        """Cancel paired keepalives promptly if stop or safety authority changes."""
+
+        stop_event = self._stop_event
+        if stop_event is None:
+            raise ScheduleLinkageApplyError("schedule-linkage stop authority is unavailable")
+        heartbeat_task = asyncio.create_task(self._heartbeat_pair(spec))
+        stop_task = asyncio.create_task(stop_event.wait())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = (heartbeat_task, stop_task, safety_task)
+        try:
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage stop was requested during active heartbeat"
+                )
+            if safety_task in done:
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage safety authority was revoked during active heartbeat"
+                )
+            heartbeat_task.result()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _read_pair_explicit_states_guarded(
         self,
         spec: ScheduleLinkageSpec,
@@ -2239,11 +2320,12 @@ class ScheduleActiveLinkageController:
             raise
         except ScheduleLinkageError:
             raise
-        except Exception:
+        except Exception as error:
             if (
                 not self._owned_staged_auto_transition_observation
                 or retry_progress is None
                 or self._run_pair_participant != "slave"
+                or not _is_retryable_transport_failure(error)
             ):
                 raise
 
@@ -2791,6 +2873,164 @@ class ScheduleActiveLinkageController:
             "schedule boundary was missed or lacked two consecutive fresh samples"
         )
 
+    async def _acquire_staged_monitor_pair(
+        self,
+        record: ScheduleLinkageRecord,
+    ) -> tuple[dict[str, DeviceState], float]:
+        """Heartbeat and explicitly read one staged pair without changing device state."""
+
+        self._run_failure = ScheduleLinkageRunFailure.MONITOR_HEARTBEAT
+        heartbeat_started_at = self._monotonic()
+        await self._heartbeat_pair_guarded(record.spec)
+        try:
+            self._assert_observation_deadline()
+        except ScheduleLinkageApplyError:
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR_DEADLINE
+            raise
+        self._run_failure = ScheduleLinkageRunFailure.MONITOR_STATE_READ
+        states = await self._read_pair_explicit_states_guarded(
+            record.spec,
+            context="active observation",
+        )
+        try:
+            self._assert_observation_deadline()
+        except ScheduleLinkageApplyError:
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR_DEADLINE
+            raise
+        return states, heartbeat_started_at
+
+    async def _acquire_staged_monitor_pair_with_retry(
+        self,
+        record: ScheduleLinkageRecord,
+    ) -> tuple[dict[str, DeviceState], float]:
+        """Retry one transport-only acquisition on a fresh, exact paired session."""
+
+        try:
+            return await self._acquire_staged_monitor_pair(record)
+        except asyncio.CancelledError:
+            raise
+        except ScheduleLinkageError:
+            raise
+        except Exception as error:
+            if not _is_retryable_transport_failure(error):
+                raise
+
+        self._assert_staged_monitor_retry_record(record)
+        self._validate_recovery_bindings(record, permit_disconnected=True)
+        self._assert_staged_monitor_retry_authority(
+            minimum_remaining_seconds=(
+                _STAGED_TRANSPORT_RETRY_DELAY_SECONDS
+                + _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS
+            )
+        )
+        self._emit_progress_best_effort(
+            ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED
+        )
+        await self._wait_for_staged_monitor_retry()
+        self._assert_staged_monitor_retry_record(record)
+        self._run_failure = ScheduleLinkageRunFailure.MONITOR_SESSION_REFRESH
+        await self._refresh_pair_sessions_uninterruptibly(record.spec)
+        self._validate_recovery_bindings(record)
+        self._assert_staged_monitor_retry_record(record)
+        self._assert_staged_monitor_retry_authority(minimum_remaining_seconds=0)
+        return await self._acquire_staged_monitor_pair(record)
+
+    def _assert_staged_monitor_retry_record(
+        self,
+        record: ScheduleLinkageRecord,
+    ) -> None:
+        """Require the exact durable ACTIVE pair before every monitor recovery phase."""
+
+        expected_ids = (
+            record.spec.master_device_id,
+            record.spec.slave_device_id,
+        )
+        try:
+            durable = self._store.confirms_lease_successor(record)
+        except BaseException:
+            durable = False
+        if (
+            not durable
+            or record.phase is not ScheduleLinkagePhase.ACTIVE
+            or record.linkage_write_intent_device_ids != expected_ids
+            or record.linked_device_ids != expected_ids
+            or record.detached_device_ids
+        ):
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR
+            self._run_drift_dimensions = ()
+            raise ScheduleLinkageApplyError(
+                "staged monitor retry lacks the exact durable active role pair"
+            )
+
+    async def _wait_for_staged_monitor_retry(self) -> None:
+        """Wait the bounded transport settle while stop and safety remain authoritative."""
+
+        stop_event = self._stop_event
+        if stop_event is None:
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR
+            raise ScheduleLinkageApplyError(
+                "staged monitor retry has no stop authority"
+            )
+        settle_task = asyncio.ensure_future(
+            self._sleep(_STAGED_TRANSPORT_RETRY_DELAY_SECONDS)
+        )
+        stop_task = asyncio.create_task(stop_event.wait())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = (settle_task, stop_task, safety_task)
+        try:
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                self._run_failure = ScheduleLinkageRunFailure.MONITOR
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage stop was requested during staged monitor retry"
+                )
+            if safety_task in done:
+                self._run_failure = ScheduleLinkageRunFailure.MONITOR
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage safety authority was revoked during staged monitor retry"
+                )
+            settle_task.result()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._assert_staged_monitor_retry_authority(
+            minimum_remaining_seconds=_ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS
+        )
+
+    def _assert_staged_monitor_retry_authority(
+        self,
+        *,
+        minimum_remaining_seconds: float,
+    ) -> None:
+        """Keep a monitor reconnect inside the same stop, safety and deadline authority."""
+
+        self._run_drift_dimensions = ()
+        if self._stop_requested():
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR
+            raise ScheduleLinkageApplyError(
+                "schedule-linkage stop was requested during staged monitor retry"
+            )
+        if (
+            self._safety_epoch is None
+            or not self._safety_interlock.permitted
+            or self._safety_interlock.epoch != self._safety_epoch
+        ):
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR
+            raise ScheduleLinkageApplyError(
+                "schedule-linkage safety authority was revoked during staged monitor retry"
+            )
+        remaining = self._require_observation_deadline() - self._monotonic()
+        if remaining < minimum_remaining_seconds:
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR_DEADLINE
+            raise ScheduleLinkageApplyError(
+                "staged monitor retry lacks a complete read-only session budget"
+            )
+
     async def _monitor_staged_auto_transition(
         self,
         record: ScheduleLinkageRecord,
@@ -2818,12 +3058,12 @@ class ScheduleActiveLinkageController:
                 raise ScheduleLinkageApplyError(
                     "schedule-linkage safety authority was revoked"
                 )
-            states = await self._read_pair_explicit_states_guarded(
-                spec,
-                context="active observation",
+            states, heartbeat_started_at = (
+                await self._acquire_staged_monitor_pair_with_retry(record)
             )
             sampled_at = self._monotonic()
             self._assert_observation_deadline(sampled_at)
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR
             sides = self._classify_staged_auto_sides(record, states, expected_roles)
             if (
                 sampled_at < transition_not_before
@@ -2885,7 +3125,20 @@ class ScheduleActiveLinkageController:
                 consecutive_after = 0
                 previous_after = None
                 stable_after_started_at = None
-            await self._sleep(spec.verification_interval_seconds)
+            elapsed_since_heartbeat = max(
+                0.0,
+                self._monotonic() - heartbeat_started_at,
+            )
+            await self._sleep(
+                min(
+                    spec.verification_interval_seconds,
+                    max(
+                        0.0,
+                        _STAGED_MONITOR_HEARTBEAT_MAX_INTERVAL_SECONDS
+                        - elapsed_since_heartbeat,
+                    ),
+                )
+            )
         raise ScheduleLinkageApplyError(
             "staged Auto transition lacked two consecutive stable after samples"
         )

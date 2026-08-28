@@ -170,6 +170,16 @@ class JebaoDevice(ABC):
 
         return await self.get_state()
 
+    async def heartbeat(self) -> None:
+        """Keep a long-lived device session alive without changing device state.
+
+        Transports that do not require an explicit keepalive may retain this no-op default.
+        Implementations that exchange a heartbeat must serialize it with their other transport
+        operations and discard the session if cancellation or an error makes framing uncertain.
+        """
+
+        return None
+
     @abstractmethod
     async def set_enabled(self, enabled: bool) -> None: ...
 
