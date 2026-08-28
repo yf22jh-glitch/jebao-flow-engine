@@ -878,6 +878,44 @@ def test_v3_role_progress_is_monotonic_in_model_and_append_path() -> None:
     intent = _intent(phase=HardwareTestIntentPhase.STARTED)
     first_at = intent.created_at + timedelta(microseconds=1)
     later_at = intent.created_at + timedelta(microseconds=2)
+    capture_started = ScheduleFlowStageEvent(
+        stage=ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+        occurred_at=first_at,
+        role_progress=ScheduleLinkageRunProgressEvent(
+            kind=ScheduleLinkageRunProgressKind.FRESH_CAPTURE_STARTED,
+            occurred_at=first_at,
+        ),
+    )
+    retry_started = ScheduleFlowStageEvent(
+        stage=ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+        occurred_at=later_at,
+        role_progress=ScheduleLinkageRunProgressEvent(
+            kind=ScheduleLinkageRunProgressKind.FRESH_CAPTURE_RETRY_STARTED,
+            occurred_at=later_at,
+        ),
+    )
+    appended = cli._append_schedule_stage_event(  # noqa: SLF001
+        (capture_started,),
+        retry_started,
+    )
+    round_tripped = HardwareTestIntent.model_validate_json(
+        HardwareTestIntent.model_validate(
+            intent.model_dump(mode="python")
+            | {
+                "updated_at": later_at,
+                "schedule_flow_stage_events": appended,
+            }
+        ).model_dump_json()
+    )
+    assert tuple(
+        event.role_progress.kind
+        for event in round_tripped.schedule_flow_stage_events
+        if event.role_progress is not None
+    ) == (
+        ScheduleLinkageRunProgressKind.FRESH_CAPTURE_STARTED,
+        ScheduleLinkageRunProgressKind.FRESH_CAPTURE_RETRY_STARTED,
+    )
+
     later_progress = ScheduleFlowStageEvent(
         stage=ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
         occurred_at=first_at,
@@ -1320,6 +1358,38 @@ def test_terminal_typed_preflight_reason_is_private_and_token_compatible(capsys)
     assert "Role failure phase: preflight" in output
     assert "Role failure reason: preflight_explicit_state_read" in output
     assert "Recovery confirmation token:" not in output
+    assert "device_id" not in output
+    assert "physical_binding" not in output
+    assert "exception" not in output
+
+
+def test_terminal_typed_fresh_capture_reason_is_sanitized_as_run_failure(capsys) -> None:
+    base = _intent(
+        phase=HardwareTestIntentPhase.TERMINAL,
+        outcome="experiment_failed_restored",
+    )
+    checkpoint = ScheduleLinkageRunProgressEvent(
+        kind=ScheduleLinkageRunProgressKind.FAILED,
+        occurred_at=base.created_at,
+        failure=ScheduleLinkageRunFailure.FRESH_CAPTURE_EXPLICIT_STATE_READ,
+    )
+    terminal = HardwareTestIntent.model_validate(
+        base.model_dump(mode="python")
+        | {"schedule_flow_role_failure": checkpoint}
+    )
+    store = SimpleNamespace(load=lambda: terminal)
+    empty = SimpleNamespace(load=lambda: None)
+
+    assert cli._status(  # noqa: SLF001
+        SimpleNamespace(instance=SimpleNamespace(id="main")),
+        store,
+        empty,
+        empty,
+        empty,
+    ) == 0
+    output = capsys.readouterr().out
+    assert "Role run failure: fresh_capture_explicit_state_read" in output
+    assert "Role failure phase: run" in output
     assert "device_id" not in output
     assert "physical_binding" not in output
     assert "exception" not in output

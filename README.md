@@ -18,7 +18,12 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 > journal은 모두 `none`이었고, 서로 독립적인 두 번의 fresh read-only 확인에서 원래 controls와
 > 두 장비의 전체 432-byte schedule image가 정확히 일치했습니다. 설정은 `dry_run: true`로 다시
 > 잠겼고 Observer와 recovery 서비스가 정상 복귀했으며 `_08`은 재실행하지 않았습니다. 따라서 핵심
-> slave 슬롯별 `AutoFlow` 질문은 계속 미검증이고, 네이티브 Linkage는 운영 기능으로 잠겨 있으며
+> slave 슬롯별 `AutoFlow` 질문은 계속 미검증입니다. 후속 `_09`는 같은 임시 저출력 계획의
+> preflight·schedule stage·TimerON arm·role preflight까지 완료했지만, role run의 첫 fresh capture가
+> 약 0.43초 만에 실패해 역할 journal·Linkage write·A→B 관찰 전에 종료됐습니다. 자동 outer
+> rollback 뒤 세 journal은 `none`이었고, 독립 세션 두 번에서 원 controls와 두 432-byte schedule
+> image의 exact 일치를 확인했습니다. 실패 원인은 당시 generic `fresh_capture`보다 좁혀지지 않았으며
+> slave 슬롯별 `AutoFlow` 질문도 여전히 미검증입니다. 네이티브 Linkage는 운영 기능으로 잠겨 있고
 > 일반 데몬·MQTT·HA에 시험 기능을 노출하지 않습니다.
 
 ## 구조

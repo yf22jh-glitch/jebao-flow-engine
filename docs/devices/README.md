@@ -28,6 +28,12 @@ attended recovery로 원복됐습니다. version 2 evidence를 적용한 한 번
 432-byte schedule image가 exact였습니다. private 설정은 `dry_run: true`로 복귀했고 Observer와
 recovery 서비스도 정상이며 `_08`은 재실행하지 않았습니다. 슬롯별 slave `AutoFlow`와 물리 파형은
 계속 미검증입니다.
+후속 `_09`는 동일 저출력 계획의 TimerON arm과 role preflight까지 완료했지만 role run의 첫
+fresh capture에서 약 0.43초 만에 중단되어 role journal·Linkage write·A→B sample이 없었습니다.
+자동 outer rollback 뒤 세 journal은 `none`이었고, 독립 세션 두 번에서 원 controls와 두 장비의
+전체 432-byte schedule image가 exact였습니다. 설정과 서비스도 안전 상태로 복귀했고 `_09`는
+재실행하지 않았습니다. generic `fresh_capture` 하위 원인은 확정하지 않았으며, 슬롯별 slave
+`AutoFlow`와 물리 파형은 계속 미검증입니다.
 
 | 제품군 | 수량 | 분류 | 상태 읽기 | 제한 레지스터 write |
 |---|---:|---|---|---|

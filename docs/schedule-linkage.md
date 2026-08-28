@@ -54,6 +54,22 @@ passes matched the original controls and both complete 432-byte schedule images 
 configuration returned to `dry_run: true`, Observer and recovery resumed normally, and `_08` was not
 rerun. The per-slot slave `AutoFlow` question therefore remains unverified.
 
+The following `_09` one-shot completed the same low-power plan's read-only preflight, schedule
+stage, TimerON arm, and role preflight. The first role-run fresh capture then failed in about
+0.43 seconds, before a role journal, any Linkage write, or an A-to-B sample existed. Automatic
+outer rollback completed; all three journals were absent, and two independent new sessions matched
+the original controls and both complete 432-byte schedule images exactly. The private configuration,
+Observer, and recovery service returned to their locked normal state. The retained reason was the
+generic `fresh_capture`, so this run does not prove whether transport or semantic validation caused
+the refusal. It was not rerun, and the per-slot slave `AutoFlow` question remains unverified.
+
+The subsequent implementation classifies run capture failures and permits exactly one retry after
+two seconds only for paired-session refresh or explicit-reply transport failures. Capability,
+clock, control, schedule, Auto, time-window, power, pair, and staged-plan failures remain immediate
+refusals. Stop, safety epoch, and observation deadline are checked before the retry and immediately
+after its fresh capture, before authorization, confirmation, or role-journal creation. The change
+passed the full 1059-test suite but has no new hardware qualification evidence yet.
+
 ## Attended flow
 
 Use a private control configuration with Observer disabled, writes enabled for exactly the two

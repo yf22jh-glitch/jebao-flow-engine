@@ -135,6 +135,7 @@ class ScheduleLinkageRunProgressKind(StrEnum):
     """Allow-listed, identity-free milestones for one role activation run."""
 
     FRESH_CAPTURE_STARTED = "fresh_capture_started"
+    FRESH_CAPTURE_RETRY_STARTED = "fresh_capture_retry_started"
     FRESH_CAPTURE_COMPLETED = "fresh_capture_completed"
     AUTHORIZATION_STARTED = "authorization_started"
     AUTHORIZATION_COMPLETED = "authorization_completed"
@@ -183,6 +184,12 @@ class ScheduleLinkageRunFailure(StrEnum):
     PREFLIGHT_SETTLE = "preflight_settle"
     PREFLIGHT_UNEXPECTED = "preflight_unexpected"
     FRESH_CAPTURE = "fresh_capture"
+    FRESH_CAPTURE_SESSION_REFRESH = "fresh_capture_session_refresh"
+    FRESH_CAPTURE_EXPLICIT_STATE_READ = "fresh_capture_explicit_state_read"
+    FRESH_CAPTURE_VALIDATION = "fresh_capture_validation"
+    FRESH_CAPTURE_DEADLINE = "fresh_capture_deadline"
+    FRESH_CAPTURE_SAFETY_INTERLOCK = "fresh_capture_safety_interlock"
+    FRESH_CAPTURE_UNEXPECTED = "fresh_capture_unexpected"
     AUTHORIZATION = "authorization"
     CONFIRMATION = "confirmation"
     CONFIRMATION_MISMATCH = "confirmation_mismatch"
@@ -1175,8 +1182,7 @@ class ScheduleActiveLinkageController:
             # unchanged while both attended preflight and run use the same reply-only contract.
             if not self._owned_staged_auto_transition_observation:
                 await self._refresh_pair_sessions_if_enabled(spec)
-            fresh = await self._capture_pair(spec)
-            self._assert_observation_deadline()
+            fresh = await self._capture_fresh_pair_for_run(spec)
             self._emit_progress_best_effort(
                 ScheduleLinkageRunProgressKind.FRESH_CAPTURE_COMPLETED
             )
@@ -1324,11 +1330,21 @@ class ScheduleActiveLinkageController:
     async def _capture_pair(
         self,
         spec: ScheduleLinkageSpec,
+        *,
+        permit_disconnected_before_refresh: bool = False,
     ) -> tuple[ScheduleLinkageSnapshot, ...]:
         master = self._get_device(spec.master_device_id)
         slave = self._get_device(spec.slave_device_id)
-        self._validate_capabilities(master, LinkageRole.MASTER)
-        self._validate_capabilities(slave, LinkageRole.ASYNC_SLAVE)
+        self._validate_capabilities(
+            master,
+            LinkageRole.MASTER,
+            permit_disconnected=permit_disconnected_before_refresh,
+        )
+        self._validate_capabilities(
+            slave,
+            LinkageRole.ASYNC_SLAVE,
+            permit_disconnected=permit_disconnected_before_refresh,
+        )
         if master.capabilities.product_key != slave.capabilities.product_key:
             raise ScheduleLinkagePreflightError(
                 "schedule-linkage requires the same qualified product family",
@@ -1351,6 +1367,11 @@ class ScheduleActiveLinkageController:
                     "schedule-linkage preflight session refresh failure",
                     failure=ScheduleLinkageRunFailure.PREFLIGHT_SESSION_REFRESH,
                 ) from error
+            # A failed prior refresh may leave one participant disconnected. Static capability
+            # checks are safe before the retry, but only this completed paired boundary may
+            # contribute connectivity evidence to a fresh capture.
+            self._validate_capabilities(master, LinkageRole.MASTER)
+            self._validate_capabilities(slave, LinkageRole.ASYNC_SLAVE)
             try:
                 states = await self._read_pair_explicit_states(spec)
             except BaseException as error:
@@ -1395,6 +1416,200 @@ class ScheduleActiveLinkageController:
             ) from error
         snapshots = self._snapshots_from_states(spec, states)
         return snapshots
+
+    async def _capture_fresh_pair_for_run(
+        self,
+        spec: ScheduleLinkageSpec,
+    ) -> tuple[ScheduleLinkageSnapshot, ...]:
+        """Capture run authorization, retrying one transport-only staged failure.
+
+        No role journal or role write exists at this point. The owned composed experiment may
+        therefore replace both sessions once after a refresh or explicit-reply failure. Any
+        capability, control, clock, schedule, Auto, time-window, or power failure remains an
+        immediate refusal, and the successful capture still has to match the token-bound
+        preflight exactly before the first role write.
+        """
+
+        try:
+            fresh = await self._capture_pair(
+                spec,
+                permit_disconnected_before_refresh=(
+                    self._owned_staged_auto_transition_observation
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except ScheduleLinkagePreflightError as error:
+            self._run_failure = self._fresh_capture_failure(error.failure)
+            if (
+                not self._owned_staged_auto_transition_observation
+                or error.failure
+                not in {
+                    ScheduleLinkageRunFailure.PREFLIGHT_SESSION_REFRESH,
+                    ScheduleLinkageRunFailure.PREFLIGHT_EXPLICIT_STATE_READ,
+                }
+            ):
+                raise
+        except BaseException:
+            self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_UNEXPECTED
+            raise
+        else:
+            return self._complete_fresh_capture(fresh)
+
+        self._emit_progress_best_effort(
+            ScheduleLinkageRunProgressKind.FRESH_CAPTURE_RETRY_STARTED
+        )
+        await self._wait_for_fresh_capture_retry()
+        try:
+            fresh = await self._capture_pair(
+                spec,
+                permit_disconnected_before_refresh=(
+                    self._owned_staged_auto_transition_observation
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except ScheduleLinkagePreflightError as error:
+            self._run_failure = self._fresh_capture_failure(error.failure)
+            raise
+        except BaseException:
+            self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_UNEXPECTED
+            raise
+        else:
+            return self._complete_fresh_capture(fresh)
+
+    def _complete_fresh_capture(
+        self,
+        fresh: tuple[ScheduleLinkageSnapshot, ...],
+    ) -> tuple[ScheduleLinkageSnapshot, ...]:
+        # A paired session refresh is intentionally uninterruptible so cancellation cannot leave
+        # one participant contributing evidence from an older transport.  Stop or safety may
+        # therefore change while that boundary or its explicit reads complete.  Recheck both
+        # authorities here, before authorization, confirmation, and durable journal creation.
+        if self._stop_requested():
+            self._run_failure = ScheduleLinkageRunFailure.CANCELLED
+            raise ScheduleLinkageApplyError(
+                "schedule-linkage stop was requested during fresh capture"
+            )
+        if (
+            self._safety_epoch is None
+            or not self._safety_interlock.permitted
+            or self._safety_interlock.epoch != self._safety_epoch
+        ):
+            self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_SAFETY_INTERLOCK
+            raise ScheduleLinkageApplyError(
+                "schedule-linkage safety authority was revoked during fresh capture"
+            )
+        try:
+            self._assert_observation_deadline()
+        except ScheduleLinkageApplyError:
+            self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_DEADLINE
+            raise
+        return fresh
+
+    @staticmethod
+    def _fresh_capture_failure(
+        failure: ScheduleLinkageRunFailure,
+    ) -> ScheduleLinkageRunFailure:
+        if failure is ScheduleLinkageRunFailure.PREFLIGHT_SESSION_REFRESH:
+            return ScheduleLinkageRunFailure.FRESH_CAPTURE_SESSION_REFRESH
+        if failure is ScheduleLinkageRunFailure.PREFLIGHT_EXPLICIT_STATE_READ:
+            return ScheduleLinkageRunFailure.FRESH_CAPTURE_EXPLICIT_STATE_READ
+        if failure is ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW:
+            return ScheduleLinkageRunFailure.FRESH_CAPTURE_DEADLINE
+        if failure is ScheduleLinkageRunFailure.PREFLIGHT_UNEXPECTED:
+            return ScheduleLinkageRunFailure.FRESH_CAPTURE_UNEXPECTED
+        return ScheduleLinkageRunFailure.FRESH_CAPTURE_VALIDATION
+
+    async def _wait_for_fresh_capture_retry(self) -> None:
+        """Wait once without allowing stop, safety, or deadline authority to drift."""
+
+        retry_delay = 2.0
+        now = self._monotonic()
+        if (
+            self._require_observation_deadline() - now
+            < retry_delay + _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS
+        ):
+            self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_DEADLINE
+            raise ScheduleLinkagePreflightError(
+                "fresh capture retry lacks a complete read-only session budget",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW,
+            )
+        if (
+            self._safety_epoch is None
+            or not self._safety_interlock.permitted
+            or self._safety_interlock.epoch != self._safety_epoch
+        ):
+            self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_SAFETY_INTERLOCK
+            raise ScheduleLinkagePreflightError(
+                "fresh capture retry lost safety authority",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SAFETY_INTERLOCK,
+            )
+        if self._stop_requested():
+            self._run_failure = ScheduleLinkageRunFailure.CANCELLED
+            raise ScheduleLinkageApplyError(
+                "schedule-linkage stop was requested before fresh capture retry"
+            )
+
+        stop_event = self._stop_event
+        if stop_event is None:
+            self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_UNEXPECTED
+            raise ScheduleLinkageApplyError("schedule-linkage stop authority is unavailable")
+        settle_task = asyncio.ensure_future(self._sleep(retry_delay))
+        stop_task = asyncio.create_task(stop_event.wait())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = (settle_task, stop_task, safety_task)
+        try:
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                self._run_failure = ScheduleLinkageRunFailure.CANCELLED
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage stop was requested during fresh capture retry"
+                )
+            if safety_task in done:
+                self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_SAFETY_INTERLOCK
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage safety authority was revoked during fresh capture retry"
+                )
+            try:
+                settle_task.result()
+            except BaseException:
+                self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_UNEXPECTED
+                raise
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        now = self._monotonic()
+        if self._stop_requested():
+            self._run_failure = ScheduleLinkageRunFailure.CANCELLED
+            raise ScheduleLinkageApplyError(
+                "schedule-linkage stop was requested after fresh capture retry settle"
+            )
+        if (
+            self._require_observation_deadline() - now
+            < _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS
+        ):
+            self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_DEADLINE
+            raise ScheduleLinkagePreflightError(
+                "fresh capture retry no longer has a complete read-only session budget",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_TIME_WINDOW,
+            )
+        if (
+            self._safety_epoch is None
+            or not self._safety_interlock.permitted
+            or self._safety_interlock.epoch != self._safety_epoch
+        ):
+            self._run_failure = ScheduleLinkageRunFailure.FRESH_CAPTURE_SAFETY_INTERLOCK
+            raise ScheduleLinkagePreflightError(
+                "fresh capture retry lost safety authority",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_SAFETY_INTERLOCK,
+            )
 
     def _snapshots_from_states(
         self,
@@ -3176,8 +3391,14 @@ class ScheduleActiveLinkageController:
             )
         return clock
 
-    def _validate_capabilities(self, device: JebaoDevice, role: LinkageRole) -> None:
-        if not device.connected:
+    def _validate_capabilities(
+        self,
+        device: JebaoDevice,
+        role: LinkageRole,
+        *,
+        permit_disconnected: bool = False,
+    ) -> None:
+        if not permit_disconnected and not device.connected:
             raise ScheduleLinkagePreflightError(
                 f"device {device.device_id!r} is disconnected",
                 failure=ScheduleLinkageRunFailure.PREFLIGHT_CAPABILITY,

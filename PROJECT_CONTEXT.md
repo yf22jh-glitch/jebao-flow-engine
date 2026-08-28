@@ -98,6 +98,15 @@ outer-control·temporary-schedule·role journal은 모두 `none`이었습니다.
 read-only 확인 두 번에서 원래 controls와 두 장비의 완전한 432-byte schedule image가 exact임을
 확인했습니다. private 설정은 `dry_run: true`이고 Observer와 recovery 서비스도 정상 복귀했습니다.
 이 실행은 재시도하지 않았으며, slave의 슬롯별 `AutoFlow` 적용 여부는 계속 미검증입니다.
+후속 `_09`는 같은 임시 저출력 계획의 read-only preflight, schedule stage, TimerON arm과
+role preflight를 완료했지만 role run의 fresh capture에서 약 0.43초 만에 fail-closed로 끝났습니다.
+role journal·Linkage write·A→B sample은 없었고 자동 outer rollback 뒤 journal 세 종류가 모두
+`none`이었습니다. 독립된 새 세션 두 번에서 원 controls와 두 장비의 완전한 432-byte schedule
+image가 exact임을 다시 확인했으며 private 설정과 두 서비스도 안전 상태로 복귀했습니다. 당시
+진단은 generic `fresh_capture`만 남겨 transport와 semantic failure를 구분하지 못했습니다. 후속
+코드는 session refresh 또는 explicit reply 실패에만 2초 뒤 정확히 한 번 재시도하고, semantic
+drift는 즉시 거부하며, 재시도 전후 stop·safety epoch·deadline을 다시 검사합니다. 전체 테스트
+1059개는 통과했지만 이 보완은 아직 새 실기로 검증하지 않았고 `_09`도 재실행하지 않습니다.
 실제 wiring에서는 fail-closed Linkage safety interlock을 비상정지·정비 latch와 공유해야
 하며, journal lease를 획득하지 못한 다른 daemon은 시험이나 startup recovery를 실행하지
 않습니다.

@@ -69,6 +69,18 @@ image가 exact임을 확인했습니다. private 설정은 `dry_run: true`로 �
 서비스가 정상 복귀했습니다. `_08`은 재실행하지 않았으며, slave의 슬롯별 `AutoFlow` 적용 여부는
 계속 미검증입니다.
 
+후속 `_09`는 같은 임시 저출력 계획으로 read-only preflight, schedule stage, TimerON arm과
+role preflight까지 완료했습니다. role run은 첫 fresh capture에서 약 0.43초 만에 실패했으므로
+role journal·Linkage write·A→B sample은 하나도 없었습니다. 자동 outer rollback 뒤 세 journal은
+모두 `none`이었고, 독립된 새 세션 두 번에서 원 controls와 두 장비의 전체 432-byte schedule
+image가 exact임을 확인했습니다. private 설정은 다시 `dry_run: true`이고 Observer와 recovery도
+정상입니다. 당시 기록은 generic `fresh_capture`여서 하위 원인을 단정하지 않습니다. 후속 코드는
+session refresh와 explicit reply failure만 2초 뒤 정확히 한 번 재시도하며, capability·clock·control·
+schedule·Auto·time·power·pair·staged-plan 검증 실패는 재시도하지 않습니다. 재시도 전후에는 stop,
+safety epoch와 observation deadline을 다시 확인하고 role journal 전 fail-closed로 종료합니다.
+전체 테스트 1059개는 통과했지만 새 실기 검증 전까지 이 변경을 qualification 증거로 쓰지 않습니다.
+`_09`도 재실행하지 않습니다.
+
 ## 완료된 사전 검증
 
 - 격리 IoT VLAN의 장비 6대 discovery 및 TCP 12416 연결
@@ -100,6 +112,9 @@ image가 exact임을 확인했습니다. private 설정은 `dry_run: true`로 �
 - `da62b73`의 새 `_08`은 write 없는 preflight와 임시 Constant 31%/32% → Sine 35%/40% stage 뒤
   `role_preflight`에서 native 역할 실행·Linkage write와 A→B 관찰 전에 안전 종료; 자동 outer
   rollback, journal 3종 제거, 독립 fresh read-only exact 확인 2회와 서비스 복귀 성공, 재실행 없음
+- 후속 `_09`는 같은 계획의 TimerON arm과 role preflight 뒤 role run `fresh_capture`에서 종료;
+  role journal·Linkage write·A→B sample 없음, 자동 outer rollback·journal 3종 제거·독립 fresh
+  exact 확인 2회와 서비스 복귀 성공, generic 하위 원인은 미확정, 재실행 없음
 - 네이티브 Linkage의 Pro 4역할과 `TimerON` encode/decode 단위 테스트
 - Sync/Async 개별 출력, timeout·수동 종료·취소·부분 실패·재시작 원복 시뮬레이터 테스트
 

@@ -101,6 +101,7 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         self.connect_paused = asyncio.Event()
         self.resume_connect = asyncio.Event()
         self.fail_after_connect_numbers: set[int] = set()
+        self.fail_before_connect_numbers: set[int] = set()
         self.fail_after_apply_roles: set[LinkageRole] = set()
         self.fail_before_roles: set[LinkageRole] = set()
         self.fail_state_reads_for_roles: set[LinkageRole] = set()
@@ -151,6 +152,11 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         if connect_number in self.pause_before_connect_numbers:
             self.connect_paused.set()
             await self.resume_connect.wait()
+        if connect_number in self.fail_before_connect_numbers:
+            self.session_connect_count += 1
+            if self.events is not None:
+                self.events.append(f"session:{self.device_id}:connect_failed")
+            raise RuntimeError("simulated session refresh failure before connect")
         await super().connect()
         self.session_connect_count += 1
         if self.events is not None:
@@ -2528,6 +2534,414 @@ async def test_staged_preflight_explicit_read_failure_has_typed_private_reason(
     assert master.calls == slave.calls == []
     assert master.commands == slave.commands == []
     assert store.load() is None
+
+
+async def test_staged_run_retries_one_transient_refresh_failure_before_writes(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-run-refresh-retry.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    # Preflight consumed connect #1. Fail run capture connect #2 before the adapter marks the
+    # master connected; the one audited retry must recover through connect #3.
+    master.fail_before_connect_numbers.add(2)
+
+    result = await controller.run(preflight)
+
+    assert result.schedule_transition_verified is True
+    kinds = [event.kind for event in progress]
+    assert kinds.count(ScheduleLinkageRunProgressKind.FRESH_CAPTURE_RETRY_STARTED) == 1
+    assert kinds.index(ScheduleLinkageRunProgressKind.FRESH_CAPTURE_RETRY_STARTED) < kinds.index(
+        ScheduleLinkageRunProgressKind.FRESH_CAPTURE_COMPLETED
+    )
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_run_retries_one_transient_explicit_read_failure(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-run-read-retry.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_explicit_state_read_numbers.add(2)
+
+    result = await controller.run(preflight)
+
+    assert result.schedule_transition_verified is True
+    assert [event.kind for event in progress].count(
+        ScheduleLinkageRunProgressKind.FRESH_CAPTURE_RETRY_STARTED
+    ) == 1
+    assert master.explicit_state_read_count >= 3
+    assert slave.explicit_state_read_count >= 3
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize("failure_kind", ["refresh", "explicit_read"])
+async def test_staged_run_exhausts_one_transport_retry_with_typed_no_write_failure(
+    tmp_path: Path,
+    failure_kind: str,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"staged-run-{failure_kind}-retry-exhausted.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    if failure_kind == "refresh":
+        master.fail_before_connect_numbers.update({2, 3})
+        expected = ScheduleLinkageRunFailure.FRESH_CAPTURE_SESSION_REFRESH
+    else:
+        slave.fail_explicit_state_read_numbers.update({2, 3})
+        expected = ScheduleLinkageRunFailure.FRESH_CAPTURE_EXPLICIT_STATE_READ
+
+    with pytest.raises(ScheduleLinkagePreflightError):
+        await controller.run(preflight)
+
+    assert [event.kind for event in progress].count(
+        ScheduleLinkageRunProgressKind.FRESH_CAPTURE_RETRY_STARTED
+    ) == 1
+    assert progress[-1].kind is ScheduleLinkageRunProgressKind.FAILED
+    assert progress[-1].failure is expected
+    assert progress[-1].drift_dimensions == ()
+    assert store.load() is None
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_staged_run_does_not_retry_semantic_fresh_capture_drift(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-run-semantic-drift.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    master.reported_schedule_drift_roles.add(LinkageRole.INDEPENDENT)
+
+    with pytest.raises(ScheduleLinkagePreflightError):
+        await controller.run(preflight)
+
+    assert ScheduleLinkageRunProgressKind.FRESH_CAPTURE_RETRY_STARTED not in {
+        event.kind for event in progress
+    }
+    assert progress[-1].failure is ScheduleLinkageRunFailure.FRESH_CAPTURE_VALIDATION
+    assert store.load() is None
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_ordinary_run_rejects_disconnect_after_preflight_without_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "ordinary-run-disconnected.json")
+    controller = _controller(master, slave, store, progress_observer=progress.append)
+    preflight = await controller.preflight(_spec())
+    await master.disconnect()
+
+    with pytest.raises(ScheduleLinkagePreflightError, match="disconnected"):
+        await controller.run(preflight)
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.FRESH_CAPTURE_VALIDATION
+    assert store.load() is None
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_staged_run_safety_trip_during_fresh_capture_retry_sends_no_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    settle_started = asyncio.Event()
+    never_resume = asyncio.Event()
+
+    async def blocking_sleep(_seconds: float) -> None:
+        settle_started.set()
+        await never_resume.wait()
+
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-run-retry-safety.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        safety_interlock=interlock,
+        sleep=blocking_sleep,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_explicit_state_read_numbers.add(2)
+    run_task = asyncio.create_task(controller.run(preflight))
+    await asyncio.wait_for(settle_started.wait(), timeout=1)
+
+    interlock.trip()
+    with pytest.raises(ScheduleLinkageApplyError, match="safety authority"):
+        await run_task
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.FRESH_CAPTURE_SAFETY_INTERLOCK
+    assert store.load() is None
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_staged_run_stop_during_fresh_capture_retry_sends_no_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    settle_started = asyncio.Event()
+    never_resume = asyncio.Event()
+
+    async def blocking_sleep(_seconds: float) -> None:
+        settle_started.set()
+        await never_resume.wait()
+
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-run-retry-stop.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        sleep=blocking_sleep,
+    )
+    spec = _staged_spec()
+    preflight = await controller.preflight(spec)
+    slave.fail_explicit_state_read_numbers.add(2)
+    run_task = asyncio.create_task(controller.run(preflight))
+    await asyncio.wait_for(settle_started.wait(), timeout=1)
+
+    assert await controller.stop(spec.operation_id) is True
+    with pytest.raises(ScheduleLinkageApplyError, match="stop was requested"):
+        await run_task
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.CANCELLED
+    assert store.load() is None
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_staged_run_safety_trip_during_retry_capture_sends_no_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-run-retry-capture-safety.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        safety_interlock=interlock,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    # Connect #1 belongs to preflight, #2 fails the first run capture, and #3 is the
+    # one permitted retry. Hold that second capture across a safety-epoch change.
+    master.fail_before_connect_numbers.add(2)
+    master.pause_before_connect_numbers.add(3)
+    run_task = asyncio.create_task(controller.run(preflight))
+    await asyncio.wait_for(master.connect_paused.wait(), timeout=1)
+
+    interlock.trip()
+    master.resume_connect.set()
+    with pytest.raises(ScheduleLinkageApplyError, match="safety authority"):
+        await run_task
+
+    kinds = [event.kind for event in progress]
+    assert kinds.count(ScheduleLinkageRunProgressKind.FRESH_CAPTURE_RETRY_STARTED) == 1
+    assert ScheduleLinkageRunProgressKind.FRESH_CAPTURE_COMPLETED not in kinds
+    assert progress[-1].failure is ScheduleLinkageRunFailure.FRESH_CAPTURE_SAFETY_INTERLOCK
+    assert store.load() is None
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_staged_run_stop_during_retry_explicit_read_sends_no_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-run-retry-capture-stop.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    spec = _staged_spec()
+    preflight = await controller.preflight(spec)
+    # Explicit read #1 belongs to preflight and #2 fails the first run capture. Hold read #3,
+    # from the one permitted retry, across a manual stop request.
+    slave.fail_explicit_state_read_numbers.add(2)
+    slave.pause_explicit_state_read_numbers.add(3)
+    run_task = asyncio.create_task(controller.run(preflight))
+    await asyncio.wait_for(slave.explicit_state_read_paused.wait(), timeout=1)
+
+    assert await controller.stop(spec.operation_id) is True
+    slave.resume_explicit_state_read.set()
+    with pytest.raises(ScheduleLinkageApplyError, match="stop was requested"):
+        await run_task
+
+    kinds = [event.kind for event in progress]
+    assert kinds.count(ScheduleLinkageRunProgressKind.FRESH_CAPTURE_RETRY_STARTED) == 1
+    assert ScheduleLinkageRunProgressKind.FRESH_CAPTURE_COMPLETED not in kinds
+    assert progress[-1].failure is ScheduleLinkageRunFailure.CANCELLED
+    assert store.load() is None
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_staged_run_cancel_during_fresh_capture_retry_sends_no_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    settle_started = asyncio.Event()
+    never_resume = asyncio.Event()
+
+    async def blocking_sleep(_seconds: float) -> None:
+        settle_started.set()
+        await never_resume.wait()
+
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-run-retry-cancel.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        sleep=blocking_sleep,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_explicit_state_read_numbers.add(2)
+    run_task = asyncio.create_task(controller.run(preflight))
+    await asyncio.wait_for(settle_started.wait(), timeout=1)
+
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.CANCELLED
+    assert store.load() is None
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_staged_run_fresh_capture_retry_rechecks_observation_deadline(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+
+    async def expire_during_settle(_seconds: float) -> None:
+        await asyncio.sleep(0)
+        master.virtual_time.value += 60
+
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-run-retry-deadline.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        sleep=expire_during_settle,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_explicit_state_read_numbers.add(2)
+
+    with pytest.raises(ScheduleLinkagePreflightError, match="session budget"):
+        await controller.run(preflight)
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.FRESH_CAPTURE_DEADLINE
+    assert store.load() is None
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
+
+
+async def test_staged_run_retry_snapshot_drift_still_fails_confirmation_without_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+
+    async def drift_during_settle(seconds: float) -> None:
+        await master.virtual_time.sleep(seconds)
+        await master.set_frequency(6)
+        master.calls.clear()
+        master.commands.clear()
+
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-run-retry-drift.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        sleep=drift_during_settle,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    slave.fail_explicit_state_read_numbers.add(2)
+
+    with pytest.raises(ScheduleLinkagePreflightError, match="no role write was sent"):
+        await controller.run(preflight)
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH
+    assert progress[-1].drift_dimensions == (ScheduleLinkageDriftDimension.FREQUENCY,)
+    assert store.load() is None
+    assert master.calls == slave.calls == []
+    assert master.commands == slave.commands == []
 
 
 async def test_staged_preflight_cancellation_completes_paired_refresh_without_read_or_write(
