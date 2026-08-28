@@ -1,6 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
-from itertools import permutations
+from itertools import permutations, product
 from pathlib import Path
 
 import pytest
@@ -118,6 +118,10 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         self.role_frequency_overrides: dict[LinkageRole, int] = {}
         self.reported_auto_updates_by_role: dict[LinkageRole, dict[str, object]] = {}
         self.reported_auto_update_sequences_by_role: dict[
+            LinkageRole,
+            list[dict[str, object] | None],
+        ] = {}
+        self.reported_full_update_sequences_by_role: dict[
             LinkageRole,
             list[dict[str, object] | None],
         ] = {}
@@ -316,6 +320,31 @@ class _ScheduleDevice(SimulatedJebaoDevice):
                     }
                 }
             )
+        full_update_sequence = self.reported_full_update_sequences_by_role.get(
+            state.linkage
+        )
+        full_updates = None
+        if full_update_sequence:
+            full_updates = full_update_sequence.pop(0)
+            if not full_update_sequence:
+                del self.reported_full_update_sequences_by_role[state.linkage]
+        if full_updates is not None:
+            auto_updates = {
+                key: value
+                for key, value in full_updates.items()
+                if key.startswith("Auto")
+            }
+            state_updates = {
+                key: value
+                for key, value in full_updates.items()
+                if not key.startswith("Auto")
+            }
+            if auto_updates:
+                state_updates["observed_attributes"] = {
+                    **result.observed_attributes,
+                    **auto_updates,
+                }
+            result = result.model_copy(update=state_updates)
         unsolicited_clock_offsets = self.unsolicited_clock_offsets_by_role.get(
             state.linkage
         )
@@ -660,6 +689,77 @@ def _control_schedule_snapshot(
             tuple(entry.model_dump(mode="json") for entry in device.entries),
         )
         for device in devices
+    )
+
+
+_STAGED_FIVE_FIELDS = ("mode", "frequency", "AutoMode", "AutoFlow", "AutoFreq")
+_STAGED_FIVE_FIELD_ORDERS = {
+    "together": (),
+    "general-first": ("mode", "frequency", "AutoMode", "AutoFlow", "AutoFreq"),
+    "auto-first": ("AutoMode", "AutoFlow", "AutoFreq", "mode", "frequency"),
+    "alternating": ("mode", "AutoMode", "frequency", "AutoFlow", "AutoFreq"),
+    "reverse": ("AutoFreq", "AutoFlow", "AutoMode", "frequency", "mode"),
+}
+
+
+def _staged_five_field_values(
+    participant: str,
+    *,
+    after: bool,
+    slave_flow: int | None = None,
+) -> dict[str, object]:
+    flow_before = 30 if participant == "master" else 35
+    frequency_after = 40 if participant == "master" else 80
+    if not after:
+        return {
+            "mode": "constant",
+            "frequency": 5,
+            "AutoMode": "constant",
+            "AutoFlow": flow_before,
+            "AutoFreq": 5,
+        }
+    return {
+        "mode": "sine",
+        "frequency": frequency_after,
+        "AutoMode": "sine",
+        "AutoFlow": 45 if slave_flow is None else slave_flow,
+        "AutoFreq": frequency_after,
+    }
+
+
+def _staged_five_field_transition(
+    participant: str,
+    order_name: str,
+) -> list[dict[str, object]]:
+    before = _staged_five_field_values(participant, after=False)
+    after = _staged_five_field_values(participant, after=True)
+    order = _STAGED_FIVE_FIELD_ORDERS[order_name]
+    if not order:
+        return [after]
+    current = dict(before)
+    updates: list[dict[str, object]] = []
+    for field in order:
+        current[field] = after[field]
+        updates.append(dict(current))
+    return updates
+
+
+def _state_with_staged_full_update(state, update: dict[str, object]):
+    auto_updates = {
+        key: value for key, value in update.items() if key.startswith("Auto")
+    }
+    return state.model_copy(
+        update={
+            **{
+                key: value
+                for key, value in update.items()
+                if not key.startswith("Auto")
+            },
+            "observed_attributes": {
+                **state.observed_attributes,
+                **auto_updates,
+            },
+        }
     )
 
 
@@ -3989,7 +4089,7 @@ async def test_staged_frequency_pin_change_during_monitor_fails_and_restores(
     ("field", "update", "expected_dimension"),
     [
         ("power", {"power": 41}, ScheduleLinkageDriftDimension.POWER),
-        ("mode", {"mode": "sine"}, ScheduleLinkageDriftDimension.MODE),
+        ("mode", {"mode": "pulse"}, ScheduleLinkageDriftDimension.MODE),
         (
             "timer",
             {"timer_enabled": False},
@@ -4749,6 +4849,217 @@ async def test_staged_monitor_retry_rechecks_exact_durable_active_record(
 
 
 @pytest.mark.parametrize("participant", ["master", "slave"])
+async def test_staged_five_field_classifier_covers_all_binary_states(
+    tmp_path: Path,
+    participant: str,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    controller = _controller(
+        master,
+        slave,
+        JsonScheduleLinkageJournalStore(tmp_path / f"five-field-{participant}.json"),
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(_staged_spec())
+    now = datetime.now(UTC)
+    record = ScheduleLinkageRecord(
+        operation_id=preflight.spec.operation_id,
+        phase=ScheduleLinkagePhase.ACTIVE,
+        spec=preflight.spec,
+        snapshots=preflight.snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=preflight.spec.observation_window_seconds),
+        linkage_write_intent_device_ids=("master", "slave"),
+        linked_device_ids=("master", "slave"),
+    )
+    expected_roles = {
+        "master": LinkageRole.MASTER,
+        "slave": LinkageRole.ASYNC_SLAVE,
+    }
+    devices = {"master": master, "slave": slave}
+    states = {
+        device_id: _state_with_staged_full_update(
+            (await device.get_state()).model_copy(update={"linkage": expected_roles[device_id]}),
+            _staged_five_field_values(device_id, after=False),
+        )
+        for device_id, device in devices.items()
+    }
+    before = _staged_five_field_values(participant, after=False)
+    after = _staged_five_field_values(participant, after=True)
+
+    observed_sides: dict[tuple[bool, ...], str] = {}
+    for bits in product((False, True), repeat=len(_STAGED_FIVE_FIELDS)):
+        update = {
+            field: (after if use_after else before)[field]
+            for field, use_after in zip(_STAGED_FIVE_FIELDS, bits, strict=True)
+        }
+        candidate_states = {
+            **states,
+            participant: _state_with_staged_full_update(states[participant], update),
+        }
+        classifications = controller._classify_staged_auto_sides(  # noqa: SLF001
+            record,
+            candidate_states,
+            expected_roles,
+        )
+        observed_sides[bits] = classifications[participant].side
+
+    expected_sides = {}
+    for bits in product((False, True), repeat=len(_STAGED_FIVE_FIELDS)):
+        general_is_terminal = bits[:2] in {(False, False), (True, True)}
+        auto_is_terminal = (
+            bits[2] and bits[4]
+            if participant == "slave"
+            else all(bits[2:])
+        )
+        if not any(bits):
+            side = "before"
+        elif auto_is_terminal and general_is_terminal:
+            side = "after"
+        else:
+            side = "transitional"
+        expected_sides[bits] = side
+    assert observed_sides == expected_sides
+
+
+@pytest.mark.parametrize("participant", ["master", "slave"])
+@pytest.mark.parametrize(
+    "order_name",
+    tuple(_STAGED_FIVE_FIELD_ORDERS),
+)
+async def test_staged_monitor_accepts_representative_five_field_report_orders(
+    tmp_path: Path,
+    participant: str,
+    order_name: str,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    baseline = _control_schedule_snapshot(master, slave)
+    master_before = _staged_five_field_values("master", after=False)
+    slave_before = _staged_five_field_values("slave", after=False)
+    master_after = _staged_five_field_values("master", after=True)
+    slave_after = _staged_five_field_values("slave", after=True)
+    transitions = _staged_five_field_transition(participant, order_name)
+    terminal = transitions[-1]
+    master.reported_full_update_sequences_by_role[LinkageRole.MASTER] = [
+        *([master_before] * 47),
+        *(
+            [*transitions, *([terminal] * 5)]
+            if participant == "master"
+            else [master_after] * 8
+        ),
+    ]
+    slave.reported_full_update_sequences_by_role[LinkageRole.ASYNC_SLAVE] = [
+        *([slave_before] * 46),
+        *(
+            [*transitions, *([terminal] * 5)]
+            if participant == "slave"
+            else [slave_after] * 8
+        ),
+    ]
+    samples = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"five-field-{participant}-{order_name}.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        sample_observer=samples.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    result = await controller.run(
+        await controller.preflight(_staged_spec(observation_window_seconds=130))
+    )
+
+    assert result.schedule_transition_verified is True
+    assert len([sample for sample in samples if sample.phase == "after"]) >= 3
+    assert store.load() is None
+    assert _control_schedule_snapshot(master, slave) == baseline
+    _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize("participant", ["master", "slave"])
+async def test_staged_general_a_terminal_can_advance_through_mixed_to_b(
+    tmp_path: Path,
+    participant: str,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    before = _staged_five_field_values(participant, after=False)
+    after = _staged_five_field_values(participant, after=True)
+    auto_b_general_a = {
+        **before,
+        "AutoMode": after["AutoMode"],
+        "AutoFlow": after["AutoFlow"],
+        "AutoFreq": after["AutoFreq"],
+    }
+    general_mixed = {**auto_b_general_a, "mode": after["mode"]}
+    other = "slave" if participant == "master" else "master"
+    other_before = _staged_five_field_values(other, after=False)
+    other_after = _staged_five_field_values(other, after=True)
+    participant_device = master if participant == "master" else slave
+    participant_role = (
+        LinkageRole.MASTER
+        if participant == "master"
+        else LinkageRole.ASYNC_SLAVE
+    )
+    other_device = slave if participant == "master" else master
+    other_role = (
+        LinkageRole.ASYNC_SLAVE
+        if participant == "master"
+        else LinkageRole.MASTER
+    )
+    participant_hold = 47 if participant == "master" else 46
+    other_hold = 46 if participant == "master" else 47
+    participant_device.reported_full_update_sequences_by_role[participant_role] = [
+        *([before] * participant_hold),
+        auto_b_general_a,
+        general_mixed,
+        *([after] * 5),
+    ]
+    other_device.reported_full_update_sequences_by_role[other_role] = [
+        *([other_before] * other_hold),
+        *([other_after] * 7),
+    ]
+    samples: list[tuple[float, object]] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"general-a-mixed-b-{participant}.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        sample_observer=lambda sample: samples.append(
+            (master.virtual_time.value, sample)
+        ),
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    result = await controller.run(
+        await controller.preflight(
+            _staged_spec(
+                observation_window_seconds=130,
+                post_boundary_stability_seconds=3,
+            )
+        )
+    )
+
+    assert result.schedule_transition_verified is True
+    after_times = [
+        observed_at for observed_at, sample in samples if sample.phase == "after"
+    ]
+    assert len(after_times) == 5
+    assert after_times[1] - after_times[0] == 2
+    assert after_times[-1] - after_times[1] == 3
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize("participant", ["master", "slave"])
 @pytest.mark.parametrize(
     "field_order",
     tuple(permutations(("AutoMode", "AutoFlow", "AutoFreq"))),
@@ -5056,9 +5367,90 @@ async def test_staged_slave_frequency_regression_survives_transport_retry(
 
 
 @pytest.mark.parametrize(
+    ("participant", "field", "transport_retry"),
+    [
+        ("master", "mode", False),
+        ("master", "frequency", True),
+        ("slave", "mode", False),
+        ("slave", "frequency", True),
+    ],
+)
+async def test_staged_general_b_field_regression_fails_across_session_boundary(
+    tmp_path: Path,
+    participant: str,
+    field: str,
+    transport_retry: bool,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    baseline = _control_schedule_snapshot(master, slave)
+    before = _staged_five_field_values(participant, after=False)
+    after = _staged_five_field_values(participant, after=True)
+    partial = {**before, field: after[field]}
+    other = "slave" if participant == "master" else "master"
+    other_before = _staged_five_field_values(other, after=False)
+    other_after = _staged_five_field_values(other, after=True)
+    target = master if participant == "master" else slave
+    target_role = (
+        LinkageRole.MASTER
+        if participant == "master"
+        else LinkageRole.ASYNC_SLAVE
+    )
+    peer = slave if participant == "master" else master
+    peer_role = (
+        LinkageRole.ASYNC_SLAVE
+        if participant == "master"
+        else LinkageRole.MASTER
+    )
+    target_hold = 47 if participant == "master" else 46
+    peer_hold = 46 if participant == "master" else 47
+    target.reported_full_update_sequences_by_role[target_role] = [
+        *([before] * target_hold),
+        partial,
+        before,
+    ]
+    peer.reported_full_update_sequences_by_role[peer_role] = [
+        *([other_before] * peer_hold),
+        *([other_after] * 4),
+    ]
+    if transport_retry:
+        target.fail_ordinary_state_read_numbers.add(47)
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path
+        / f"staged-general-regression-{participant}-{field}-{transport_retry}.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached") as caught:
+        await controller.run(
+            await controller.preflight(_staged_spec(observation_window_seconds=130))
+        )
+
+    cause = caught.value.__cause__
+    assert isinstance(cause, ScheduleLinkageApplyError)
+    assert "field evidence regressed" in str(cause)
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
+    retry_kinds = {
+        event.kind is ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED
+        for event in progress
+    }
+    assert (True in retry_kinds) is transport_retry
+    assert store.load() is None
+    assert _control_schedule_snapshot(master, slave) == baseline
+    _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize(
     ("partial_count", "expected_success"),
-    [(3, True), (4, False)],
-    ids=["third-partial-allowed", "fourth-partial-rejected"],
+    [(4, True), (5, False)],
+    ids=["third-stalled-partial-allowed", "fourth-stalled-partial-rejected"],
 )
 async def test_staged_monitor_enforces_exact_partial_auto_report_count_boundary(
     tmp_path: Path,
@@ -5121,8 +5513,8 @@ async def test_staged_monitor_enforces_exact_partial_auto_report_count_boundary(
         assert progress[-1].drift_dimensions == (
             ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
         )
-        # The fourth successful partial acquisition is rejected before any terminal B evidence
-        # can be admitted as a monitor sample.
+        # The first partial advances one B field.  The fourth subsequent no-progress report is
+        # rejected before any terminal B evidence can be admitted as a monitor sample.
         assert all(
             (sample.master.mode, sample.master.flow, sample.master.frequency)
             != ("sine", 45, 40)
@@ -5200,6 +5592,90 @@ async def test_staged_monitor_enforces_partial_auto_wall_clock_boundary(
         assert progress[-1].drift_dimensions == (
             ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
         )
+    assert store.load() is None
+    assert _control_schedule_snapshot(master, slave) == baseline
+    _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize(
+    ("participant", "field", "limit_kind"),
+    [
+        ("master", "mode", "count"),
+        ("slave", "frequency", "wall-clock"),
+    ],
+)
+async def test_staged_general_partial_no_progress_has_bounded_budget(
+    tmp_path: Path,
+    participant: str,
+    field: str,
+    limit_kind: str,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    baseline = _control_schedule_snapshot(master, slave)
+    before = _staged_five_field_values(participant, after=False)
+    after = _staged_five_field_values(participant, after=True)
+    partial = {**before, field: after[field]}
+    other = "slave" if participant == "master" else "master"
+    other_before = _staged_five_field_values(other, after=False)
+    other_after = _staged_five_field_values(other, after=True)
+    target = master if participant == "master" else slave
+    target_role = (
+        LinkageRole.MASTER
+        if participant == "master"
+        else LinkageRole.ASYNC_SLAVE
+    )
+    peer = slave if participant == "master" else master
+    peer_role = (
+        LinkageRole.ASYNC_SLAVE
+        if participant == "master"
+        else LinkageRole.MASTER
+    )
+    target_hold = 47 if participant == "master" else 46
+    peer_hold = 46 if participant == "master" else 47
+    # The first partial makes forward progress and starts the episode.  Three identical stalled
+    # reports are tolerated; the fourth no-progress report is the bounded failure.
+    partial_repeats = 5 if limit_kind == "count" else 2
+    target.reported_full_update_sequences_by_role[target_role] = [
+        *([before] * target_hold),
+        *([partial] * partial_repeats),
+    ]
+    peer.reported_full_update_sequences_by_role[peer_role] = [
+        *([other_before] * peer_hold),
+        *([other_after] * partial_repeats),
+    ]
+    if limit_kind == "wall-clock":
+        # One ordinary verification sleep plus this advance makes the second identical report
+        # arrive 15.001 seconds after the first no-progress partial.
+        target.ordinary_state_read_time_advances[47] = 14.001
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"staged-general-no-progress-{participant}-{limit_kind}.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached") as caught:
+        await controller.run(
+            await controller.preflight(_staged_spec(observation_window_seconds=130))
+        )
+
+    cause = caught.value.__cause__
+    assert isinstance(cause, ScheduleLinkageApplyError)
+    expected_message = (
+        "partial transition exceeded its report limit"
+        if limit_kind == "count"
+        else "partial transition did not settle in time"
+    )
+    assert expected_message in str(cause)
+    assert progress[-1].failure is (
+        ScheduleLinkageRunFailure.MONITOR_AUTO_TRANSITION_TIMEOUT
+    )
     assert store.load() is None
     assert _control_schedule_snapshot(master, slave) == baseline
     _assert_only_linkage_calls(master, slave)
@@ -5349,6 +5825,174 @@ async def test_staged_auto_transition_rejects_role_adjacent_partial_evidence(
     _assert_only_linkage_calls(master, slave)
 
 
+@pytest.mark.parametrize("participant", ["master", "slave"])
+@pytest.mark.parametrize("field", ["mode", "frequency"])
+async def test_staged_general_transition_rejects_role_adjacent_evidence(
+    tmp_path: Path,
+    participant: str,
+    field: str,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    baseline = _control_schedule_snapshot(master, slave)
+    target = master if participant == "master" else slave
+    role = LinkageRole.MASTER if participant == "master" else LinkageRole.ASYNC_SLAVE
+    before = _staged_five_field_values(participant, after=False)
+    after = _staged_five_field_values(participant, after=True)
+    partial = {**before, field: after[field]}
+    role_setup_reads = 2 if participant == "master" else 1
+    target.reported_full_update_sequences_by_role[role] = [
+        *([None] * role_setup_reads),
+        partial,
+    ]
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"staged-early-general-{participant}-{field}.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_staged_spec()))
+
+    assert progress[-1].failure is (
+        ScheduleLinkageRunFailure.MONITOR_EARLY_AUTO_TRANSITION
+    )
+    assert progress[-1].drift_dimensions == (
+        ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+    )
+    assert store.load() is None
+    assert _control_schedule_snapshot(master, slave) == baseline
+    _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize("participant", ["master", "slave"])
+@pytest.mark.parametrize(
+    ("field", "value_kind"),
+    [("mode", "third"), ("frequency", "third"), ("frequency", "cross")],
+)
+async def test_staged_general_transition_rejects_nonparticipant_values(
+    tmp_path: Path,
+    participant: str,
+    field: str,
+    value_kind: str,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    baseline = _control_schedule_snapshot(master, slave)
+    target = master if participant == "master" else slave
+    role = LinkageRole.MASTER if participant == "master" else LinkageRole.ASYNC_SLAVE
+    before = _staged_five_field_values(participant, after=False)
+    invalid_value: object
+    if field == "mode":
+        invalid_value = "pulse"
+    elif value_kind == "cross":
+        invalid_value = 80 if participant == "master" else 40
+    else:
+        invalid_value = 41
+    invalid = {**before, field: invalid_value}
+    role_setup_reads = 2 if participant == "master" else 1
+    target.reported_full_update_sequences_by_role[role] = [
+        *([None] * role_setup_reads),
+        invalid,
+    ]
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"staged-invalid-general-{participant}-{field}-{value_kind}.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(await controller.preflight(_staged_spec()))
+
+    expected_dimension = (
+        ScheduleLinkageDriftDimension.MODE
+        if field == "mode"
+        else ScheduleLinkageDriftDimension.FREQUENCY
+    )
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MONITOR_STATE_EVIDENCE
+    assert progress[-1].drift_dimensions == (expected_dimension,)
+    assert ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED not in {
+        event.kind for event in progress
+    }
+    assert store.load() is None
+    assert _control_schedule_snapshot(master, slave) == baseline
+    _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize("participant", ["master", "slave"])
+async def test_staged_auto_flow_report_cannot_replace_manual_power(
+    tmp_path: Path,
+    participant: str,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    baseline = _control_schedule_snapshot(master, slave)
+    before = _staged_five_field_values(participant, after=False)
+    after = _staged_five_field_values(participant, after=True)
+    invalid = {**after, "power": after["AutoFlow"]}
+    other = "slave" if participant == "master" else "master"
+    other_before = _staged_five_field_values(other, after=False)
+    other_after = _staged_five_field_values(other, after=True)
+    target = master if participant == "master" else slave
+    target_role = (
+        LinkageRole.MASTER
+        if participant == "master"
+        else LinkageRole.ASYNC_SLAVE
+    )
+    peer = slave if participant == "master" else master
+    peer_role = (
+        LinkageRole.ASYNC_SLAVE
+        if participant == "master"
+        else LinkageRole.MASTER
+    )
+    target_hold = 47 if participant == "master" else 46
+    peer_hold = 46 if participant == "master" else 47
+    target.reported_full_update_sequences_by_role[target_role] = [
+        *([before] * target_hold),
+        invalid,
+    ]
+    peer.reported_full_update_sequences_by_role[peer_role] = [
+        *([other_before] * peer_hold),
+        *([other_after] * 3),
+    ]
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"staged-power-is-not-auto-flow-{participant}.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+        await controller.run(
+            await controller.preflight(_staged_spec(observation_window_seconds=130))
+        )
+
+    assert progress[-1].failure is ScheduleLinkageRunFailure.MONITOR_STATE_EVIDENCE
+    assert progress[-1].drift_dimensions == (
+        ScheduleLinkageDriftDimension.POWER,
+    )
+    assert store.load() is None
+    assert _control_schedule_snapshot(master, slave) == baseline
+    _assert_only_linkage_calls(master, slave)
+
+
 async def test_staged_slave_prior_tuple_stabilizes_while_master_enters_next_entry(
     tmp_path: Path,
 ) -> None:
@@ -5460,15 +6104,15 @@ async def test_staged_transport_retry_restarts_terminal_stability_timeline(
 ) -> None:
     master, slave = await _ready_staged_pair()
     baseline = _control_schedule_snapshot(master, slave)
-    master_before = {"AutoMode": "constant", "AutoFlow": 30, "AutoFreq": 5}
-    slave_before = {"AutoMode": "constant", "AutoFlow": 35, "AutoFreq": 5}
-    master_after = {"AutoMode": "sine", "AutoFlow": 45, "AutoFreq": 40}
-    slave_after = {"AutoMode": "sine", "AutoFlow": 45, "AutoFreq": 80}
-    master.reported_auto_update_sequences_by_role[LinkageRole.MASTER] = [
+    master_before = _staged_five_field_values("master", after=False)
+    slave_before = _staged_five_field_values("slave", after=False)
+    master_after = _staged_five_field_values("master", after=True)
+    slave_after = _staged_five_field_values("slave", after=True)
+    master.reported_full_update_sequences_by_role[LinkageRole.MASTER] = [
         *([master_before] * 47),
         *([master_after] * 8),
     ]
-    slave.reported_auto_update_sequences_by_role[LinkageRole.ASYNC_SLAVE] = [
+    slave.reported_full_update_sequences_by_role[LinkageRole.ASYNC_SLAVE] = [
         *([slave_before] * 46),
         *([slave_after] * 8),
     ]
@@ -5689,6 +6333,52 @@ async def test_staged_slave_flow_partial_settles_into_long_slave_a_candidate(
     assert stable[-1] - stable[0] == 300
     assert len(stable) >= 2
     assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_full_general_b_accepts_safe_slave_flow_variance(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    baseline = _control_schedule_snapshot(master, slave)
+    master_before = _staged_five_field_values("master", after=False)
+    slave_before = _staged_five_field_values("slave", after=False)
+    master_after = _staged_five_field_values("master", after=True)
+    slave_after = _staged_five_field_values("slave", after=True, slave_flow=32)
+    master.reported_full_update_sequences_by_role[LinkageRole.MASTER] = [
+        *([master_before] * 47),
+        *([master_after] * 5),
+    ]
+    slave.reported_full_update_sequences_by_role[LinkageRole.ASYNC_SLAVE] = [
+        *([slave_before] * 46),
+        *([slave_after] * 5),
+    ]
+    samples = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "staged-full-general-b-slave-flow-variance.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        sample_observer=samples.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    result = await controller.run(
+        await controller.preflight(_staged_spec(observation_window_seconds=130))
+    )
+
+    assert result.schedule_transition_verified is True
+    terminal = next(sample for sample in reversed(samples) if sample.phase == "after")
+    assert (terminal.slave.mode, terminal.slave.flow, terminal.slave.frequency) == (
+        "sine",
+        32,
+        80,
+    )
+    assert store.load() is None
+    assert _control_schedule_snapshot(master, slave) == baseline
     _assert_only_linkage_calls(master, slave)
 
 
@@ -6296,6 +6986,63 @@ async def test_staged_restart_recovery_accepts_role_frequency_only_to_detach(
     )
     assert (await slave.get_state()).frequency == 21
     _assert_only_linkage_calls(master, slave)
+
+
+async def test_staged_restart_recovery_rejects_untokened_auto_before_detach(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-unknown-auto.json")
+    setup = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await setup.preflight(_staged_spec())
+    await master.write_linkage(LinkageRole.MASTER)
+    await slave.write_linkage(LinkageRole.ASYNC_SLAVE)
+    master.calls.clear()
+    slave.calls.clear()
+    master.commands.clear()
+    slave.commands.clear()
+    now = datetime.now(UTC)
+    record = ScheduleLinkageRecord(
+        operation_id=preflight.spec.operation_id,
+        phase=ScheduleLinkagePhase.ACTIVE,
+        spec=preflight.spec,
+        snapshots=preflight.snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(minutes=2),
+        linkage_write_intent_device_ids=("master", "slave"),
+        linked_device_ids=("master", "slave"),
+    )
+    with store.lease():
+        store.create(record)
+    master.reported_auto_updates_by_role[LinkageRole.MASTER] = {
+        "AutoMode": "random",
+    }
+    restarted = _controller(
+        master,
+        slave,
+        store,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    with pytest.raises(
+        ScheduleLinkageRollbackError,
+        match="role topology does not match durable recovery intent",
+    ):
+        await restarted.recover_pending()
+
+    assert store.load() == record
+    assert master.calls == []
+    assert slave.calls == []
+    assert (await master.get_state()).linkage is LinkageRole.MASTER
+    assert (await slave.get_state()).linkage is LinkageRole.ASYNC_SLAVE
 
 
 async def test_opt_in_recovery_refreshes_disconnected_sessions_before_topology_proof(

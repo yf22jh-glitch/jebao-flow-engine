@@ -79,7 +79,7 @@ _ROLE_FREQUENCY_CONVERGENCE_REQUIRED_EXACT_READS = 2
 _STAGED_TRANSPORT_RETRY_DELAY_SECONDS = 2.0
 _STAGED_MONITOR_HEARTBEAT_MAX_INTERVAL_SECONDS = 4.0
 _STAGED_AUTO_PARTIAL_SETTLE_MAX_SECONDS = 15.0
-_STAGED_AUTO_PARTIAL_MAX_SAMPLES = 3
+_STAGED_AUTO_PARTIAL_MAX_STALLED_SAMPLES = 3
 # Read-only field sampling observed Pro NowTime advance in independent 22-25 second batches.
 # Treat 30 seconds as a conservative early-boundary allowance: a larger hidden lag can only make
 # the attended experiment fail closed, never authorize an early Auto transition as schedule-led.
@@ -482,6 +482,13 @@ class ScheduleLinkageSample(BaseModel):
     slave: ScheduleAutoEvidence
     master_manual_power: int = Field(ge=0, le=100)
     slave_manual_power: int = Field(ge=0, le=100)
+    # Pro boundary reports may mirror the scheduled Mode/Frequency into the separate live
+    # control registers.  Optional defaults keep previously persisted diagnostic intents
+    # readable while new evidence records the exact bounded pair used for stability.
+    master_reported_mode: str | None = None
+    master_reported_frequency: int | None = Field(default=None, ge=0, le=100)
+    slave_reported_mode: str | None = None
+    slave_reported_frequency: int | None = Field(default=None, ge=0, le=100)
     master_linkage: Literal[LinkageRole.MASTER]
     slave_linkage: Literal[LinkageRole.ASYNC_SLAVE]
 
@@ -749,10 +756,22 @@ class _ClockAnchor:
     sampled_at_monotonic: float
 
 
+type _StagedTransitionField = Literal[
+    "auto_mode",
+    "auto_flow",
+    "auto_frequency",
+    "reported_mode",
+    "reported_frequency",
+]
+type _StablePairEvidence = tuple[tuple[str, int, int, str, int], ...]
+
+
 @dataclass(frozen=True, slots=True)
 class _StagedAutoClassification:
     side: Literal["before", "transitional", "after"]
-    b_fields: frozenset[Literal["mode", "flow", "frequency"]] = frozenset()
+    auto_side: Literal["before", "transitional", "after"]
+    control_side: Literal["before", "transitional", "after"]
+    b_fields: frozenset[_StagedTransitionField] = frozenset()
 
 
 def schedule_linkage_confirmation_token(
@@ -1884,6 +1903,7 @@ class ScheduleActiveLinkageController:
             if (
                 expectation.before.mode != "constant"
                 or expectation.after_mode != "sine"
+                or snapshot.mode != expectation.before.mode
                 or entries[0].mode != "constant"
                 or entries[0].parameters.get("frequency") != 0
             ):
@@ -2862,7 +2882,7 @@ class ScheduleActiveLinkageController:
         )
         deadline = min(deadline, self._require_observation_deadline())
         consecutive_after = 0
-        previous_after: tuple[tuple[str, int, int], ...] | None = None
+        previous_after: _StablePairEvidence | None = None
         stable_after_started_at: float | None = None
         while self._monotonic() <= deadline:
             if self._stop_requested():
@@ -3106,17 +3126,17 @@ class ScheduleActiveLinkageController:
             spec.master_device_id: LinkageRole.MASTER,
             spec.slave_device_id: LinkageRole.ASYNC_SLAVE,
         }
-        after_seen: set[str] = set()
+        auto_after_seen: set[str] = set()
         b_fields_seen: dict[
             str,
-            set[Literal["mode", "flow", "frequency"]],
+            set[_StagedTransitionField],
         ] = {device_id: set() for device_id in expected_roles}
         partial_started_at: dict[str, float | None] = {
             device_id: None for device_id in expected_roles
         }
-        partial_sample_count = {device_id: 0 for device_id in expected_roles}
+        partial_stalled_count = {device_id: 0 for device_id in expected_roles}
         consecutive_after = 0
-        previous_after: tuple[tuple[str, int, int], ...] | None = None
+        previous_after: _StablePairEvidence | None = None
         stable_after_started_at: float | None = None
         transition_not_before = self._staged_transition_not_before
         if transition_not_before is None:
@@ -3153,13 +3173,18 @@ class ScheduleActiveLinkageController:
                 device_id: classification.side
                 for device_id, classification in classifications.items()
             }
-            master_side = sides[spec.master_device_id]
-            terminal_candidate = master_side == "after" and all(
-                side != "transitional" for side in sides.values()
+            master_classification = classifications[spec.master_device_id]
+            terminal_candidate = master_classification.auto_side == "after" and all(
+                classification.auto_side != "transitional"
+                and classification.control_side != "transitional"
+                for classification in classifications.values()
             )
             if (
                 sampled_at < transition_not_before
-                and any(side != "before" for side in sides.values())
+                and any(
+                    classification.side != "before" or classification.b_fields
+                    for classification in classifications.values()
+                )
             ):
                 self._run_failure = (
                     ScheduleLinkageRunFailure.MONITOR_EARLY_AUTO_TRANSITION
@@ -3170,8 +3195,8 @@ class ScheduleActiveLinkageController:
                 raise ScheduleLinkageApplyError(
                     "staged Auto evidence changed before the conservative boundary window"
                 )
-            for device_id in after_seen:
-                if sides[device_id] == "before":
+            for device_id in auto_after_seen:
+                if classifications[device_id].auto_side == "before":
                     self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
                     self._run_drift_dimensions = (
                         ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
@@ -3179,7 +3204,7 @@ class ScheduleActiveLinkageController:
                     raise ScheduleLinkageApplyError(
                         "staged Auto evidence returned to its prior entry"
                     )
-                if sides[device_id] == "transitional":
+                if classifications[device_id].auto_side == "transitional":
                     self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
                     self._run_drift_dimensions = (
                         ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
@@ -3194,14 +3219,16 @@ class ScheduleActiveLinkageController:
                         ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
                     )
                     raise ScheduleLinkageApplyError(
-                        "staged Auto field evidence regressed toward its prior entry"
+                        "staged transition field evidence regressed toward its prior entry"
                     )
             for device_id, classification in classifications.items():
                 started_at = partial_started_at[device_id]
+                new_b_fields = classification.b_fields - b_fields_seen[device_id]
                 settled = classification.side == "after" or (
                     terminal_candidate
                     and device_id == spec.slave_device_id
-                    and classification.side == "before"
+                    and classification.auto_side == "before"
+                    and classification.control_side != "transitional"
                 )
                 if started_at is not None and (
                     sampled_at - started_at
@@ -3216,13 +3243,16 @@ class ScheduleActiveLinkageController:
                     raise ScheduleLinkageApplyError(
                         "staged Auto partial transition did not settle in time"
                     )
-                if classification.side == "transitional":
+                if classification.side == "transitional" and not settled:
                     if started_at is None:
                         partial_started_at[device_id] = sampled_at
-                    partial_sample_count[device_id] += 1
+                    if new_b_fields:
+                        partial_stalled_count[device_id] = 0
+                    else:
+                        partial_stalled_count[device_id] += 1
                     if (
-                        partial_sample_count[device_id]
-                        > _STAGED_AUTO_PARTIAL_MAX_SAMPLES
+                        partial_stalled_count[device_id]
+                        > _STAGED_AUTO_PARTIAL_MAX_STALLED_SAMPLES
                     ):
                         self._run_failure = (
                             ScheduleLinkageRunFailure.MONITOR_AUTO_TRANSITION_TIMEOUT
@@ -3235,10 +3265,12 @@ class ScheduleActiveLinkageController:
                         )
                 elif settled:
                     partial_started_at[device_id] = None
-                    partial_sample_count[device_id] = 0
+                    partial_stalled_count[device_id] = 0
                 b_fields_seen[device_id].update(classification.b_fields)
-            after_seen.update(
-                device_id for device_id, side in sides.items() if side == "after"
+            auto_after_seen.update(
+                device_id
+                for device_id, classification in classifications.items()
+                if classification.auto_side == "after"
             )
             if all(side == "before" for side in sides.values()):
                 self._assert_pair_sample(
@@ -3246,6 +3278,7 @@ class ScheduleActiveLinkageController:
                     states,
                     expected_roles,
                     phase="before",
+                    allow_staged_control_transition=True,
                 )
                 consecutive_after = 0
                 previous_after = None
@@ -3260,6 +3293,7 @@ class ScheduleActiveLinkageController:
                     states,
                     expected_roles,
                     phase="after",
+                    allow_staged_control_transition=True,
                 )
                 if previous_after == evidence:
                     consecutive_after += 1
@@ -3321,6 +3355,7 @@ class ScheduleActiveLinkageController:
             expected_roles,
             phase="ambiguous",
             emit_sample=False,
+            allow_staged_control_transition=True,
         )
         self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_EVIDENCE
         self._run_drift_dimensions = (
@@ -3338,21 +3373,36 @@ class ScheduleActiveLinkageController:
                 dimensions=(ScheduleLinkageDriftDimension.AUTO_EVIDENCE,),
                 observed_role=observed_role,
             )
-            evidence = _observed_auto(snapshot.device_id, states[snapshot.device_id])
-            b_fields = self._staged_auto_b_fields(record, snapshot, evidence)
+            state = states[snapshot.device_id]
+            evidence = _observed_auto(snapshot.device_id, state)
+            auto_b_fields = self._staged_auto_b_fields(record, snapshot, evidence)
             if evidence == snapshot.expectation.before:
-                side: Literal["before", "transitional", "after"] = "before"
+                auto_side: Literal["before", "transitional", "after"] = "before"
             elif self._matches_after_evidence(record, snapshot, evidence):
-                side = "after"
+                auto_side = "after"
             elif self._is_safe_staged_transitional_auto(record, snapshot, evidence):
-                side = "transitional"
+                auto_side = "transitional"
             else:
                 raise ScheduleLinkageApplyError(
                     f"device {snapshot.device_id!r} reported an unknown staged Auto tuple"
                 )
+            control_side, control_b_fields = self._classify_staged_control_side(
+                snapshot,
+                state,
+                expected_roles[snapshot.device_id],
+            )
+            side = (
+                "transitional"
+                if auto_side == "transitional"
+                or control_side == "transitional"
+                or (auto_side == "before" and control_side == "after")
+                else auto_side
+            )
             classifications[snapshot.device_id] = _StagedAutoClassification(
                 side=side,
-                b_fields=b_fields,
+                auto_side=auto_side,
+                control_side=control_side,
+                b_fields=auto_b_fields | control_b_fields,
             )
         return classifications
 
@@ -3361,16 +3411,16 @@ class ScheduleActiveLinkageController:
         record: ScheduleLinkageRecord,
         snapshot: ScheduleLinkageSnapshot,
         evidence: ScheduleAutoEvidence,
-    ) -> frozenset[Literal["mode", "flow", "frequency"]]:
+    ) -> frozenset[_StagedTransitionField]:
         """Return irreversible B-side fields, excluding observed slave Flow variance."""
 
         expectation = snapshot.expectation
-        fields: set[Literal["mode", "flow", "frequency"]] = set()
+        fields: set[_StagedTransitionField] = set()
         if (
             expectation.before.mode != expectation.after_mode
             and evidence.mode == expectation.after_mode
         ):
-            fields.add("mode")
+            fields.add("auto_mode")
         slave_flow_variance = (
             record.spec.observe_slave_after_tuple_variance
             and snapshot.device_id == record.spec.slave_device_id
@@ -3380,14 +3430,52 @@ class ScheduleActiveLinkageController:
             and expectation.before.flow != expectation.after_flow
             and evidence.flow == expectation.after_flow
         ):
-            fields.add("flow")
+            fields.add("auto_flow")
         if (
             expectation.after_frequency is not None
             and expectation.before.frequency != expectation.after_frequency
             and evidence.frequency == expectation.after_frequency
         ):
-            fields.add("frequency")
+            fields.add("auto_frequency")
         return frozenset(fields)
+
+    def _classify_staged_control_side(
+        self,
+        snapshot: ScheduleLinkageSnapshot,
+        state: DeviceState,
+        expected_role: LinkageRole,
+    ) -> tuple[
+        Literal["before", "transitional", "after"],
+        frozenset[_StagedTransitionField],
+    ]:
+        """Classify the separate live Mode/Frequency pair against this device's own A/B."""
+
+        expectation = snapshot.expectation
+        after_frequency = expectation.after_frequency
+        if after_frequency is None:
+            raise ScheduleLinkageApplyError(
+                "staged live control evidence has no token-bound B frequency"
+            )
+        before = (
+            snapshot.mode,
+            self._expected_snapshot_frequency(snapshot, expected_role),
+        )
+        after = (expectation.after_mode, after_frequency)
+        observed = (state.mode, state.frequency)
+        fields: set[_StagedTransitionField] = set()
+        if before[0] != after[0] and observed[0] == after[0]:
+            fields.add("reported_mode")
+        if before[1] != after[1] and observed[1] == after[1]:
+            fields.add("reported_frequency")
+        if observed == before:
+            side: Literal["before", "transitional", "after"] = "before"
+        elif observed == after:
+            side = "after"
+        else:
+            # The staged invariant already proved both scalar values are participant-own A/B.
+            # Therefore the only remaining shape is one field from each side of the pair.
+            side = "transitional"
+        return side, frozenset(fields)
 
     def _is_safe_staged_transitional_auto(
         self,
@@ -3427,8 +3515,9 @@ class ScheduleActiveLinkageController:
         *,
         phase: Literal["before", "ambiguous", "after"],
         emit_sample: bool = True,
-    ) -> tuple[tuple[str, int, int], ...]:
-        effective: list[tuple[str, int, int]] = []
+        allow_staged_control_transition: bool = False,
+    ) -> _StablePairEvidence:
+        effective: list[tuple[str, int, int, str, int]] = []
         observed: dict[str, ScheduleAutoEvidence] = {}
         for snapshot in record.snapshots:
             state = states[snapshot.device_id]
@@ -3438,12 +3527,20 @@ class ScheduleActiveLinkageController:
                 else "slave"
             )
             self._set_pair_verification_checkpoint()
-            self._assert_immutable_snapshot(
-                snapshot,
-                state,
-                expected_roles[snapshot.device_id],
-                observed_role=observed_role,
-            )
+            if allow_staged_control_transition:
+                self._assert_staged_control_snapshot(
+                    snapshot,
+                    state,
+                    expected_roles[snapshot.device_id],
+                    observed_role=observed_role,
+                )
+            else:
+                self._assert_immutable_snapshot(
+                    snapshot,
+                    state,
+                    expected_roles[snapshot.device_id],
+                    observed_role=observed_role,
+                )
             if phase == "ambiguous":
                 continue
             self._set_pair_verification_failure(
@@ -3470,6 +3567,10 @@ class ScheduleActiveLinkageController:
                 slave=observed[record.spec.slave_device_id],
                 master_manual_power=master_state.power,
                 slave_manual_power=slave_state.power,
+                master_reported_mode=master_state.mode,
+                master_reported_frequency=master_state.frequency,
+                slave_reported_mode=slave_state.mode,
+                slave_reported_frequency=slave_state.frequency,
                 master_linkage=LinkageRole.MASTER,
                 slave_linkage=LinkageRole.ASYNC_SLAVE,
             )
@@ -3501,7 +3602,20 @@ class ScheduleActiveLinkageController:
                 raise ScheduleLinkageApplyError(
                     f"device {snapshot.device_id!r} did not enter its next schedule entry"
                 )
-            effective.append((evidence.mode, evidence.flow, evidence.frequency))
+            state = states[snapshot.device_id]
+            if state.frequency is None:
+                raise ScheduleLinkageApplyError(
+                    f"device {snapshot.device_id!r} has no reported Frequency evidence"
+                )
+            effective.append(
+                (
+                    evidence.mode,
+                    evidence.flow,
+                    evidence.frequency,
+                    state.mode,
+                    state.frequency,
+                )
+            )
         return tuple(effective)
 
     def _matches_after_evidence(
@@ -3920,7 +4034,6 @@ class ScheduleActiveLinkageController:
                     states_by_id,
                     record.snapshots,
                 )
-                self._prepare_staged_frequency_recovery_pins(record, states_by_id)
             for snapshot in record.snapshots:
                 state = states_by_id[snapshot.device_id]
                 allowed = {LinkageRole.INDEPENDENT}
@@ -3930,44 +4043,32 @@ class ScheduleActiveLinkageController:
                     raise ScheduleLinkageApplyError(
                         f"device {snapshot.device_id!r} role is outside durable intent"
                     )
-                self._assert_immutable_snapshot(
-                    snapshot,
-                    state,
-                    state.linkage,
-                )
+                if (
+                    self._owned_staged_auto_transition_observation
+                    and state.linkage is not LinkageRole.INDEPENDENT
+                ):
+                    # Recovery may begin while a scheduled report is incomplete or anomalous.
+                    # Once forward execution has already failed, refusing the sole inverse
+                    # Linkage write would strand a native role.  Ignore only the separate live
+                    # Mode/Frequency pair long enough to detach this exact bound participant;
+                    # fixed controls, schedule fingerprint and token-bound Auto evidence remain
+                    # exact, and every post-detach read still requires the original snapshot.
+                    self._assert_staged_recovery_control_snapshot(
+                        record,
+                        snapshot,
+                        state,
+                        state.linkage,
+                    )
+                else:
+                    self._assert_immutable_snapshot(
+                        snapshot,
+                        state,
+                        state.linkage,
+                    )
         except Exception as error:
             raise ScheduleLinkageRollbackError(
                 "controller role topology does not match durable recovery intent"
             ) from error
-
-    def _prepare_staged_frequency_recovery_pins(
-        self,
-        record: ScheduleLinkageRecord,
-        states: Mapping[str, DeviceState],
-    ) -> None:
-        """Tolerate decoded linked-role Frequency only long enough to detach exactly."""
-
-        self._staged_role_frequency_pins.clear()
-        for snapshot in record.snapshots:
-            state = states[snapshot.device_id]
-            if state.linkage is LinkageRole.INDEPENDENT:
-                continue
-            candidate = state.frequency
-            if candidate == snapshot.frequency:
-                continue
-            # Forward observation pins only token-bound slave candidates.  Recovery is narrower
-            # in time but broader in value: once forward execution has failed, a decoded byte is
-            # accepted solely to authorize Linkage=independent.  The following read must prove
-            # the original snapshot Frequency exactly or the journal remains recoverable.
-            if (
-                isinstance(candidate, bool)
-                or not isinstance(candidate, int)
-                or not 0 <= candidate <= 100
-            ):
-                raise ScheduleLinkageApplyError(
-                    "linked role frequency is not safe recovery evidence"
-                )
-            self._staged_role_frequency_pins[snapshot.device_id] = candidate
 
     async def _reconcile_detached(
         self,
@@ -4044,13 +4145,122 @@ class ScheduleActiveLinkageController:
         *,
         observed_role: Literal["master", "slave"] | None = None,
     ) -> None:
-        expected_frequency = (
+        self._assert_snapshot_control_sets(
+            snapshot,
+            state,
+            expected_role,
+            allowed_modes=frozenset({snapshot.mode}),
+            allowed_frequencies=frozenset(
+                {self._expected_snapshot_frequency(snapshot, expected_role)}
+            ),
+            observed_role=observed_role,
+        )
+
+    def _assert_staged_control_snapshot(
+        self,
+        snapshot: ScheduleLinkageSnapshot,
+        state: DeviceState,
+        expected_role: LinkageRole,
+        *,
+        observed_role: Literal["master", "slave"] | None = None,
+    ) -> None:
+        """Allow only the owned schedule's A/B live control pair while a role is linked."""
+
+        after_frequency = snapshot.expectation.after_frequency
+        if (
+            not self._owned_staged_auto_transition_observation
+            or expected_role is LinkageRole.INDEPENDENT
+            or after_frequency is None
+        ):
+            raise ScheduleLinkageApplyError(
+                "staged live control evidence is outside the owned linked monitor"
+            )
+        self._assert_snapshot_control_sets(
+            snapshot,
+            state,
+            expected_role,
+            allowed_modes=frozenset(
+                {snapshot.mode, snapshot.expectation.after_mode}
+            ),
+            allowed_frequencies=frozenset(
+                {
+                    self._expected_snapshot_frequency(snapshot, expected_role),
+                    after_frequency,
+                }
+            ),
+            observed_role=observed_role,
+        )
+
+    def _assert_staged_recovery_control_snapshot(
+        self,
+        record: ScheduleLinkageRecord,
+        snapshot: ScheduleLinkageSnapshot,
+        state: DeviceState,
+        expected_role: LinkageRole,
+    ) -> None:
+        """Authorize Linkage-only detach despite a known decoded live Mode anomaly.
+
+        Monitor acceptance remains limited to the participant's token-bound A/B pair.  This
+        broader gate is recovery-only: physical binding, durable role intent, fixed controls,
+        schedule fingerprint and token-bound Auto evidence are still proved, and the first
+        independent read after the inverse role write must match the exact snapshot.
+        """
+
+        if (
+            not self._owned_staged_auto_transition_observation
+            or expected_role is LinkageRole.INDEPENDENT
+            or state.mode not in _KNOWN_PRO_MODES
+        ):
+            raise ScheduleLinkageApplyError(
+                "staged live control evidence is unsafe for role recovery"
+            )
+        evidence = _observed_auto(snapshot.device_id, state)
+        if not (
+            evidence == snapshot.expectation.before
+            or self._matches_after_evidence(record, snapshot, evidence)
+            or self._is_safe_staged_transitional_auto(record, snapshot, evidence)
+        ):
+            raise ScheduleLinkageApplyError(
+                "staged Auto evidence is outside the owned recovery transition"
+            )
+        if state.frequency is None:
+            raise ScheduleLinkageApplyError(
+                "staged live Frequency is unavailable for role recovery"
+            )
+        self._assert_snapshot_control_sets(
+            snapshot,
+            state,
+            expected_role,
+            allowed_modes=frozenset({state.mode}),
+            allowed_frequencies=frozenset({state.frequency}),
+            observed_role=None,
+        )
+
+    def _expected_snapshot_frequency(
+        self,
+        snapshot: ScheduleLinkageSnapshot,
+        expected_role: LinkageRole,
+    ) -> int:
+        return (
             self._staged_role_frequency_pins[snapshot.device_id]
             if self._owned_staged_auto_transition_observation
             and expected_role is not LinkageRole.INDEPENDENT
             and snapshot.device_id in self._staged_role_frequency_pins
             else snapshot.frequency
         )
+
+    def _assert_snapshot_control_sets(
+        self,
+        snapshot: ScheduleLinkageSnapshot,
+        state: DeviceState,
+        expected_role: LinkageRole,
+        *,
+        allowed_modes: frozenset[str],
+        allowed_frequencies: frozenset[int],
+        observed_role: Literal["master", "slave"] | None,
+    ) -> None:
+        """Keep every non-schedule-controlled dimension exact and report only its name."""
+
         dimensions: set[ScheduleLinkageDriftDimension] = set()
         if not state.online:
             dimensions.add(ScheduleLinkageDriftDimension.ONLINE)
@@ -4068,16 +4278,6 @@ class ScheduleActiveLinkageController:
                 snapshot.power,
             ),
             (
-                ScheduleLinkageDriftDimension.MODE,
-                state.mode,
-                snapshot.mode,
-            ),
-            (
-                ScheduleLinkageDriftDimension.FREQUENCY,
-                state.frequency,
-                expected_frequency,
-            ),
-            (
                 ScheduleLinkageDriftDimension.TIMER_ENABLED,
                 state.timer_enabled,
                 True,
@@ -4090,6 +4290,10 @@ class ScheduleActiveLinkageController:
         ):
             if actual_value != expected_value:
                 dimensions.add(dimension)
+        if state.mode not in allowed_modes:
+            dimensions.add(ScheduleLinkageDriftDimension.MODE)
+        if state.frequency not in allowed_frequencies:
+            dimensions.add(ScheduleLinkageDriftDimension.FREQUENCY)
         schedule_mismatch = (
             schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint
         )
@@ -4108,23 +4312,18 @@ class ScheduleActiveLinkageController:
             )
 
         self._assert_healthy(snapshot.device_id, state)
-        actual = (
+        fixed_actual = (
             state.enabled,
             state.power,
-            state.mode,
-            state.frequency,
             state.timer_enabled,
             state.linkage,
         )
-        expected = (
-            snapshot.enabled,
-            snapshot.power,
-            snapshot.mode,
-            expected_frequency,
-            True,
-            expected_role,
-        )
-        if actual != expected:
+        fixed_expected = (snapshot.enabled, snapshot.power, True, expected_role)
+        if (
+            fixed_actual != fixed_expected
+            or state.mode not in allowed_modes
+            or state.frequency not in allowed_frequencies
+        ):
             raise ScheduleLinkageApplyError(
                 f"device {snapshot.device_id!r} changed outside Linkage"
             )

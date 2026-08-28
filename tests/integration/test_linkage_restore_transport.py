@@ -115,6 +115,33 @@ def _with_auto_state(
     return bytes(changed)
 
 
+def _with_scheduled_transition_state(
+    raw_state: bytes,
+    *,
+    mode: str,
+    frequency: int,
+    auto_mode: str,
+    auto_flow: int,
+    auto_frequency: int,
+) -> bytes:
+    """Apply one full scheduled report while preserving manual Flow and schedule bytes."""
+
+    changed = bytearray(
+        _with_auto_state(
+            raw_state,
+            mode=auto_mode,
+            flow=auto_flow,
+            frequency=auto_frequency,
+        )
+    )
+    invariant_power = raw_state[2]
+    changed[1] = LOCAL_WAVEMAKER_PRO.by_name("Mode").enum_values.index(mode)
+    changed[3] = frequency
+    if changed[2] != invariant_power:  # pragma: no cover - helper construction invariant
+        raise AssertionError("scheduled report changed invariant manual Flow")
+    return bytes(changed)
+
+
 def _binding(device_id: str) -> PhysicalDeviceBinding:
     return PhysicalDeviceBinding.from_identifiers(
         vendor_device_id=f"transport-test-{device_id}",
@@ -1002,6 +1029,373 @@ async def test_staged_tcp_action04_field_reports_cross_heartbeat_and_retry_safel
     assert store.load() is None
     assert master_server.errors == []
     assert slave_server.errors == []
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "single_full_report",
+        "general_leading_retry",
+        "auto_leading_general_catchup",
+        "general_regression",
+        "general_third_mode",
+        "general_cross_frequency",
+    ],
+)
+async def test_staged_tcp_full_scheduled_reports_settle_from_last_field_change(
+    tmp_path: Path,
+    scenario: str,
+) -> None:
+    master_independent = _scheduled_role_state(
+        power=31,
+        before_flow=31,
+        after_flow=35,
+        after_frequency=30,
+        now_second=29,
+    )
+    slave_independent = _scheduled_role_state(
+        power=32,
+        before_flow=32,
+        after_flow=40,
+        after_frequency=40,
+        now_second=29,
+    )
+    master_linked = _with_linkage(master_independent, LinkageRole.MASTER)
+    slave_linked = _with_linkage(slave_independent, LinkageRole.ASYNC_SLAVE)
+    master_states = {
+        "before": master_linked,
+        "general_mode": _with_scheduled_transition_state(
+            master_linked,
+            mode="sine",
+            frequency=20,
+            auto_mode="constant",
+            auto_flow=31,
+            auto_frequency=5,
+        ),
+        "general_full": _with_scheduled_transition_state(
+            master_linked,
+            mode="sine",
+            frequency=30,
+            auto_mode="constant",
+            auto_flow=31,
+            auto_frequency=5,
+        ),
+        "general_auto_mode_flow": _with_scheduled_transition_state(
+            master_linked,
+            mode="sine",
+            frequency=30,
+            auto_mode="sine",
+            auto_flow=35,
+            auto_frequency=5,
+        ),
+        "auto_full": _with_scheduled_transition_state(
+            master_linked,
+            mode="constant",
+            frequency=20,
+            auto_mode="sine",
+            auto_flow=35,
+            auto_frequency=30,
+        ),
+        "auto_full_general_mode": _with_scheduled_transition_state(
+            master_linked,
+            mode="sine",
+            frequency=20,
+            auto_mode="sine",
+            auto_flow=35,
+            auto_frequency=30,
+        ),
+        "terminal": _with_scheduled_transition_state(
+            master_linked,
+            mode="sine",
+            frequency=30,
+            auto_mode="sine",
+            auto_flow=35,
+            auto_frequency=30,
+        ),
+        "third_mode": _with_scheduled_transition_state(
+            master_linked,
+            mode="pulse",
+            frequency=20,
+            auto_mode="constant",
+            auto_flow=31,
+            auto_frequency=5,
+        ),
+        "cross_frequency": _with_scheduled_transition_state(
+            master_linked,
+            mode="constant",
+            frequency=40,
+            auto_mode="constant",
+            auto_flow=31,
+            auto_frequency=5,
+        ),
+    }
+    slave_terminal = _with_scheduled_transition_state(
+        slave_linked,
+        mode="sine",
+        frequency=40,
+        auto_mode="sine",
+        auto_flow=40,
+        auto_frequency=40,
+    )
+    expected_failure = None
+    expected_error_fragment = None
+    expected_dimension = None
+    if scenario == "single_full_report":
+        master_steps = ("terminal",) * 6
+        terminal_step = 0
+        fault_steps = frozenset()
+    elif scenario == "general_leading_retry":
+        master_steps = (
+            "general_mode",
+            "general_full",
+            "general_auto_mode_flow",
+            *("terminal",) * 6,
+        )
+        terminal_step = 3
+        fault_steps = frozenset({1})
+    elif scenario == "auto_leading_general_catchup":
+        master_steps = (
+            "auto_full",
+            "auto_full_general_mode",
+            *("terminal",) * 7,
+        )
+        terminal_step = 2
+        fault_steps = frozenset()
+    elif scenario == "general_regression":
+        master_steps = ("general_mode", "before")
+        terminal_step = 1
+        fault_steps = frozenset()
+        expected_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
+        expected_error_fragment = "transition field evidence regressed"
+        expected_dimension = ScheduleLinkageDriftDimension.AUTO_EVIDENCE
+    elif scenario == "general_third_mode":
+        master_steps = ("third_mode",) * 2
+        terminal_step = 0
+        fault_steps = frozenset()
+        expected_failure = ScheduleLinkageRunFailure.MONITOR_STATE_EVIDENCE
+        expected_error_fragment = "changed outside Linkage"
+        expected_dimension = ScheduleLinkageDriftDimension.MODE
+    else:
+        master_steps = ("cross_frequency",) * 2
+        terminal_step = 0
+        fault_steps = frozenset()
+        expected_failure = ScheduleLinkageRunFailure.MONITOR_STATE_EVIDENCE
+        expected_error_fragment = "changed outside Linkage"
+        expected_dimension = ScheduleLinkageDriftDimension.FREQUENCY
+
+    master_server = _LocalGizwitsPump(
+        master_independent,
+        state_action=STATE_REPORT_ACTION,
+        pair_report_with_reply=True,
+    )
+    slave_server = _LocalGizwitsPump(
+        slave_independent,
+        state_action=STATE_REPORT_ACTION,
+        pair_report_with_reply=True,
+    )
+    master_script_states = tuple(master_states[step] for step in master_steps)
+    slave_script_states = tuple(
+        slave_terminal for _step in range(len(master_steps) + 4)
+    )
+    master_server.register_monitor_heartbeat_script(
+        master_script_states,
+        transition_delay_seconds=1.15,
+        fail_state_read_steps=fault_steps,
+    )
+    slave_server.register_monitor_heartbeat_script(
+        slave_script_states,
+        transition_delay_seconds=1.15,
+    )
+    await asyncio.gather(master_server.start(), slave_server.start())
+    master = _device(
+        "master",
+        master_server,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+    )
+    slave = _device(
+        "slave",
+        slave_server,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+    )
+    linkage_attribute = LOCAL_WAVEMAKER_PRO.linkage_attribute
+    if linkage_attribute is None:  # pragma: no cover - Pro always exposes Linkage
+        raise AssertionError("test profile has no linkage attribute")
+    expected_control_payloads: dict[_LocalGizwitsPump, tuple[bytes, bytes]] = {}
+    for server, independent, linked, role in (
+        (
+            master_server,
+            master_independent,
+            master_linked,
+            LinkageRole.MASTER,
+        ),
+        (
+            slave_server,
+            slave_independent,
+            slave_linked,
+            LinkageRole.ASYNC_SLAVE,
+        ),
+    ):
+        role_payload = build_control_payload(
+            LOCAL_WAVEMAKER_PRO,
+            {linkage_attribute: role.value},
+        )
+        detach_payload = build_control_payload(
+            LOCAL_WAVEMAKER_PRO,
+            {linkage_attribute: LinkageRole.INDEPENDENT.value},
+        )
+        server.register_control(role_payload, linked)
+        server.register_control(detach_payload, independent)
+        expected_control_payloads[server] = (role_payload, detach_payload)
+
+    samples = []
+    progress = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"tcp-full-scheduled-{scenario}.json"
+    )
+    controller = ScheduleActiveLinkageController(
+        {"master": master, "slave": slave},
+        store,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        sample_observer=lambda sample: samples.append(
+            (master_server.monitor_script_steps, sample)
+        ),
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    stability_seconds = 0.15 if scenario == "auto_leading_general_catchup" else 0.1
+    spec = ScheduleLinkageSpec(
+        operation_id=f"tcp_full_{scenario}",
+        qualification_operation_id="qualified_pair",
+        master_device_id="master",
+        slave_device_id="slave",
+        observation_window_seconds=60,
+        verification_interval_seconds=0.05,
+        minimum_lead_seconds=10,
+        ambiguous_band_seconds=0.1,
+        post_boundary_stability_seconds=stability_seconds,
+        observe_slave_after_tuple_variance=True,
+    )
+
+    try:
+        await asyncio.gather(master.connect(), slave.connect())
+        preflight = await controller.preflight(spec)
+        if expected_failure is None:
+            result = await controller.run(preflight)
+            assert result.stop_reason is ScheduleLinkageStopReason.BOUNDARY_VERIFIED
+            assert result.schedule_transition_verified is True
+        else:
+            with pytest.raises(
+                ScheduleLinkageApplyError,
+                match="roles were detached",
+            ) as captured:
+                await controller.run(preflight)
+            cause = captured.value.__cause__
+            assert isinstance(cause, ScheduleLinkageApplyError)
+            assert expected_error_fragment in str(cause)
+    finally:
+        await asyncio.gather(
+            master.disconnect(),
+            slave.disconnect(),
+            return_exceptions=True,
+        )
+        await asyncio.gather(master_server.close(), slave_server.close())
+
+    after_samples = [
+        (script_step, sample)
+        for script_step, sample in samples
+        if sample.phase == "after"
+    ]
+    if expected_failure is not None:
+        assert progress[-1].failure is expected_failure
+        assert progress[-1].drift_dimensions == (expected_dimension,)
+        assert after_samples == []
+    else:
+        assert all(
+            event.failure is None and event.drift_dimensions == ()
+            for event in progress
+        )
+        assert len(after_samples) >= 2
+        assert all(
+            (
+                sample.master.mode,
+                sample.master.flow,
+                sample.master.frequency,
+                sample.slave.mode,
+                sample.slave.flow,
+                sample.slave.frequency,
+                sample.master_manual_power,
+                sample.slave_manual_power,
+            )
+            == ("sine", 35, 30, "sine", 40, 40, 31, 32)
+            for _script_step, sample in after_samples
+        )
+        if scenario == "auto_leading_general_catchup":
+            general_a = [
+                (script_step, sample)
+                for script_step, sample in after_samples
+                if (sample.master_reported_mode, sample.master_reported_frequency)
+                == ("constant", 20)
+            ]
+            general_b = [
+                (script_step, sample)
+                for script_step, sample in after_samples
+                if (sample.master_reported_mode, sample.master_reported_frequency)
+                == ("sine", 30)
+            ]
+            # Auto=B with the exact captured general A tuple is a valid observation candidate.
+            # The following mixed general tuple is partial and emits no sample; once general B
+            # completes, its full stability interval begins from that final field change.
+            assert [script_step for script_step, _sample in general_a] == [1]
+            assert all(
+                (sample.master_reported_mode, sample.master_reported_frequency)
+                != ("sine", 20)
+                for _script_step, sample in after_samples
+            )
+            assert len(general_b) >= 4
+            assert all(
+                script_step >= terminal_step + 1
+                for script_step, _sample in general_b
+            )
+            assert master_server.monitor_script_steps >= terminal_step + 4
+        else:
+            assert all(
+                script_step >= terminal_step + 1
+                for script_step, _sample in after_samples
+            )
+            assert all(
+                (
+                    sample.master_reported_mode,
+                    sample.master_reported_frequency,
+                    sample.slave_reported_mode,
+                    sample.slave_reported_frequency,
+                )
+                == ("sine", 30, "sine", 40)
+                for _script_step, sample in after_samples
+            )
+    expected_retries = 1 if scenario == "general_leading_retry" else 0
+    assert sum(
+        event.kind is ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED
+        for event in progress
+    ) == expected_retries
+    assert master_server.monitor_state_read_failures == expected_retries
+    assert all(state[2] == 31 for state in master_script_states)
+    assert all(state[2] == 32 for state in slave_script_states)
+    assert master_server.current_state == master_independent
+    assert slave_server.current_state == slave_independent
+    for server in (master_server, slave_server):
+        role_payload, detach_payload = expected_control_payloads[server]
+        observed_payloads = [
+            payload for _connection, payload, _sent_at in server.control_payload_events
+        ]
+        assert observed_payloads.count(role_payload) == 1
+        assert observed_payloads.count(detach_payload) == 1
+        assert len(observed_payloads) == 2
+        assert server.errors == []
+    assert store.load() is None
 
 
 async def test_schedule_ack_loss_accepts_fresh_state_report_without_control_replay() -> None:

@@ -636,7 +636,10 @@ def _print_sample(sample: ScheduleLinkageSample | None) -> None:
         "Effective sample: "
         f"phase={sample.phase}, "
         f"master={sample.master.mode}/{sample.master.flow}%/freq{sample.master.frequency}, "
-        f"slave={sample.slave.mode}/{sample.slave.flow}%/freq{sample.slave.frequency}"
+        f"slave={sample.slave.mode}/{sample.slave.flow}%/freq{sample.slave.frequency}, "
+        f"reported-control="
+        f"{sample.master_reported_mode}/freq{sample.master_reported_frequency}:"
+        f"{sample.slave_reported_mode}/freq{sample.slave_reported_frequency}"
     )
 
 
@@ -798,6 +801,12 @@ async def _run(
                     and previous.slave == sample.slave
                     and previous.master_manual_power == sample.master_manual_power
                     and previous.slave_manual_power == sample.slave_manual_power
+                    and previous.master_reported_mode == sample.master_reported_mode
+                    and previous.master_reported_frequency
+                    == sample.master_reported_frequency
+                    and previous.slave_reported_mode == sample.slave_reported_mode
+                    and previous.slave_reported_frequency
+                    == sample.slave_reported_frequency
                     and previous.master_linkage is sample.master_linkage
                     and previous.slave_linkage is sample.slave_linkage
                 ):
