@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
+from jebao_flow.devices.identity import PhysicalDeviceBinding, configuration_fingerprint
 from jebao_flow.devices.linkage import (
     LinkageDiagnosticEvent,
     LinkageDiagnosticEventKind,
@@ -33,6 +34,8 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleAutoEvidence,
     ScheduleLinkageBusyError,
     ScheduleLinkageDriftDimension,
+    ScheduleLinkageExternalDisarmProof,
+    ScheduleLinkageExternalDisarmState,
     ScheduleLinkagePreflightError,
     ScheduleLinkageResult,
     ScheduleLinkageRunFailure,
@@ -2373,6 +2376,33 @@ class _DisarmDevice:
         self.remain_timer_on = remain_timer_on
         self.target = None
         self.retired = False
+        mac_address = "020000000001" if device_id == "master" else "020000000002"
+        self.physical_binding = PhysicalDeviceBinding.from_identifiers(
+            vendor_device_id=f"test-{device_id}",
+            mac_address=mac_address,
+            product_key="test-product",
+            config_fingerprint=configuration_fingerprint(
+                {"device_id": device_id, "address": f"test-{device_id}"}
+            ),
+        )
+        self.schedule = DeviceSchedule(
+            enabled=False,
+            entries=(
+                ScheduleEntry(
+                    slot=0,
+                    start="00:00",
+                    end="23:59",
+                    mode="constant",
+                    mode_code=2,
+                    parameters={
+                        "flow": 31,
+                        "frequency": 0,
+                        "feed_time": 0,
+                        "custom_frequency": 0,
+                    },
+                ),
+            ),
+        )
 
     async def disconnect(self) -> None:
         self.events.append(f"{self.device_id}:disconnect")
@@ -2394,7 +2424,7 @@ class _DisarmDevice:
         self.events.append(f"{self.device_id}:read")
         target = self.target
         assert target is not None
-        return SimpleNamespace(
+        return DeviceState(
             online=True,
             error=None,
             enabled=target.enabled,
@@ -2403,6 +2433,7 @@ class _DisarmDevice:
             frequency=target.frequency,
             linkage=target.linkage,
             timer_enabled=True if self.remain_timer_on else target.timer_enabled,
+            schedule=self.schedule,
         )
 
 
@@ -2418,6 +2449,122 @@ def _disarm_record(operation_id: str = "scheduled_slave_flow"):
             frequency=20,
         ),
     )
+
+
+def _recovery_disarm_proof(
+    operation_id: str = "scheduled_slave_flow_roles",
+) -> ScheduleLinkageExternalDisarmProof:
+    schedule = DeviceSchedule(
+        enabled=False,
+        entries=(
+            ScheduleEntry(
+                slot=0,
+                start="00:00",
+                end="23:59",
+                mode="constant",
+                mode_code=2,
+                parameters={
+                    "flow": 31,
+                    "frequency": 0,
+                    "feed_time": 0,
+                    "custom_frequency": 0,
+                },
+            ),
+        ),
+    )
+    fingerprint = schedule_structure_fingerprint(schedule)
+    assert fingerprint is not None
+    states: list[ScheduleLinkageExternalDisarmState] = []
+    for device_id, power, mac_address in (
+        ("master", 31, "020000000001"),
+        ("slave", 32, "020000000002"),
+    ):
+        states.append(
+            ScheduleLinkageExternalDisarmState(
+                device_id=device_id,
+                physical_binding=PhysicalDeviceBinding.from_identifiers(
+                    vendor_device_id=f"test-{device_id}",
+                    mac_address=mac_address,
+                    product_key="test-product",
+                    config_fingerprint=configuration_fingerprint(
+                        {"device_id": device_id, "address": f"test-{device_id}"}
+                    ),
+                ),
+                observed_at=datetime.now(UTC),
+                online=True,
+                error=None,
+                enabled=True,
+                power=power,
+                mode="constant",
+                frequency=20,
+                timer_enabled=False,
+                linkage=LinkageRole.INDEPENDENT,
+                schedule_fingerprint=fingerprint,
+            )
+        )
+    return ScheduleLinkageExternalDisarmProof(
+        operation_id=operation_id,
+        states=tuple(states),
+    )
+
+
+async def test_normal_unwind_hands_exact_disarm_proof_to_role_close_before_restore(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    received: list[ScheduleLinkageExternalDisarmProof] = []
+    controller = _SequenceController(events)
+    spec = _spec(sentinel_qualification=False)
+    expected_proof = _recovery_disarm_proof(f"{spec.operation_id}_roles")
+
+    class RoleStore:
+        record = SimpleNamespace(operation_id=f"{spec.operation_id}_roles")
+
+        def load(self):
+            return self.record
+
+    role_store = RoleStore()
+
+    class ClosingRoleController(_FakeRoleController):
+        async def finalize_externally_disarmed(
+            self,
+            operation_id: str,
+            *,
+            proof: ScheduleLinkageExternalDisarmProof,
+        ) -> bool:
+            assert operation_id == f"{spec.operation_id}_roles"
+            received.append(proof)
+            events.append("roles:journal_close")
+            role_store.record = None
+            return True
+
+    async def prove_disarmed(
+        _record: LinkageTransactionRecord,
+    ) -> ScheduleLinkageExternalDisarmProof:
+        events.append("timer:off")
+        return expected_proof
+
+    controller._experiment_spec = spec  # noqa: SLF001
+    controller._schedule_controller = _FakeScheduleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._role_controller = ClosingRoleController(events)  # type: ignore[assignment]  # noqa: SLF001
+    controller._role_store = role_store  # type: ignore[assignment]  # noqa: SLF001
+    controller._disarm_temporary_schedule_uninterruptibly = prove_disarmed  # type: ignore[method-assign]  # noqa: SLF001
+    monkeypatch.setattr(
+        controller,
+        "_validate_nested_recovery_ownership",
+        lambda _outer, _schedule, _role: None,
+    )
+    record = cast(
+        LinkageTransactionRecord,
+        SimpleNamespace(operation_id=spec.operation_id),
+    )
+
+    await controller._activate_relationship(record)  # noqa: SLF001
+
+    assert received == [expected_proof]
+    assert events.index("timer:off") < events.index("roles:journal_close")
+    assert events.index("roles:journal_close") < events.index("temporary:restore")
+    assert role_store.record is None
 
 
 async def test_disarm_attempts_both_devices_and_accepts_verified_ack_loss() -> None:
@@ -2436,7 +2583,7 @@ async def test_disarm_attempts_both_devices_and_accepts_verified_ack_loss() -> N
     )
     controller._active_operation_id = "scheduled_slave_flow"  # noqa: SLF001
 
-    await controller._disarm_temporary_schedule(  # noqa: SLF001
+    proof = await controller._disarm_temporary_schedule(  # noqa: SLF001
         cast(LinkageTransactionRecord, _disarm_record())
     )
 
@@ -2456,6 +2603,8 @@ async def test_disarm_attempts_both_devices_and_accepts_verified_ack_loss() -> N
     ]
     assert slave.target.linkage is LinkageRole.INDEPENDENT
     assert slave.target.timer_enabled is False
+    assert proof.operation_id == "scheduled_slave_flow_roles"
+    assert tuple(state.device_id for state in proof.states) == ("master", "slave")
 
 
 async def test_retired_role_preflight_sessions_refresh_before_timer_off_and_restore() -> None:
@@ -2592,16 +2741,28 @@ class _RecoverRoles:
         self.store.record = None
         return True
 
-    async def finalize_externally_disarmed(self, operation_id: str) -> bool:
+    async def finalize_externally_disarmed(
+        self,
+        operation_id: str,
+        *,
+        proof: ScheduleLinkageExternalDisarmProof,
+    ) -> bool:
         assert operation_id
+        assert proof.operation_id == operation_id
         self.events.append("roles:journal_close")
         self.store.record = None
         return True
 
 
 class _FailFinalizeRoles:
-    async def finalize_externally_disarmed(self, operation_id: str) -> bool:
+    async def finalize_externally_disarmed(
+        self,
+        operation_id: str,
+        *,
+        proof: ScheduleLinkageExternalDisarmProof,
+    ) -> bool:
         assert operation_id
+        assert proof.operation_id == operation_id
         raise RuntimeError("simulated role journal close failure")
 
 
@@ -2657,8 +2818,9 @@ async def test_attended_recovery_orders_roles_timer_schedule_then_outer(monkeypa
         lambda _outer, _schedule, _role: None,
     )
 
-    async def disarm(_record) -> None:
+    async def disarm(_record) -> ScheduleLinkageExternalDisarmProof:
         events.append("timer:off_verified")
+        return _recovery_disarm_proof("recover_order_roles")
 
     monkeypatch.setattr(controller, "_disarm_temporary_schedule_uninterruptibly", disarm)
 
@@ -2712,10 +2874,11 @@ async def test_schedule_only_recovery_reports_its_actual_disarm(monkeypatch) -> 
         lambda _outer, _schedule, _role: None,
     )
 
-    async def disarm(_record) -> None:
+    async def disarm(_record) -> ScheduleLinkageExternalDisarmProof:
         nonlocal physically_disarmed
         events.append("timer:off_verified")
         physically_disarmed = True
+        return _recovery_disarm_proof("schedule_only_roles")
 
     async def recover_outer(self, *, authority) -> bool:
         del self, authority
@@ -2759,7 +2922,8 @@ async def test_failed_role_journal_close_retains_the_temporary_schedule_authorit
 
     with pytest.raises(TemporaryScheduleObserverUnstoppableError) as captured:
         await controller._clear_role_journal_before_schedule_restore(  # noqa: SLF001
-            cast(LinkageTransactionRecord, _disarm_record())
+            cast(LinkageTransactionRecord, _disarm_record()),
+            proof=_recovery_disarm_proof(),
         )
 
     assert captured.value.code is TemporaryScheduleErrorCode.OBSERVER_NOT_STOPPED

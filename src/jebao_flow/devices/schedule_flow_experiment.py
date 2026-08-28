@@ -37,6 +37,8 @@ from jebao_flow.devices.schedule_linkage import (
     PrerequisiteAuthorizer,
     ScheduleActiveLinkageController,
     ScheduleLinkageBusyError,
+    ScheduleLinkageExternalDisarmProof,
+    ScheduleLinkageExternalDisarmState,
     ScheduleLinkageJournalStore,
     ScheduleLinkagePreflightError,
     ScheduleLinkageRecord,
@@ -1016,8 +1018,13 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 )
                 try:
                     if timer_on_may_be_armed:
-                        await self._disarm_temporary_schedule_uninterruptibly(record)
-                        await self._clear_role_journal_before_schedule_restore(record)
+                        disarm_proof = (
+                            await self._disarm_temporary_schedule_uninterruptibly(record)
+                        )
+                        await self._clear_role_journal_before_schedule_restore(
+                            record,
+                            proof=disarm_proof,
+                        )
                 except BaseException:
                     self._emit_stage(
                         ScheduleFlowStage.ROLE_DISARM_STARTED,
@@ -1190,11 +1197,12 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         recovered = False
         controls_disarmed = False
         if role_record is not None:
-            await self._disarm_nested_recovery_controls(outer_record)
+            disarm_proof = await self._disarm_nested_recovery_controls(outer_record)
             controls_disarmed = True
             recovered = (
                 await self._role_controller.finalize_externally_disarmed(
-                    role_record.operation_id
+                    role_record.operation_id,
+                    proof=disarm_proof,
                 )
                 or recovered
             )
@@ -1228,7 +1236,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
     async def _disarm_nested_recovery_controls(
         self,
         outer_record: LinkageTransactionRecord,
-    ) -> None:
+    ) -> ScheduleLinkageExternalDisarmProof:
         """Report the real TimerOFF proof used by role and schedule-only recovery."""
 
         # A fresh process may enter recovery while TimerON/native roles are still active.  Gate
@@ -1239,7 +1247,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             best_effort=True,
         )
         try:
-            await self._disarm_temporary_schedule_uninterruptibly(outer_record)
+            proof = await self._disarm_temporary_schedule_uninterruptibly(outer_record)
         except BaseException:
             self._emit_stage(
                 ScheduleFlowStage.ROLE_DISARM_STARTED,
@@ -1251,10 +1259,13 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             ScheduleFlowStage.ROLE_DISARMED,
             best_effort=True,
         )
+        return proof
 
     async def _clear_role_journal_before_schedule_restore(
         self,
         outer_record: LinkageTransactionRecord,
+        *,
+        proof: ScheduleLinkageExternalDisarmProof,
     ) -> None:
         """Prove the nested role saga terminal while its temporary schedule still exists."""
 
@@ -1269,7 +1280,8 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 role_record,
             )
             await self._role_controller.finalize_externally_disarmed(
-                role_record.operation_id
+                role_record.operation_id,
+                proof=proof,
             )
             if self._role_store.load() is not None:
                 raise LinkageRollbackError("role-only recovery remains incomplete")
@@ -1919,7 +1931,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
     async def _disarm_temporary_schedule_uninterruptibly(
         self,
         record: LinkageTransactionRecord,
-    ) -> None:
+    ) -> ScheduleLinkageExternalDisarmProof:
         task = asyncio.create_task(self._disarm_temporary_schedule(record))
         cancellation_received = False
         while not task.done():
@@ -1927,11 +1939,15 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 await asyncio.shield(task)
             except asyncio.CancelledError:
                 cancellation_received = True
-        task.result()
+        proof = task.result()
         if cancellation_received:
             raise asyncio.CancelledError
+        return proof
 
-    async def _disarm_temporary_schedule(self, record: LinkageTransactionRecord) -> None:
+    async def _disarm_temporary_schedule(
+        self,
+        record: LinkageTransactionRecord,
+    ) -> ScheduleLinkageExternalDisarmProof:
         # Slave first prevents a still-attached slave from following a master while TimerON is
         # being removed. This is a compensating safety write and remains authorized after the
         # forward observation deadline, but only for the still-owned operation.
@@ -1975,6 +1991,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 pass
 
         safe = True
+        proof_states: dict[str, ScheduleLinkageExternalDisarmState] = {}
         for device_id, power in targets:
             device = self._get_device(device_id)
             try:
@@ -1990,7 +2007,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             except BaseException:
                 safe = False
                 continue
-            safe = safe and (
+            state_is_safe = (
                 state.online
                 and state.error is None
                 and state.enabled
@@ -2000,6 +2017,21 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 and state.linkage is LinkageRole.INDEPENDENT
                 and state.timer_enabled is False
             )
+            if not state_is_safe:
+                safe = False
+                continue
+            physical_binding = device.physical_binding
+            if physical_binding is None:
+                safe = False
+                continue
+            try:
+                proof_states[device_id] = ScheduleLinkageExternalDisarmState.from_state(
+                    device_id,
+                    state,
+                    physical_binding=physical_binding,
+                )
+            except BaseException:
+                safe = False
 
         if not safe:
             # This exact error tells the schedule transaction to retain its staged image and
@@ -2009,6 +2041,14 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             )
         if cancellation_received:
             raise asyncio.CancelledError
+        expected_ids = (
+            record.spec.master_device_id,
+            record.spec.slave_device_id,
+        )
+        return ScheduleLinkageExternalDisarmProof(
+            operation_id=f"{record.operation_id}_roles",
+            states=tuple(proof_states[device_id] for device_id in expected_ids),
+        )
 
     def _require_experiment(
         self,

@@ -945,6 +945,45 @@ def test_v3_role_progress_is_monotonic_in_model_and_append_path() -> None:
         )
 
 
+def test_v3_slave_pair_read_retry_progress_round_trips_monotonically() -> None:
+    intent = _intent(phase=HardwareTestIntentPhase.STARTED)
+    kinds = (
+        ScheduleLinkageRunProgressKind.SLAVE_PAIR_VERIFICATION_STARTED,
+        ScheduleLinkageRunProgressKind.SLAVE_PAIR_STATE_READ_RETRY_STARTED,
+        ScheduleLinkageRunProgressKind.SLAVE_PAIR_VERIFIED,
+    )
+    events: tuple[ScheduleFlowStageEvent, ...] = ()
+    for offset, kind in enumerate(kinds, start=1):
+        occurred_at = intent.created_at + timedelta(microseconds=offset)
+        events = cli._append_schedule_stage_event(  # noqa: SLF001
+            events,
+            ScheduleFlowStageEvent(
+                stage=ScheduleFlowStage.ROLE_OBSERVATION_STARTED,
+                occurred_at=occurred_at,
+                role_progress=ScheduleLinkageRunProgressEvent(
+                    kind=kind,
+                    occurred_at=occurred_at,
+                ),
+            ),
+        )
+
+    round_tripped = HardwareTestIntent.model_validate_json(
+        HardwareTestIntent.model_validate(
+            intent.model_dump(mode="python")
+            | {
+                "updated_at": events[-1].occurred_at,
+                "schedule_flow_stage_events": events,
+            }
+        ).model_dump_json()
+    )
+
+    assert tuple(
+        event.role_progress.kind
+        for event in round_tripped.schedule_flow_stage_events
+        if event.role_progress is not None
+    ) == kinds
+
+
 def test_v3_role_failure_checkpoint_is_backward_compatible_and_privacy_bounded() -> None:
     legacy_payload = _intent().model_dump(mode="json")
     legacy_payload.pop("schedule_flow_role_failure")

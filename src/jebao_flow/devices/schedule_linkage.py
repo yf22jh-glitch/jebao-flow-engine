@@ -70,6 +70,7 @@ _ROLE_FREQUENCY_CONVERGENCE_MAX_READS = 4
 _ROLE_FREQUENCY_CONVERGENCE_ADMISSION_WINDOW_SECONDS = 20.0
 _ROLE_FREQUENCY_CONVERGENCE_MAX_INTERVAL_SECONDS = 5.0
 _ROLE_FREQUENCY_CONVERGENCE_REQUIRED_EXACT_READS = 2
+_STAGED_TRANSPORT_RETRY_DELAY_SECONDS = 2.0
 # Read-only field sampling observed Pro NowTime advance in independent 22-25 second batches.
 # Treat 30 seconds as a conservative early-boundary allowance: a larger hidden lag can only make
 # the attended experiment fail closed, never authorize an early Auto transition as schedule-led.
@@ -156,6 +157,7 @@ class ScheduleLinkageRunProgressKind(StrEnum):
     SLAVE_ADAPTER_WRITE_STARTED = "slave_adapter_write_started"
     SLAVE_ADAPTER_WRITE_COMPLETED = "slave_adapter_write_completed"
     SLAVE_PAIR_VERIFICATION_STARTED = "slave_pair_verification_started"
+    SLAVE_PAIR_STATE_READ_RETRY_STARTED = "slave_pair_state_read_retry_started"
     SLAVE_PAIR_VERIFIED = "slave_pair_verified"
     MONITOR_STARTED = "monitor_started"
     MONITOR_COMPLETED = "monitor_completed"
@@ -492,6 +494,88 @@ class ScheduleLinkageSnapshot(BaseModel):
     linkage: Literal[LinkageRole.INDEPENDENT]
     schedule_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     expectation: ScheduleBoundaryExpectation
+
+
+class ScheduleLinkageExternalDisarmState(BaseModel):
+    """Redacted, in-memory state captured by the composed TimerOFF proof."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    device_id: DeviceIdentifier
+    physical_binding: PhysicalDeviceBinding
+    observed_at: datetime
+    online: Literal[True]
+    error: None = None
+    enabled: Literal[True]
+    power: int = Field(ge=0, le=100)
+    mode: str = Field(min_length=1)
+    frequency: int = Field(ge=0, le=100)
+    timer_enabled: Literal[False]
+    linkage: Literal[LinkageRole.INDEPENDENT]
+    schedule_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @classmethod
+    def from_state(
+        cls,
+        device_id: str,
+        state: DeviceState,
+        *,
+        physical_binding: PhysicalDeviceBinding,
+    ) -> Self:
+        fingerprint = schedule_structure_fingerprint(state.schedule)
+        if fingerprint is None:
+            raise ScheduleLinkageRollbackError(
+                "external disarm proof has no schedule fingerprint"
+            )
+        return cls(
+            device_id=device_id,
+            physical_binding=physical_binding,
+            observed_at=state.observed_at,
+            online=state.online,
+            error=state.error,
+            enabled=state.enabled,
+            power=state.power,
+            mode=state.mode,
+            frequency=state.frequency,
+            timer_enabled=state.timer_enabled,
+            linkage=state.linkage,
+            schedule_fingerprint=fingerprint,
+        )
+
+    @model_validator(mode="after")
+    def validate_timestamp(self) -> Self:
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise ValueError("external disarm timestamp must be timezone-aware")
+        return self
+
+
+class ScheduleLinkageExternalDisarmProof(BaseModel):
+    """Exact pair proof handed directly from composed disarm to role closure."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: Literal[1] = 1
+    operation_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    states: tuple[ScheduleLinkageExternalDisarmState, ...] = Field(
+        min_length=2,
+        max_length=2,
+    )
+
+    @model_validator(mode="after")
+    def validate_pair(self) -> Self:
+        device_ids = tuple(state.device_id for state in self.states)
+        if len(set(device_ids)) != len(device_ids):
+            raise ValueError("external disarm proof device IDs must be distinct")
+        identity_keys = tuple(
+            physical_identity_key(state.physical_binding) for state in self.states
+        )
+        if len(set(identity_keys)) != len(identity_keys):
+            raise ValueError("external disarm proof physical bindings must be distinct")
+        return self
 
 
 class ScheduleLinkagePreflight(BaseModel):
@@ -1098,13 +1182,20 @@ class ScheduleActiveLinkageController:
                 self._staged_role_frequency_pins.clear()
                 lease.__exit__(None, None, None)
 
-    async def finalize_externally_disarmed(self, operation_id: str) -> bool:
+    async def finalize_externally_disarmed(
+        self,
+        operation_id: str,
+        *,
+        proof: ScheduleLinkageExternalDisarmProof,
+    ) -> bool:
         """Clear a role journal only after both controls prove independent and TimerOFF.
 
         The composed schedule-flow transaction owns the compensating full-control write.  Once it
         has stopped TimerON on both devices, ordinary role recovery can no longer require the
-        immutable TimerON snapshot.  This no-write closure keeps that exception narrow and bound
-        to the exact role operation while the temporary schedule fingerprint is still installed.
+        immutable TimerON snapshot. The composed controller passes the redacted immutable states
+        captured by that exact fresh disarm proof, avoiding an immediate second LAN session
+        replacement. This no-write closure keeps the exception narrow and bound to the exact role
+        operation while the temporary schedule fingerprint is still installed.
         """
 
         if self._run_lock.locked():
@@ -1126,21 +1217,32 @@ class ScheduleActiveLinkageController:
                         raise ScheduleLinkageRollbackError(
                             "external disarm does not own this schedule-linkage journal"
                         )
+                    if proof.operation_id != operation_id:
+                        raise ScheduleLinkageRollbackError(
+                            "external disarm proof does not own this schedule-linkage journal"
+                        )
                     self._validate_recovery_bindings(
                         record,
-                        permit_disconnected=self._refresh_sessions_before_critical_reads,
+                        permit_disconnected=True,
                     )
-                    # The composed disarm proof may have consumed a paired 0x04 report while
-                    # leaving its older 0x03 reply queued.  Close the role journal only from a
-                    # newly authenticated stream, just like every other critical role read.
-                    await self._refresh_pair_sessions_if_enabled(record.spec)
-                    self._validate_recovery_bindings(record)
-                    states = await self._read_pair(record.spec)
-                    for snapshot in record.snapshots:
-                        self._assert_externally_disarmed_snapshot(
-                            snapshot,
-                            states[snapshot.device_id],
+                    expected_ids = (
+                        record.spec.master_device_id,
+                        record.spec.slave_device_id,
+                    )
+                    if tuple(state.device_id for state in proof.states) != expected_ids:
+                        raise ScheduleLinkageRollbackError(
+                            "external disarm proof does not contain the ordered role pair"
                         )
+                    for snapshot, state in zip(
+                        record.snapshots,
+                        proof.states,
+                        strict=True,
+                    ):
+                        if state.physical_binding != snapshot.physical_binding:
+                            raise ScheduleLinkageRollbackError(
+                                "external disarm proof changed physical binding"
+                            )
+                        self._assert_externally_disarmed_proof(snapshot, state)
                     self._store.clear()
                     return True
                 except ScheduleLinkageRollbackError:
@@ -1524,7 +1626,7 @@ class ScheduleActiveLinkageController:
     async def _wait_for_fresh_capture_retry(self) -> None:
         """Wait once without allowing stop, safety, or deadline authority to drift."""
 
-        retry_delay = 2.0
+        retry_delay = _STAGED_TRANSPORT_RETRY_DELAY_SECONDS
         now = self._monotonic()
         if (
             self._require_observation_deadline() - now
@@ -2012,6 +2114,7 @@ class ScheduleActiveLinkageController:
             pair_started = (
                 ScheduleLinkageRunProgressKind.MASTER_PAIR_VERIFICATION_STARTED
             )
+            pair_read_retry_started = None
             pair_verified = ScheduleLinkageRunProgressKind.MASTER_PAIR_VERIFIED
         else:
             intent_failure = ScheduleLinkageRunFailure.SLAVE_INTENT
@@ -2025,6 +2128,9 @@ class ScheduleActiveLinkageController:
             pair_failure = ScheduleLinkageRunFailure.SLAVE_PAIR_VERIFICATION
             pair_started = (
                 ScheduleLinkageRunProgressKind.SLAVE_PAIR_VERIFICATION_STARTED
+            )
+            pair_read_retry_started = (
+                ScheduleLinkageRunProgressKind.SLAVE_PAIR_STATE_READ_RETRY_STARTED
             )
             pair_verified = ScheduleLinkageRunProgressKind.SLAVE_PAIR_VERIFIED
         self._run_failure = intent_failure
@@ -2048,9 +2154,10 @@ class ScheduleActiveLinkageController:
         self._set_pair_verification_failure("session_refresh")
         await self._refresh_pair_sessions_if_enabled(record.spec)
         self._set_pair_verification_failure("state_read")
-        states = await self._read_critical_pair_states(
-            record.spec,
-            context="post-role verification",
+        states = await self._read_post_role_pair_states(
+            record,
+            retry_progress=pair_read_retry_started,
+            pair_failure=pair_failure,
         )
         if not self._owned_staged_auto_transition_observation:
             self._set_pair_verification_failure("clock_skew")
@@ -2058,6 +2165,7 @@ class ScheduleActiveLinkageController:
         sampled_at = self._monotonic()
         self._set_pair_verification_failure("deadline")
         self._assert_observation_deadline(sampled_at)
+        self._assert_staged_pre_boundary_sample_time(sampled_at)
         if not self._owned_staged_auto_transition_observation:
             self._set_pair_verification_failure("clock_continuity")
             self._assert_clock_continuity(
@@ -2096,18 +2204,7 @@ class ScheduleActiveLinkageController:
                 initial_error=error,
                 pair_failure=pair_failure,
             )
-        if self._owned_staged_auto_transition_observation:
-            transition_not_before = self._staged_transition_not_before
-            if transition_not_before is None:
-                self._set_pair_verification_checkpoint()
-                raise ScheduleLinkageApplyError(
-                    "staged role verification has no authorized boundary window"
-                )
-            if sampled_at >= transition_not_before:
-                self._set_pair_verification_checkpoint()
-                raise ScheduleLinkageApplyError(
-                    "staged role verification exceeded the conservative boundary window"
-                )
+        self._assert_staged_pre_boundary_sample_time(sampled_at)
         self._run_failure = pair_failure
         self._run_drift_dimensions = ()
         linked = (*record.linked_device_ids, device_id)
@@ -2123,6 +2220,188 @@ class ScheduleActiveLinkageController:
             else self._clock_anchor(states, sampled_at)
         )
         return record, next_anchor
+
+    async def _read_post_role_pair_states(
+        self,
+        record: ScheduleLinkageRecord,
+        *,
+        retry_progress: ScheduleLinkageRunProgressKind | None,
+        pair_failure: ScheduleLinkageRunFailure,
+    ) -> dict[str, DeviceState]:
+        """Retry one owned staged slave pair read without repeating its role write."""
+
+        try:
+            return await self._read_critical_pair_states(
+                record.spec,
+                context="post-role verification",
+            )
+        except asyncio.CancelledError:
+            raise
+        except ScheduleLinkageError:
+            raise
+        except Exception:
+            if (
+                not self._owned_staged_auto_transition_observation
+                or retry_progress is None
+                or self._run_pair_participant != "slave"
+            ):
+                raise
+
+        self._assert_staged_slave_read_retry_record(record, pair_failure)
+
+        self._emit_progress_best_effort(retry_progress)
+        await self._wait_for_staged_slave_read_retry(pair_failure)
+        self._assert_staged_slave_read_retry_record(record, pair_failure)
+        self._set_pair_verification_failure("session_refresh")
+        await self._refresh_pair_sessions_uninterruptibly(record.spec)
+        self._set_pair_verification_checkpoint()
+        self._validate_recovery_bindings(record)
+        self._assert_staged_slave_read_retry_authority(
+            pair_failure,
+            minimum_remaining_seconds=0,
+        )
+        self._assert_staged_slave_read_retry_record(record, pair_failure)
+        self._set_pair_verification_failure("state_read")
+        states = await self._read_critical_pair_states(
+            record.spec,
+            context="post-role verification",
+        )
+        self._assert_staged_slave_read_retry_authority(
+            pair_failure,
+            minimum_remaining_seconds=0,
+        )
+        self._assert_staged_slave_read_retry_record(record, pair_failure)
+        return states
+
+    def _assert_staged_slave_read_retry_record(
+        self,
+        record: ScheduleLinkageRecord,
+        pair_failure: ScheduleLinkageRunFailure,
+    ) -> None:
+        """Require the exact leased post-slave-write journal before each retry phase."""
+
+        expected_ids = (
+            record.spec.master_device_id,
+            record.spec.slave_device_id,
+        )
+        try:
+            durable = self._store.confirms_lease_successor(record)
+        except BaseException:
+            durable = False
+        if (
+            not durable
+            or record.phase is not ScheduleLinkagePhase.APPLYING
+            or record.linkage_write_intent_device_ids != expected_ids
+            or record.linked_device_ids != expected_ids[:1]
+            or record.detached_device_ids
+        ):
+            self._run_failure = pair_failure
+            self._run_drift_dimensions = ()
+            raise ScheduleLinkageApplyError(
+                "staged slave read retry lacks the exact durable role intent"
+            )
+
+    async def _wait_for_staged_slave_read_retry(
+        self,
+        pair_failure: ScheduleLinkageRunFailure,
+    ) -> None:
+        retry_delay = _STAGED_TRANSPORT_RETRY_DELAY_SECONDS
+        self._assert_staged_slave_read_retry_authority(
+            pair_failure,
+            minimum_remaining_seconds=(
+                retry_delay + _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS
+            ),
+        )
+        stop_event = self._stop_event
+        if stop_event is None:
+            self._run_failure = pair_failure
+            raise ScheduleLinkageApplyError(
+                "staged slave read retry has no stop authority"
+            )
+        settle_task = asyncio.ensure_future(self._sleep(retry_delay))
+        stop_task = asyncio.create_task(stop_event.wait())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = (settle_task, stop_task, safety_task)
+        try:
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                self._run_failure = pair_failure
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage stop was requested during staged slave read retry"
+                )
+            if safety_task in done:
+                self._run_failure = pair_failure
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage safety authority was revoked during staged slave read retry"
+                )
+            settle_task.result()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._assert_staged_slave_read_retry_authority(
+            pair_failure,
+            minimum_remaining_seconds=_ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS,
+        )
+
+    def _assert_staged_slave_read_retry_authority(
+        self,
+        pair_failure: ScheduleLinkageRunFailure,
+        *,
+        minimum_remaining_seconds: float,
+    ) -> None:
+        self._run_failure = pair_failure
+        self._run_drift_dimensions = ()
+        if self._stop_requested():
+            raise ScheduleLinkageApplyError(
+                "schedule-linkage stop was requested during staged slave read retry"
+            )
+        if (
+            self._safety_epoch is None
+            or not self._safety_interlock.permitted
+            or self._safety_interlock.epoch != self._safety_epoch
+        ):
+            raise ScheduleLinkageApplyError(
+                "schedule-linkage safety authority was revoked during staged slave read retry"
+            )
+        forward_deadline = self._forward_deadline
+        transition_not_before = self._staged_transition_not_before
+        if forward_deadline is None or transition_not_before is None:
+            self._set_pair_verification_checkpoint()
+            raise ScheduleLinkageApplyError(
+                "staged slave read retry has no authorized pre-boundary window"
+            )
+        remaining = min(
+            self._require_observation_deadline(),
+            forward_deadline,
+            transition_not_before,
+        ) - self._monotonic()
+        if remaining <= minimum_remaining_seconds:
+            self._set_pair_verification_failure("deadline")
+            raise ScheduleLinkageApplyError(
+                "staged slave read retry lacks a complete pre-boundary session budget"
+            )
+        self._run_failure = pair_failure
+        self._run_drift_dimensions = ()
+
+    def _assert_staged_pre_boundary_sample_time(self, sampled_at: float) -> None:
+        if not self._owned_staged_auto_transition_observation:
+            return
+        transition_not_before = self._staged_transition_not_before
+        if transition_not_before is None:
+            self._set_pair_verification_checkpoint()
+            raise ScheduleLinkageApplyError(
+                "staged role verification has no authorized boundary window"
+            )
+        if sampled_at >= transition_not_before:
+            self._set_pair_verification_checkpoint()
+            raise ScheduleLinkageApplyError(
+                "staged role verification exceeded the conservative boundary window"
+            )
 
     async def _converge_role_frequency(
         self,
@@ -2141,6 +2420,17 @@ class ScheduleActiveLinkageController:
             self._monotonic() + _ROLE_FREQUENCY_CONVERGENCE_ADMISSION_WINDOW_SECONDS,
             self._require_observation_deadline(),
         )
+        if self._owned_staged_auto_transition_observation:
+            transition_not_before = self._staged_transition_not_before
+            if transition_not_before is None:
+                self._set_pair_verification_checkpoint()
+                raise ScheduleLinkageApplyError(
+                    "staged role convergence has no authorized boundary window"
+                )
+            convergence_deadline = min(
+                convergence_deadline,
+                transition_not_before,
+            )
         interval = min(
             spec.verification_interval_seconds,
             _ROLE_FREQUENCY_CONVERGENCE_MAX_INTERVAL_SECONDS,
@@ -2180,6 +2470,7 @@ class ScheduleActiveLinkageController:
             sampled_at = self._monotonic()
             self._set_pair_verification_failure("deadline")
             self._assert_observation_deadline(sampled_at)
+            self._assert_staged_pre_boundary_sample_time(sampled_at)
             if not self._owned_staged_auto_transition_observation:
                 self._set_pair_verification_failure("clock_continuity")
                 self._assert_clock_continuity(
@@ -3338,12 +3629,11 @@ class ScheduleActiveLinkageController:
                 f"device {snapshot.device_id!r} schedule fingerprint changed"
             )
 
-    def _assert_externally_disarmed_snapshot(
+    def _assert_externally_disarmed_proof(
         self,
         snapshot: ScheduleLinkageSnapshot,
-        state: DeviceState,
+        state: ScheduleLinkageExternalDisarmState,
     ) -> None:
-        self._assert_healthy(snapshot.device_id, state)
         actual = (
             state.enabled,
             state.power,
@@ -3364,7 +3654,7 @@ class ScheduleActiveLinkageController:
             raise ScheduleLinkageRollbackError(
                 f"device {snapshot.device_id!r} external disarm is not exact"
             )
-        if schedule_structure_fingerprint(state.schedule) != snapshot.schedule_fingerprint:
+        if state.schedule_fingerprint != snapshot.schedule_fingerprint:
             raise ScheduleLinkageRollbackError(
                 f"device {snapshot.device_id!r} schedule changed before external disarm closure"
             )
@@ -3579,6 +3869,8 @@ __all__ = [
     "ScheduleLinkageBusyError",
     "ScheduleLinkageDriftDimension",
     "ScheduleLinkageError",
+    "ScheduleLinkageExternalDisarmProof",
+    "ScheduleLinkageExternalDisarmState",
     "ScheduleLinkageJournalClaimError",
     "ScheduleLinkageJournalStore",
     "ScheduleLinkagePhase",
