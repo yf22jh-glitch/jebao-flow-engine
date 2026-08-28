@@ -20,7 +20,10 @@ from jebao_flow.devices import (
     LinkageTransactionRecord,
     PhysicalDeviceBinding,
     ScheduleActiveLinkageController,
+    ScheduleLinkageApplyError,
+    ScheduleLinkageDriftDimension,
     ScheduleLinkagePhase,
+    ScheduleLinkageRunFailure,
     ScheduleLinkageRunProgressKind,
     ScheduleLinkageSpec,
     ScheduleLinkageStopReason,
@@ -64,6 +67,7 @@ def _scheduled_role_state(
     after_flow: int,
     after_frequency: int,
     linkage: LinkageRole = LinkageRole.INDEPENDENT,
+    now_second: int = 0,
 ) -> bytes:
     """Build the two-slot TimerON image used by the role controller field path."""
 
@@ -84,7 +88,7 @@ def _scheduled_role_state(
     raw[20:29] = bytes(
         (18, 11, 23, 59, 1, after_flow, after_frequency, 0, 0)
     )
-    raw[443:451] = bytes((20, 26, 8, 27, 0, 18, 10, 0))
+    raw[443:451] = bytes((20, 26, 8, 27, 0, 18, 10, now_second))
     return bytes(raw)
 
 
@@ -94,6 +98,20 @@ def _with_linkage(raw_state: bytes, linkage: LinkageRole) -> bytes:
         linkage.value
     )
     changed[0] = (changed[0] & ~0x0C) | (role_index << 2)
+    return bytes(changed)
+
+
+def _with_auto_state(
+    raw_state: bytes,
+    *,
+    mode: str,
+    flow: int,
+    frequency: int,
+) -> bytes:
+    changed = bytearray(raw_state)
+    changed[6] = LOCAL_WAVEMAKER_PRO.by_name("AutoMode").enum_values.index(mode)
+    changed[7] = flow
+    changed[8] = frequency
     return bytes(changed)
 
 
@@ -134,11 +152,20 @@ class _LocalGizwitsPump:
         self.control_payload_events: list[tuple[int, bytes, float]] = []
         self.state_requests_by_connection: dict[int, int] = {}
         self.state_request_events: list[tuple[int, float]] = []
+        self.heartbeat_requests = 0
+        self.heartbeat_state_reports = 0
+        self.monitor_script_steps = 0
+        self.monitor_state_read_failures = 0
         self.errors: list[Exception] = []
         self._post_timer_fault_origin: int | None = None
         self._ack_loss_payload: bytes | None = None
         self._ack_loss_origin: int | None = None
         self._ack_resolution_failures_remaining = 0
+        self._monitor_heartbeat_states: tuple[bytes, ...] = ()
+        self._monitor_state_read_fault_steps: frozenset[int] = frozenset()
+        self._monitor_transition_delay_seconds = 0.0
+        self._monitor_script_started_at: float | None = None
+        self._fail_next_monitor_state_read = False
         self._server: asyncio.Server | None = None
         self._writers: set[asyncio.StreamWriter] = set()
         self._handlers: set[asyncio.Task[None]] = set()
@@ -173,6 +200,30 @@ class _LocalGizwitsPump:
         self.register_control(payload, state)
         self._ack_loss_payload = payload
         self._ack_resolution_failures_remaining = failed_resolution_reads
+
+    def register_monitor_heartbeat_script(
+        self,
+        states: tuple[bytes, ...],
+        *,
+        transition_delay_seconds: float,
+        fail_state_read_steps: frozenset[int] = frozenset(),
+    ) -> None:
+        """Emit full action-0x04 reports before heartbeat replies once linked.
+
+        Each state is one successive full DP image from a controller that reports a logical
+        Auto transition field by field.  Selected zero-based steps then strand the following
+        explicit read so the production monitor has to replace the authenticated TCP session.
+        """
+
+        if transition_delay_seconds < 0:
+            raise ValueError("monitor transition delay must be non-negative")
+        if any(len(state) != len(self.current_state) for state in states):
+            raise ValueError("monitor states must retain the full raw status image")
+        if any(step < 0 or step >= len(states) for step in fail_state_read_steps):
+            raise ValueError("monitor state-read fault step is outside the script")
+        self._monitor_heartbeat_states = states
+        self._monitor_state_read_fault_steps = fail_state_read_steps
+        self._monitor_transition_delay_seconds = transition_delay_seconds
 
     async def close(self) -> None:
         if self._server is not None:
@@ -225,6 +276,9 @@ class _LocalGizwitsPump:
                     await writer.drain()
                     authenticated = True
                     continue
+                if request.command == GizwitsCommand.HEARTBEAT_REQUEST:
+                    await self._handle_heartbeat(authenticated, writer)
+                    continue
                 if request.command == GizwitsCommand.SERIAL_CONTROL_REQUEST:
                     should_close = await self._handle_control(
                         connection_number,
@@ -260,6 +314,43 @@ class _LocalGizwitsPump:
                 await writer.wait_closed()
             except OSError:
                 pass
+
+    async def _handle_heartbeat(
+        self,
+        authenticated: bool,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        if not authenticated:
+            raise AssertionError("heartbeat arrived before local authentication")
+        self.heartbeat_requests += 1
+        linkage_index = (self.current_state[0] >> 2) & 0x03
+        if self._monitor_heartbeat_states and linkage_index != 0:
+            now = asyncio.get_running_loop().time()
+            if self._monitor_script_started_at is None:
+                self._monitor_script_started_at = now
+            if (
+                now - self._monitor_script_started_at
+                >= self._monitor_transition_delay_seconds
+                and self.monitor_script_steps < len(self._monitor_heartbeat_states)
+            ):
+                step = self.monitor_script_steps
+                self.current_state = self._monitor_heartbeat_states[step]
+                self.monitor_script_steps += 1
+                self.heartbeat_state_reports += 1
+                self._fail_next_monitor_state_read = (
+                    step in self._monitor_state_read_fault_steps
+                )
+                # This is deliberately unsolicited relative to the heartbeat exchange.  The
+                # production session must consume it as a valid action-0x04 report and continue
+                # to the heartbeat response without losing its frame boundary.
+                writer.write(
+                    encode_frame(
+                        GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+                        bytes([STATE_REPORT_ACTION]) + self.current_state,
+                    )
+                )
+        writer.write(encode_frame(GizwitsCommand.HEARTBEAT_RESPONSE))
+        await writer.drain()
 
     async def _handle_control(
         self,
@@ -336,6 +427,18 @@ class _LocalGizwitsPump:
         self.state_request_events.append(
             (connection_number, asyncio.get_running_loop().time())
         )
+        if self._fail_next_monitor_state_read:
+            self._fail_next_monitor_state_read = False
+            self.monitor_state_read_failures += 1
+            # Leave the frame between magic and length.  The client must quarantine this exact
+            # stream and retry only the read-only monitor acquisition on a fresh session.
+            writer.write(MAGIC)
+            await writer.drain()
+            try:
+                await reader.read()
+            except ConnectionResetError:
+                pass
+            return True
         if (
             self._ack_resolution_failures_remaining
             and self._ack_loss_origin is not None
@@ -657,6 +760,248 @@ async def test_schedule_role_activation_refreshes_report_reply_streams_and_detac
         await slave.disconnect()
         await master_server.close()
         await slave_server.close()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "partial_retry_terminal",
+        "reconnect_resets_stability",
+        "partial_retry_regression",
+    ],
+)
+async def test_staged_tcp_action04_field_reports_cross_heartbeat_and_retry_safely(
+    tmp_path: Path,
+    scenario: str,
+) -> None:
+    master_independent = _scheduled_role_state(
+        power=31,
+        before_flow=31,
+        after_flow=35,
+        after_frequency=30,
+        now_second=29,
+    )
+    slave_independent = _scheduled_role_state(
+        power=32,
+        before_flow=32,
+        after_flow=40,
+        after_frequency=30,
+        now_second=29,
+    )
+    master_linked = _with_linkage(master_independent, LinkageRole.MASTER)
+    slave_linked = _with_linkage(slave_independent, LinkageRole.ASYNC_SLAVE)
+    master_states = {
+        "before": master_linked,
+        "partial_mode": _with_auto_state(
+            master_linked,
+            mode="sine",
+            flow=31,
+            frequency=5,
+        ),
+        "partial_mode_flow": _with_auto_state(
+            master_linked,
+            mode="sine",
+            flow=35,
+            frequency=5,
+        ),
+        "after": _with_auto_state(
+            master_linked,
+            mode="sine",
+            flow=35,
+            frequency=30,
+        ),
+    }
+    slave_after = _with_auto_state(
+        slave_linked,
+        mode="sine",
+        flow=40,
+        frequency=30,
+    )
+    if scenario == "partial_retry_terminal":
+        master_steps = (
+            "partial_mode",
+            "partial_mode_flow",
+            "after",
+            "after",
+            "after",
+        )
+        fault_step = 1
+    elif scenario == "reconnect_resets_stability":
+        # The first terminal sample precedes the broken stream.  A correct monitor must not use
+        # the two-second reconnect gap as stability time, so two more terminal acquisitions are
+        # required after the fresh-session retry.
+        master_steps = (
+            "partial_mode",
+            "after",
+            "after",
+            "after",
+            "after",
+            "after",
+        )
+        fault_step = 2
+    else:
+        master_steps = ("partial_mode", "partial_mode_flow", "before")
+        fault_step = 1
+
+    master_server = _LocalGizwitsPump(
+        master_independent,
+        state_action=STATE_REPORT_ACTION,
+        pair_report_with_reply=True,
+    )
+    slave_server = _LocalGizwitsPump(
+        slave_independent,
+        state_action=STATE_REPORT_ACTION,
+        pair_report_with_reply=True,
+    )
+    master_server.register_monitor_heartbeat_script(
+        tuple(master_states[step] for step in master_steps),
+        transition_delay_seconds=1.15,
+        fail_state_read_steps=frozenset({fault_step}),
+    )
+    slave_server.register_monitor_heartbeat_script(
+        tuple(slave_after for _step in range(len(master_steps) + 4)),
+        transition_delay_seconds=1.15,
+    )
+    await asyncio.gather(master_server.start(), slave_server.start())
+    master = _device(
+        "master",
+        master_server,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+    )
+    slave = _device(
+        "slave",
+        slave_server,
+        minimum_command_interval_ms=100,
+        readback_delay_ms=0,
+    )
+    linkage_attribute = LOCAL_WAVEMAKER_PRO.linkage_attribute
+    if linkage_attribute is None:  # pragma: no cover - Pro always exposes Linkage
+        raise AssertionError("test profile has no linkage attribute")
+    for server, independent, linked, role in (
+        (
+            master_server,
+            master_independent,
+            master_linked,
+            LinkageRole.MASTER,
+        ),
+        (
+            slave_server,
+            slave_independent,
+            slave_linked,
+            LinkageRole.ASYNC_SLAVE,
+        ),
+    ):
+        server.register_control(
+            build_control_payload(
+                LOCAL_WAVEMAKER_PRO,
+                {linkage_attribute: role.value},
+            ),
+            linked,
+        )
+        server.register_control(
+            build_control_payload(
+                LOCAL_WAVEMAKER_PRO,
+                {linkage_attribute: LinkageRole.INDEPENDENT.value},
+            ),
+            independent,
+        )
+
+    samples = []
+    progress = []
+    store = JsonScheduleLinkageJournalStore(tmp_path / f"tcp-{scenario}.json")
+    controller = ScheduleActiveLinkageController(
+        {"master": master, "slave": slave},
+        store,
+        prerequisite_authorizer=lambda _spec, _snapshots: None,
+        safety_interlock=LinkageSafetyInterlock(initially_permitted=True),
+        sample_observer=samples.append,
+        progress_observer=progress.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    spec = ScheduleLinkageSpec(
+        operation_id=f"tcp_{scenario}",
+        qualification_operation_id="qualified_pair",
+        master_device_id="master",
+        slave_device_id="slave",
+        observation_window_seconds=60,
+        verification_interval_seconds=0.05,
+        minimum_lead_seconds=10,
+        ambiguous_band_seconds=0.1,
+        post_boundary_stability_seconds=0.1,
+        observe_slave_after_tuple_variance=True,
+    )
+
+    try:
+        await asyncio.gather(master.connect(), slave.connect())
+        preflight = await controller.preflight(spec)
+        if scenario == "partial_retry_regression":
+            with pytest.raises(
+                ScheduleLinkageApplyError,
+                match="roles were detached",
+            ) as captured:
+                await controller.run(preflight)
+            cause = captured.value.__cause__
+            assert isinstance(cause, ScheduleLinkageApplyError)
+            assert "field evidence regressed" in str(cause)
+            assert progress[-1].failure is (
+                ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
+            )
+            assert progress[-1].drift_dimensions == (
+                ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+            )
+        else:
+            result = await controller.run(preflight)
+            assert result.stop_reason is ScheduleLinkageStopReason.BOUNDARY_VERIFIED
+            assert result.schedule_transition_verified is True
+            assert all(
+                event.failure is None and event.drift_dimensions == ()
+                for event in progress
+            )
+            after_samples = [sample for sample in samples if sample.phase == "after"]
+            assert len(after_samples) >= 2
+            assert all(
+                (
+                    sample.master.mode,
+                    sample.master.flow,
+                    sample.master.frequency,
+                )
+                == ("sine", 35, 30)
+                for sample in after_samples
+            )
+            if scenario == "reconnect_resets_stability":
+                assert len(after_samples) >= 3
+                assert master_server.monitor_script_steps >= 5
+    finally:
+        await asyncio.gather(
+            master.disconnect(),
+            slave.disconnect(),
+            return_exceptions=True,
+        )
+        await asyncio.gather(master_server.close(), slave_server.close())
+
+    assert sum(
+        event.kind is ScheduleLinkageRunProgressKind.MONITOR_TRANSPORT_RETRY_STARTED
+        for event in progress
+    ) == 1
+    assert master_server.monitor_state_read_failures == 1
+    assert master_server.heartbeat_state_reports >= fault_step + 2
+    assert master_server.accepted_connections == slave_server.accepted_connections
+    assert master_server.accepted_connections >= 7
+    partial_tuples = {("sine", 31, 5), ("sine", 35, 5)}
+    assert all(
+        (sample.master.mode, sample.master.flow, sample.master.frequency)
+        not in partial_tuples
+        for sample in samples
+    )
+    assert master_server.current_state == master_independent
+    assert slave_server.current_state == slave_independent
+    assert len(master_server.control_payload_events) == 2
+    assert len(slave_server.control_payload_events) == 2
+    assert store.load() is None
+    assert master_server.errors == []
+    assert slave_server.errors == []
 
 
 async def test_schedule_ack_loss_accepts_fresh_state_report_without_control_replay() -> None:

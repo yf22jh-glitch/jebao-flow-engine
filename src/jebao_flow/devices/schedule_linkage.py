@@ -78,6 +78,8 @@ _ROLE_FREQUENCY_CONVERGENCE_MAX_INTERVAL_SECONDS = 5.0
 _ROLE_FREQUENCY_CONVERGENCE_REQUIRED_EXACT_READS = 2
 _STAGED_TRANSPORT_RETRY_DELAY_SECONDS = 2.0
 _STAGED_MONITOR_HEARTBEAT_MAX_INTERVAL_SECONDS = 4.0
+_STAGED_AUTO_PARTIAL_SETTLE_MAX_SECONDS = 15.0
+_STAGED_AUTO_PARTIAL_MAX_SAMPLES = 3
 # Read-only field sampling observed Pro NowTime advance in independent 22-25 second batches.
 # Treat 30 seconds as a conservative early-boundary allowance: a larger hidden lag can only make
 # the attended experiment fail closed, never authorize an early Auto transition as schedule-led.
@@ -240,6 +242,11 @@ class ScheduleLinkageRunFailure(StrEnum):
     MONITOR = "monitor"
     MONITOR_HEARTBEAT = "monitor_heartbeat"
     MONITOR_STATE_READ = "monitor_state_read"
+    MONITOR_STATE_EVIDENCE = "monitor_state_evidence"
+    MONITOR_AUTO_EVIDENCE = "monitor_auto_evidence"
+    MONITOR_EARLY_AUTO_TRANSITION = "monitor_early_auto_transition"
+    MONITOR_AUTO_REGRESSION = "monitor_auto_regression"
+    MONITOR_AUTO_TRANSITION_TIMEOUT = "monitor_auto_transition_timeout"
     MONITOR_SESSION_REFRESH = "monitor_session_refresh"
     MONITOR_DEADLINE = "monitor_deadline"
     CANCELLED = "cancelled"
@@ -298,6 +305,9 @@ class ScheduleLinkageRunProgressEvent(BaseModel):
             ScheduleLinkageRunFailure.SLAVE_PAIR_MASTER_STATE,
             ScheduleLinkageRunFailure.SLAVE_PAIR_SLAVE_STATE,
         }
+        monitor_state_failures = {
+            ScheduleLinkageRunFailure.MONITOR_STATE_EVIDENCE,
+        }
         pair_auto_failures = {
             ScheduleLinkageRunFailure.MASTER_PAIR_AUTO,
             ScheduleLinkageRunFailure.MASTER_PAIR_MASTER_AUTO,
@@ -306,8 +316,16 @@ class ScheduleLinkageRunProgressEvent(BaseModel):
             ScheduleLinkageRunFailure.SLAVE_PAIR_MASTER_AUTO,
             ScheduleLinkageRunFailure.SLAVE_PAIR_SLAVE_AUTO,
         }
+        monitor_auto_failures = {
+            ScheduleLinkageRunFailure.MONITOR_AUTO_EVIDENCE,
+            ScheduleLinkageRunFailure.MONITOR_EARLY_AUTO_TRANSITION,
+            ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION,
+            ScheduleLinkageRunFailure.MONITOR_AUTO_TRANSITION_TIMEOUT,
+        }
         dimensional_failures = {
             ScheduleLinkageRunFailure.CONFIRMATION_MISMATCH,
+            *monitor_state_failures,
+            *monitor_auto_failures,
             *pair_state_failures,
             *pair_auto_failures,
         }
@@ -361,7 +379,7 @@ class ScheduleLinkageRunProgressEvent(BaseModel):
             )
         ):
             raise ValueError("confirmation mismatch contains a non-confirmation dimension")
-        if self.failure in pair_state_failures and any(
+        if self.failure in {*pair_state_failures, *monitor_state_failures} and any(
             dimension not in pair_state_dimensions for dimension in self.drift_dimensions
         ):
             raise ValueError("pair state failure contains a non-state dimension")
@@ -369,6 +387,10 @@ class ScheduleLinkageRunProgressEvent(BaseModel):
             ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
         ):
             raise ValueError("pair Auto failure requires only the Auto evidence dimension")
+        if self.failure in monitor_auto_failures and self.drift_dimensions != (
+            ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+        ):
+            raise ValueError("monitor Auto failure requires only the Auto evidence dimension")
         return self
 
 
@@ -725,6 +747,12 @@ class _TransitionPlan:
 class _ClockAnchor:
     clocks: Mapping[str, datetime]
     sampled_at_monotonic: float
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedAutoClassification:
+    side: Literal["before", "transitional", "after"]
+    b_fields: frozenset[Literal["mode", "flow", "frequency"]] = frozenset()
 
 
 def schedule_linkage_confirmation_token(
@@ -2936,11 +2964,12 @@ class ScheduleActiveLinkageController:
     async def _acquire_staged_monitor_pair_with_retry(
         self,
         record: ScheduleLinkageRecord,
-    ) -> tuple[dict[str, DeviceState], float]:
+    ) -> tuple[dict[str, DeviceState], float, bool]:
         """Retry one transport-only acquisition on a fresh, exact paired session."""
 
         try:
-            return await self._acquire_staged_monitor_pair(record)
+            states, heartbeat_started_at = await self._acquire_staged_monitor_pair(record)
+            return states, heartbeat_started_at, False
         except asyncio.CancelledError:
             raise
         except ScheduleLinkageError:
@@ -2967,7 +2996,8 @@ class ScheduleActiveLinkageController:
         self._validate_recovery_bindings(record)
         self._assert_staged_monitor_retry_record(record)
         self._assert_staged_monitor_retry_authority(minimum_remaining_seconds=0)
-        return await self._acquire_staged_monitor_pair(record)
+        states, heartbeat_started_at = await self._acquire_staged_monitor_pair(record)
+        return states, heartbeat_started_at, True
 
     def _assert_staged_monitor_retry_record(
         self,
@@ -3077,6 +3107,14 @@ class ScheduleActiveLinkageController:
             spec.slave_device_id: LinkageRole.ASYNC_SLAVE,
         }
         after_seen: set[str] = set()
+        b_fields_seen: dict[
+            str,
+            set[Literal["mode", "flow", "frequency"]],
+        ] = {device_id: set() for device_id in expected_roles}
+        partial_started_at: dict[str, float | None] = {
+            device_id: None for device_id in expected_roles
+        }
+        partial_sample_count = {device_id: 0 for device_id in expected_roles}
         consecutive_after = 0
         previous_after: tuple[tuple[str, int, int], ...] | None = None
         stable_after_started_at: float | None = None
@@ -3086,35 +3124,122 @@ class ScheduleActiveLinkageController:
                 "staged Auto transition has no authorized monotonic boundary window"
             )
         while self._monotonic() <= self._require_observation_deadline():
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR
+            self._run_drift_dimensions = ()
             if self._stop_requested():
                 return ScheduleLinkageStopReason.MANUAL, False
             if not self._active_observation_allowed():
                 raise ScheduleLinkageApplyError(
                     "schedule-linkage safety authority was revoked"
                 )
-            states, heartbeat_started_at = (
+            states, heartbeat_started_at, transport_retried = (
                 await self._acquire_staged_monitor_pair_with_retry(record)
             )
             sampled_at = self._monotonic()
             self._assert_observation_deadline(sampled_at)
-            self._run_failure = ScheduleLinkageRunFailure.MONITOR
-            sides = self._classify_staged_auto_sides(record, states, expected_roles)
+            if transport_retried:
+                # A reconnect creates an unobserved interval between two session generations.
+                # Preserve irreversible A-to-B field evidence, but never count that gap toward
+                # the required unchanged post-boundary observation.
+                consecutive_after = 0
+                previous_after = None
+                stable_after_started_at = None
+            classifications = self._classify_staged_auto_sides(
+                record,
+                states,
+                expected_roles,
+            )
+            sides = {
+                device_id: classification.side
+                for device_id, classification in classifications.items()
+            }
+            master_side = sides[spec.master_device_id]
+            terminal_candidate = master_side == "after" and all(
+                side != "transitional" for side in sides.values()
+            )
             if (
                 sampled_at < transition_not_before
-                and any(side == "after" for side in sides.values())
+                and any(side != "before" for side in sides.values())
             ):
+                self._run_failure = (
+                    ScheduleLinkageRunFailure.MONITOR_EARLY_AUTO_TRANSITION
+                )
+                self._run_drift_dimensions = (
+                    ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+                )
                 raise ScheduleLinkageApplyError(
                     "staged Auto evidence changed before the conservative boundary window"
                 )
             for device_id in after_seen:
                 if sides[device_id] == "before":
+                    self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
+                    self._run_drift_dimensions = (
+                        ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+                    )
                     raise ScheduleLinkageApplyError(
                         "staged Auto evidence returned to its prior entry"
                     )
+                if sides[device_id] == "transitional":
+                    self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
+                    self._run_drift_dimensions = (
+                        ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+                    )
+                    raise ScheduleLinkageApplyError(
+                        "staged Auto evidence regressed to a partial transition"
+                    )
+            for device_id, seen_fields in b_fields_seen.items():
+                if not seen_fields.issubset(classifications[device_id].b_fields):
+                    self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
+                    self._run_drift_dimensions = (
+                        ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+                    )
+                    raise ScheduleLinkageApplyError(
+                        "staged Auto field evidence regressed toward its prior entry"
+                    )
+            for device_id, classification in classifications.items():
+                started_at = partial_started_at[device_id]
+                settled = classification.side == "after" or (
+                    terminal_candidate
+                    and device_id == spec.slave_device_id
+                    and classification.side == "before"
+                )
+                if started_at is not None and (
+                    sampled_at - started_at
+                    > _STAGED_AUTO_PARTIAL_SETTLE_MAX_SECONDS
+                ):
+                    self._run_failure = (
+                        ScheduleLinkageRunFailure.MONITOR_AUTO_TRANSITION_TIMEOUT
+                    )
+                    self._run_drift_dimensions = (
+                        ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+                    )
+                    raise ScheduleLinkageApplyError(
+                        "staged Auto partial transition did not settle in time"
+                    )
+                if classification.side == "transitional":
+                    if started_at is None:
+                        partial_started_at[device_id] = sampled_at
+                    partial_sample_count[device_id] += 1
+                    if (
+                        partial_sample_count[device_id]
+                        > _STAGED_AUTO_PARTIAL_MAX_SAMPLES
+                    ):
+                        self._run_failure = (
+                            ScheduleLinkageRunFailure.MONITOR_AUTO_TRANSITION_TIMEOUT
+                        )
+                        self._run_drift_dimensions = (
+                            ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+                        )
+                        raise ScheduleLinkageApplyError(
+                            "staged Auto partial transition exceeded its report limit"
+                        )
+                elif settled:
+                    partial_started_at[device_id] = None
+                    partial_sample_count[device_id] = 0
+                b_fields_seen[device_id].update(classification.b_fields)
             after_seen.update(
                 device_id for device_id, side in sides.items() if side == "after"
             )
-            master_side = sides[spec.master_device_id]
             if all(side == "before" for side in sides.values()):
                 self._assert_pair_sample(
                     record,
@@ -3125,7 +3250,7 @@ class ScheduleActiveLinkageController:
                 consecutive_after = 0
                 previous_after = None
                 stable_after_started_at = None
-            elif master_side == "after":
+            elif terminal_candidate:
                 # The master's exact B tuple proves that the staged boundary has happened.  The
                 # slave may expose its own B Flow, follow the master's Flow, keep A's Flow, or
                 # even retain the exact A tuple; holding that bounded safe candidate stable is the
@@ -3154,11 +3279,14 @@ class ScheduleActiveLinkageController:
                     self._assert_observation_deadline()
                     return ScheduleLinkageStopReason.BOUNDARY_VERIFIED, True
             else:
-                # Explicit Auto DPs can refresh independently.  A mixed sample is transitional,
-                # but a participant that has already reached B may never return to A.
+                # AutoMode, AutoFlow and AutoFreq reports can refresh independently within one
+                # controller.  An allow-listed partial tuple proves neither A nor B, so it emits
+                # no sample and contributes no time or count toward stable-after evidence.
                 consecutive_after = 0
                 previous_after = None
                 stable_after_started_at = None
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR
+            self._run_drift_dimensions = ()
             elapsed_since_heartbeat = max(
                 0.0,
                 self._monotonic() - heartbeat_started_at,
@@ -3182,9 +3310,11 @@ class ScheduleActiveLinkageController:
         record: ScheduleLinkageRecord,
         states: Mapping[str, DeviceState],
         expected_roles: Mapping[str, LinkageRole],
-    ) -> dict[str, Literal["before", "after"]]:
-        """Reject every Auto tuple except the captured A or guarded B evidence."""
+    ) -> dict[str, _StagedAutoClassification]:
+        """Classify token-bound A/B evidence and safe fieldwise A-to-B reports."""
 
+        self._run_failure = ScheduleLinkageRunFailure.MONITOR_STATE_EVIDENCE
+        self._run_drift_dimensions = ()
         self._assert_pair_sample(
             record,
             states,
@@ -3192,7 +3322,11 @@ class ScheduleActiveLinkageController:
             phase="ambiguous",
             emit_sample=False,
         )
-        sides: dict[str, Literal["before", "after"]] = {}
+        self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_EVIDENCE
+        self._run_drift_dimensions = (
+            ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+        )
+        classifications: dict[str, _StagedAutoClassification] = {}
         for snapshot in record.snapshots:
             observed_role: Literal["master", "slave"] = (
                 "master"
@@ -3205,15 +3339,85 @@ class ScheduleActiveLinkageController:
                 observed_role=observed_role,
             )
             evidence = _observed_auto(snapshot.device_id, states[snapshot.device_id])
+            b_fields = self._staged_auto_b_fields(record, snapshot, evidence)
             if evidence == snapshot.expectation.before:
-                sides[snapshot.device_id] = "before"
+                side: Literal["before", "transitional", "after"] = "before"
             elif self._matches_after_evidence(record, snapshot, evidence):
-                sides[snapshot.device_id] = "after"
+                side = "after"
+            elif self._is_safe_staged_transitional_auto(record, snapshot, evidence):
+                side = "transitional"
             else:
                 raise ScheduleLinkageApplyError(
                     f"device {snapshot.device_id!r} reported an unknown staged Auto tuple"
                 )
-        return sides
+            classifications[snapshot.device_id] = _StagedAutoClassification(
+                side=side,
+                b_fields=b_fields,
+            )
+        return classifications
+
+    @staticmethod
+    def _staged_auto_b_fields(
+        record: ScheduleLinkageRecord,
+        snapshot: ScheduleLinkageSnapshot,
+        evidence: ScheduleAutoEvidence,
+    ) -> frozenset[Literal["mode", "flow", "frequency"]]:
+        """Return irreversible B-side fields, excluding observed slave Flow variance."""
+
+        expectation = snapshot.expectation
+        fields: set[Literal["mode", "flow", "frequency"]] = set()
+        if (
+            expectation.before.mode != expectation.after_mode
+            and evidence.mode == expectation.after_mode
+        ):
+            fields.add("mode")
+        slave_flow_variance = (
+            record.spec.observe_slave_after_tuple_variance
+            and snapshot.device_id == record.spec.slave_device_id
+        )
+        if (
+            not slave_flow_variance
+            and expectation.before.flow != expectation.after_flow
+            and evidence.flow == expectation.after_flow
+        ):
+            fields.add("flow")
+        if (
+            expectation.after_frequency is not None
+            and expectation.before.frequency != expectation.after_frequency
+            and evidence.frequency == expectation.after_frequency
+        ):
+            fields.add("frequency")
+        return frozenset(fields)
+
+    def _is_safe_staged_transitional_auto(
+        self,
+        record: ScheduleLinkageRecord,
+        snapshot: ScheduleLinkageSnapshot,
+        evidence: ScheduleAutoEvidence,
+    ) -> bool:
+        """Allow only fieldwise A-to-B reports inside the owned active monitor."""
+
+        expectation = snapshot.expectation
+        self._assert_auto_flow_safe(snapshot, evidence)
+        if evidence.mode not in {expectation.before.mode, expectation.after_mode}:
+            return False
+        # The owned staged plan is Constant-to-Sine.  Retaining None here prevents a transient
+        # feed tuple (and its AutoFeedTime) from being accepted as a boundary update.
+        if evidence.feed_time != expectation.before.feed_time:
+            return False
+        allowed_frequencies = {expectation.before.frequency}
+        if expectation.after_frequency is not None:
+            allowed_frequencies.add(expectation.after_frequency)
+        if evidence.frequency not in allowed_frequencies:
+            return False
+        slave_variance = (
+            record.spec.observe_slave_after_tuple_variance
+            and snapshot.device_id == record.spec.slave_device_id
+        )
+        return slave_variance or evidence.flow in {
+            expectation.before.flow,
+            expectation.after_flow,
+        }
 
     def _assert_pair_sample(
         self,
@@ -3338,6 +3542,14 @@ class ScheduleActiveLinkageController:
         snapshot: ScheduleLinkageSnapshot,
         evidence: ScheduleAutoEvidence,
     ) -> bool:
+        self._assert_auto_flow_safe(snapshot, evidence)
+        return True
+
+    def _assert_auto_flow_safe(
+        self,
+        snapshot: ScheduleLinkageSnapshot,
+        evidence: ScheduleAutoEvidence,
+    ) -> None:
         capabilities = self._get_device(snapshot.device_id).capabilities
         limits = capabilities.power_limits
         guarded_maximum = min(limits.max_power, _SCHEDULE_LINKAGE_TEST_MAX_POWER)
@@ -3348,7 +3560,6 @@ class ScheduleActiveLinkageController:
             raise ScheduleLinkageApplyError(
                 f"device {snapshot.device_id!r} observed unsafe AutoFlow"
             )
-        return True
 
     def _emit_sample_best_effort(self, sample: ScheduleLinkageSample) -> None:
         if self._sample_observer is None:
@@ -3378,6 +3589,12 @@ class ScheduleActiveLinkageController:
 
         participant = self._run_pair_participant
         if participant is None:
+            if (
+                self._run_failure
+                is ScheduleLinkageRunFailure.MONITOR_STATE_EVIDENCE
+                and substage == "state"
+            ):
+                self._run_drift_dimensions = dimensions
             return
         failure_by_stage = {
             ("master", "session_refresh"): (
