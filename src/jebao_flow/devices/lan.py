@@ -24,6 +24,8 @@ from jebao_flow.devices.base import (
     ControlVerificationOutcome,
     DeviceConnectionError,
     HardwareWritesDisabledError,
+    HeartbeatFencedStateError,
+    HeartbeatFencedStateStage,
     JebaoDevice,
     PowerStateVerificationError,
     SafetyInterlockError,
@@ -302,6 +304,47 @@ class LanJebaoDevice(JebaoDevice):
                 self._quarantine_session_now(self._session)
                 raise
 
+    async def get_heartbeat_fenced_state(self) -> DeviceState:
+        """Heartbeat and read report-capable state on one locked session generation."""
+
+        async with self._io_lock:
+            session = self._session
+            if self._session_retired:
+                error = DeviceConnectionError(
+                    f"retired session for {self._device_id!r} must be replaced before heartbeat"
+                )
+                raise HeartbeatFencedStateError(
+                    HeartbeatFencedStateStage.HEARTBEAT,
+                    error,
+                ) from error
+            try:
+                await session.heartbeat()
+            except asyncio.CancelledError:
+                self._session_retired = True
+                self._quarantine_session_now(session)
+                raise
+            except Exception as error:
+                self._session_retired = True
+                self._quarantine_session_now(session)
+                raise HeartbeatFencedStateError(
+                    HeartbeatFencedStateStage.HEARTBEAT,
+                    error,
+                ) from error
+            try:
+                raw = await session.read_raw_state(accept_reports=True)
+                return self._decode_state(raw)
+            except asyncio.CancelledError:
+                self._session_retired = True
+                self._quarantine_session_now(session)
+                raise
+            except Exception as error:
+                self._session_retired = True
+                self._quarantine_session_now(session)
+                raise HeartbeatFencedStateError(
+                    HeartbeatFencedStateStage.STATE_READ,
+                    error,
+                ) from error
+
     async def _get_state(self, *, accept_reports: bool | None) -> DeviceState:
         async with self._io_lock:
             if self._session_retired:
@@ -314,13 +357,7 @@ class LanJebaoDevice(JebaoDevice):
                     if accept_reports is None
                     else await self._session.read_raw_state(accept_reports=accept_reports)
                 )
-                values = self.schema.decode_status(raw)
-                schedule = decode_schedule(
-                    self.schema.product_key,
-                    raw,
-                    enabled=bool(values.get(self.schema.timer_attribute, False)),
-                )
-                state = self._to_device_state(values, schedule=schedule)
+                state = self._decode_state(raw)
             except asyncio.CancelledError:
                 self._session_retired = True
                 self._quarantine_session_now(self._session)
@@ -330,6 +367,15 @@ class LanJebaoDevice(JebaoDevice):
                 self._quarantine_session_now(self._session)
                 raise
             return state
+
+    def _decode_state(self, raw: bytes) -> DeviceState:
+        values = self.schema.decode_status(raw)
+        schedule = decode_schedule(
+            self.schema.product_key,
+            raw,
+            enabled=bool(values.get(self.schema.timer_attribute, False)),
+        )
+        return self._to_device_state(values, schedule=schedule)
 
     async def set_enabled(self, enabled: bool) -> None:
         attribute = self._require_logical_attribute(Capability.ENABLED)

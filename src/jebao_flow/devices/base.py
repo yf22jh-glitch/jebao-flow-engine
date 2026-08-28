@@ -19,6 +19,26 @@ class DeviceConnectionError(DeviceError):
     pass
 
 
+class HeartbeatFencedStateStage(StrEnum):
+    """Allow-listed half of one heartbeat-fenced state acquisition."""
+
+    HEARTBEAT = "heartbeat"
+    STATE_READ = "state_read"
+
+
+class HeartbeatFencedStateError(DeviceError):
+    """Preserve which read-only half failed without exposing transport details."""
+
+    def __init__(
+        self,
+        stage: HeartbeatFencedStateStage,
+        cause: Exception,
+    ) -> None:
+        super().__init__(f"heartbeat-fenced state acquisition failed during {stage.value}")
+        self.stage = stage
+        self.cause = cause
+
+
 class UnsupportedCapabilityError(DeviceError):
     pass
 
@@ -179,6 +199,29 @@ class JebaoDevice(ABC):
         """
 
         return None
+
+    async def get_heartbeat_fenced_state(self) -> DeviceState:
+        """Return state immediately after a successful transport heartbeat.
+
+        The generic fallback preserves stage-specific failures but cannot promise transport
+        atomicity. Drivers with a persistent session should override this method and hold their
+        session lock across both operations, as the LAN driver does.
+        """
+
+        try:
+            await self.heartbeat()
+        except Exception as error:
+            raise HeartbeatFencedStateError(
+                HeartbeatFencedStateStage.HEARTBEAT,
+                error,
+            ) from error
+        try:
+            return await self.get_state()
+        except Exception as error:
+            raise HeartbeatFencedStateError(
+                HeartbeatFencedStateStage.STATE_READ,
+                error,
+            ) from error
 
     @abstractmethod
     async def set_enabled(self, enabled: bool) -> None: ...

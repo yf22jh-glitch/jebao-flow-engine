@@ -17,6 +17,8 @@ from jebao_flow.devices import (
     ControlVerificationOutcome,
     DeviceConnectionError,
     HardwareWritesDisabledError,
+    HeartbeatFencedStateError,
+    HeartbeatFencedStateStage,
     LanJebaoDevice,
     PhysicalDeviceBinding,
     PowerStateVerificationError,
@@ -238,6 +240,110 @@ async def test_heartbeat_is_serialized_read_only_transport_traffic() -> None:
     assert session.heartbeat_calls == 1
     assert session.sent == []
     assert session.connected is True
+
+
+async def test_heartbeat_fenced_state_uses_one_session_and_accepts_reports() -> None:
+    device = _device()
+    await device.connect()
+
+    state = await device.get_heartbeat_fenced_state()
+
+    [session] = _FakeSession.instances
+    assert state.online is True
+    assert session.events[-2:] == ["heartbeat", "read:reports"]
+    assert session.heartbeat_calls == 1
+    assert session.read_accept_reports == [True]
+    assert session.sent == []
+
+
+@pytest.mark.parametrize(
+    "failed_stage",
+    [HeartbeatFencedStateStage.HEARTBEAT, HeartbeatFencedStateStage.STATE_READ],
+)
+async def test_heartbeat_fenced_state_preserves_failure_stage_and_quarantines(
+    failed_stage: HeartbeatFencedStateStage,
+) -> None:
+    if failed_stage is HeartbeatFencedStateStage.HEARTBEAT:
+        _FakeSession.heartbeat_failure = ProtocolTimeoutError("private heartbeat failure")
+    else:
+        _FakeSession.read_failures_remaining = 1
+    device = _device()
+    await device.connect()
+    [session] = _FakeSession.instances
+
+    with pytest.raises(HeartbeatFencedStateError) as caught:
+        await device.get_heartbeat_fenced_state()
+
+    assert caught.value.stage is failed_stage
+    assert isinstance(caught.value.cause, ProtocolTimeoutError)
+    assert session.events[-1] == "quarantine"
+    assert session.connected is False
+
+
+async def test_heartbeat_fenced_state_holds_device_lock_across_both_operations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = _device()
+    await device.connect()
+    [session] = _FakeSession.instances
+    heartbeat_started = asyncio.Event()
+    resume_heartbeat = asyncio.Event()
+    original_heartbeat = session.heartbeat
+
+    async def paused_heartbeat() -> None:
+        await original_heartbeat()
+        heartbeat_started.set()
+        await resume_heartbeat.wait()
+
+    monkeypatch.setattr(session, "heartbeat", paused_heartbeat)
+    fenced_task = asyncio.create_task(device.get_heartbeat_fenced_state())
+    await asyncio.wait_for(heartbeat_started.wait(), timeout=1)
+    competing_read = asyncio.create_task(device.get_state())
+    await asyncio.sleep(0)
+
+    assert session.events[-1] == "heartbeat"
+    assert session.read_accept_reports == []
+
+    resume_heartbeat.set()
+    await asyncio.wait_for(fenced_task, timeout=1)
+    await asyncio.wait_for(competing_read, timeout=1)
+
+    assert len(_FakeSession.instances) == 1
+    assert session.events[-3:] == ["heartbeat", "read:reports", "read:reports"]
+
+
+async def test_cancelled_heartbeat_fenced_state_read_quarantines_same_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = _device()
+    await device.connect()
+    [session] = _FakeSession.instances
+    read_started = asyncio.Event()
+    never_resume = asyncio.Event()
+
+    async def hanging_read(*, accept_reports: bool = True) -> bytes:
+        session.read_accept_reports.append(accept_reports)
+        session.events.append("read:reports")
+        read_started.set()
+        await never_resume.wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(session, "read_raw_state", hanging_read)
+    task = asyncio.create_task(device.get_heartbeat_fenced_state())
+    await asyncio.wait_for(read_started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert session.events[-1] == "quarantine"
+    assert session.connected is False
+    assert session.heartbeat_calls == 1
+    assert session.read_accept_reports == [True]
+    with pytest.raises(HeartbeatFencedStateError) as caught:
+        await device.get_heartbeat_fenced_state()
+    assert caught.value.stage is HeartbeatFencedStateStage.HEARTBEAT
+    assert isinstance(caught.value.cause, DeviceConnectionError)
 
 
 async def test_heartbeat_rejects_retired_session_without_transport_traffic() -> None:

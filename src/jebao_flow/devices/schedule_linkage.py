@@ -30,7 +30,12 @@ from pydantic import (
     model_validator,
 )
 
-from jebao_flow.devices.base import DeviceConnectionError, JebaoDevice
+from jebao_flow.devices.base import (
+    DeviceConnectionError,
+    HeartbeatFencedStateError,
+    HeartbeatFencedStateStage,
+    JebaoDevice,
+)
 from jebao_flow.devices.identity import PhysicalDeviceBinding, physical_identity_key
 from jebao_flow.devices.linkage import LinkageSafetyInterlock, schedule_structure_fingerprint
 from jebao_flow.protocol.errors import ProtocolError
@@ -376,6 +381,8 @@ def schedule_linkage_run_progress_rank(kind: ScheduleLinkageRunProgressKind) -> 
 def _is_retryable_transport_failure(error: BaseException) -> bool:
     """Return whether a fresh session can safely resolve an acquisition failure."""
 
+    if isinstance(error, HeartbeatFencedStateError):
+        error = error.cause
     return isinstance(error, (DeviceConnectionError, ProtocolError, OSError))
 
 
@@ -2035,36 +2042,6 @@ class ScheduleActiveLinkageController:
                     task.cancel()
             await asyncio.gather(*heartbeat_tasks, return_exceptions=True)
 
-    async def _heartbeat_pair_guarded(self, spec: ScheduleLinkageSpec) -> None:
-        """Cancel paired keepalives promptly if stop or safety authority changes."""
-
-        stop_event = self._stop_event
-        if stop_event is None:
-            raise ScheduleLinkageApplyError("schedule-linkage stop authority is unavailable")
-        heartbeat_task = asyncio.create_task(self._heartbeat_pair(spec))
-        stop_task = asyncio.create_task(stop_event.wait())
-        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
-        tasks = (heartbeat_task, stop_task, safety_task)
-        try:
-            done, _pending = await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if stop_task in done:
-                raise ScheduleLinkageApplyError(
-                    "schedule-linkage stop was requested during active heartbeat"
-                )
-            if safety_task in done:
-                raise ScheduleLinkageApplyError(
-                    "schedule-linkage safety authority was revoked during active heartbeat"
-                )
-            heartbeat_task.result()
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
     async def _read_pair_explicit_states_guarded(
         self,
         spec: ScheduleLinkageSpec,
@@ -2097,6 +2074,65 @@ class ScheduleActiveLinkageController:
                 )
             if safety_task in done:
                 self._set_pair_verification_checkpoint()
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage safety authority was revoked"
+                )
+            return read_task.result()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _read_pair_heartbeat_fenced_states_guarded(
+        self,
+        spec: ScheduleLinkageSpec,
+    ) -> dict[str, DeviceState]:
+        """Acquire paired heartbeat-fenced states under stop and safety authority.
+
+        A role-active GAgent may interleave, or return, the complete state produced by a
+        0x90/0x02 query as an action-0x04 report rather than the action-0x03 reply commonly seen
+        in independent mode. Each device driver owns one atomic heartbeat/read operation so no
+        other request or session replacement can cross the fence. This relaxed read is
+        deliberately monitor-only; capture, first-write, post-role and restore evidence remain
+        reply-only.
+        """
+
+        stop_event = self._stop_event
+        if stop_event is None:
+            raise ScheduleLinkageApplyError("schedule-linkage stop authority is unavailable")
+        ids = (spec.master_device_id, spec.slave_device_id)
+        state_tasks = tuple(
+            asyncio.create_task(
+                self._get_device(device_id).get_heartbeat_fenced_state()
+            )
+            for device_id in ids
+        )
+
+        async def read_pair() -> dict[str, DeviceState]:
+            try:
+                states = await asyncio.gather(*state_tasks)
+            finally:
+                for task in state_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*state_tasks, return_exceptions=True)
+            return dict(zip(ids, states, strict=True))
+
+        read_task = asyncio.create_task(read_pair())
+        stop_task = asyncio.create_task(stop_event.wait())
+        safety_task = asyncio.create_task(self._safety_interlock.wait_until_blocked())
+        tasks = (read_task, stop_task, safety_task)
+        try:
+            done, _pending = await asyncio.wait(
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                raise ScheduleLinkageApplyError(
+                    "schedule-linkage stop was requested during active observation"
+                )
+            if safety_task in done:
                 raise ScheduleLinkageApplyError(
                     "schedule-linkage safety authority was revoked"
                 )
@@ -2877,21 +2913,19 @@ class ScheduleActiveLinkageController:
         self,
         record: ScheduleLinkageRecord,
     ) -> tuple[dict[str, DeviceState], float]:
-        """Heartbeat and explicitly read one staged pair without changing device state."""
+        """Heartbeat-fence and read one staged pair without changing device state."""
 
         self._run_failure = ScheduleLinkageRunFailure.MONITOR_HEARTBEAT
         heartbeat_started_at = self._monotonic()
-        await self._heartbeat_pair_guarded(record.spec)
         try:
-            self._assert_observation_deadline()
-        except ScheduleLinkageApplyError:
-            self._run_failure = ScheduleLinkageRunFailure.MONITOR_DEADLINE
+            states = await self._read_pair_heartbeat_fenced_states_guarded(record.spec)
+        except HeartbeatFencedStateError as error:
+            self._run_failure = (
+                ScheduleLinkageRunFailure.MONITOR_HEARTBEAT
+                if error.stage is HeartbeatFencedStateStage.HEARTBEAT
+                else ScheduleLinkageRunFailure.MONITOR_STATE_READ
+            )
             raise
-        self._run_failure = ScheduleLinkageRunFailure.MONITOR_STATE_READ
-        states = await self._read_pair_explicit_states_guarded(
-            record.spec,
-            context="active observation",
-        )
         try:
             self._assert_observation_deadline()
         except ScheduleLinkageApplyError:

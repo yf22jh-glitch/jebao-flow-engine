@@ -24,6 +24,22 @@ DEFAULT_CONTROL_PORT = 12416
 _LOGGER = logging.getLogger(__name__)
 
 
+def _is_async_state_report(frame: GizwitsFrame) -> bool:
+    """Return whether a frame is one valid unsolicited P0 state report.
+
+    GAgent can broadcast action-0x04 reports to an authenticated LAN client while that client is
+    waiting for an unrelated response.  These reports are expected asynchronous traffic, not
+    evidence that the stream is desynchronised.  Empty or action-only 0x91 frames and every other
+    action remain ordinary unexpected frames and therefore consume the bounded skip budget.
+    """
+
+    return (
+        frame.command == GizwitsCommand.SERIAL_TRANSMIT_RESPONSE
+        and len(frame.payload) > 1
+        and frame.payload[0] == STATE_REPORT_ACTION
+    )
+
+
 class GizwitsSession:
     """Serializes request/response exchanges over one authenticated TCP stream.
 
@@ -219,12 +235,20 @@ class GizwitsSession:
                 async with asyncio.timeout(self.response_timeout_seconds):
                     writer.write(encode_frame(command, payload))
                     await writer.drain()
-                    for _ in range(self.max_skipped_frames + 1):
+                    skipped_frames = 0
+                    while skipped_frames <= self.max_skipped_frames:
                         frame = await read_frame(reader)
                         if frame.command in expected_values and (
                             response_predicate is None or response_predicate(frame)
                         ):
                             return frame
+                        if _is_async_state_report(frame):
+                            _LOGGER.debug(
+                                "skipped_async_state_report",
+                                extra={"address": self.address},
+                            )
+                            continue
+                        skipped_frames += 1
                         _LOGGER.debug(
                             "skipped_unsolicited_frame",
                             extra={

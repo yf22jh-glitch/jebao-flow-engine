@@ -124,6 +124,13 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         self.clock_offsets_after_role: dict[LinkageRole, float] = {}
         self.last_written_role = LinkageRole.INDEPENDENT
         self.ordinary_state_read_count = 0
+        self.fail_ordinary_state_read_numbers: set[int] = set()
+        self.ordinary_state_read_failures: dict[int, BaseException] = {}
+        self.ordinary_state_read_time_advances: dict[int, float] = {}
+        self.pause_ordinary_state_read_numbers: set[int] = set()
+        self.ordinary_state_read_paused = asyncio.Event()
+        self.resume_ordinary_state_read = asyncio.Event()
+        self.ordinary_state_read_cancelled_count = 0
         self.explicit_state_read_count = 0
         self.fail_explicit_state_reads_remaining = 0
         self.fail_explicit_state_read_numbers: set[int] = set()
@@ -185,6 +192,24 @@ class _ScheduleDevice(SimulatedJebaoDevice):
     async def get_state(self):
         if not self._explicit_state_read_active:
             self.ordinary_state_read_count += 1
+            read_number = self.ordinary_state_read_count
+            self.virtual_time.value += self.ordinary_state_read_time_advances.pop(
+                read_number,
+                0.0,
+            )
+            if read_number in self.pause_ordinary_state_read_numbers:
+                self.pause_ordinary_state_read_numbers.discard(read_number)
+                self.ordinary_state_read_paused.set()
+                try:
+                    await self.resume_ordinary_state_read.wait()
+                except asyncio.CancelledError:
+                    self.ordinary_state_read_cancelled_count += 1
+                    raise
+            if read_number in self.fail_ordinary_state_read_numbers:
+                self.fail_ordinary_state_read_numbers.remove(read_number)
+                raise ProtocolConnectionError("simulated ordinary state read failure")
+            if read_number in self.ordinary_state_read_failures:
+                raise self.ordinary_state_read_failures.pop(read_number)
         state = await super().get_state()
         if state.linkage in self.role_frequency_overrides:
             state = state.model_copy(
@@ -3934,13 +3959,28 @@ async def test_staged_rejects_nonzero_raw_constant_frequency_at_preflight(
     assert slave.calls == []
 
 
-async def test_staged_monitor_uses_explicit_reads_and_accepts_mixed_auto_refresh(
+async def test_staged_monitor_uses_heartbeat_fenced_reports_after_explicit_role_checks(
     tmp_path: Path,
 ) -> None:
     master, slave = await _ready_staged_pair()
     # The slave's effective Auto tuple refreshes one sample after the master's tuple.
     slave.clock_offsets_after_role[LinkageRole.ASYNC_SLAVE] = -1
     samples: list[tuple[float, object]] = []
+    read_counts: list[tuple[ScheduleLinkageRunProgressKind, int, int]] = []
+
+    def observe_progress(event: ScheduleLinkageRunProgressEvent) -> None:
+        if event.kind in {
+            ScheduleLinkageRunProgressKind.MONITOR_STARTED,
+            ScheduleLinkageRunProgressKind.MONITOR_COMPLETED,
+        }:
+            read_counts.append(
+                (
+                    event.kind,
+                    master.explicit_state_read_count,
+                    master.ordinary_state_read_count,
+                )
+            )
+
     store = JsonScheduleLinkageJournalStore(tmp_path / "staged-mixed-auto.json")
     controller = _controller(
         master,
@@ -3949,6 +3989,7 @@ async def test_staged_monitor_uses_explicit_reads_and_accepts_mixed_auto_refresh
         sample_observer=lambda sample: samples.append(
             (master.virtual_time.value, sample)
         ),
+        progress_observer=observe_progress,
         refresh_sessions_before_critical_reads=True,
         owned_staged_auto_transition_observation=True,
     )
@@ -3965,18 +4006,116 @@ async def test_staged_monitor_uses_explicit_reads_and_accepts_mixed_auto_refresh
         sample.master.mode == "sine" and sample.slave.mode == "sine"
         for _, sample in after
     )
-    # Five explicit critical reads (preflight, run-fresh capture, gate and two role checks)
-    # precede one explicit read per monitor sample. No fresh session is opened for every
-    # observation sample.
-    assert (
-        master.explicit_state_read_count - 5
-        == master.virtual_time.sleep_count + 1
-    )
+    # Preflight, run-fresh capture, the gate and both post-role checks remain reply-only. The
+    # active monitor then uses only report-capable reads behind a successful heartbeat fence.
+    [
+        (started_kind, explicit_at_start, ordinary_at_start),
+        (completed_kind, explicit_at_end, ordinary_at_end),
+    ] = read_counts
+    assert started_kind is ScheduleLinkageRunProgressKind.MONITOR_STARTED
+    assert completed_kind is ScheduleLinkageRunProgressKind.MONITOR_COMPLETED
+    assert explicit_at_start == explicit_at_end == 5
+    assert ordinary_at_start == 0
+    assert ordinary_at_end > ordinary_at_start
     assert slave.explicit_state_read_count == master.explicit_state_read_count
-    assert master.explicit_state_read_count > master.session_connect_count
-    assert master.heartbeat_count == master.explicit_state_read_count - 3
-    assert slave.heartbeat_count == slave.explicit_state_read_count - 3
+    assert master.heartbeat_count == slave.heartbeat_count
+    assert master.heartbeat_count > 2
     assert store.load() is None
+
+
+async def test_staged_monitor_never_requires_explicit_reply_after_active_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    monitor_started = False
+    master_explicit = master.get_explicit_state
+    slave_explicit = slave.get_explicit_state
+
+    async def master_explicit_before_monitor_only():
+        if monitor_started:
+            raise AssertionError("role-active master exposes report-only state")
+        return await master_explicit()
+
+    async def slave_explicit_before_monitor_only():
+        if monitor_started:
+            raise AssertionError("role-active slave exposes report-only state")
+        return await slave_explicit()
+
+    def observe_progress(event: ScheduleLinkageRunProgressEvent) -> None:
+        nonlocal monitor_started
+        if event.kind is ScheduleLinkageRunProgressKind.MONITOR_STARTED:
+            monitor_started = True
+
+    monkeypatch.setattr(master, "get_explicit_state", master_explicit_before_monitor_only)
+    monkeypatch.setattr(slave, "get_explicit_state", slave_explicit_before_monitor_only)
+    store = JsonScheduleLinkageJournalStore(tmp_path / "staged-report-only-monitor.json")
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=observe_progress,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    result = await controller.run(await controller.preflight(_staged_spec()))
+
+    assert result.schedule_transition_verified is True
+    assert monitor_started is True
+    assert master.explicit_state_read_count == slave.explicit_state_read_count == 5
+    assert master.ordinary_state_read_count > 0
+    assert slave.ordinary_state_read_count > 0
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
+@pytest.mark.parametrize("authority", ["stop", "safety", "cancel"])
+async def test_staged_monitor_heartbeat_fenced_pair_cleans_up_on_authority_change(
+    tmp_path: Path,
+    authority: str,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    interlock = LinkageSafetyInterlock(initially_permitted=True)
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / f"staged-fenced-read-{authority}.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        safety_interlock=interlock,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    spec = _staged_spec()
+    preflight = await controller.preflight(spec)
+    for device in (master, slave):
+        device.pause_ordinary_state_read_numbers.add(1)
+    run_task = asyncio.create_task(controller.run(preflight))
+    await asyncio.wait_for(master.ordinary_state_read_paused.wait(), timeout=1)
+    await asyncio.wait_for(slave.ordinary_state_read_paused.wait(), timeout=1)
+
+    if authority == "stop":
+        assert await controller.stop(spec.operation_id) is True
+        result = await asyncio.wait_for(run_task, timeout=1)
+        assert result.stop_reason is ScheduleLinkageStopReason.MANUAL
+        assert result.schedule_transition_verified is False
+    elif authority == "safety":
+        interlock.trip()
+        with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
+            await asyncio.wait_for(run_task, timeout=1)
+    else:
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(run_task, timeout=1)
+
+    assert master.ordinary_state_read_cancelled_count == 1
+    assert slave.ordinary_state_read_cancelled_count == 1
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    _assert_only_linkage_calls(master, slave)
 
 
 async def test_staged_monitor_keeps_long_lived_pair_alive_without_control_rewrites(
@@ -4080,7 +4219,7 @@ async def test_staged_monitor_retries_one_transport_read_on_fresh_pair(
         owned_staged_auto_transition_observation=True,
     )
     preflight = await controller.preflight(_staged_spec())
-    slave.fail_explicit_state_read_numbers.add(20)
+    slave.fail_ordinary_state_read_numbers.add(15)
 
     result = await controller.run(preflight)
 
@@ -4146,7 +4285,7 @@ async def test_staged_monitor_second_transport_failure_restores_without_rewrite(
         owned_staged_auto_transition_observation=True,
     )
     preflight = await controller.preflight(_staged_spec())
-    slave.fail_explicit_state_read_numbers.update({20, 21})
+    slave.fail_ordinary_state_read_numbers.update({15, 16})
 
     with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
         await controller.run(preflight)
@@ -4177,7 +4316,7 @@ async def test_staged_monitor_does_not_retry_schema_or_semantic_read_failure(
         owned_staged_auto_transition_observation=True,
     )
     preflight = await controller.preflight(_staged_spec())
-    slave.explicit_state_read_failures[6] = ValueError(
+    slave.ordinary_state_read_failures[1] = ValueError(
         "simulated decoded schema mismatch"
     )
 
@@ -4262,8 +4401,8 @@ async def test_staged_monitor_retry_requires_complete_observation_budget(
         owned_staged_auto_transition_observation=True,
     )
     preflight = await controller.preflight(_staged_spec())
-    slave.explicit_state_read_time_advances[20] = 60
-    slave.fail_explicit_state_read_numbers.add(20)
+    slave.ordinary_state_read_time_advances[15] = 60
+    slave.fail_ordinary_state_read_numbers.add(15)
 
     with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
         await controller.run(preflight)
@@ -4301,7 +4440,7 @@ async def test_staged_monitor_successful_acquisition_deadline_is_typed(
     if overrun_stage == "heartbeat":
         master.heartbeat_time_advances[3] = 90
     else:
-        master.explicit_state_read_time_advances[6] = 90
+        master.ordinary_state_read_time_advances[1] = 90
 
     with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
         await controller.run(preflight)
@@ -4338,7 +4477,7 @@ async def test_staged_monitor_retry_stop_preempts_refresh_and_restores(
     )
     spec = _staged_spec()
     preflight = await controller.preflight(spec)
-    slave.fail_explicit_state_read_numbers.add(20)
+    slave.fail_ordinary_state_read_numbers.add(15)
     run_task = asyncio.create_task(controller.run(preflight))
     await asyncio.wait_for(retry_wait_started.wait(), timeout=1)
 
@@ -4370,7 +4509,7 @@ async def test_staged_monitor_retry_safety_trip_during_pair_refresh_restores(
         safety_interlock=interlock,
     )
     preflight = await controller.preflight(_staged_spec())
-    slave.fail_explicit_state_read_numbers.add(20)
+    slave.fail_ordinary_state_read_numbers.add(15)
     master.pause_before_connect_numbers.add(6)
     run_task = asyncio.create_task(controller.run(preflight))
     await asyncio.wait_for(master.connect_paused.wait(), timeout=1)
@@ -4401,10 +4540,10 @@ async def test_staged_monitor_retry_cancellation_during_second_read_restores(
         owned_staged_auto_transition_observation=True,
     )
     preflight = await controller.preflight(_staged_spec())
-    slave.fail_explicit_state_read_numbers.add(20)
-    slave.pause_explicit_state_read_numbers.add(21)
+    slave.fail_ordinary_state_read_numbers.add(15)
+    slave.pause_ordinary_state_read_numbers.add(16)
     run_task = asyncio.create_task(controller.run(preflight))
-    await asyncio.wait_for(slave.explicit_state_read_paused.wait(), timeout=1)
+    await asyncio.wait_for(slave.ordinary_state_read_paused.wait(), timeout=1)
 
     run_task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -4445,7 +4584,7 @@ async def test_staged_monitor_retry_rechecks_exact_durable_active_record(
         return original_confirms(record)
 
     monkeypatch.setattr(store, "confirms_lease_successor", reject_second_confirmation)
-    slave.fail_explicit_state_read_numbers.add(20)
+    slave.fail_ordinary_state_read_numbers.add(15)
 
     with pytest.raises(ScheduleLinkageApplyError, match="roles were detached"):
         await controller.run(preflight)
