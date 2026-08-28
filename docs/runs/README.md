@@ -70,6 +70,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | 파일 | 범위 | 요지 |
 |---|---|---|
 | [2026-08-26--28 네이티브 Linkage 실기 이력](2026-08-26--2026-08-28-native-linkage-history.md) | 13회 (legacy 집계) | 슬롯별 `AutoFlow` 질문은 여전히 UNKNOWN. 직접 시도는 5회 |
+| [2026-08-28 write-free collector pilot](2026-08-28-pilot-2bd1bf97.md) | 18 pair / 36 raw frame | collector transport·timing PASS. Q2는 판정하지 않음 |
 
 ## 새 실행 기록 템플릿
 
