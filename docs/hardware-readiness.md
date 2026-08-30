@@ -240,25 +240,39 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | 앱이 만든 제3자 baseline을 복원할 승인된 exact restore 수단과 권한이 있는가 | **BLOCKING / 미확보** — 선행조건 2 |
 | native MASTER/SLAVE 역할 write와 Sync 복구가 검증됐는가 | PASS |
 | 최소 write-free read-only collector가 실기 검증됐는가 | PASS — 18/18 pair, 36/36 explicit reply, offline verify PASS |
-| (Q2) ASYNC에서 slave가 자기 B 슬롯의 출력을 독립 적용하는가 | **UNKNOWN (PARKED, 2026-08-28)** — 아래 §park 참조 |
+| (Q2) ASYNC에서 slave가 자기 B 슬롯의 출력을 독립 적용하는가 | **YES / PASS (2026-08-30, 이 Pro pair·고정 계획 범위)** — master 31→35와 별개로 slave 32→40, 900초 epoch와 exact restore 완료 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |
 | 리턴·도징 actuator가 실기 검증됐는가 | NOT IN CURRENT TEST SCOPE |
 | 앱 없는 Wi-Fi provisioning과 control-mode reconnect restore가 준비됐는가 | NOT IMPLEMENTED |
 
-현재 전체 실행 판정은 **NO-GO**입니다. 동결된 write 하네스(부록 A)로는 실행하지 않습니다.
-대안인 읽기 전용 관측도 현재 **NO-GO / BLOCKED**입니다. 선행조건 1(최소 read-only
-collector)은 완료됐지만 선행조건 2(검증된 복원 수단)가 미확보이므로 앱 live-write와
-measurement epoch를 시작하지 않습니다.
+현재 **production grouping 전체 판정은 NO-GO**입니다. 다만 repository maintainer와 on-site
+hardware approver가 별도로 승인한 2026-08-30 Q2 단회 write 실기는 완료됐고, Q2 자체는 아래
+범위에서 닫혔습니다. 아래 읽기 전용 두-epoch 절차의 NO-GO와 선행조건 2 미확보는 그 별도
+절차에 관한 상태로 계속 유효하며, 완료된 단회 실기를 반복 실행하라는 뜻이 아닙니다.
 
-`UNKNOWN`을 코드의 가정으로 채우지 않습니다. 성공 판정은 실제 장비가 서로 다른 B 출력을
-300초 유지한 durable sample로만 내립니다. 그 전에 중단되면 원복 성공과 기능 검증 실패를
-서로 분리해 기록합니다.
+Q2 성공 판정은 실제 장비가 서로 다른 B 출력을 300초 이상 유지한 durable sample로 냈습니다.
+단회 실기는 `master=35`, `slave=40`을 900초 epoch 끝까지 관측했고 상충 sample이 없었습니다.
+상세 증거와 exact-restore raw는
+[`2026-08-30 Q2 attempt 05`](runs/2026-08-30-q2-attempt-05.md)에 있습니다.
 
-## park 판정 (2026-08-28)
+## Q2 단회 실기 결론 — 2026-08-30
 
-**ASYNC write 실기는 보류합니다. Q2는 읽기 전용 관측으로 먼저 판정을 시도하고, Q1은 현재
-범위 밖으로 park합니다.**
+- 경계 전: master `constant/31`, async-slave `constant/32`
+- 비원자 갱신 중 첫 관측: master `constant/31`, async-slave `sine/40`
+- 수초 내 완전 수렴: master `sine/35`, async-slave `sine/40`
+- 경계 후: 300초 안정 조건 및 900초 전체 epoch 동안 `35/40` 유지, 상충 0
+- 복원: 두 역할 `independent`, 원 `TimerON`과 manual controls, 두 432-byte schedule image가
+  fresh explicit raw에서 baseline과 byte-exact 일치
+
+따라서 이 두 Local Wavemaker Pro의 현재 펌웨어·설정에서는 async-slave가 master 출력에
+고정되지 않고 자기 스케줄 슬롯의 `AutoFlow`를 독립 적용합니다. 이는 protocol-reported
+`AutoFlow` 결론이며 물리 유량·파형·위상이나 다른 모델·펌웨어까지 증명하지 않습니다.
+
+## park 판정 (2026-08-28, Q2는 2026-08-30 해제·종결)
+
+아래는 2026-08-28 당시의 park 근거입니다. Q2는 이후 승인된 단회 실기로 YES/PASS가 됐고,
+Q1만 현재 범위 밖으로 계속 park합니다.
 
 ### Q1 (manual `Flow` 독립) — PARKED / OUT OF CURRENT SCOPE
 
@@ -274,9 +288,9 @@ Q1도 `UNKNOWN`입니다. 당시 "유지되지 않음"으로 기록됐다가 del
 이 조건 없이 Q1 실기를 반복하지 않습니다. 슬레이브별 개별 출력이 필요하면 모든 펌프를
 `independent`로 두는 소프트웨어 그룹을 사용합니다.
 
-### Q2 (슬롯별 `AutoFlow` 독립) — PARKED, 관측으로 판정 시도
+### Q2 (슬롯별 `AutoFlow` 독립) — CLOSED, 2026-08-30 YES/PASS
 
-### 사유
+### 2026-08-28 당시 park 사유
 
 - 실기 13회 중 이 질문(슬롯별 `AutoFlow` 독립 적용)을 **직접 시도한 것은 5회**이고, 그중
   측정 지점(A→B 경계 관찰)에 도달한 것은 1회(retry4)뿐입니다. 그 1회도 5개 필드의 비원자
@@ -287,9 +301,9 @@ Q1도 `UNKNOWN`입니다. 당시 "유지되지 않음"으로 기록됐다가 del
   `native_linkage_not_qualified`를 반환하며, `src/jebao_flow/app.py`는 실제 command executor
   없이 서비스를 만듭니다. FAIL이어도 software-independent actuator와 그룹 런타임이 필요합니다.
   즉 이 질문은 **개발을 막지 않습니다.**
-- 따라서 이 `UNKNOWN`은 park 가능한 질문입니다. park는 실패가 아닙니다.
+- 따라서 당시에는 이 `UNKNOWN`을 park했습니다. park는 실패가 아니었습니다.
 
-### 재개 조건
+### 당시 재개 조건 (2026-08-30 단회 승인으로 충족)
 
 다음 중 하나가 성립하면 재개를 검토합니다.
 
@@ -303,6 +317,9 @@ Q1도 `UNKNOWN`입니다. 당시 "유지되지 않음"으로 기록됐다가 del
 별도 커밋)를 따릅니다. 장비에 대한 실제 write는 on-site hardware approver가 명시적으로
 승인하고 현장에서 감시하며, 그 승인 범위 안에서 에이전트가 원격으로 실행할 수 있습니다
 (앱 조작처럼 물리적 접근이 필요한 단계는 approver가 수행합니다).
+
+2026-08-30에는 두 역할의 별도 승인과 단회 해제 커밋으로 위 조건을 충족해 실기를 완료했습니다.
+Q2가 닫혔으므로 동일 native 실기를 다시 실행하려면 새로운 명시적 승인과 별도 해제가 필요합니다.
 
 
 

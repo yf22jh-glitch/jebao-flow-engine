@@ -74,6 +74,12 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-08-30 write-free collector 30초 cadence](2026-08-30-collector-a2f44ded.md) | 18 pair / 36 raw frame | 30초 cadence acquisition PASS. Q2·independent-control epoch는 미실행 |
 | [2026-08-30 exact-restore preflight](2026-08-30-preflight-8e4204d2.md) | 1 pair / 2 raw frame | 역할 B latent `Flow=89`를 fresh raw로 재확인. restore admission은 계속 FAIL |
 | [2026-08-30 current baseline](2026-08-30-baseline-a9e40866.md) | 1 pair / 2 raw frame | `708fed7`에서도 역할 B latent `Flow=89` 재확인. 앱 정규화 대기 |
+| [2026-08-30 Q2 qualification retry](2026-08-30-q2-qualification-retry.md) | 저출력 qualification 1회 | 역할 해제 read-back 실패 뒤 attended recovery; 새 receipt 없음 |
+| [2026-08-30 Q2 attempt 01](2026-08-30-q2-attempt-01.md) | write 전 거부 | receipt exception이 최종 armed plan에 전달되지 않음 |
+| [2026-08-30 Q2 attempt 02](2026-08-30-q2-attempt-02.md) | role write 전 복구 | nested role spec의 receipt authority 누락 |
+| [2026-08-30 Q2 attempt 03](2026-08-30-q2-attempt-03.md) | 두 role write 뒤 복구 | slave pair read 오류가 monitor 전 조기 원복을 유발 |
+| [2026-08-30 Q2 attempt 04](2026-08-30-q2-attempt-04.md) | write 전 거부 | preflight→run 사이 boundary lead 소진 |
+| [2026-08-30 Q2 attempt 05](2026-08-30-q2-attempt-05.md) | 900초 ASYNC epoch + exact restore | **Q2 YES**: slave 32→40, master 31→35와 독립; 원본 스케줄 byte-exact 복원 |
 
 ## 새 실행 기록 템플릿
 

@@ -125,6 +125,17 @@ repository maintainer와 on-site hardware approver가 현재 작업에서 **Q2 �
 자동 종료되고 위 동결이 다시 적용됩니다. 복구가 남으면 새 실험은 금지하고 해당 operation의
 ordered recovery만 허용합니다.
 
+### 2026-08-30 단회 해제 종료
+
+[`Q2 attempt 05`](docs/runs/2026-08-30-q2-attempt-05.md)가 900초 epoch를 완료했고,
+fresh explicit raw에서 두 역할의 `independent`, 원 `TimerON`·manual controls와 두 432-byte
+schedule image의 byte-exact 복원을 확인했습니다. Q2는 이 pair·고정 계획 범위에서 YES/PASS로
+종결됐습니다.
+
+이 기록을 포함한 문서 커밋부터 단회 해제는 소진됐으며 **§1 동결이 다시 적용됩니다.** 같은
+native write 실기를 반복하거나 위 하네스의 코드·테스트를 다시 수정하려면 repository
+maintainer의 새로운 명시적 승인과 별도 해제 커밋이 필요합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
