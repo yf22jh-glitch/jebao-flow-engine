@@ -252,7 +252,7 @@ def test_plan_binds_five_minute_stability_to_role_observation() -> None:
     assert outer.bootstrap_active_schedule is True
     assert outer.duration_seconds == 840
     assert temporary.observation_timeout_seconds == 720
-    assert temporary.recovery_authority_seconds == 2100
+    assert temporary.recovery_authority_seconds == 2400
 
 
 def test_plan_requires_stable_evidence_to_finish_before_2359() -> None:
@@ -1459,10 +1459,10 @@ def test_plan_rejects_an_experiment_that_cannot_prove_slave_independence(
         _spec(**updates)
 
 
-def test_plan_accepts_the_fixed_630_second_window_but_no_larger_value() -> None:
-    assert _spec(observation_window_seconds=630).observation_window_seconds == 630
+def test_plan_accepts_the_930_second_ceiling_but_no_larger_value() -> None:
+    assert _spec(observation_window_seconds=930).observation_window_seconds == 930
     with pytest.raises(ValidationError):
-        _spec(observation_window_seconds=630.001)
+        _spec(observation_window_seconds=930.001)
 
 
 def test_sentinel_only_requires_sentinel_qualification() -> None:

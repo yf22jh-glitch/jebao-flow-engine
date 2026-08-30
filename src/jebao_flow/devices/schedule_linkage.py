@@ -138,6 +138,7 @@ class ScheduleLinkagePhase(StrEnum):
 
 class ScheduleLinkageStopReason(StrEnum):
     BOUNDARY_VERIFIED = "boundary_verified"
+    EPOCH_COMPLETED = "epoch_completed"
     MANUAL = "manual"
 
 
@@ -426,7 +427,7 @@ class ScheduleLinkageSpec(BaseModel):
     )
     master_device_id: DeviceIdentifier
     slave_device_id: DeviceIdentifier
-    observation_window_seconds: float = Field(default=180, gt=0, le=630)
+    observation_window_seconds: float = Field(default=180, gt=0, le=930)
     verification_interval_seconds: float = Field(default=1, gt=0, le=10)
     minimum_lead_seconds: float = Field(default=45, ge=10, le=180)
     ambiguous_band_seconds: float = Field(default=1, ge=0.1, le=5)
@@ -435,7 +436,8 @@ class ScheduleLinkageSpec(BaseModel):
     # slave that remains on its prior tuple or follows the master.  Keep the ordinary role-only
     # diagnostic strict unless this journaled, opt-in evidence mode is explicitly selected.
     observe_slave_after_tuple_variance: bool = False
-    maximum_clock_skew_seconds: float = Field(default=2, ge=0.1, le=10)
+    complete_observation_epoch: bool = False
+    maximum_clock_skew_seconds: float = Field(default=2, ge=0.1, le=30)
     clock_advance_tolerance_seconds: float = Field(default=2, ge=0.1, le=10)
 
     @model_validator(mode="after")
@@ -3119,7 +3121,13 @@ class ScheduleActiveLinkageController:
         self,
         record: ScheduleLinkageRecord,
     ) -> tuple[ScheduleLinkageStopReason, bool]:
-        """Observe an owned two-entry schedule without trusting the batched NowTime DP."""
+        """Observe the complete attended epoch without trusting the batched NowTime DP.
+
+        Once the owned field schedule and roles are active, measurement mismatches and transient
+        read failures are evidence, not a reason to erase the experiment early.  Only stop,
+        revoked safety authority, an unsafe active Flow, or exhausted observation authority may
+        end the epoch before its fixed deadline.
+        """
 
         spec = record.spec
         expected_roles = {
@@ -3143,6 +3151,101 @@ class ScheduleActiveLinkageController:
             raise ScheduleLinkageApplyError(
                 "staged Auto transition has no authorized monotonic boundary window"
             )
+        transition_verified = False
+        contradictory_after_verification = False
+        diagnostic_issue_count = 0
+
+        def reset_candidate_tracking() -> None:
+            nonlocal consecutive_after, previous_after, stable_after_started_at
+            auto_after_seen.clear()
+            for fields in b_fields_seen.values():
+                fields.clear()
+            for device_id in expected_roles:
+                partial_started_at[device_id] = None
+                partial_stalled_count[device_id] = 0
+            consecutive_after = 0
+            previous_after = None
+            stable_after_started_at = None
+
+        def record_diagnostic_issue(
+            reason: str,
+            *,
+            contradictory: bool = False,
+        ) -> None:
+            nonlocal diagnostic_issue_count, contradictory_after_verification
+            diagnostic_issue_count += 1
+            if contradictory and transition_verified:
+                contradictory_after_verification = True
+            failure = self._run_failure.value if self._run_failure is not None else "monitor"
+            dimensions = ",".join(value.value for value in self._run_drift_dimensions) or "none"
+            _LOGGER.warning(
+                "q2-observation continued issue=%s failure=%s drift=%s count=%d",
+                reason,
+                failure,
+                dimensions,
+                diagnostic_issue_count,
+            )
+
+        def assert_no_unsafe_active_flow(states: Mapping[str, DeviceState]) -> None:
+            for snapshot in record.snapshots:
+                state = states[snapshot.device_id]
+                capabilities = self._get_device(snapshot.device_id).capabilities
+                guarded_maximum = min(
+                    capabilities.power_limits.max_power,
+                    _SCHEDULE_LINKAGE_TEST_MAX_POWER,
+                )
+                if state.timer_enabled is True:
+                    active_flow = state.observed_attributes.get("AutoFlow")
+                else:
+                    active_flow = state.power
+                if (
+                    isinstance(active_flow, int)
+                    and not isinstance(active_flow, bool)
+                    and active_flow > guarded_maximum
+                ):
+                    self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_EVIDENCE
+                    self._run_drift_dimensions = (
+                        ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+                    )
+                    raise ScheduleLinkageApplyError(
+                        "staged monitor observed unsafe AutoFlow above the attended cap"
+                    )
+
+        def log_observed_pair(states: Mapping[str, DeviceState], sampled_at: float) -> None:
+            master = states[spec.master_device_id]
+            slave = states[spec.slave_device_id]
+            master_values = master.observed_attributes
+            slave_values = slave.observed_attributes
+            _LOGGER.warning(
+                "q2-observation sample monotonic=%.3f "
+                "master=timer:%s,role:%s,auto:%s/%s/%s "
+                "slave=timer:%s,role:%s,auto:%s/%s/%s",
+                sampled_at,
+                master.timer_enabled,
+                getattr(master.linkage, "value", master.linkage),
+                master_values.get("AutoMode"),
+                master_values.get("AutoFlow"),
+                master_values.get("AutoFreq"),
+                slave.timer_enabled,
+                getattr(slave.linkage, "value", slave.linkage),
+                slave_values.get("AutoMode"),
+                slave_values.get("AutoFlow"),
+                slave_values.get("AutoFreq"),
+            )
+
+        async def wait_for_next_sample(heartbeat_started_at: float | None = None) -> None:
+            elapsed = (
+                0.0
+                if heartbeat_started_at is None
+                else max(0.0, self._monotonic() - heartbeat_started_at)
+            )
+            await self._sleep(
+                min(
+                    spec.verification_interval_seconds,
+                    max(0.0, _STAGED_MONITOR_HEARTBEAT_MAX_INTERVAL_SECONDS - elapsed),
+                )
+            )
+
         while self._monotonic() <= self._require_observation_deadline():
             self._run_failure = ScheduleLinkageRunFailure.MONITOR
             self._run_drift_dimensions = ()
@@ -3152,11 +3255,31 @@ class ScheduleActiveLinkageController:
                 raise ScheduleLinkageApplyError(
                     "schedule-linkage safety authority was revoked"
                 )
-            states, heartbeat_started_at, transport_retried = (
-                await self._acquire_staged_monitor_pair_with_retry(record)
-            )
+            try:
+                states, heartbeat_started_at, transport_retried = (
+                    await self._acquire_staged_monitor_pair_with_retry(record)
+                )
+            except asyncio.CancelledError:
+                raise
+            except ScheduleLinkageApplyError:
+                if self._run_failure is ScheduleLinkageRunFailure.MONITOR_DEADLINE:
+                    break
+                raise
+            except Exception:
+                if not spec.complete_observation_epoch:
+                    raise
+                if not self._active_observation_allowed() or self._stop_requested():
+                    raise
+                record_diagnostic_issue("read")
+                reset_candidate_tracking()
+                await wait_for_next_sample()
+                continue
             sampled_at = self._monotonic()
-            self._assert_observation_deadline(sampled_at)
+            if sampled_at > self._require_observation_deadline():
+                break
+            assert_no_unsafe_active_flow(states)
+            if spec.complete_observation_epoch:
+                log_observed_pair(states, sampled_at)
             if transport_retried:
                 # A reconnect creates an unobserved interval between two session generations.
                 # Preserve irreversible A-to-B field evidence, but never count that gap toward
@@ -3164,11 +3287,19 @@ class ScheduleActiveLinkageController:
                 consecutive_after = 0
                 previous_after = None
                 stable_after_started_at = None
-            classifications = self._classify_staged_auto_sides(
-                record,
-                states,
-                expected_roles,
-            )
+            try:
+                classifications = self._classify_staged_auto_sides(
+                    record,
+                    states,
+                    expected_roles,
+                )
+            except ScheduleLinkageApplyError:
+                if not spec.complete_observation_epoch:
+                    raise
+                record_diagnostic_issue("classification")
+                reset_candidate_tracking()
+                await wait_for_next_sample(heartbeat_started_at)
+                continue
             sides = {
                 device_id: classification.side
                 for device_id, classification in classifications.items()
@@ -3192,35 +3323,45 @@ class ScheduleActiveLinkageController:
                 self._run_drift_dimensions = (
                     ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
                 )
-                raise ScheduleLinkageApplyError(
-                    "staged Auto evidence changed before the conservative boundary window"
-                )
+                if not spec.complete_observation_epoch:
+                    raise ScheduleLinkageApplyError(
+                        "staged Auto evidence changed before the conservative boundary window"
+                    )
+                record_diagnostic_issue("early_transition")
+                reset_candidate_tracking()
+                await wait_for_next_sample(heartbeat_started_at)
+                continue
+            auto_regression_reason: str | None = None
             for device_id in auto_after_seen:
                 if classifications[device_id].auto_side == "before":
-                    self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
-                    self._run_drift_dimensions = (
-                        ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
-                    )
-                    raise ScheduleLinkageApplyError(
+                    auto_regression_reason = (
                         "staged Auto evidence returned to its prior entry"
                     )
+                    break
                 if classifications[device_id].auto_side == "transitional":
-                    self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
-                    self._run_drift_dimensions = (
-                        ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
-                    )
-                    raise ScheduleLinkageApplyError(
+                    auto_regression_reason = (
                         "staged Auto evidence regressed to a partial transition"
                     )
-            for device_id, seen_fields in b_fields_seen.items():
-                if not seen_fields.issubset(classifications[device_id].b_fields):
-                    self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
-                    self._run_drift_dimensions = (
-                        ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
-                    )
+                    break
+            field_regressed = any(
+                not seen_fields.issubset(classifications[device_id].b_fields)
+                for device_id, seen_fields in b_fields_seen.items()
+            )
+            if auto_regression_reason is not None or field_regressed:
+                self._run_failure = ScheduleLinkageRunFailure.MONITOR_AUTO_REGRESSION
+                self._run_drift_dimensions = (
+                    ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
+                )
+                if not spec.complete_observation_epoch:
                     raise ScheduleLinkageApplyError(
-                        "staged transition field evidence regressed toward its prior entry"
+                        auto_regression_reason
+                        or "staged transition field evidence regressed toward its prior entry"
                     )
+                record_diagnostic_issue("regression", contradictory=True)
+                reset_candidate_tracking()
+                await wait_for_next_sample(heartbeat_started_at)
+                continue
+            partial_timeout_reason: str | None = None
             for device_id, classification in classifications.items():
                 started_at = partial_started_at[device_id]
                 new_b_fields = classification.b_fields - b_fields_seen[device_id]
@@ -3240,9 +3381,10 @@ class ScheduleActiveLinkageController:
                     self._run_drift_dimensions = (
                         ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
                     )
-                    raise ScheduleLinkageApplyError(
+                    partial_timeout_reason = (
                         "staged Auto partial transition did not settle in time"
                     )
+                    break
                 if classification.side == "transitional" and not settled:
                     if started_at is None:
                         partial_started_at[device_id] = sampled_at
@@ -3260,26 +3402,42 @@ class ScheduleActiveLinkageController:
                         self._run_drift_dimensions = (
                             ScheduleLinkageDriftDimension.AUTO_EVIDENCE,
                         )
-                        raise ScheduleLinkageApplyError(
+                        partial_timeout_reason = (
                             "staged Auto partial transition exceeded its report limit"
                         )
+                        break
                 elif settled:
                     partial_started_at[device_id] = None
                     partial_stalled_count[device_id] = 0
                 b_fields_seen[device_id].update(classification.b_fields)
+            if partial_timeout_reason is not None:
+                if not spec.complete_observation_epoch:
+                    raise ScheduleLinkageApplyError(partial_timeout_reason)
+                record_diagnostic_issue("partial_timeout")
+                reset_candidate_tracking()
+                await wait_for_next_sample(heartbeat_started_at)
+                continue
             auto_after_seen.update(
                 device_id
                 for device_id, classification in classifications.items()
                 if classification.auto_side == "after"
             )
             if all(side == "before" for side in sides.values()):
-                self._assert_pair_sample(
-                    record,
-                    states,
-                    expected_roles,
-                    phase="before",
-                    allow_staged_control_transition=True,
-                )
+                try:
+                    self._assert_pair_sample(
+                        record,
+                        states,
+                        expected_roles,
+                        phase="before",
+                        allow_staged_control_transition=True,
+                    )
+                except ScheduleLinkageApplyError:
+                    if not spec.complete_observation_epoch:
+                        raise
+                    record_diagnostic_issue("before_sample", contradictory=True)
+                    reset_candidate_tracking()
+                    await wait_for_next_sample(heartbeat_started_at)
+                    continue
                 consecutive_after = 0
                 previous_after = None
                 stable_after_started_at = None
@@ -3288,13 +3446,21 @@ class ScheduleActiveLinkageController:
                 # slave may expose its own B Flow, follow the master's Flow, keep A's Flow, or
                 # even retain the exact A tuple; holding that bounded safe candidate stable is the
                 # behavior this experiment is designed to classify.
-                evidence = self._assert_pair_sample(
-                    record,
-                    states,
-                    expected_roles,
-                    phase="after",
-                    allow_staged_control_transition=True,
-                )
+                try:
+                    evidence = self._assert_pair_sample(
+                        record,
+                        states,
+                        expected_roles,
+                        phase="after",
+                        allow_staged_control_transition=True,
+                    )
+                except ScheduleLinkageApplyError:
+                    if not spec.complete_observation_epoch:
+                        raise
+                    record_diagnostic_issue("after_sample", contradictory=True)
+                    reset_candidate_tracking()
+                    await wait_for_next_sample(heartbeat_started_at)
+                    continue
                 if previous_after == evidence:
                     consecutive_after += 1
                 else:
@@ -3311,7 +3477,14 @@ class ScheduleActiveLinkageController:
                     and stable_for >= spec.post_boundary_stability_seconds
                 ):
                     self._assert_observation_deadline()
-                    return ScheduleLinkageStopReason.BOUNDARY_VERIFIED, True
+                    if not spec.complete_observation_epoch:
+                        return ScheduleLinkageStopReason.BOUNDARY_VERIFIED, True
+                    if not transition_verified:
+                        _LOGGER.warning(
+                            "q2-observation stable boundary evidence reached; "
+                            "continuing to the fixed epoch deadline"
+                        )
+                    transition_verified = True
             else:
                 # AutoMode, AutoFlow and AutoFreq reports can refresh independently within one
                 # controller.  An allow-listed partial tuple proves neither A nor B, so it emits
@@ -3321,19 +3494,17 @@ class ScheduleActiveLinkageController:
                 stable_after_started_at = None
             self._run_failure = ScheduleLinkageRunFailure.MONITOR
             self._run_drift_dimensions = ()
-            elapsed_since_heartbeat = max(
-                0.0,
-                self._monotonic() - heartbeat_started_at,
+            await wait_for_next_sample(heartbeat_started_at)
+        if spec.complete_observation_epoch:
+            _LOGGER.warning(
+                "q2-observation epoch completed verified=%s contradictory=%s issues=%d",
+                transition_verified,
+                contradictory_after_verification,
+                diagnostic_issue_count,
             )
-            await self._sleep(
-                min(
-                    spec.verification_interval_seconds,
-                    max(
-                        0.0,
-                        _STAGED_MONITOR_HEARTBEAT_MAX_INTERVAL_SECONDS
-                        - elapsed_since_heartbeat,
-                    ),
-                )
+            return (
+                ScheduleLinkageStopReason.EPOCH_COMPLETED,
+                transition_verified and not contradictory_after_verification,
             )
         raise ScheduleLinkageApplyError(
             "staged Auto transition lacked two consecutive stable after samples"

@@ -129,12 +129,12 @@ class ScheduleFlowExperimentSpec(BaseModel):
     slave_after_flow: int = Field(default=40, ge=0, le=100)
     sine_frequency: int = Field(default=30, ge=0, le=100)
     safe_frequency: int = Field(default=20, ge=0, le=100)
-    observation_window_seconds: float = Field(default=600, gt=0, le=630)
+    observation_window_seconds: float = Field(default=600, gt=0, le=930)
     post_boundary_stability_seconds: float = Field(default=300, ge=0, le=300)
     verification_interval_seconds: float = Field(default=2, gt=0, le=10)
     minimum_lead_seconds: float = Field(default=60, ge=10, le=180)
     ambiguous_band_seconds: float = Field(default=1, ge=0.1, le=5)
-    maximum_clock_skew_seconds: float = Field(default=2, ge=0.1, le=10)
+    maximum_clock_skew_seconds: float = Field(default=2, ge=0.1, le=30)
     clock_advance_tolerance_seconds: float = Field(default=2, ge=0.1, le=10)
     sentinel_qualification: bool = True
     sentinel_only: bool = False
@@ -173,7 +173,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
     def outer_linkage_spec(self) -> LinkageTestSpec:
         """Build the journal owner that pauses and ultimately restores original controls."""
 
-        duration = min(900.0, self.observation_window_seconds + 240.0)
+        duration = min(1200.0, self.observation_window_seconds + 240.0)
         return LinkageTestSpec(
             operation_id=self.operation_id,
             master_device_id=self.master_device_id,
@@ -200,6 +200,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
             ambiguous_band_seconds=self.ambiguous_band_seconds,
             post_boundary_stability_seconds=self.post_boundary_stability_seconds,
             observe_slave_after_tuple_variance=True,
+            complete_observation_epoch=True,
             maximum_clock_skew_seconds=self.maximum_clock_skew_seconds,
             clock_advance_tolerance_seconds=self.clock_advance_tolerance_seconds,
         )
@@ -224,8 +225,8 @@ class ScheduleFlowExperimentSpec(BaseModel):
                 ),
             ),
             forward_timeout_seconds=90,
-            observation_timeout_seconds=min(900, self.observation_window_seconds + 120),
-            recovery_authority_seconds=2100,
+            observation_timeout_seconds=min(1200, self.observation_window_seconds + 120),
+            recovery_authority_seconds=2400,
         )
 
 

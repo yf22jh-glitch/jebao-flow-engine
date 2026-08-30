@@ -219,11 +219,12 @@ def test_fixed_plan_is_the_only_audited_field_shape() -> None:
     assert spec.sine_frequency == 30
     assert spec.safe_frequency == 20
     assert spec.post_boundary_stability_seconds == 300
-    assert spec.observation_window_seconds == 630
+    assert spec.observation_window_seconds == 915
     assert spec.sentinel_qualification is True
-    assert spec.role_observation_spec().observation_window_seconds == 630
-    assert spec.outer_linkage_spec().duration_seconds == 870
-    assert spec.temporary_schedule_spec().observation_timeout_seconds == 750
+    assert spec.role_observation_spec().observation_window_seconds == 915
+    assert spec.role_observation_spec().complete_observation_epoch is True
+    assert spec.outer_linkage_spec().duration_seconds == 1155
+    assert spec.temporary_schedule_spec().observation_timeout_seconds == 1035
 
 
 def test_sentinel_only_is_cli_parsed_and_confirmation_token_bound() -> None:
@@ -532,13 +533,16 @@ def test_pause_authorizer_requires_current_receipts_from_named_qualification(tmp
         authorize(_spec(), _snapshots())
 
 
-def test_boundary_uses_freshest_device_clock_and_refuses_skew_or_midnight() -> None:
+def test_boundary_uses_freshest_device_clock_and_refuses_large_skew_or_midnight() -> None:
     first = datetime(2026, 8, 27, 12, 10, 1)
     second = datetime(2026, 8, 27, 12, 10, 2)
 
     assert cli._next_boundary((first, second)) == "12:15"  # noqa: SLF001
-    with pytest.raises(cli.ScheduleFlowCliError, match="two-second skew"):
-        cli._next_boundary((first, second + timedelta(seconds=3)))  # noqa: SLF001
+    assert (  # noqa: SLF001
+        cli._next_boundary((first, second + timedelta(seconds=10))) == "12:15"
+    )
+    with pytest.raises(cli.ScheduleFlowCliError, match="preserved-raw allowance"):
+        cli._next_boundary((first, second + timedelta(seconds=31)))  # noqa: SLF001
     with pytest.raises(cli.ScheduleFlowCliError, match="midnight"):
         cli._next_boundary(  # noqa: SLF001
             (
@@ -601,8 +605,7 @@ async def test_schedule_context_starts_both_device_reads_concurrently() -> None:
         },
         ("master", "slave"),
     )
-    with pytest.raises(cli.ScheduleFlowCliError, match="two-second skew"):
-        cli._next_boundary(skewed)  # noqa: SLF001
+    assert cli._next_boundary(skewed) == "12:15"  # noqa: SLF001
 
 
 async def test_schedule_context_waits_for_the_sibling_read_before_raising() -> None:
@@ -651,7 +654,10 @@ async def test_schedule_context_waits_for_the_sibling_read_before_raising() -> N
 def test_run_boundary_requires_the_full_four_to_five_minute_lead_window() -> None:
     cli._require_boundary_still_fresh(  # noqa: SLF001
         "12:15",
-        (datetime(2026, 8, 27, 12, 10), datetime(2026, 8, 27, 12, 11)),
+        (
+            datetime(2026, 8, 27, 12, 10),
+            datetime(2026, 8, 27, 12, 10, 10),
+        ),
     )
     for outside in (
         datetime(2026, 8, 27, 12, 9, 59, 999000),
@@ -667,16 +673,8 @@ def test_run_boundary_requires_the_full_four_to_five_minute_lead_window() -> Non
 def test_fixed_window_covers_maximum_boundary_stability_and_rollback_budget() -> None:
     spec = _spec()
 
-    required = (
-        300
-        + spec.post_boundary_stability_seconds
-        + 2 * spec.ambiguous_band_seconds
-        + 4 * spec.verification_interval_seconds
-        + 15
-    )
-
-    assert required == 625
-    assert spec.observation_window_seconds == required + 5
+    assert spec.observation_window_seconds - 15 == 900
+    assert spec.post_boundary_stability_seconds == 300
 
 
 def test_run_boundary_rejects_a_missing_pair_clock() -> None:

@@ -324,11 +324,11 @@ class LinkageTestSpec(BaseModel):
     master_power: int = Field(ge=0, le=100)
     slave_power: int = Field(ge=0, le=100)
     frequency: int = Field(ge=0, le=100)
-    duration_seconds: float = Field(default=30, gt=0, le=900)
+    duration_seconds: float = Field(default=30, gt=0, le=1200)
     verification_interval_seconds: float = Field(default=1, gt=0, le=30)
     bootstrap_active_schedule: bool = False
     slave_power_after: int | None = Field(default=None, ge=0, le=100)
-    power_change_after_seconds: float | None = Field(default=None, gt=0, le=900)
+    power_change_after_seconds: float | None = Field(default=None, gt=0, le=1200)
 
     @model_validator(mode="after")
     def validate_relationship(self) -> Self:

@@ -6062,6 +6062,38 @@ async def test_staged_transition_requires_two_identical_after_samples(
     assert master.virtual_time.value >= 41
 
 
+async def test_complete_epoch_keeps_observing_after_stable_boundary_evidence(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    samples: list[tuple[float, object]] = []
+    controller = _controller(
+        master,
+        slave,
+        JsonScheduleLinkageJournalStore(tmp_path / "staged-complete-epoch.json"),
+        sample_observer=lambda sample: samples.append(
+            (master.virtual_time.value, sample)
+        ),
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+
+    result = await controller.run(
+        await controller.preflight(
+            _staged_spec(
+                observation_window_seconds=70,
+                post_boundary_stability_seconds=0,
+                complete_observation_epoch=True,
+            )
+        )
+    )
+
+    assert result.stop_reason is ScheduleLinkageStopReason.EPOCH_COMPLETED
+    assert result.schedule_transition_verified is True
+    assert master.virtual_time.value >= 55
+    assert len([sample for _observed_at, sample in samples if sample.phase == "after"]) > 2
+
+
 async def test_staged_transition_resets_requested_stability_when_after_tuple_changes(
     tmp_path: Path,
 ) -> None:

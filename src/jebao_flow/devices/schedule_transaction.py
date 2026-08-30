@@ -266,7 +266,7 @@ class TemporaryScheduleSpec(BaseModel):
     kind: TemporaryScheduleKind = TemporaryScheduleKind.FIELD_OBSERVATION
     device_patches: tuple[DeviceSchedulePatch, ...] = Field(min_length=2, max_length=2)
     forward_timeout_seconds: float = Field(default=60, gt=0, le=300)
-    observation_timeout_seconds: float = Field(default=600, gt=0, le=900)
+    observation_timeout_seconds: float = Field(default=600, gt=0, le=1200)
     observation_cancel_timeout_seconds: float = Field(default=180, ge=120, le=300)
     disarm_verify_timeout_seconds: float = Field(default=30, gt=0, le=120)
     restore_timeout_seconds: float = Field(default=90, gt=0, le=180)

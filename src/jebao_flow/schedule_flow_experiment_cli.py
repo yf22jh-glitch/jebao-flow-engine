@@ -143,12 +143,14 @@ def _fixed_spec(
         slave_after_flow=40,
         sine_frequency=30,
         safe_frequency=20,
-        observation_window_seconds=630,
+        # ScheduleLinkageController retains a 15-second rollback reserve.  A 915-second
+        # authority therefore yields the maintainer-approved full 900-second read-only epoch.
+        observation_window_seconds=915,
         post_boundary_stability_seconds=300,
         verification_interval_seconds=2,
         minimum_lead_seconds=60,
         ambiguous_band_seconds=1,
-        maximum_clock_skew_seconds=2,
+        maximum_clock_skew_seconds=30,
         clock_advance_tolerance_seconds=2,
         sentinel_qualification=True,
         sentinel_only=sentinel_only,
@@ -170,8 +172,8 @@ def _next_boundary(clocks: Sequence[datetime]) -> str:
     if len(clocks) != 2 or any(clock.tzinfo is not None for clock in clocks):
         raise ScheduleFlowCliError("both device-local clocks must be available and timezone-naive")
     earliest, latest = min(clocks), max(clocks)
-    if (latest - earliest).total_seconds() > 2:
-        raise ScheduleFlowCliError("device-local clocks exceed the audited two-second skew")
+    if (latest - earliest).total_seconds() > 30:
+        raise ScheduleFlowCliError("device-local clocks exceed the preserved-raw allowance")
     boundary = latest.replace(second=0, microsecond=0) + timedelta(minutes=5)
     lead = (boundary - latest).total_seconds()
     if not _BOUNDARY_MIN_LEAD_SECONDS <= lead <= _BOUNDARY_MAX_LEAD_SECONDS:
@@ -185,16 +187,18 @@ def _require_boundary_still_fresh(
     boundary_time: str,
     clocks: Sequence[datetime],
 ) -> None:
-    if len(clocks) != 2:
+    if len(clocks) != 2 or any(clock.tzinfo is not None for clock in clocks):
         raise ScheduleFlowCliError("both fresh device clocks are required before execution")
-    for clock in clocks:
-        hour, minute = (int(part) for part in boundary_time.split(":"))
-        boundary = clock.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        lead = (boundary - clock).total_seconds()
-        if not _RUN_MIN_LEAD_SECONDS <= lead <= _BOUNDARY_MAX_LEAD_SECONDS:
-            raise ScheduleFlowCliError(
-                "confirmed boundary is no longer within the audited execution lead window"
-            )
+    earliest, latest = min(clocks), max(clocks)
+    if (latest - earliest).total_seconds() > 30:
+        raise ScheduleFlowCliError("fresh device clocks exceed the preserved-raw allowance")
+    hour, minute = (int(part) for part in boundary_time.split(":"))
+    boundary = latest.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    lead = (boundary - latest).total_seconds()
+    if not _RUN_MIN_LEAD_SECONDS <= lead <= _BOUNDARY_MAX_LEAD_SECONDS:
+        raise ScheduleFlowCliError(
+            "confirmed boundary is no longer within the audited execution lead window"
+        )
 
 
 def _require_plan_supported(
@@ -533,7 +537,7 @@ async def _preflight(
         print("Plan: sparse unused-slot wire qualification only; no field or role activation.")
     else:
         print("Plan: Constant master 31% / slave 32% -> Sine master 35% / slave 40%.")
-        print("Observation: 300s stable evidence inside a 630s bounded window.")
+        print("Observation: full 900s epoch with at least 300s stable post-boundary evidence.")
     print(f"Confirmation token: {token}")
     return 0
 
