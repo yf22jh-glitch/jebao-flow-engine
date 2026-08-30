@@ -92,10 +92,11 @@ alias되므로 **장비의 고정 갱신 주기를 확정하거나 그 숫자를
 - [x] private observer 설정에 격리망용 discovery target 7개 구성
 - [x] 읽기 전용 discovery에서 private identity 6/6 재바인딩
 - [x] recovery와 one-shot 명령이 고정 이름 `/hardware-safety` 볼륨 공유
-- [!] 현재 private 실기 설정은 Pro 두 대가 `allow_hardware_writes: true`입니다.
-      **읽기 전용 관측을 시작하기 전에 `dry_run: true` + 모든 장비 `allow_hardware_writes: false`로
-      다시 잠가야 합니다** (읽기 전용 관측 절차 phase 0). 설정 파일 변경만으로는 이미
-      로드된 프로세스가 멈추지 않으므로 write 가능 프로세스의 부재도 함께 확인합니다
+- [!] 2026-08-30 collector 종료 시점에는 private 설정의 `dry_run: true`와 모든 장비의
+      `allow_hardware_writes: false`를 재확인했습니다(등급 (c) 운영자 관측). 이 값은 현재
+      런타임 상태를 보장하지 않으므로 **모든 live operation 직전에 mounted config와 이미
+      로드된 프로세스를 다시 확인**합니다. 설정 파일만 잠그고 기존 write 가능 프로세스를
+      남겨 두면 통제가 성립하지 않습니다
 - [x] 일반 Observer와 실기 write 프로세스를 동시에 실행하지 않음
 - [ ] 메인 수류 A/B와 바형의 실제 수조 내 위치·방향을 사진 또는 현장 메모로 확정
 - [ ] 세 수류모터의 정확한 물리 모델 라벨 기록
@@ -333,7 +334,9 @@ live-write operation**이며, 그 승인 범위 안에서 에이전트가 원격
   (`src/jebao_flow/devices/lan.py`)
 - 48슬롯 시간표와 장비 자체 시계는 같은 452-byte 상태 프레임에서 디코딩됩니다
   (`src/jebao_flow/protocol/schedule.py`)
-- `AutoMode`/`AutoFlow`/`AutoFreq`는 `schema_declared_writable`에 없는 **읽기 전용 출력**입니다
+- collector와 판정 로직은 `AutoMode`/`AutoFlow`/`AutoFreq`를 **관측값으로만** 사용합니다.
+  현재 Pro schema에서는 세 필드도 writable kind로 선언돼 있으므로, 이 사실을 장비가 쓰기를
+  지원한다는 근거로 사용하지 않고 복원·actuator의 write allowlist에도 넣지 않습니다
 
 `AutoFlow`는 펌웨어가 보고한 유효 출력입니다. 물리 유량까지 증명하지는 않지만, 동결된 write
 하네스도 그 범위 이상은 증명하지 못합니다.
@@ -385,19 +388,60 @@ schedule image를 byte-exact로 재현한다는 증거가 없습니다. 비교�
 - [ ] 그 수단이 실제로 exact 복원을 만든다는 것이 **사전에 확인**됨
 - [ ] 복원에 걸리는 시간과 실패 시 남는 상태를 미리 파악
 
-### 복원 순서 (검증된 안전 순서)
+### 복원 순서 (수정 후보, 아직 실장 qualification 전)
 
-부록 A에서 검증된 순서를 그대로 따릅니다. 이 순서를 수행할 수 있는 **검증된 수단이 없으면
-관측은 계속 `NO-GO`입니다.**
+기존에 적혀 있던 `slave detach → master detach → TimerOFF` 순서는 안전 순서로 확정할 수
+없습니다. `Linkage` 역할 변경이나 `TimerOFF`가 예약 운전 뒤의 latent manual
+`Mode`/`Flow`/`Frequency`를 활성화할 수 있기 때문입니다. 2026-08-27 운영 기록에도 TimerON
+상태의 한 장비가 manual `Flow=89`를 보존한 사례가 있습니다(등급 (c),
+[`native-linkage.md`](native-linkage.md),
+[`pre-hardware-test-checklist.md`](pre-hardware-test-checklist.md)). 이는 현재 baseline 값의
+증거가 아니므로, 현재 값은 보존된 2026-08-30 raw series에서 오프라인으로 재도출하고 live
+operation 직전 fresh baseline으로 다시 확인합니다.
 
-1. **slave role detach**
-2. **master role detach**
-3. **TimerOFF**
-4. **exact schedule images** (두 장비의 432-byte 이미지)
-5. **original outer controls와 `TimerON`**
+standalone 복원 수단은 아래 후보 순서를 구현하고 fault injection·실장 qualification을 거쳐야
+합니다. qualification 전에는 이 순서를 **검증된 수단이라고 부르지 않으며 관측은 계속
+`NO-GO`**입니다.
+
+1. 앱을 열기 전에 fresh explicit state에서 원 controls·roles·두 432-byte image를 durable
+   baseline에 fsync하고, restore payload의 byte-exact round trip을 오프라인으로 검증
+2. baseline이 `ON + TimerON + independent`인지, manual Flow와 active schedule Flow가 승인된
+   operation ceiling·장비 범위·step 안인지 확인. 실패하면 write 0회로 `NO-GO`
+3. **slave**에 `{SwitchON=true, TimerON=false, Linkage=independent, Mode=constant,
+   Flow=safe, Frequency=safe}`를 **하나의 control frame**으로 정확히 한 번 전송
+4. **master**에도 같은 atomic safe-fallback frame을 정확히 한 번 전송
+5. 두 장비의 **exact 432-byte schedule image** 복원
+6. **slave**, 이어서 **master**에 원 `{SwitchON, TimerON, Linkage, Mode, Flow, Frequency}`를
+   각각 **하나의 atomic frame**으로 정확히 한 번 복원
+7. writer를 종료한 뒤 별도 fresh session의 bounded read-only convergence로 원 controls,
+   `Linkage`, `TimerON`, 두 432-byte image의 exact 일치를 검증
+
+연결된 `async_slave`에 manual Flow만 먼저 staging하는 것은 parked Q1을 다시 실행하는 것이므로
+금지합니다. 역할 해제와 `TimerOFF`를 별도 frame으로 나누는 것도 latent Flow 노출 구간을 만들기
+때문에 금지합니다. 어느 action의 ACK나 결과가 불명확해도 같은 control frame을 재전송하지 않고,
+fresh explicit state가 exact target을 증명할 때만 완료로 기록합니다. 그렇지 않으면 durable
+journal을 유지한 채 `RECOVERY_REQUIRED`로 중단합니다.
 
 각 단계는 operation manifest에 기록된 승인 범위 안에서만 수행하고, 어느 단계든 실패하면
 아래 escalation으로 넘어갑니다. 다음 단계로 진행하지 않습니다.
+
+### 2026-08-30 baseline의 오프라인 admission 재검증
+
+보존된 series `JFS-a2f44ded609b34adab1425c1dcc40c0e`(artifact digest
+`df6803b99548ffd68b910518cce33d4277859213a238b1ae4e1381671d29ddf2`)의 ordinal 0 raw
+explicit-reply frame을 다시 디코딩했습니다. transport header 뒤 452-byte status에서 manual
+controls와 48개 9-byte slot을 직접 재도출했으므로 아래 장비 상태 값은 등급 (a)입니다.
+
+| 논리 역할 | latent manual | active non-feed schedule Flow 범위 | admission |
+|---|---|---:|---|
+| A | `constant`, `Flow=30`, `Frequency=32` | 30~60 | 범위 관점 PASS |
+| B | `random`, `Flow=89`, `Frequency=34` | 50~80 | **FAIL (`89 > 80`)** |
+
+따라서 이 preserved baseline을 그대로 사용한 standalone restore qualification은 `NO-GO`입니다.
+이 결론은 현재 live state가 아직 같다는 뜻이 아닙니다. 실기를 재개하려면 on-site approver가
+별도의 승인된 앱 operation으로 B의 latent manual Flow를 먼저 안전 범위로 정규화하고, 앱을
+완전히 종료한 뒤 fresh explicit baseline을 새로 보존해야 합니다. 에이전트가 이 값을 우회하거나
+restore 경로에서 clamp하지 않습니다.
 
 **이 조건을 만족하지 못하면 관측은 `NO-GO`로 남깁니다.** 이 항목은 동결된 ASYNC 실험
 하네스를 재가동하라는 뜻이 **아닙니다.** 하네스 재가동은 [`AGENTS.md`](../AGENTS.md) §1의
@@ -442,6 +486,23 @@ manifest 뒤에 옵니다.
 각 epoch 시작 전에 **제바오 앱을 완전히 종료**합니다(백그라운드도 아님). epoch 동안 앱과
 다른 컨트롤러를 사용하지 않습니다.
 
+### 구현 상태 (2026-08-30, 실장 qualification 전)
+
+- standalone exact-restore 후보는 sentinel qualification → baseline exact restore → phase 5용
+  `PREPARED` journal staging을 구현했습니다. **fault-injection과 자동 테스트만 통과했으며 실장
+  qualification은 아직 없습니다.**
+- control/ASYNC 두 collector plan과 판정 manifest는 `prepare-pair` 한 번으로 앱 write 전에
+  함께 fsync되고, 둘 다 같은 phase-5 operation id와 staged-record digest에 묶입니다.
+- phase 5 성공으로 live journal이 정상 삭제된 뒤에도 immutable Q2 manifest와 qualified
+  bundle의 고정 timestamp에서 당시 staged record를 재구성해 오프라인 판정할 수 있습니다.
+  manifest를 처음 만들 때는 여전히 실제 `PREPARED` journal이 존재해야 합니다.
+- 30분 슬롯과 300초 안정 구간을 쓰는 v1은 epoch당 최소 5,700초를 강제합니다. 20초 cadence면
+  최소 286 pair(권장은 여유를 둔 더 큰 값), 30초 cadence면 최소 191 pair입니다. 이보다 짧은
+  spec은 collector plan을 durable하게 만들기 전에 거부됩니다.
+
+위 항목은 구현 후보의 정적 상태일 뿐 `NO-GO`를 해제하지 않습니다. 현재 preserved baseline의
+B manual Flow admission 실패와 on-site 조건을 먼저 해결해야 합니다.
+
 ### phase 0 — 앱 write 이전 준비
 
 - [x] 선행조건 1(collector) 완료 — [pilot 실행 기록](runs/2026-08-28-pilot-2bd1bf97.md)
@@ -454,7 +515,9 @@ manifest 뒤에 옵니다.
   - [ ] Home Assistant의 기존 Jebao 직접 통합 중지
   - [ ] **recovery supervisor 미실행 확인**
   - [ ] **one-shot writer 프로세스 미실행 확인**
-- [ ] **미완료 journal 없음 확인** — outer-control, temporary-schedule, schedule-linkage
+- [ ] **미완료 legacy journal 없음 확인** — outer-control, temporary-schedule,
+      schedule-linkage. exact-restore journal은 qualification 시작 전에는 없어야 하고, 완료 뒤 앱
+      write를 시작할 때는 phase 5용 `PREPARED` 하나가 반드시 있어야 합니다
 - [ ] **emergency-stop latch 없음 확인**
 - [ ] 두 장비의 원 controls, `Linkage`, `TimerON`, 432-byte schedule image 전체를
       private 경로에 fsync로 보존. 이것이 복원 기준이며 이후 어떤 단계도 덮어쓰지 않습니다
@@ -462,6 +525,10 @@ manifest 뒤에 옵니다.
 - [ ] on-site hardware approver의 승인 확인
 - [ ] **operation manifest fsync** — private baseline의 expected binding과 각 phase에서
       허용되는 UI action 목록을 순서대로 기록 (§앱 live-write의 대체 통제)
+- [ ] fresh baseline으로 standalone exact-restore `prepare`와 두 attended qualification cycle을
+      완료하고, qualified bundle과 phase 5용 `PREPARED` journal을 확인
+- [ ] 앱을 열기 전에 `jebao-flow-q2-epoch prepare-pair`로 control/ASYNC 두 manifest를 함께
+      만들고, 두 manifest가 같은 phase-5 record digest를 가리키는지 확인
 - [ ] 그 다음 **앱을 엽니다**
 - [ ] **대상 장비 대조** — approver가 **앱 UI에서 선택한 두 장비**가 manifest에 기록된
       physical binding과 같은 장비인지 대조합니다. 앱은 논리 이름으로 표시되고 collector는
@@ -508,6 +575,8 @@ manifest 뒤에 옵니다.
       432-byte schedule image가 baseline과 **exact 일치**하는지 검증
 - [ ] 불일치가 있으면 위 escalation을 따름
 - [ ] 검증 완료 후에만 일반 Observer 재시작
+- [ ] phase 5가 journal을 정상 정리한 뒤 control/ASYNC series를 오프라인 분류하고 두 receipt를
+      결합. 이 단계는 장비 write를 하지 않으며 성공한 원복 journal의 잔존을 요구하지 않습니다
 
 ### 소요 시간
 
