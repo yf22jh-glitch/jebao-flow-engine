@@ -98,6 +98,30 @@ operation으로 다룹니다. 절차와 안전 순서는 `docs/hardware-readines
 
 에이전트가 스스로 해제할 수 없습니다. 다른 작업의 일부로 조용히 되살리는 것도 해제입니다.
 
+### 2026-08-30 Q2 단회 해제
+
+repository maintainer와 on-site hardware approver가 현재 작업에서 **Q2 실기 1회**를 명시적으로
+승인했습니다. 이 승인은 `async_slave`가 자기 스케줄의 서로 다른 A/B `AutoFlow`를 실제 경계에서
+적용하는지 15분 동안 관측한 뒤 원상복구하라는 반복 지시에 한정됩니다.
+
+이 단회 해제에서 허용하는 변경과 실행은 다음뿐입니다.
+
+- 고정 계획 `master 31% / slave 32%`에서 `master 35% / slave 40%`로 넘어가는 스케줄 1회
+- 보존 raw에서 확인된 장비 시계 차이를 반영한 기존 비안전 clock-skew 게이트 완화
+- 전체 관측 시간을 900초로 연장하고, 스케줄 write 이후의 판정 불일치·일시적 read 오류를
+  기록하면서 물리 안전 위반이 없는 한 관측 종료까지 계속하는 변경
+- 관측 종료 뒤 `slave role detach → master role detach → TimerOFF → exact schedule images →
+  original outer controls/TimerON` 순서의 복구와 그 복구에 필요한 명령
+- 위 범위에 직접 대응하는 기존 단위 테스트 수정
+
+출력 상한·identity·single-write·durable journal·rollback 권한은 완화하지 않습니다. 새 pre-write
+게이트나 새 실패 계층은 추가하지 않습니다. 실제 출력이 45%를 넘거나 identity가 달라지는 등
+구체적인 물리 위험만 즉시 중단 사유이며, 그 밖의 중간 오류는 조기 원복 사유로 쓰지 않습니다.
+
+실행이 terminal 상태와 exact restore를 확인하고 `docs/runs/` 기록을 커밋하면 이 단회 해제는
+자동 종료되고 위 동결이 다시 적용됩니다. 복구가 남으면 새 실험은 금지하고 해당 operation의
+ordered recovery만 허용합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
