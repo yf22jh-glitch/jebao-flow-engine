@@ -3314,6 +3314,66 @@ async def test_staged_slave_pair_read_exhausts_exactly_one_retry_and_restores(
     _assert_only_linkage_calls(master, slave)
 
 
+async def test_complete_epoch_continues_after_slave_post_write_read_exhaustion(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    progress: list[ScheduleLinkageRunProgressEvent] = []
+    progress_times: list[tuple[ScheduleLinkageRunProgressKind, float]] = []
+    store = JsonScheduleLinkageJournalStore(
+        tmp_path / "complete-epoch-slave-read-exhausted.json"
+    )
+    controller = _controller(
+        master,
+        slave,
+        store,
+        progress_observer=lambda event: (
+            progress.append(event),
+            progress_times.append((event.kind, master.virtual_time.value)),
+        ),
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+    )
+    preflight = await controller.preflight(
+        _staged_spec(
+            observation_window_seconds=90,
+            post_boundary_stability_seconds=0,
+            complete_observation_epoch=True,
+        )
+    )
+    # Exhaust the one bounded reply-only retry immediately after the slave role write.  The
+    # adapter write itself has returned successfully, so the complete Q2 epoch must observe the
+    # boundary instead of erasing the experiment at this diagnostic read failure.
+    slave.fail_explicit_state_read_numbers.update({5, 6})
+
+    result = await controller.run(preflight)
+
+    kinds = [event.kind for event in progress]
+    assert result.stop_reason is ScheduleLinkageStopReason.EPOCH_COMPLETED
+    assert result.schedule_transition_verified is True
+    assert kinds.count(
+        ScheduleLinkageRunProgressKind.SLAVE_PAIR_STATE_READ_RETRY_STARTED
+    ) == 1
+    assert ScheduleLinkageRunProgressKind.SLAVE_PAIR_VERIFIED not in kinds
+    assert ScheduleLinkageRunProgressKind.MONITOR_STARTED in kinds
+    monitor_started_at = next(
+        observed_at
+        for kind, observed_at in progress_times
+        if kind is ScheduleLinkageRunProgressKind.MONITOR_STARTED
+    )
+    assert master.virtual_time.value - monitor_started_at >= 75
+    assert [call[1] for call in master.calls] == [
+        LinkageRole.MASTER,
+        LinkageRole.INDEPENDENT,
+    ]
+    assert [call[1] for call in slave.calls] == [
+        LinkageRole.ASYNC_SLAVE,
+        LinkageRole.INDEPENDENT,
+    ]
+    assert store.load() is None
+    _assert_only_linkage_calls(master, slave)
+
+
 async def test_staged_slave_pair_retry_refresh_failure_is_precise_and_restored(
     tmp_path: Path,
 ) -> None:
@@ -6067,12 +6127,16 @@ async def test_complete_epoch_keeps_observing_after_stable_boundary_evidence(
 ) -> None:
     master, slave = await _ready_staged_pair()
     samples: list[tuple[float, object]] = []
+    progress: list[tuple[float, ScheduleLinkageRunProgressKind]] = []
     controller = _controller(
         master,
         slave,
         JsonScheduleLinkageJournalStore(tmp_path / "staged-complete-epoch.json"),
         sample_observer=lambda sample: samples.append(
             (master.virtual_time.value, sample)
+        ),
+        progress_observer=lambda event: progress.append(
+            (master.virtual_time.value, event.kind)
         ),
         refresh_sessions_before_critical_reads=True,
         owned_staged_auto_transition_observation=True,
@@ -6090,6 +6154,12 @@ async def test_complete_epoch_keeps_observing_after_stable_boundary_evidence(
 
     assert result.stop_reason is ScheduleLinkageStopReason.EPOCH_COMPLETED
     assert result.schedule_transition_verified is True
+    monitor_started_at = next(
+        observed_at
+        for observed_at, kind in progress
+        if kind is ScheduleLinkageRunProgressKind.MONITOR_STARTED
+    )
+    assert master.virtual_time.value - monitor_started_at >= 55
     assert master.virtual_time.value >= 55
     assert len([sample for _observed_at, sample in samples if sample.phase == "after"]) > 2
 

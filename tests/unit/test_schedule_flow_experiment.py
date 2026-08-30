@@ -250,8 +250,8 @@ def test_plan_binds_five_minute_stability_to_role_observation() -> None:
     assert role.observe_slave_after_tuple_variance is True
     assert role.observation_window_seconds == 600
     assert outer.bootstrap_active_schedule is True
-    assert outer.duration_seconds == 840
-    assert temporary.observation_timeout_seconds == 720
+    assert outer.duration_seconds == 885
+    assert temporary.observation_timeout_seconds == 885
     assert temporary.recovery_authority_seconds == 2400
 
 

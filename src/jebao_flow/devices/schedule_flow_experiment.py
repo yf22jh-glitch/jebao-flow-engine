@@ -92,6 +92,10 @@ _STAGED_A_CONVERGENCE_TIMEOUT_SECONDS = 30.0
 _STAGED_A_CONVERGENCE_RETRY_SECONDS = 1.0
 _STAGED_CURRENT_AUTO_MODES = frozenset({"constant", "pulse", "sine", "feed"})
 _SCHEDULE_FLOW_TEST_MAX_POWER = 45
+# TimerON staging, fresh role preflight, and exact inverse restoration are outside the fixed
+# read-only role epoch.  Keep their existing hard 20-minute ceiling while reserving enough time
+# that a slow diagnostic read cannot truncate the maintainer-approved 900-second observation.
+_COMPOSED_OPERATION_RESERVE_SECONDS = 285.0
 
 SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT = 64
 SCHEDULE_FLOW_STAGE_EVENT_LIMIT = SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT + 1
@@ -174,7 +178,10 @@ class ScheduleFlowExperimentSpec(BaseModel):
     def outer_linkage_spec(self) -> LinkageTestSpec:
         """Build the journal owner that pauses and ultimately restores original controls."""
 
-        duration = min(1200.0, self.observation_window_seconds + 240.0)
+        duration = min(
+            1200.0,
+            self.observation_window_seconds + _COMPOSED_OPERATION_RESERVE_SECONDS,
+        )
         return LinkageTestSpec(
             operation_id=self.operation_id,
             master_device_id=self.master_device_id,
@@ -227,7 +234,11 @@ class ScheduleFlowExperimentSpec(BaseModel):
                 ),
             ),
             forward_timeout_seconds=90,
-            observation_timeout_seconds=min(1200, self.observation_window_seconds + 120),
+            observation_timeout_seconds=min(
+                1200,
+                self.observation_window_seconds
+                + _COMPOSED_OPERATION_RESERVE_SECONDS,
+            ),
             recovery_authority_seconds=2400,
         )
 

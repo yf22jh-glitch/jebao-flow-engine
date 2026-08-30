@@ -1442,6 +1442,7 @@ class ScheduleActiveLinkageController:
                 clock_anchor,
             )
             self._run_failure = ScheduleLinkageRunFailure.MONITOR
+            record = self._begin_complete_observation_epoch(record)
             record = self._transition(record, ScheduleLinkagePhase.ACTIVE)
             self._emit_progress_best_effort(
                 ScheduleLinkageRunProgressKind.MONITOR_STARTED
@@ -2318,61 +2319,82 @@ class ScheduleActiveLinkageController:
         self._emit_progress_best_effort(adapter_completed)
         self._run_failure = pair_failure
         self._run_pair_participant = "master" if role is LinkageRole.MASTER else "slave"
-        self._emit_progress_best_effort(pair_started)
-        self._set_pair_verification_failure("session_refresh")
-        await self._refresh_pair_sessions_if_enabled(record.spec)
-        self._set_pair_verification_failure("state_read")
-        states = await self._read_post_role_pair_states(
-            record,
-            retry_progress=pair_read_retry_started,
-            pair_failure=pair_failure,
-        )
-        if not self._owned_staged_auto_transition_observation:
-            self._set_pair_verification_failure("clock_skew")
-            self._assert_pair_clock_skew(record.spec, states)
-        sampled_at = self._monotonic()
-        self._set_pair_verification_failure("deadline")
-        self._assert_observation_deadline(sampled_at)
-        self._assert_staged_pre_boundary_sample_time(sampled_at)
-        if not self._owned_staged_auto_transition_observation:
-            self._set_pair_verification_failure("clock_continuity")
-            self._assert_clock_continuity(
-                record.spec,
-                states,
-                previous_clocks=previous_anchor.clocks,
-                elapsed_monotonic=sampled_at - previous_anchor.sampled_at_monotonic,
-            )
-        expected_roles = {
-            record.spec.master_device_id: (
-                LinkageRole.MASTER
-                if record.spec.master_device_id in intents
-                else LinkageRole.INDEPENDENT
-            ),
-            record.spec.slave_device_id: (
-                LinkageRole.ASYNC_SLAVE
-                if record.spec.slave_device_id in intents
-                else LinkageRole.INDEPENDENT
-            ),
-        }
-        self._set_pair_verification_checkpoint()
+        states: dict[str, DeviceState] | None = None
         try:
-            self._assert_pair_sample(record, states, expected_roles, phase="before")
-        except ScheduleLinkageApplyError as error:
-            if not self._frequency_only_pair_state_failure():
-                raise
-            states, sampled_at = await self._converge_role_frequency(
+            self._emit_progress_best_effort(pair_started)
+            self._set_pair_verification_failure("session_refresh")
+            await self._refresh_pair_sessions_if_enabled(record.spec)
+            self._set_pair_verification_failure("state_read")
+            states = await self._read_post_role_pair_states(
                 record,
-                expected_roles,
-                initial_states=states,
-                initial_anchor=(
-                    previous_anchor
-                    if self._owned_staged_auto_transition_observation
-                    else self._clock_anchor(states, sampled_at)
-                ),
-                initial_error=error,
+                retry_progress=pair_read_retry_started,
                 pair_failure=pair_failure,
             )
-        self._assert_staged_pre_boundary_sample_time(sampled_at)
+            if not self._owned_staged_auto_transition_observation:
+                self._set_pair_verification_failure("clock_skew")
+                self._assert_pair_clock_skew(record.spec, states)
+            sampled_at = self._monotonic()
+            self._set_pair_verification_failure("deadline")
+            self._assert_observation_deadline(sampled_at)
+            self._assert_staged_pre_boundary_sample_time(sampled_at)
+            if not self._owned_staged_auto_transition_observation:
+                self._set_pair_verification_failure("clock_continuity")
+                self._assert_clock_continuity(
+                    record.spec,
+                    states,
+                    previous_clocks=previous_anchor.clocks,
+                    elapsed_monotonic=sampled_at - previous_anchor.sampled_at_monotonic,
+                )
+            expected_roles = {
+                record.spec.master_device_id: (
+                    LinkageRole.MASTER
+                    if record.spec.master_device_id in intents
+                    else LinkageRole.INDEPENDENT
+                ),
+                record.spec.slave_device_id: (
+                    LinkageRole.ASYNC_SLAVE
+                    if record.spec.slave_device_id in intents
+                    else LinkageRole.INDEPENDENT
+                ),
+            }
+            self._set_pair_verification_checkpoint()
+            try:
+                self._assert_pair_sample(record, states, expected_roles, phase="before")
+            except ScheduleLinkageApplyError as error:
+                if not self._frequency_only_pair_state_failure():
+                    raise
+                states, sampled_at = await self._converge_role_frequency(
+                    record,
+                    expected_roles,
+                    initial_states=states,
+                    initial_anchor=(
+                        previous_anchor
+                        if self._owned_staged_auto_transition_observation
+                        else self._clock_anchor(states, sampled_at)
+                    ),
+                    initial_error=error,
+                    pair_failure=pair_failure,
+                )
+            self._assert_staged_pre_boundary_sample_time(sampled_at)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if not self._continue_complete_epoch_after_role_verification_error(
+                record,
+                states=states,
+                error=error,
+            ):
+                raise
+            linked = (*record.linked_device_ids, device_id)
+            record = record.model_copy(
+                update={
+                    "linked_device_ids": linked,
+                    "updated_at": self._record_now(record),
+                }
+            )
+            self._store.save(record)
+            self._run_pair_participant = None
+            return record, previous_anchor
         self._run_failure = pair_failure
         self._run_drift_dimensions = ()
         linked = (*record.linked_device_ids, device_id)
@@ -2388,6 +2410,97 @@ class ScheduleActiveLinkageController:
             else self._clock_anchor(states, sampled_at)
         )
         return record, next_anchor
+
+    def _continue_complete_epoch_after_role_verification_error(
+        self,
+        record: ScheduleLinkageRecord,
+        *,
+        states: Mapping[str, DeviceState] | None,
+        error: Exception,
+    ) -> bool:
+        """Keep the one-shot Q2 measurement alive after an acknowledged role write.
+
+        The durable intent and successful adapter return already authorize exact reverse-order
+        compensation.  A missing or contradictory post-write read is measurement evidence, not
+        a reason to erase the 15-minute epoch.  Identity, safety authority, the observation
+        deadline, and the attended 45% active-output cap remain hard stops.
+        """
+
+        if (
+            not record.spec.complete_observation_epoch
+            or not self._owned_staged_auto_transition_observation
+            or not self._active_observation_allowed()
+        ):
+            return False
+        # This is the existing immutable physical binding check.  A reconnect or cached device
+        # object that no longer belongs to the approved pair must still abort immediately.
+        self._validate_recovery_bindings(record, permit_disconnected=True)
+        if states is not None:
+            self._assert_attended_active_flow_cap(record, states)
+        failure = self._run_failure.value if self._run_failure is not None else "unknown"
+        participant = self._run_pair_participant or "unknown"
+        _LOGGER.warning(
+            "q2-observation continuing after post-write role verification error "
+            "participant=%s failure=%s error=%s",
+            participant,
+            failure,
+            type(error).__name__,
+        )
+        return True
+
+    def _begin_complete_observation_epoch(
+        self,
+        record: ScheduleLinkageRecord,
+    ) -> ScheduleLinkageRecord:
+        """Start the fixed read-only epoch only after both acknowledged role writes."""
+
+        if not record.spec.complete_observation_epoch:
+            return record
+        epoch_seconds = (
+            record.spec.observation_window_seconds
+            - _ROLE_ONLY_ROLLBACK_RESERVE_SECONDS
+        )
+        self._observation_deadline = self._monotonic() + epoch_seconds
+        updated_at = self._record_now(record)
+        record = record.model_copy(
+            update={
+                "updated_at": updated_at,
+                "expires_at": updated_at
+                + timedelta(
+                    seconds=epoch_seconds + _ROLE_ONLY_ROLLBACK_RESERVE_SECONDS
+                ),
+            }
+        )
+        self._store.save(record)
+        return record
+
+    def _assert_attended_active_flow_cap(
+        self,
+        record: ScheduleLinkageRecord,
+        states: Mapping[str, DeviceState],
+    ) -> None:
+        """Reject only an observed active output above the attended one-shot cap."""
+
+        for snapshot in record.snapshots:
+            state = states[snapshot.device_id]
+            capabilities = self._get_device(snapshot.device_id).capabilities
+            guarded_maximum = min(
+                capabilities.power_limits.max_power,
+                _SCHEDULE_LINKAGE_TEST_MAX_POWER,
+            )
+            active_flow = (
+                state.observed_attributes.get("AutoFlow")
+                if state.timer_enabled is True
+                else state.power
+            )
+            if (
+                isinstance(active_flow, int)
+                and not isinstance(active_flow, bool)
+                and active_flow > guarded_maximum
+            ):
+                raise ScheduleLinkageApplyError(
+                    "staged observation found active Flow above the attended cap"
+                )
 
     async def _read_post_role_pair_states(
         self,
