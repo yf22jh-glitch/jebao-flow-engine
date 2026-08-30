@@ -156,6 +156,7 @@ def _fixed_spec(
         sentinel_qualification=True,
         sentinel_only=sentinel_only,
         allow_expired_qualification=allow_expired_qualification,
+        full_epoch_after_roles=True,
     )
     requested = (
         spec.master_before_flow,

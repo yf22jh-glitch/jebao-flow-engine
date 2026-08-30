@@ -1325,6 +1325,10 @@ def schedule_flow_confirmation_token(
         # Bind the one-shot exception only when explicitly enabled while keeping prior v3
         # confirmation tokens readable.
         schedule_flow_spec.pop("allow_expired_qualification")
+    if not spec.full_epoch_after_roles:
+        # Older terminal v3 intents predate the fixed epoch-after-roles authority.  Keep those
+        # records authentic while binding the longer composed timeout whenever it is enabled.
+        schedule_flow_spec.pop("full_epoch_after_roles")
     canonical = {
         "version": 1,
         "instance_id": instance_id,

@@ -143,6 +143,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
     sentinel_qualification: bool = True
     sentinel_only: bool = False
     allow_expired_qualification: bool = False
+    full_epoch_after_roles: bool = False
 
     @model_validator(mode="after")
     def validate_experiment(self) -> Self:
@@ -178,10 +179,12 @@ class ScheduleFlowExperimentSpec(BaseModel):
     def outer_linkage_spec(self) -> LinkageTestSpec:
         """Build the journal owner that pauses and ultimately restores original controls."""
 
-        duration = min(
-            1200.0,
-            self.observation_window_seconds + _COMPOSED_OPERATION_RESERVE_SECONDS,
+        reserve = (
+            _COMPOSED_OPERATION_RESERVE_SECONDS
+            if self.full_epoch_after_roles
+            else 240.0
         )
+        duration = min(1200.0, self.observation_window_seconds + reserve)
         return LinkageTestSpec(
             operation_id=self.operation_id,
             master_device_id=self.master_device_id,
@@ -237,7 +240,11 @@ class ScheduleFlowExperimentSpec(BaseModel):
             observation_timeout_seconds=min(
                 1200,
                 self.observation_window_seconds
-                + _COMPOSED_OPERATION_RESERVE_SECONDS,
+                + (
+                    _COMPOSED_OPERATION_RESERVE_SECONDS
+                    if self.full_epoch_after_roles
+                    else 120.0
+                ),
             ),
             recovery_authority_seconds=2400,
         )

@@ -229,6 +229,7 @@ def test_fixed_plan_is_the_only_audited_field_shape() -> None:
     assert spec.sentinel_qualification is True
     assert spec.role_observation_spec().observation_window_seconds == 915
     assert spec.role_observation_spec().complete_observation_epoch is True
+    assert spec.full_epoch_after_roles is True
     assert spec.outer_linkage_spec().duration_seconds == 1200
     assert spec.temporary_schedule_spec().observation_timeout_seconds == 1200
 
