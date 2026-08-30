@@ -128,6 +128,7 @@ def _fixed_spec(
     slave_device_id: str,
     boundary_time: str,
     sentinel_only: bool = False,
+    allow_expired_qualification: bool = False,
 ) -> ScheduleFlowExperimentSpec:
     """Return the only field-test plan currently audited for physical execution."""
 
@@ -154,6 +155,7 @@ def _fixed_spec(
         clock_advance_tolerance_seconds=2,
         sentinel_qualification=True,
         sentinel_only=sentinel_only,
+        allow_expired_qualification=allow_expired_qualification,
     )
     requested = (
         spec.master_before_flow,
@@ -295,16 +297,22 @@ def _require_receipts(
     store: JsonQualificationStore,
     qualification_operation_id: str,
     snapshots: Sequence[DeviceControlSnapshot],
+    allow_expired: bool = False,
 ) -> None:
     now = datetime.now(UTC)
     for snapshot in snapshots:
         receipt = store.load(snapshot.physical_binding)
-        if (
-            receipt is None
-            or receipt.device_id != snapshot.device_id
-            or receipt.operation_id != qualification_operation_id
-            or not receipt.is_valid_for(snapshot.physical_binding, now=now)
-        ):
+        exact_receipt = (
+            receipt is not None
+            and receipt.device_id == snapshot.device_id
+            and receipt.operation_id == qualification_operation_id
+            and receipt.physical_binding == snapshot.physical_binding
+        )
+        current_receipt = exact_receipt and receipt.is_valid_for(
+            snapshot.physical_binding,
+            now=now,
+        )
+        if not exact_receipt or (not allow_expired and not current_receipt):
             raise ScheduleFlowCliError(
                 "both exact controllers require current receipts from the named qualification"
             )
@@ -320,11 +328,18 @@ def _qualification_authorizer(
         now = datetime.now(UTC)
         for snapshot in snapshots:
             receipt = store.load(snapshot.physical_binding)
-            if (
-                receipt is None
-                or receipt.device_id != snapshot.device_id
-                or receipt.operation_id != spec.qualification_operation_id
-                or not receipt.is_valid_for(snapshot.physical_binding, now=now)
+            exact_receipt = (
+                receipt is not None
+                and receipt.device_id == snapshot.device_id
+                and receipt.operation_id == spec.qualification_operation_id
+                and receipt.physical_binding == snapshot.physical_binding
+            )
+            current_receipt = exact_receipt and receipt.is_valid_for(
+                snapshot.physical_binding,
+                now=now,
+            )
+            if not exact_receipt or (
+                not spec.allow_expired_qualification and not current_receipt
             ):
                 raise ScheduleFlowCliError(
                     "schedule role activation requires both current qualification receipts"
@@ -338,7 +353,12 @@ def _pause_authorizer(store: JsonQualificationStore):
         spec: ScheduleFlowExperimentSpec,
         snapshots: tuple[DeviceControlSnapshot, ...],
     ) -> None:
-        _require_receipts(store, spec.qualification_operation_id, snapshots)
+        _require_receipts(
+            store,
+            spec.qualification_operation_id,
+            snapshots,
+            spec.allow_expired_qualification,
+        )
 
     return authorize
 
@@ -492,6 +512,11 @@ async def _preflight(
                 slave_device_id=args.slave,
                 boundary_time="12:00",
                 sentinel_only=getattr(args, "sentinel_only", False),
+                allow_expired_qualification=getattr(
+                    args,
+                    "allow_expired_qualification",
+                    False,
+                ),
             )
             _require_plan_supported(devices, provisional)
             snapshots = await _capture_preview(devices, provisional.outer_linkage_spec())
@@ -499,7 +524,12 @@ async def _preflight(
                 devices,
                 (args.master, args.slave),
             )
-        _require_receipts(qualification_store, args.qualification_operation_id, snapshots)
+        _require_receipts(
+            qualification_store,
+            args.qualification_operation_id,
+            snapshots,
+            provisional.allow_expired_qualification,
+        )
         spec = _fixed_spec(
             operation_id=args.operation_id,
             qualification_operation_id=args.qualification_operation_id,
@@ -550,6 +580,11 @@ def _spec_from_run_args(args: argparse.Namespace) -> ScheduleFlowExperimentSpec:
         slave_device_id=args.slave,
         boundary_time=args.boundary_time,
         sentinel_only=getattr(args, "sentinel_only", False),
+        allow_expired_qualification=getattr(
+            args,
+            "allow_expired_qualification",
+            False,
+        ),
     )
 
 
@@ -733,7 +768,12 @@ async def _run(
             raise ScheduleFlowCliError("run arguments do not match the armed full experiment")
         if not hmac.compare_digest(args.confirm, intent.confirmation_token):
             raise ConfirmationMismatchError("confirmation token does not match")
-        _require_receipts(qualification_store, spec.qualification_operation_id, intent.snapshots)
+        _require_receipts(
+            qualification_store,
+            spec.qualification_operation_id,
+            intent.snapshots,
+            spec.allow_expired_qualification,
+        )
 
         devices = await _build_devices(config, selected, writable=True)
         async with _connected(devices):
@@ -1549,6 +1589,11 @@ def _add_identity_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--qualification-operation-id", required=True)
     parser.add_argument("--master", required=True, help="configured logical master name")
     parser.add_argument("--slave", required=True, help="configured logical slave name")
+    parser.add_argument(
+        "--allow-expired-qualification",
+        action="store_true",
+        help="one-shot Q2 authority: require the exact prior receipt but ignore only its expiry",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

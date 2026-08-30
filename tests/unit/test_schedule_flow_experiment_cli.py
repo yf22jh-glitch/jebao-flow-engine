@@ -108,7 +108,12 @@ def _digests() -> tuple[HardwareTestScheduleImageDigest, ...]:
     )
 
 
-def _spec(boundary: str = "12:34", *, sentinel_only: bool = False):
+def _spec(
+    boundary: str = "12:34",
+    *,
+    sentinel_only: bool = False,
+    allow_expired_qualification: bool = False,
+):
     return cli._fixed_spec(  # noqa: SLF001
         operation_id="scheduled_flow_001",
         qualification_operation_id="qualified_pair_001",
@@ -116,6 +121,7 @@ def _spec(boundary: str = "12:34", *, sentinel_only: bool = False):
         slave_device_id="slave",
         boundary_time=boundary,
         sentinel_only=sentinel_only,
+        allow_expired_qualification=allow_expired_qualification,
     )
 
 
@@ -255,6 +261,10 @@ def test_sentinel_only_is_cli_parsed_and_confirmation_token_bound() -> None:
 
     assert preflight.sentinel_only is True
     assert run.sentinel_only is True
+    expired = parser.parse_args(
+        ("preflight", *identity, "--allow-expired-qualification")
+    )
+    assert expired.allow_expired_qualification is True
     assert schedule_flow_confirmation_token(
         "main", wire_spec, _snapshots(), _digests()
     ) != schedule_flow_confirmation_token(
@@ -266,6 +276,7 @@ def test_default_spec_keeps_pre_sentinel_only_v3_confirmation_token() -> None:
     spec = _spec()
     legacy_spec = spec.model_dump(mode="json")
     legacy_spec.pop("sentinel_only")
+    legacy_spec.pop("allow_expired_qualification")
     canonical = {
         "version": 1,
         "instance_id": "main",
@@ -531,6 +542,38 @@ def test_pause_authorizer_requires_current_receipts_from_named_qualification(tmp
     )
     with pytest.raises(cli.ScheduleFlowCliError, match="named qualification"):
         authorize(_spec(), _snapshots())
+
+
+def test_expired_receipt_exception_still_requires_exact_pair_and_operation(tmp_path) -> None:
+    store = JsonQualificationStore(tmp_path / "qualifications")
+    now = datetime.now(UTC)
+    for snapshot in _snapshots():
+        store.save(
+            DeviceQualificationReceipt(
+                operation_id="qualified_pair_001",
+                device_id=snapshot.device_id,
+                physical_binding=snapshot.physical_binding,
+                original_power=40,
+                step_power=35,
+                completed_at=now - timedelta(days=2),
+                valid_until=now - timedelta(days=1),
+            )
+        )
+    authorize = cli._pause_authorizer(store)  # noqa: SLF001
+
+    with pytest.raises(cli.ScheduleFlowCliError, match="current receipts"):
+        authorize(_spec(), _snapshots())
+
+    authorize(
+        _spec(allow_expired_qualification=True),
+        _snapshots(),
+    )
+
+    mismatched = _spec(allow_expired_qualification=True).model_copy(
+        update={"qualification_operation_id": "different_operation"}
+    )
+    with pytest.raises(cli.ScheduleFlowCliError, match="current receipts"):
+        authorize(mismatched, _snapshots())
 
 
 def test_boundary_uses_freshest_device_clock_and_refuses_large_skew_or_midnight() -> None:

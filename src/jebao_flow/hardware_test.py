@@ -1321,6 +1321,10 @@ def schedule_flow_confirmation_token(
         # Preserve confirmation and recovery authority for v3 intents armed before the
         # sentinel-only field existed. A true value remains explicit and token-bound.
         schedule_flow_spec.pop("sentinel_only")
+    if not spec.allow_expired_qualification:
+        # Bind the one-shot exception only when explicitly enabled while keeping prior v3
+        # confirmation tokens readable.
+        schedule_flow_spec.pop("allow_expired_qualification")
     canonical = {
         "version": 1,
         "instance_id": instance_id,

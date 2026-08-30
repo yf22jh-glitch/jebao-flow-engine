@@ -138,6 +138,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
     clock_advance_tolerance_seconds: float = Field(default=2, ge=0.1, le=10)
     sentinel_qualification: bool = True
     sentinel_only: bool = False
+    allow_expired_qualification: bool = False
 
     @model_validator(mode="after")
     def validate_experiment(self) -> Self:
