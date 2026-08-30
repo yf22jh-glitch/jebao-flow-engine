@@ -108,6 +108,9 @@ repository maintainer와 on-site hardware approver가 현재 작업에서 **Q2 �
 
 - 고정 계획 `master 31% / slave 32%`에서 `master 35% / slave 40%`로 넘어가는 스케줄 1회
 - 보존 raw에서 확인된 장비 시계 차이를 반영한 기존 비안전 clock-skew 게이트 완화
+- 2026-08-30 저출력 재자격 실행이 자동 rollback 판정에서 실패하고 attended recovery로
+  terminal 복구된 뒤에는, 이 Q2 1회에 한해 **동일 operation id와 동일 physical binding의 기존
+  자격 영수증**에서 만료 시각만 무시. 영수증 부재·identity 불일치·operation 불일치는 우회 금지
 - 전체 관측 시간을 900초로 연장하고, 스케줄 write 이후의 판정 불일치·일시적 read 오류를
   기록하면서 물리 안전 위반이 없는 한 관측 종료까지 계속하는 변경
 - 관측 종료 뒤 `slave role detach → master role detach → TimerOFF → exact schedule images →
