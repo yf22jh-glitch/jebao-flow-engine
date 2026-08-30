@@ -537,6 +537,7 @@ async def _preflight(
             slave_device_id=args.slave,
             boundary_time=_next_boundary(clocks),
             sentinel_only=getattr(args, "sentinel_only", False),
+            allow_expired_qualification=provisional.allow_expired_qualification,
         )
         token = schedule_flow_confirmation_token(
             config.instance.id,

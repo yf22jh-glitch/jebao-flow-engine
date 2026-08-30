@@ -1845,6 +1845,7 @@ async def test_preflight_persists_full_v3_intent_without_writes(monkeypatch, cap
         qualification_operation_id="qualified_pair_001",
         master="master",
         slave="slave",
+        allow_expired_qualification=True,
     )
     monkeypatch.setattr(cli, "_assert_no_verification_conflict", lambda **_kwargs: None)
     monkeypatch.setattr(
@@ -1860,7 +1861,7 @@ async def test_preflight_persists_full_v3_intent_without_writes(monkeypatch, cap
         return {"master": object(), "slave": object()}
 
     async def capture_preview(_devices, spec):
-        assert spec == _spec().outer_linkage_spec()
+        assert spec == _spec(allow_expired_qualification=True).outer_linkage_spec()
         return _snapshots()
 
     async def capture_context(_devices, _device_ids):
@@ -1888,6 +1889,7 @@ async def test_preflight_persists_full_v3_intent_without_writes(monkeypatch, cap
     assert saved.version == 3
     assert saved.phase is HardwareTestIntentPhase.ARMED
     assert saved.schedule_flow_spec.boundary_time == "12:15"
+    assert saved.schedule_flow_spec.allow_expired_qualification is True
     assert saved.schedule_image_digests == _digests()
     output = capsys.readouterr().out
     assert "no control or schedule frame was sent" in output
