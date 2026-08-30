@@ -499,6 +499,11 @@ manifest 뒤에 옵니다.
 - 30분 슬롯과 300초 안정 구간을 쓰는 v1은 epoch당 최소 5,700초를 강제합니다. 20초 cadence면
   최소 286 pair(권장은 여유를 둔 더 큰 값), 30초 cadence면 최소 191 pair입니다. 이보다 짧은
   spec은 collector plan을 durable하게 만들기 전에 거부됩니다.
+- 현재 source attestation은 exact commit의 **clean Git checkout**, 사용 가능한 `git` 실행 파일,
+  source tree 안의 cached bytecode 부재를 요구합니다. 일반 daemon Docker image는 `.git`을
+  포함하지 않으므로 패키징·CLI 확인용이며, Q2 수집 명령은 source를 read-only mount한 별도
+  실행 환경에서 해당 조건을 충족해야 합니다. embedded image provenance가 구현되기 전까지
+  image 단독 실행을 source-attested 수집으로 부르지 않습니다.
 
 위 항목은 구현 후보의 정적 상태일 뿐 `NO-GO`를 해제하지 않습니다. 현재 preserved baseline의
 B manual Flow admission 실패와 on-site 조건을 먼저 해결해야 합니다.
