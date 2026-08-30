@@ -931,7 +931,11 @@ async def _run_with_signals(
             guard.trip()
 
     async def enforce_late_emergency_stop() -> None:
-        if signal_count < 2 and guard.permitted and not latch_error:
+        # A normal controller return releases the deployment lease and intentionally trips the
+        # process-local epoch.  Only a durable latch (or the explicit second-signal path) is a late
+        # emergency here; treating normal lease release as an e-stop would issue an unsafe extra
+        # fallback write after an otherwise completed operation.
+        if signal_count < 2 and not guard.emergency_latch_active and not latch_error:
             return
         record = confirming_store.created_record
         if record is None:
@@ -1416,8 +1420,7 @@ def _status(
     except DeviceVerificationCliError:
         other_workflow_conflict = True
     guard = dependencies.guard_factory()
-    guard.clear()
-    latch_active = not guard.permitted
+    latch_active = guard.emergency_latch_active
     print(f"Verification intent: {intent.phase.value if intent is not None else 'none'}")
     print(f"Verification journal: {record.phase.value if record is not None else 'none'}")
     recovery_reason = (
@@ -1425,10 +1428,7 @@ def _status(
     )
     print(f"Recovery reason: {recovery_reason}")
     print(f"Persistent safety latch: {'active' if latch_active else 'clear'}")
-    print(
-        "Other hardware workflow conflict: "
-        f"{'yes' if other_workflow_conflict else 'no'}"
-    )
+    print(f"Other hardware workflow conflict: {'yes' if other_workflow_conflict else 'no'}")
     source = record or intent
     if source is not None:
         device_id = (

@@ -32,7 +32,7 @@ from jebao_flow.devices.base import (
     UnsupportedCapabilityError,
     WriteGuard,
 )
-from jebao_flow.devices.identity import PhysicalDeviceBinding
+from jebao_flow.physical_identity import PhysicalDeviceBinding
 from jebao_flow.protocol.control import build_control_payload
 from jebao_flow.protocol.errors import (
     ProtocolConnectionError,
@@ -173,6 +173,8 @@ class LanJebaoDevice(JebaoDevice):
         self._allow_hardware_writes = allow_hardware_writes
         self._session_factory = session_factory
         self._session = self._new_session(exclude=())
+        self._authenticated_session: RawSession | None = None
+        self._connected_write_token: object | None = None
         self._session_retired = False
         self._io_lock = asyncio.Lock()
         self._last_command_at: float | None = None
@@ -265,6 +267,7 @@ class LanJebaoDevice(JebaoDevice):
                 self._session_retired = True
                 self._quarantine_session_now(self._session)
                 raise
+            self._mark_authenticated_session(self._session)
             self._session_retired = False
             self._last_sent_values.clear()
 
@@ -277,7 +280,24 @@ class LanJebaoDevice(JebaoDevice):
                 # object as well, so rollback and reconnect never inherit its sequence, buffered
                 # frames or pending writer-close bookkeeping.
                 self._session_retired = True
+                self._authenticated_session = None
+                self._connected_write_token = None
                 self._last_sent_values.clear()
+
+    def connected_session_token(self) -> object:
+        """Return an opaque capability for the currently authenticated transport.
+
+        Exact restore captures this only after its post-connect physical-identity check.  Every
+        later authentication rotates the token, so a ticket issued for one TCP session cannot be
+        replayed after disconnect/reconnect even when the endpoint address is unchanged.
+        """
+
+        token = self._connected_write_token
+        if token is None or not self._has_authenticated_connected_session():
+            raise DeviceConnectionError(
+                f"exact restore session for {self._device_id!r} is not authenticated and connected"
+            )
+        return token
 
     async def get_state(self) -> DeviceState:
         return await self._get_state(accept_reports=None)
@@ -530,6 +550,53 @@ class LanJebaoDevice(JebaoDevice):
     ) -> ControlVerificationOutcome:
         """Restore all 48 Pro AutoTime slots from one exact recovery snapshot."""
 
+        return await self._restore_schedule_image(
+            image,
+            guard=guard,
+            on_ack_unconfirmed=on_ack_unconfirmed,
+            on_ack_resolution=on_ack_resolution,
+            connected_only=False,
+            connected_session_token=None,
+        )
+
+    async def restore_schedule_image_connected(
+        self,
+        image: bytes,
+        *,
+        connected_session_token: object,
+        guard: WriteGuard | None = None,
+        on_ack_unconfirmed: AckUnconfirmedHook | None = None,
+        on_ack_resolution: AckResolutionHook | None = None,
+    ) -> ControlVerificationOutcome:
+        """Restore an exact schedule without opening or replacing the authenticated session.
+
+        Exact restore validates physical identity after :meth:`connect`.  Reconnecting inside
+        the following action would move the write to a transport that the identity ticket did
+        not authorize.  This entry point therefore fails before a control attempt when that
+        exact connected session is no longer usable, and it never reconnects for read-back or
+        ACK-loss resolution.
+        """
+
+        return await self._restore_schedule_image(
+            image,
+            guard=guard,
+            on_ack_unconfirmed=on_ack_unconfirmed,
+            on_ack_resolution=on_ack_resolution,
+            connected_only=True,
+            connected_session_token=connected_session_token,
+        )
+
+    async def _restore_schedule_image(
+        self,
+        image: bytes,
+        *,
+        guard: WriteGuard | None,
+        on_ack_unconfirmed: AckUnconfirmedHook | None,
+        on_ack_resolution: AckResolutionHook | None,
+        connected_only: bool,
+        connected_session_token: object | None,
+    ) -> ControlVerificationOutcome:
+
         self._require_local_wavemaker_pro_schedule()
         exact = validate_local_wavemaker_pro_schedule_image(image)
         slots = {
@@ -548,7 +615,7 @@ class LanJebaoDevice(JebaoDevice):
         # is emitted by ``connect`` and the guard is checked on both sides of that await.
         self._require_hardware_writes_enabled()
         self._require_write_guard(guard)
-        if not self.connected:
+        if not connected_only and not self.connected:
             await self.connect()
         self._require_write_guard(guard)
         return await self._apply_changes(
@@ -558,6 +625,8 @@ class LanJebaoDevice(JebaoDevice):
             on_ack_resolution=on_ack_resolution,
             payload=payload,
             decoder=decode_schedule_image,
+            connected_only=connected_only,
+            connected_session_token=connected_session_token if connected_only else None,
         )
 
     async def set_timer_enabled(self, enabled: bool) -> None:
@@ -597,6 +666,22 @@ class LanJebaoDevice(JebaoDevice):
         guard: WriteGuard | None = None,
     ) -> None:
         await self._apply_changes(self._target_changes(target), guard=guard)
+
+    async def write_target_connected(
+        self,
+        target: DeviceTarget,
+        *,
+        connected_session_token: object,
+        guard: WriteGuard | None = None,
+    ) -> None:
+        """Write one exact outer target without reconnecting the authenticated session."""
+
+        await self._apply_changes(
+            self._target_changes(target),
+            guard=guard,
+            connected_only=True,
+            connected_session_token=connected_session_token,
+        )
 
     def _target_changes(self, target: DeviceTarget) -> dict[str, Any]:
         enabled_attribute = self._require_logical_attribute(Capability.ENABLED)
@@ -645,6 +730,8 @@ class LanJebaoDevice(JebaoDevice):
         on_ack_resolution: AckResolutionHook | None = None,
         payload: bytes | None = None,
         decoder: StateDecoder | None = None,
+        connected_only: bool = False,
+        connected_session_token: object | None = None,
     ) -> ControlVerificationOutcome:
         self._require_hardware_writes_enabled()
         payload = build_control_payload(self.schema, changes) if payload is None else bytes(payload)
@@ -656,6 +743,12 @@ class LanJebaoDevice(JebaoDevice):
                 raise DeviceConnectionError(
                     f"retired session for {self._device_id!r} must be replaced before writing"
                 )
+            if connected_only and not self._connected_write_token_matches(
+                connected_session_token
+            ):
+                raise DeviceConnectionError(
+                    f"exact restore session token for {self._device_id!r} is stale or invalid"
+                )
             self._require_write_guard(guard)
             if all(self._last_sent_values.get(name) == value for name, value in changes.items()):
                 # The app, native schedules or master broadcasts may have changed the device
@@ -666,6 +759,12 @@ class LanJebaoDevice(JebaoDevice):
                     self._require_write_guard(guard)
                     return ControlVerificationOutcome.STATE_VERIFIED
             await self._respect_command_interval()
+            if connected_only and not self._connected_write_token_matches(
+                connected_session_token
+            ):
+                raise DeviceConnectionError(
+                    f"exact restore session token for {self._device_id!r} changed before write"
+                )
             # The guard is intentionally checked under the same device I/O lock and immediately
             # before send. An emergency-stop writer that trips the guard while waiting cannot be
             # followed by this stale ON target.
@@ -683,6 +782,16 @@ class LanJebaoDevice(JebaoDevice):
                 self._quarantine_session_now(self._session)
                 raise
             except (ProtocolError, OSError) as acknowledgement_error:
+                if connected_only:
+                    # The control crossed the only permitted send boundary.  Preserve the
+                    # at-most-once result and retire the stream, but do not authenticate another
+                    # session under an identity ticket issued for this one.
+                    self._session_retired = True
+                    self._last_sent_values.clear()
+                    self._quarantine_session_now(self._session)
+                    if on_ack_unconfirmed is not None:
+                        on_ack_unconfirmed(self._classify_ack_failure(acknowledgement_error))
+                    raise
                 return await self._resolve_unacknowledged_control(
                     changes,
                     acknowledgement_error=acknowledgement_error,
@@ -699,6 +808,13 @@ class LanJebaoDevice(JebaoDevice):
                 self._require_write_guard(guard)
                 try:
                     if not self._session.connected:
+                        if connected_only:
+                            self._session_retired = True
+                            self._quarantine_session_now(self._session)
+                            raise ControlReadbackError(
+                                f"exact restore session for {self._device_id!r} disconnected "
+                                "after control"
+                            )
                         try:
                             await self._session.connect()
                             self._require_write_guard(guard)
@@ -707,6 +823,7 @@ class LanJebaoDevice(JebaoDevice):
                             self._session_retired = True
                             self._quarantine_session_now(self._session)
                             raise
+                        self._mark_authenticated_session(self._session)
                         self._last_sent_values.clear()
                     # Connecting and authenticating may take several seconds. Re-check the
                     # attended operation deadline/interlock before issuing even a read-only
@@ -858,6 +975,7 @@ class LanJebaoDevice(JebaoDevice):
                         attempts=attempt,
                         on_ack_resolution=on_ack_resolution,
                     )
+                    self._mark_authenticated_session(session)
                     self._last_sent_values.clear()
                     self._require_write_guard(guard)
                     raw = await self._run_ack_resolution_stage(
@@ -1064,6 +1182,7 @@ class LanJebaoDevice(JebaoDevice):
                 attempts=attempt,
                 on_ack_resolution=on_ack_resolution,
             )
+            self._mark_authenticated_session(replacement)
             self._require_ack_resolution_time(
                 deadline,
                 stage=ControlAckResolutionStage.AUTHENTICATE,
@@ -1089,6 +1208,24 @@ class LanJebaoDevice(JebaoDevice):
             self._quarantine_session_now(session)
             raise RuntimeError("session factory returned an already-connected session")
         return session
+
+    def _has_authenticated_connected_session(self) -> bool:
+        return (
+            not self._session_retired
+            and self._session.connected
+            and self._authenticated_session is self._session
+        )
+
+    def _connected_write_token_matches(self, candidate: object | None) -> bool:
+        return (
+            candidate is not None
+            and candidate is self._connected_write_token
+            and self._has_authenticated_connected_session()
+        )
+
+    def _mark_authenticated_session(self, session: RawSession) -> None:
+        self._authenticated_session = session
+        self._connected_write_token = object()
 
     def _install_clean_session_best_effort(
         self,

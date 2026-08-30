@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import json
 import stat
 import struct
 import subprocess
 import sys
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -223,6 +224,28 @@ def _context(*, index: int = 0) -> CaptureContext:
         epoch="pilot",
         sample_index=index,
     )
+
+
+async def _completed_pilot(tmp_path: Path, *, pair_count: int = 1):
+    root = _private_root(tmp_path)
+    store = PilotSeriesStore(root)
+    targets = select_capture_pair(_config(), "first", "second")
+    plan = store.prepare(
+        targets,
+        source_attestation=_TEST_SOURCE_ATTESTATION,
+        planned_pair_count=pair_count,
+        requested_cadence_seconds=0.001,
+        collector_commit_sha="a" * 40,
+    )
+    metadata = await store.run(
+        plan,
+        targets,
+        source_attestation=_TEST_SOURCE_ATTESTATION,
+        discovery_factory=lambda: _Discovery(_discovered()),
+        session_factory=_Session,
+        discovery_timeout_seconds=2,
+    )
+    return store, plan, metadata
 
 
 def test_capture_pair_requires_fully_locked_private_config() -> None:
@@ -879,6 +902,123 @@ async def test_pilot_series_precommits_plan_and_preserves_every_ordinal(
             discovery_timeout_seconds=2,
         )
     assert _Discovery.calls == calls_before_reentry
+
+
+async def test_extract_verified_accepted_pair_returns_immutable_safe_raw_evidence(
+    tmp_path: Path,
+) -> None:
+    store, plan, metadata = await _completed_pilot(tmp_path, pair_count=2)
+
+    artifact = store.extract_verified_accepted_pair(
+        plan,
+        expected_series_sha256=metadata.series_sha256,
+        ordinal=1,
+    )
+
+    pair_path = plan.series_directory / "attempts/000001/pair.json"
+    assert artifact.plan_artifact_id == plan.plan_artifact_id
+    assert artifact.plan_sha256 == plan.plan_sha256
+    assert artifact.series_id == plan.series_id
+    assert artifact.series_sha256 == metadata.series_sha256
+    assert artifact.ordinal == 1
+    assert artifact.pair_manifest_sha256 == hashlib.sha256(pair_path.read_bytes()).hexdigest()
+    assert artifact.pair_completion_gap_ns >= 0
+    assert tuple(sample.role for sample in artifact.samples) == ("a", "b")
+    assert tuple(sample.identity_binding_sha256 for sample in artifact.samples) == tuple(
+        target.identity_binding_sha256
+        for target in select_capture_pair(_config(), "first", "second")
+    )
+    for role, sample in zip(("a", "b"), artifact.samples, strict=True):
+        sample_directory = plan.series_directory / f"attempts/000001/{role}"
+        assert sample.raw_wire_frame == (sample_directory / "raw.frame").read_bytes()
+        assert (
+            sample.sample_manifest_sha256
+            == hashlib.sha256((sample_directory / "sample.json").read_bytes()).hexdigest()
+        )
+        assert sample.raw_wire_frame_sha256 == hashlib.sha256(sample.raw_wire_frame).hexdigest()
+        assert sample.attempt.started_monotonic_ns <= sample.read.started_monotonic_ns
+        assert sample.read.completed_monotonic_ns <= sample.identity_after.started_monotonic_ns
+    public_repr = repr(artifact)
+    assert "raw_wire_frame=" not in public_repr
+    public_serialization = repr(asdict(artifact))
+    for forbidden_field in (
+        "series_directory",
+        "vendor_device_id",
+        "mac_address",
+        "address",
+    ):
+        assert forbidden_field not in public_serialization
+    for private_value in (
+        FIRST_DEVICE_ID,
+        SECOND_DEVICE_ID,
+        FIRST_MAC,
+        SECOND_MAC,
+        "first.private",
+        "second.private",
+        str(plan.series_directory),
+    ):
+        assert private_value not in public_repr
+        assert private_value not in public_serialization
+    with pytest.raises(FrozenInstanceError):
+        artifact.ordinal = 0  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        artifact.samples[0].role = "b"  # type: ignore[misc]
+
+
+async def test_extract_verified_pair_rejects_nonaccepted_and_invalid_ordinals(
+    tmp_path: Path,
+) -> None:
+    _Session.raw_by_address["second.private"] = TimeoutError("private endpoint")
+    store, plan, metadata = await _completed_pilot(tmp_path)
+
+    with pytest.raises(ArtifactStoreError, match="pilot_artifact_pair_not_accepted"):
+        store.extract_verified_accepted_pair(
+            plan,
+            expected_series_sha256=metadata.series_sha256,
+            ordinal=0,
+        )
+    for invalid_ordinal in (-1, 1, True):
+        with pytest.raises(ArtifactStoreError, match="pilot_artifact_ordinal_invalid"):
+            store.extract_verified_accepted_pair(
+                plan,
+                expected_series_sha256=metadata.series_sha256,
+                ordinal=invalid_ordinal,
+            )
+
+
+@pytest.mark.parametrize("target", ["pair", "sample", "raw", "missing_raw"])
+async def test_extract_verified_pair_reverifies_selected_attempt_after_full_series(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    store, plan, metadata = await _completed_pilot(tmp_path)
+    original_verify = store.verify_completed_series
+
+    def verify_then_mutate(reference, *, expected_series_sha256: str):
+        verified = original_verify(
+            reference,
+            expected_series_sha256=expected_series_sha256,
+        )
+        attempt = plan.series_directory / "attempts/000000"
+        if target == "pair":
+            (attempt / "pair.json").write_bytes(b"{}")
+        elif target == "sample":
+            (attempt / "a/sample.json").write_bytes(b"{}")
+        elif target == "raw":
+            (attempt / "a/raw.frame").write_bytes(b"tampered")
+        else:
+            (attempt / "a/raw.frame").unlink()
+        return verified
+
+    monkeypatch.setattr(store, "verify_completed_series", verify_then_mutate)
+
+    with pytest.raises(ArtifactStoreError, match="pilot_"):
+        store.extract_verified_accepted_pair(
+            plan,
+            expected_series_sha256=metadata.series_sha256,
+            ordinal=0,
+        )
 
 
 async def test_pilot_run_revalidates_source_attestation_before_network(

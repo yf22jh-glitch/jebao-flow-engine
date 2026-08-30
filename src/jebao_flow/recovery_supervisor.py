@@ -1,7 +1,7 @@
 """Always-on, recovery-only supervisor for attended hardware workflows.
 
 The supervisor is deliberately inert while no durable recovery artifact exists.  Its idle poll
-opens only the six fixed intent/journal files and the persistent emergency-stop marker; device
+opens only the eight fixed intent/journal files and the persistent emergency-stop marker; device
 discovery, TCP connections, and all control writes remain inside the already-audited recovery
 dispatchers and are reached only for one unambiguous, fresh automatic-recovery candidate.
 """
@@ -17,13 +17,14 @@ import os
 import signal
 import stat
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from jebao_flow.config import AppConfig, load_config
 from jebao_flow.device_verification_cli import (
@@ -48,9 +49,14 @@ from jebao_flow.devices.verification import (
     DeviceVerificationBusyError,
     DeviceVerificationRecord,
 )
+from jebao_flow.exact_restore_store import (
+    ExactRestoreJournalClaimError,
+    ExactRestoreJournalStore,
+)
 from jebao_flow.hardware_guard import HardwareOperationBusyError
 from jebao_flow.hardware_safety import (
     emergency_stop_latch_path,
+    exact_restore_journal_path,
     native_linkage_intent_path,
     native_linkage_journal_path,
     schedule_linkage_intent_path,
@@ -103,6 +109,16 @@ class RecoveryDispatchBusyError(RuntimeError):
     """Dependency-injection marker used when a recovery dispatcher is temporarily busy."""
 
 
+class _ExactRestoreArtifactPresence(BaseModel):
+    """Minimal safe parse used only to block automatic recovery for attended restore state."""
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    version: int = Field(ge=1)
+    operation_id: str = Field(min_length=1)
+    phase: str = Field(min_length=1)
+
+
 @dataclass(frozen=True, slots=True)
 class RecoveryArtifacts:
     """One consistent-enough read of the durable workflow artifacts.
@@ -118,6 +134,7 @@ class RecoveryArtifacts:
     schedule_intent: ScheduleLinkageIntent | None = None
     schedule_journal: ScheduleLinkageRecord | None = None
     temporary_schedule_journal: TemporaryScheduleRecord | None = None
+    exact_restore_journal: _ExactRestoreArtifactPresence | None = None
 
 
 ArtifactScanner = Callable[[], RecoveryArtifacts]
@@ -127,6 +144,7 @@ VerificationDispatcher = Callable[[AppConfig, argparse.Namespace], Awaitable[int
 ScheduleDispatcher = Callable[[AppConfig, argparse.Namespace], Awaitable[int]]
 Clock = Callable[[], datetime]
 BusyClassifier = Callable[[BaseException], bool]
+ExactRestoreAdmission = Callable[[], AbstractContextManager[bool]]
 
 
 def _load_fixed_artifact[ModelT: BaseModel](
@@ -213,6 +231,10 @@ def _default_scan_artifacts() -> RecoveryArtifacts:
             temporary_schedule_journal_path(),
             TemporaryScheduleRecord,
         ),
+        exact_restore_journal=_load_fixed_artifact(
+            exact_restore_journal_path(),
+            _ExactRestoreArtifactPresence,
+        ),
     )
 
 
@@ -239,6 +261,15 @@ async def _default_schedule_dispatch(config: AppConfig, args: argparse.Namespace
     return await dispatch_schedule_linkage(config, args)
 
 
+@contextmanager
+def _default_exact_restore_admission() -> Iterator[bool]:
+    """Exclude exact-restore creation for the full legacy recovery dispatch."""
+
+    store = ExactRestoreJournalStore()
+    with store.claim():
+        yield store.load() is None
+
+
 def _default_is_busy(error: BaseException) -> bool:
     if isinstance(
         error,
@@ -248,20 +279,25 @@ def _default_is_busy(error: BaseException) -> bool:
         | LinkageTransactionBusyError
         | DeviceVerificationBusyError
         | ScheduleLinkageBusyError
-        | ScheduleLinkageJournalClaimError,
+        | ScheduleLinkageJournalClaimError
+        | ExactRestoreJournalClaimError,
     ):
         return True
     # The CLI intent leases predate typed busy errors. Match only their exact sanitized
     # messages; never publish or log exception text from a lower network/device layer.
     return (
-        isinstance(error, HardwareTestError)
-        and str(error) == "another hardware-test process is already running"
-    ) or (
-        isinstance(error, DeviceVerificationCliError)
-        and str(error) == "another device-verification process is active"
-    ) or (
-        isinstance(error, ScheduleLinkageCliError)
-        and str(error) == "another schedule-linkage process is active"
+        (
+            isinstance(error, HardwareTestError)
+            and str(error) == "another hardware-test process is already running"
+        )
+        or (
+            isinstance(error, DeviceVerificationCliError)
+            and str(error) == "another device-verification process is active"
+        )
+        or (
+            isinstance(error, ScheduleLinkageCliError)
+            and str(error) == "another schedule-linkage process is active"
+        )
     )
 
 
@@ -275,6 +311,7 @@ class RecoverySupervisorDependencies:
     native_dispatch: NativeDispatcher = _default_native_dispatch
     verification_dispatch: VerificationDispatcher = _default_verification_dispatch
     schedule_dispatch: ScheduleDispatcher = _default_schedule_dispatch
+    exact_restore_admission: ExactRestoreAdmission = _default_exact_restore_admission
     clock: Clock = lambda: datetime.now(UTC)
     is_busy: BusyClassifier = _default_is_busy
 
@@ -316,6 +353,7 @@ def _artifact_fingerprint(artifacts: RecoveryArtifacts) -> str:
         artifacts.schedule_intent,
         artifacts.schedule_journal,
         artifacts.temporary_schedule_journal,
+        artifacts.exact_restore_journal,
     ):
         if artifact is None:
             encoded = b"none"
@@ -445,6 +483,12 @@ class RecoverySupervisor:
                 return self._status
 
             fingerprint = _artifact_fingerprint(artifacts)
+            # Standalone exact restore has its own attended authority and at-most-once journal.
+            # This supervisor may block around it but must never guess, clear, or dispatch it.
+            if artifacts.exact_restore_journal is not None:
+                self._blocked_fingerprint = None
+                self._set_status(RecoverySupervisorStatus.ATTENDED_REQUIRED)
+                return self._status
             # Temporary schedule bytes must be restored before any outer control-state journal
             # can safely re-enable TimerON.  This supervisor intentionally has no authority to
             # guess that cross-journal order; the attended schedule recovery command owns it.
@@ -469,9 +513,8 @@ class RecoverySupervisor:
                 artifacts.verification_journal is not None
                 or _phase_is_nonterminal(artifacts.verification_intent)
             )
-            schedule_nonterminal = (
-                artifacts.schedule_journal is not None
-                or _phase_is_nonterminal(artifacts.schedule_intent)
+            schedule_nonterminal = artifacts.schedule_journal is not None or _phase_is_nonterminal(
+                artifacts.schedule_intent
             )
 
             if sum((native_nonterminal, verification_nonterminal, schedule_nonterminal)) > 1:
@@ -526,7 +569,17 @@ class RecoverySupervisor:
 
             self._set_status(recovering)
             try:
-                result = await self._dispatch_uninterruptibly(dispatcher, args)
+                # The earlier artifact scan is advisory.  Hold the exact-restore journal claim
+                # across the complete legacy dispatcher so an exact journal cannot appear and
+                # begin a second write workflow in the scan-to-dispatch interval.  Exact restore
+                # acquires the same claim before the global hardware lease, preserving one lock
+                # order for both workflows.
+                with self._dependencies.exact_restore_admission() as admitted:
+                    if not admitted:
+                        self._blocked_fingerprint = None
+                        self._set_status(RecoverySupervisorStatus.ATTENDED_REQUIRED)
+                        return self._status
+                    result = await self._dispatch_uninterruptibly(dispatcher, args)
             except BaseException as error:
                 if isinstance(error, asyncio.CancelledError):
                     raise
@@ -541,9 +594,7 @@ class RecoverySupervisor:
                 return self._status
 
             if result != 0:
-                self._blocked_fingerprint = self._latest_artifact_fingerprint(
-                    fallback=fingerprint
-                )
+                self._blocked_fingerprint = self._latest_artifact_fingerprint(fallback=fingerprint)
                 self._set_status(RecoverySupervisorStatus.ERROR)
                 return self._status
             self._blocked_fingerprint = None
@@ -657,9 +708,7 @@ class RecoverySupervisor:
                 if getattr(intent, "phase", None) is ScheduleLinkageIntentPhase.STARTED
                 else RecoverySupervisorStatus.ATTENDED_REQUIRED
             )
-        expected_detached = tuple(
-            reversed(getattr(record, "linkage_write_intent_device_ids", ()))
-        )
+        expected_detached = tuple(reversed(getattr(record, "linkage_write_intent_device_ids", ())))
         terminal_clear_crash = (
             getattr(intent, "phase", None) is ScheduleLinkageIntentPhase.TERMINAL
             and getattr(intent, "outcome", None)

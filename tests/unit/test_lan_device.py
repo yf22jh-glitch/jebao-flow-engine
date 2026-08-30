@@ -1748,6 +1748,90 @@ async def test_pro_exact_schedule_restore_bypasses_forward_limits_and_verifies_f
     assert _FakeSession.instances[0].read_accept_reports == [True]
 
 
+async def test_connected_exact_schedule_restore_never_opens_a_session() -> None:
+    raw_state = _pro_schedule_state({0: _schedule_slot(flow=38)})
+    image = extract_local_wavemaker_pro_schedule_image(raw_state)
+    _FakeSession.state = raw_state
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+
+    with pytest.raises(DeviceConnectionError, match="exact restore session"):
+        await device.restore_schedule_image_connected(
+            image,
+            connected_session_token=object(),
+            guard=lambda: True,
+        )
+
+    assert len(_FakeSession.instances) == 1
+    assert _FakeSession.instances[0].connect_calls == 0
+    assert _FakeSession.instances[0].authenticate_calls == 0
+    assert _FakeSession.instances[0].sent == []
+
+
+async def test_connected_exact_schedule_restore_rejects_transport_without_lan_auth() -> None:
+    raw_state = _pro_schedule_state({0: _schedule_slot(flow=38)})
+    image = extract_local_wavemaker_pro_schedule_image(raw_state)
+    _FakeSession.state = raw_state
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    session = _FakeSession.instances[0]
+    await session.connect()
+
+    with pytest.raises(DeviceConnectionError, match="session token"):
+        await device.restore_schedule_image_connected(
+            image,
+            connected_session_token=object(),
+            guard=lambda: True,
+        )
+
+    assert len(_FakeSession.instances) == 1
+    assert session.connect_calls == 1
+    assert session.authenticate_calls == 0
+    assert session.sent == []
+
+
+async def test_connected_exact_schedule_restore_uses_the_authenticated_session_once() -> None:
+    raw_state = _pro_schedule_state({0: _schedule_slot(flow=38)})
+    image = extract_local_wavemaker_pro_schedule_image(raw_state)
+    _FakeSession.state = raw_state
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    connected_session_token = device.connected_session_token()
+
+    outcome = await device.restore_schedule_image_connected(
+        image,
+        connected_session_token=connected_session_token,
+        guard=lambda: True,
+    )
+
+    assert outcome is ControlVerificationOutcome.STATE_VERIFIED
+    assert len(_FakeSession.instances) == 1
+    assert _FakeSession.instances[0].connect_calls == 1
+    assert _FakeSession.instances[0].authenticate_calls == 1
+    assert len(_FakeSession.instances[0].sent) == 1
+
+
+async def test_connected_exact_schedule_ack_loss_does_not_open_a_resolution_session() -> None:
+    raw_state = _pro_schedule_state({0: _schedule_slot(flow=38)})
+    image = extract_local_wavemaker_pro_schedule_image(raw_state)
+    _FakeSession.state = raw_state
+    _FakeSession.send_failure = ProtocolTimeoutError("private transport endpoint")
+    device = _device(allow_writes=True, minimum_command_interval_ms=100)
+    await device.connect()
+    connected_session_token = device.connected_session_token()
+
+    with pytest.raises(ProtocolTimeoutError):
+        await device.restore_schedule_image_connected(
+            image,
+            connected_session_token=connected_session_token,
+            guard=lambda: True,
+        )
+
+    assert len(_FakeSession.instances) == 1
+    assert _FakeSession.instances[0].connect_calls == 1
+    assert _FakeSession.instances[0].authenticate_calls == 1
+    assert len(_FakeSession.instances[0].sent) == 1
+    assert _FakeSession.instances[0].connected is False
+
+
 async def test_cancelled_schedule_send_retires_transport_before_exact_restore() -> None:
     original_state = _pro_schedule_state({0: _schedule_slot(flow=89)})
     original_image = extract_local_wavemaker_pro_schedule_image(original_state)

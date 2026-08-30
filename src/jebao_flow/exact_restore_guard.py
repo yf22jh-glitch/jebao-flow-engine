@@ -1,8 +1,8 @@
-"""Deployment-wide lease and fail-closed interlock for physical writes.
+"""Independent deployment-wide guard for an attended exact-restore operation.
 
-Every sanctioned physical-write workflow uses the same advisory lock and persistent emergency
-stop marker.  The default paths live under the fixed ``/hardware-safety`` mount; optional path
-arguments exist for isolated tests only.
+This module deliberately does not import ``jebao_flow.devices`` or the frozen native ASYNC
+write harness.  The exact-restore path still shares the deployment-wide operation lease and
+emergency-stop latch with every other physical-write workflow through ``hardware_safety``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from pathlib import Path
 from threading import get_ident
 from types import TracebackType
 
-from jebao_flow.devices.linkage import LinkageSafetyInterlock
 from jebao_flow.hardware_safety import (
     HardwareSafetyRootError,
     _open_hardware_safety_root,
@@ -23,25 +22,21 @@ from jebao_flow.hardware_safety import (
     emergency_stop_latch_path,
     global_operation_lock_path,
     hardware_safety_root,
-    validate_hardware_safety_root,
-)
-from jebao_flow.hardware_safety import (
-    exact_restore_journal_path as default_exact_restore_journal_path,
 )
 
 
-class HardwareOperationLockError(RuntimeError):
-    """The deployment-wide operation lease could not be established safely."""
+class ExactRestoreOperationLockError(RuntimeError):
+    """The deployment-wide exact-restore lease could not be established safely."""
 
 
-class HardwareOperationBusyError(HardwareOperationLockError):
-    """Another workflow or durable recovery state blocks physical-write admission."""
+class ExactRestoreOperationBusyError(ExactRestoreOperationLockError):
+    """Another process already owns the deployment-wide physical-write lease."""
 
 
-class _DeploymentLeaseContext:
-    """Release a lease only from the process and thread that acquired it."""
+class _GuardLeaseContext:
+    """Release a lease only from the exact process and thread that acquired it."""
 
-    def __init__(self, guard: DeploymentHardwareGuard) -> None:
+    def __init__(self, guard: ExactRestoreGuard) -> None:
         self._guard = guard
         self._active = False
         self._owner_pid = -1
@@ -49,7 +44,7 @@ class _DeploymentLeaseContext:
 
     def __enter__(self) -> None:
         if self._active:
-            raise HardwareOperationLockError("deployment lease context is already active")
+            raise ExactRestoreOperationLockError("exact-restore lease context is already active")
         self._guard._acquire_lease()
         self._owner_pid = os.getpid()
         self._owner_thread_id = get_ident()
@@ -63,10 +58,10 @@ class _DeploymentLeaseContext:
     ) -> bool:
         del exc_type, exc_value, traceback
         if not self._active:
-            raise HardwareOperationLockError("deployment lease context is not active")
+            raise ExactRestoreOperationLockError("exact-restore lease context is not active")
         if self._owner_pid != os.getpid() or self._owner_thread_id != get_ident():
-            raise HardwareOperationLockError(
-                "deployment lease must be released by its owner process and thread"
+            raise ExactRestoreOperationLockError(
+                "exact-restore lease must be released by its owner process and thread"
             )
         try:
             self._guard._release_lease()
@@ -75,118 +70,124 @@ class _DeploymentLeaseContext:
         return False
 
 
-class DeploymentHardwareGuard(LinkageSafetyInterlock):
-    """One process-local interlock backed by deployment-wide persistent primitives.
+class ExactRestoreGuard:
+    """Fail-closed process interlock backed by deployment-wide persistent primitives.
 
-    ``permitted`` is fail-closed when any filesystem object exists at the emergency latch path.
-    Observing a latch also trips the process-local epoch, so removing the file cannot revive an
-    operation that was already in flight.  ``lease`` is deliberately synchronous because it only
-    performs local, nonblocking filesystem operations and is held around an asynchronous workflow.
+    A new guard starts blocked and must be explicitly cleared before use.  Its epoch advances
+    whenever ``trip`` is called, so a stale in-flight operation cannot be revived by a later
+    ``clear``.  Any filesystem object at the emergency latch path is treated as an active latch;
+    unreadable latch metadata is treated the same way.
+
+    ``lease`` is synchronous because it performs only local, nonblocking filesystem operations.
+    The descriptor may then be held around an asynchronous exact-restore workflow.
     """
 
     def __init__(
         self,
         *,
-        operation_lock_path: Path | None = None,
-        latch_path: Path | None = None,
-        exact_restore_journal_path: Path | None = None,
         poll_interval_seconds: float = 0.1,
     ) -> None:
         if poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
-        super().__init__(initially_permitted=False)
-        self._operation_lock_path = (
-            global_operation_lock_path()
-            if operation_lock_path is None
-            else Path(operation_lock_path)
-        )
-        self._latch_path = emergency_stop_latch_path() if latch_path is None else Path(latch_path)
-        # Production guards must share admission state with the standalone exact-restore
-        # workflow.  Isolated tests may either supply an equally isolated journal path or omit
-        # it to disable this production-only check; a custom lock path must never cause a read
-        # from the real /hardware-safety tree.
-        self._exact_restore_journal_path = (
-            default_exact_restore_journal_path()
-            if operation_lock_path is None and exact_restore_journal_path is None
-            else (None if exact_restore_journal_path is None else Path(exact_restore_journal_path))
-        )
+
+        self._permitted = False
+        self._epoch = 0
+        self._blocked = asyncio.Event()
+        self._blocked.set()
+        self._operation_lock_path = global_operation_lock_path()
+        self._latch_path = emergency_stop_latch_path()
         self._poll_interval_seconds = poll_interval_seconds
-        self._uses_fixed_operation_path = operation_lock_path is None
+        self._validate_fixed_paths = True
         self._lease_descriptor = -1
         self._lease_root_descriptor = -1
         self._lease_compromised = False
         self._lease_pid = -1
         self._lease_thread_id = -1
 
+    @classmethod
+    def _for_test(
+        cls,
+        *,
+        operation_lock_path: Path,
+        latch_path: Path,
+        poll_interval_seconds: float = 0.1,
+    ) -> ExactRestoreGuard:
+        """Build a guard with isolated paths for tests; production callers use fixed paths."""
+
+        guard = cls(poll_interval_seconds=poll_interval_seconds)
+        guard._operation_lock_path = Path(operation_lock_path)
+        guard._latch_path = Path(latch_path)
+        guard._validate_fixed_paths = False
+        return guard
+
     @property
     def permitted(self) -> bool:
         self._observe_lease_integrity()
         self._observe_persistent_latch()
-        return super().permitted
+        return self._permitted
 
     @property
     def epoch(self) -> int:
         self._observe_lease_integrity()
         self._observe_persistent_latch()
-        return super().epoch
+        return self._epoch
 
-    @property
-    def emergency_latch_active(self) -> bool:
-        """Return the persistent latch state without treating normal lease release as an e-stop."""
+    def trip(self) -> None:
+        """Block the process-local operation and invalidate its captured epoch."""
 
-        active = self._persistent_latch_present()
-        if active:
-            self._trip_if_active()
-        return active
+        self._permitted = False
+        self._epoch += 1
+        self._blocked.set()
 
     def clear(self) -> None:
-        """Permit a new operation only while the persistent emergency latch is absent."""
+        """Permit an operation only while its fixed lease and emergency latch are intact."""
 
-        if self._persistent_latch_present():
+        if self._lease_descriptor < 0 or self._lease_compromised:
             self._trip_if_active()
             return
-        super().clear()
-        # Close the check-then-clear race.  A later race is still caught by every ``permitted``
-        # check, including the adapter's guard immediately before a wire send.
+        self._observe_lease_integrity()
+        if self._lease_compromised or self._persistent_latch_present():
+            self._trip_if_active()
+            return
+        self._permitted = True
+        self._blocked.clear()
+        # Close the check-then-clear race.  Later races remain visible through every permitted
+        # or epoch check and through wait_until_blocked's bounded poll.
         self._observe_persistent_latch()
 
     async def wait_until_blocked(self) -> None:
-        """Wake for either a local trip or a persistent latch created by another process."""
+        """Wake for either a local trip or a latch created by another process."""
 
         while self.permitted:
             try:
                 await asyncio.wait_for(
-                    super().wait_until_blocked(),
+                    self._blocked.wait(),
                     timeout=self._poll_interval_seconds,
                 )
             except TimeoutError:
                 continue
 
-    def lease(self) -> _DeploymentLeaseContext:
+    def lease(self) -> _GuardLeaseContext:
         """Acquire the single deployment-wide physical-write lease without waiting."""
 
-        return _DeploymentLeaseContext(self)
+        return _GuardLeaseContext(self)
 
     def _acquire_lease(self) -> None:
         root_descriptor = -1
         descriptor = -1
         locked = False
         try:
-            if self._uses_fixed_operation_path:
-                validate_hardware_safety_root()
+            if self._validate_fixed_paths:
                 root = hardware_safety_root()
-                fixed_paths = [self._operation_lock_path, self._latch_path]
-                if self._exact_restore_journal_path is not None:
-                    fixed_paths.append(self._exact_restore_journal_path)
-                if any(path.parent != root for path in fixed_paths):
-                    raise HardwareOperationLockError(
-                        "deployment guard paths left the fixed hardware-safety root"
+                if self._operation_lock_path.parent != root or self._latch_path.parent != root:
+                    raise ExactRestoreOperationLockError(
+                        "exact-restore guard paths left the fixed hardware-safety root"
                     )
                 root_descriptor = _open_hardware_safety_root()
 
             if self._lease_descriptor >= 0:
-                raise HardwareOperationLockError(
-                    "deployment guard already owns a physical-write lease"
+                raise ExactRestoreOperationLockError(
+                    "exact-restore guard already owns a deployment-wide lease"
                 )
 
             descriptor = self._open_lock_file(root_descriptor)
@@ -194,18 +195,15 @@ class DeploymentHardwareGuard(LinkageSafetyInterlock):
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 locked = True
             except BlockingIOError as error:
-                raise HardwareOperationBusyError(
+                raise ExactRestoreOperationBusyError(
                     "another physical-write workflow owns the deployment lease"
                 ) from error
             except OSError as error:
-                raise HardwareOperationLockError(
+                raise ExactRestoreOperationLockError(
                     "cannot acquire the deployment-wide physical-write lease"
                 ) from error
 
-            # Ensure a path replacement cannot make another process lock a different inode after
-            # this process opened the expected file.
             self._validate_open_lock(descriptor, root_descriptor)
-            self._require_no_exact_restore_journal(root_descriptor)
             self._lease_descriptor = descriptor
             self._lease_root_descriptor = root_descriptor
             self._lease_compromised = False
@@ -214,8 +212,8 @@ class DeploymentHardwareGuard(LinkageSafetyInterlock):
             descriptor = -1
             root_descriptor = -1
         except HardwareSafetyRootError as error:
-            raise HardwareOperationLockError(
-                "fixed hardware-safety root is unavailable for deployment guard"
+            raise ExactRestoreOperationLockError(
+                "fixed hardware-safety root is unavailable for exact restore"
             ) from error
         finally:
             if locked and descriptor >= 0:
@@ -232,13 +230,13 @@ class DeploymentHardwareGuard(LinkageSafetyInterlock):
         descriptor = self._lease_descriptor
         root_descriptor = self._lease_root_descriptor
         if descriptor < 0 or self._lease_pid != os.getpid() or self._lease_thread_id != get_ident():
-            raise HardwareOperationLockError(
-                "deployment lease must be released by its owner process and thread"
+            raise ExactRestoreOperationLockError(
+                "exact-restore lease must be released by its owner process and thread"
             )
 
         self._observe_lease_integrity()
         compromised = self._lease_compromised
-        self._trip_if_active()
+        self.trip()
         self._lease_descriptor = -1
         self._lease_root_descriptor = -1
         self._lease_compromised = False
@@ -256,11 +254,13 @@ class DeploymentHardwareGuard(LinkageSafetyInterlock):
                 if root_descriptor >= 0:
                     os.close(root_descriptor)
         if compromised:
-            raise HardwareOperationLockError("deployment lease integrity was lost before release")
+            raise ExactRestoreOperationLockError(
+                "exact-restore lease integrity was lost before release"
+            )
 
-    def _open_lock_file(self, root_descriptor: int = -1) -> int:
+    def _open_lock_file(self, root_descriptor: int) -> int:
         if not hasattr(os, "O_NOFOLLOW"):
-            raise HardwareOperationLockError("O_NOFOLLOW is required for the hardware lease")
+            raise ExactRestoreOperationLockError("O_NOFOLLOW is required for the hardware lease")
         flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
@@ -275,18 +275,18 @@ class DeploymentHardwareGuard(LinkageSafetyInterlock):
         try:
             descriptor = os.open(target, flags, 0o600, dir_fd=directory_descriptor)
         except OSError as error:
-            raise HardwareOperationLockError(
+            raise ExactRestoreOperationLockError(
                 "cannot open the deployment-wide physical-write lease"
             ) from error
 
         try:
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
-                raise HardwareOperationLockError(
+                raise ExactRestoreOperationLockError(
                     "deployment-wide physical-write lease has unsafe ownership or type"
                 )
             if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1:
-                raise HardwareOperationLockError(
+                raise ExactRestoreOperationLockError(
                     "deployment-wide physical-write lease has unsafe metadata"
                 )
             self._validate_open_lock(descriptor, root_descriptor)
@@ -306,11 +306,12 @@ class DeploymentHardwareGuard(LinkageSafetyInterlock):
                     dir_fd=root_descriptor,
                     follow_symlinks=False,
                 )
-                _validate_hardware_safety_root_descriptor(root_descriptor)
             else:
                 path_metadata = os.stat(self._operation_lock_path, follow_symlinks=False)
+            if root_descriptor >= 0:
+                _validate_hardware_safety_root_descriptor(root_descriptor)
         except (HardwareSafetyRootError, OSError) as error:
-            raise HardwareOperationLockError(
+            raise ExactRestoreOperationLockError(
                 "deployment-wide physical-write lease changed while opening"
             ) from error
         if (
@@ -324,7 +325,7 @@ class DeploymentHardwareGuard(LinkageSafetyInterlock):
             or path_metadata.st_nlink != 1
             or (opened.st_dev, opened.st_ino) != (path_metadata.st_dev, path_metadata.st_ino)
         ):
-            raise HardwareOperationLockError(
+            raise ExactRestoreOperationLockError(
                 "deployment-wide physical-write lease has unsafe metadata"
             )
 
@@ -353,46 +354,11 @@ class DeploymentHardwareGuard(LinkageSafetyInterlock):
             self._lease_compromised = True
             return True
         except OSError:
-            # An unreadable latch location is indistinguishable from an active safety marker.
+            # An unreadable latch path is indistinguishable from an active safety marker.
             if root_descriptor >= 0:
                 self._lease_compromised = True
             return True
         return True
-
-    def _require_no_exact_restore_journal(self, root_descriptor: int = -1) -> None:
-        """Block legacy workflows while exact restore owns durable recovery state.
-
-        This check runs only after the deployment-wide operation lock is held.  Exact restore
-        uses that same lock while creating, advancing, and clearing its journal, so sanctioned
-        workflows cannot race this admission decision.
-        """
-
-        path = self._exact_restore_journal_path
-        if path is None:
-            return
-        try:
-            if root_descriptor >= 0:
-                _validate_hardware_safety_root_descriptor(root_descriptor)
-                os.stat(path.name, dir_fd=root_descriptor, follow_symlinks=False)
-                _validate_hardware_safety_root_descriptor(root_descriptor)
-            else:
-                path.lstat()
-        except FileNotFoundError:
-            if root_descriptor >= 0:
-                try:
-                    _validate_hardware_safety_root_descriptor(root_descriptor)
-                except HardwareSafetyRootError as error:
-                    raise HardwareOperationBusyError(
-                        "cannot prove the exact-restore journal is absent"
-                    ) from error
-            return
-        except (HardwareSafetyRootError, OSError) as error:
-            raise HardwareOperationBusyError(
-                "cannot prove the exact-restore journal is absent"
-            ) from error
-        raise HardwareOperationBusyError(
-            "an exact-restore journal blocks the legacy physical-write workflow"
-        )
 
     def _observe_persistent_latch(self) -> None:
         if self._persistent_latch_present():
@@ -408,17 +374,17 @@ class DeploymentHardwareGuard(LinkageSafetyInterlock):
             return
         try:
             self._validate_open_lock(descriptor, self._lease_root_descriptor)
-        except HardwareOperationLockError:
+        except ExactRestoreOperationLockError:
             self._lease_compromised = True
             self._trip_if_active()
 
     def _trip_if_active(self) -> None:
-        if super().permitted:
-            super().trip()
+        if self._permitted:
+            self.trip()
 
 
 __all__ = [
-    "DeploymentHardwareGuard",
-    "HardwareOperationBusyError",
-    "HardwareOperationLockError",
+    "ExactRestoreGuard",
+    "ExactRestoreOperationBusyError",
+    "ExactRestoreOperationLockError",
 ]

@@ -61,13 +61,24 @@ _SLAVE_MAC = "aabbccddee02"
 
 @pytest.fixture(autouse=True)
 def _shared_hardware_safety_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "shared-hardware-safety"
     monkeypatch.setattr(
         hardware_safety,
         "_HARDWARE_SAFETY_ROOT",
-        tmp_path / "shared-hardware-safety",
+        root,
     )
     monkeypatch.setattr(hardware_test, "validate_hardware_safety_root", lambda: None)
     monkeypatch.setattr(hardware_guard, "validate_hardware_safety_root", lambda: None)
+    monkeypatch.setattr(
+        hardware_guard,
+        "_open_hardware_safety_root",
+        lambda: os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
+    )
+    monkeypatch.setattr(
+        hardware_guard,
+        "_validate_hardware_safety_root_descriptor",
+        lambda _descriptor: None,
+    )
 
 
 def _config(tmp_path: Path, **runtime_overrides: object) -> AppConfig:

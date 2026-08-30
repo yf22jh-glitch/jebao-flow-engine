@@ -285,10 +285,61 @@ class PublicPilotMetadata:
     expected_identity_bindings_sha256: tuple[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedPilotInterval:
+    """Public host timing copied from an already verified private manifest."""
+
+    started_utc: str
+    completed_utc: str
+    started_monotonic_ns: int
+    completed_monotonic_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedPilotRawSample:
+    """One accepted sample with immutable raw evidence and privacy-safe provenance."""
+
+    role: str
+    identity_binding_sha256: str
+    sample_manifest_sha256: str
+    raw_wire_frame_sha256: str
+    attempt: VerifiedPilotInterval
+    identity_before: VerifiedPilotInterval
+    read: VerifiedPilotInterval
+    identity_after: VerifiedPilotInterval
+    raw_wire_frame: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedPilotPairArtifact:
+    """An accepted pair extracted only after complete-series and pair re-verification."""
+
+    plan_artifact_id: str
+    plan_sha256: str
+    series_id: str
+    series_sha256: str
+    ordinal: int
+    pair_manifest_sha256: str
+    attempt: VerifiedPilotInterval
+    pair_completion_gap_ns: int
+    samples: tuple[VerifiedPilotRawSample, VerifiedPilotRawSample]
+
+
 def _utc_text(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise CollectorPreflightError("clock_not_timezone_aware")
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _public_verified_interval(value: dict[str, Any]) -> VerifiedPilotInterval:
+    """Convert an interval only after the enclosing verifier accepted it."""
+
+    return VerifiedPilotInterval(
+        started_utc=value["started_utc"],
+        completed_utc=value["completed_utc"],
+        started_monotonic_ns=value["started_monotonic_ns"],
+        completed_monotonic_ns=value["completed_monotonic_ns"],
+    )
 
 
 def _stamp(utc_clock: UtcClock, monotonic_clock: MonotonicClock) -> ClockStamp:
@@ -2602,6 +2653,123 @@ class PilotSeriesStore:
             raise ArtifactStoreError("pilot_series_status_mismatch")
         return series
 
+    def extract_verified_accepted_pair(
+        self,
+        reference: PilotPlanReference,
+        *,
+        expected_series_sha256: str,
+        ordinal: int,
+    ) -> VerifiedPilotPairArtifact:
+        """Return one accepted raw pair after full-series and exact-attempt verification.
+
+        This is an evidence extraction boundary, not a Q2 classifier.  It deliberately
+        exposes neither private paths nor physical identifiers.
+        """
+
+        series = self.verify_completed_series(
+            reference,
+            expected_series_sha256=expected_series_sha256,
+        )
+        records = series["records"]
+        if (
+            not isinstance(ordinal, int)
+            or isinstance(ordinal, bool)
+            or ordinal < 0
+            or ordinal >= len(records)
+        ):
+            raise ArtifactStoreError("pilot_artifact_ordinal_invalid")
+        record = records[ordinal]
+        if record.get("outcome") != "accepted":
+            raise ArtifactStoreError("pilot_artifact_pair_not_accepted")
+
+        plan = self.verify_plan(reference)
+        pair = self._verify_attempt(
+            reference,
+            plan,
+            ordinal=ordinal,
+            include_artifact_payloads=True,
+        )
+        pair_payload = pair.pop("_verified_pair_payload", None)
+        verified_samples = pair.pop("_verified_samples", None)
+        if (
+            pair.get("outcome") != "accepted"
+            or not isinstance(pair_payload, bytes)
+            or not isinstance(verified_samples, tuple)
+            or len(verified_samples) != 2
+        ):
+            raise ArtifactStoreError("pilot_artifact_pair_not_accepted")
+        pair_digest = hashlib.sha256(pair_payload).hexdigest()
+        if not secrets.compare_digest(pair_digest, str(record.get("pair_sha256"))):
+            raise ArtifactStoreError("pilot_artifact_pair_digest_mismatch")
+
+        samples: list[VerifiedPilotRawSample] = []
+        for role, verified in zip(("a", "b"), verified_samples, strict=True):
+            sample = verified.pop("_verified_sample_manifest", None)
+            sample_payload = verified.pop("_verified_sample_payload", None)
+            raw_wire_frame = verified.pop("_verified_raw_wire_frame", None)
+            if (
+                verified.get("outcome") != "accepted"
+                or not isinstance(sample, dict)
+                or not isinstance(sample_payload, bytes)
+                or not isinstance(raw_wire_frame, bytes)
+                or sample.get("role") != role
+            ):
+                raise ArtifactStoreError("pilot_artifact_sample_not_accepted")
+            identity = sample.get("identity_check")
+            raw_claim = sample.get("raw")
+            if (
+                not isinstance(identity, dict)
+                or not isinstance(raw_claim, dict)
+                or not isinstance(sample.get("attempt"), dict)
+                or not isinstance(sample.get("read"), dict)
+                or not isinstance(identity.get("before"), dict)
+                or not isinstance(identity.get("after"), dict)
+            ):
+                raise ArtifactStoreError("pilot_artifact_sample_provenance_invalid")
+            identity_binding = sample.get("expected_identity_binding_sha256")
+            raw_digest = hashlib.sha256(raw_wire_frame).hexdigest()
+            if (
+                not _is_sha256(identity_binding)
+                or sample.get("observed_identity_binding_sha256_before") != identity_binding
+                or sample.get("observed_identity_binding_sha256_after") != identity_binding
+                or not secrets.compare_digest(raw_digest, str(raw_claim.get("sha256")))
+            ):
+                raise ArtifactStoreError("pilot_artifact_sample_provenance_invalid")
+            samples.append(
+                VerifiedPilotRawSample(
+                    role=role,
+                    identity_binding_sha256=identity_binding,
+                    sample_manifest_sha256=hashlib.sha256(sample_payload).hexdigest(),
+                    raw_wire_frame_sha256=raw_digest,
+                    attempt=_public_verified_interval(sample["attempt"]),
+                    identity_before=_public_verified_interval(identity["before"]),
+                    read=_public_verified_interval(sample["read"]),
+                    identity_after=_public_verified_interval(identity["after"]),
+                    raw_wire_frame=raw_wire_frame,
+                )
+            )
+
+        pair_attempt = pair.get("attempt")
+        pair_gap = pair.get("pair_completion_gap_ns")
+        if (
+            not isinstance(pair_attempt, dict)
+            or not isinstance(pair_gap, int)
+            or isinstance(pair_gap, bool)
+            or pair_gap < 0
+        ):
+            raise ArtifactStoreError("pilot_artifact_pair_provenance_invalid")
+        return VerifiedPilotPairArtifact(
+            plan_artifact_id=reference.plan_artifact_id,
+            plan_sha256=reference.plan_sha256,
+            series_id=reference.series_id,
+            series_sha256=expected_series_sha256,
+            ordinal=ordinal,
+            pair_manifest_sha256=pair_digest,
+            attempt=_public_verified_interval(pair_attempt),
+            pair_completion_gap_ns=pair_gap,
+            samples=(samples[0], samples[1]),
+        )
+
     def verify_partial_series(
         self,
         reference: PilotPlanReference,
@@ -2800,6 +2968,7 @@ class PilotSeriesStore:
         plan: dict[str, Any],
         *,
         ordinal: int,
+        include_artifact_payloads: bool = False,
     ) -> dict[str, Any]:
         attempt = reference.series_directory / "attempts" / f"{ordinal:06d}"
         try:
@@ -2867,6 +3036,7 @@ class PilotSeriesStore:
                 role=role,
                 expected_target=planned_target,
                 validity_policy=plan["validity_predicate"],
+                include_artifact_payload=include_artifact_payloads,
             )
             if (
                 not isinstance(claim, dict)
@@ -2890,6 +3060,10 @@ class PilotSeriesStore:
             or pair.get("pair_completion_gap_ns") != expected_gap
         ):
             raise ArtifactStoreError("pilot_pair_outcome_or_gap_mismatch")
+        if include_artifact_payloads:
+            pair = dict(pair)
+            pair["_verified_pair_payload"] = pair_payload
+            pair["_verified_samples"] = tuple(verified_samples)
         return pair
 
     @staticmethod
@@ -2929,6 +3103,7 @@ class PilotSeriesStore:
         role: str,
         expected_target: dict[str, Any],
         validity_policy: dict[str, Any],
+        include_artifact_payload: bool = False,
     ) -> dict[str, Any]:
         directory = reference.series_directory / "attempts" / f"{ordinal:06d}" / role
         try:
@@ -3107,13 +3282,18 @@ class PilotSeriesStore:
             raise ArtifactStoreError("pilot_sample_failure_claim_missing")
         elif sample.get("state_observation") is not None:
             raise ArtifactStoreError("pilot_sample_state_observation_invalid")
-        return {
+        verified: dict[str, Any] = {
             "outcome": expected_outcome,
             "sample_sha256": hashlib.sha256(sample_payload).hexdigest(),
             "read_completed_monotonic_ns": (
                 read_timing[1] if read_timing is not None else None
             ),
         }
+        if include_artifact_payload:
+            verified["_verified_sample_manifest"] = sample
+            verified["_verified_sample_payload"] = sample_payload
+            verified["_verified_raw_wire_frame"] = raw_payload
+        return verified
 
 
 _PAIR_OUTCOMES = ("accepted", "predicate_rejected", "read_failure")
@@ -3144,6 +3324,9 @@ __all__ = [
     "RawCaptureStore",
     "ReadOnlySession",
     "ResolvedCaptureEndpoint",
+    "VerifiedPilotInterval",
+    "VerifiedPilotPairArtifact",
+    "VerifiedPilotRawSample",
     "collect_device_sample",
     "collect_pair",
     "capture_validity_policy",

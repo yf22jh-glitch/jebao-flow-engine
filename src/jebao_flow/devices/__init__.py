@@ -1,123 +1,158 @@
-from jebao_flow.devices.base import (
-    ControlAckFailureKind,
-    ControlAcknowledgementError,
-    ControlAckPowerMismatchError,
-    ControlAckReadbackError,
-    ControlAckResolutionStage,
-    ControlAckResolutionState,
-    ControlAckResolutionUpdate,
-    ControlAckStateMismatchError,
-    ControlReadbackError,
-    ControlStateMismatchError,
-    ControlVerificationOutcome,
-    DeviceConnectionError,
-    HardwareWritesDisabledError,
-    HeartbeatFencedStateError,
-    HeartbeatFencedStateStage,
-    JebaoDevice,
-    PowerStateVerificationError,
-    SafetyInterlockError,
-    StateVerificationError,
-    UnsupportedCapabilityError,
-)
-from jebao_flow.devices.factory import create_lan_device, create_read_only_lan_device
-from jebao_flow.devices.identity import (
-    PhysicalDeviceBinding,
-    configuration_fingerprint,
-    physical_identity_key,
-)
-from jebao_flow.devices.lan import ControlPlan, LanJebaoDevice
-from jebao_flow.devices.linkage import (
-    DeviceControlSnapshot,
-    LinkageApplyError,
-    LinkageDiagnosticEvent,
-    LinkageDiagnosticEventKind,
-    LinkageForwardFailureCategory,
-    LinkageJournalClaimError,
-    LinkageLiveSlavePowerVerificationError,
-    LinkagePreflightError,
-    LinkageRecoveryAuthority,
-    LinkageRecoveryReason,
-    LinkageRollbackError,
-    LinkageRollbackFailure,
-    LinkageRollbackFailureCategory,
-    LinkageRollbackParticipant,
-    LinkageRollbackStage,
-    LinkageSafetyInterlock,
-    LinkageStopReason,
-    LinkageTestResult,
-    LinkageTestSpec,
-    LinkageTransactionBusyError,
-    LinkageTransactionPhase,
-    LinkageTransactionRecord,
-    TemporaryLinkageController,
-    schedule_structure_fingerprint,
-)
-from jebao_flow.devices.observer import ReadOnlyObserver
-from jebao_flow.devices.registry import DeviceRegistry
-from jebao_flow.devices.schedule_flow_experiment import (
-    ScheduleFlowExperimentController,
-    ScheduleFlowExperimentResult,
-    ScheduleFlowExperimentSpec,
-    ScheduleFlowOutcome,
-    classify_schedule_flow_sample,
-)
-from jebao_flow.devices.schedule_linkage import (
-    ScheduleActiveLinkageController,
-    ScheduleAutoEvidence,
-    ScheduleBoundaryExpectation,
-    ScheduleLinkageApplyError,
-    ScheduleLinkageBusyError,
-    ScheduleLinkageDriftDimension,
-    ScheduleLinkageError,
-    ScheduleLinkageJournalClaimError,
-    ScheduleLinkagePhase,
-    ScheduleLinkagePreflight,
-    ScheduleLinkagePreflightError,
-    ScheduleLinkageRecord,
-    ScheduleLinkageResult,
-    ScheduleLinkageRollbackError,
-    ScheduleLinkageRunFailure,
-    ScheduleLinkageRunProgressEvent,
-    ScheduleLinkageRunProgressKind,
-    ScheduleLinkageSample,
-    ScheduleLinkageSnapshot,
-    ScheduleLinkageSpec,
-    ScheduleLinkageStopReason,
-    schedule_linkage_confirmation_token,
-    schedule_linkage_run_progress_rank,
-)
-from jebao_flow.devices.schedule_transaction import (
-    DeviceSchedulePatch,
-    ObservationCompletion,
-    ScheduleImageSnapshot,
-    ScheduleSlotPatch,
-    TemporaryScheduleController,
-    TemporaryScheduleError,
-    TemporaryScheduleErrorCode,
-    TemporaryScheduleKind,
-    TemporarySchedulePhase,
-    TemporaryScheduleRecord,
-    TemporaryScheduleResult,
-    TemporaryScheduleSpec,
-    behavior_neutral_unused_slot_patch,
-    temporary_schedule_confirmation_token,
-)
-from jebao_flow.devices.simulator import SimulatedJebaoDevice
-from jebao_flow.devices.verification import (
-    AttendedRestoreAuthority,
-    DeviceVerificationError,
-    DeviceVerificationErrorCode,
-    DeviceVerificationPhase,
-    DeviceVerificationRecord,
-    DeviceVerificationRecoveryReason,
-    DeviceVerificationResult,
-    DeviceVerificationSnapshot,
-    DeviceVerificationSpec,
-    DeviceVerificationStopReason,
-    FirstPhysicalWriteVerifier,
-    JsonDeviceVerificationJournalStore,
-)
+"""Lazy public device exports that isolate optional write-path modules."""
+
+from __future__ import annotations
+
+from importlib import import_module
+
+_MODULE_BY_EXPORT = {
+    **dict.fromkeys(
+        (
+            "ControlAckFailureKind",
+            "ControlAcknowledgementError",
+            "ControlAckPowerMismatchError",
+            "ControlAckReadbackError",
+            "ControlAckResolutionStage",
+            "ControlAckResolutionState",
+            "ControlAckResolutionUpdate",
+            "ControlAckStateMismatchError",
+            "ControlReadbackError",
+            "ControlStateMismatchError",
+            "ControlVerificationOutcome",
+            "DeviceConnectionError",
+            "HardwareWritesDisabledError",
+            "HeartbeatFencedStateError",
+            "HeartbeatFencedStateStage",
+            "JebaoDevice",
+            "PowerStateVerificationError",
+            "SafetyInterlockError",
+            "StateVerificationError",
+            "UnsupportedCapabilityError",
+        ),
+        "jebao_flow.devices.base",
+    ),
+    **dict.fromkeys(
+        ("create_lan_device", "create_read_only_lan_device"),
+        "jebao_flow.devices.factory",
+    ),
+    **dict.fromkeys(
+        (
+            "PhysicalDeviceBinding",
+            "configuration_fingerprint",
+            "physical_identity_key",
+        ),
+        "jebao_flow.devices.identity",
+    ),
+    **dict.fromkeys(
+        ("ControlPlan", "LanJebaoDevice"),
+        "jebao_flow.devices.lan",
+    ),
+    **dict.fromkeys(
+        (
+            "DeviceControlSnapshot",
+            "LinkageApplyError",
+            "LinkageDiagnosticEvent",
+            "LinkageDiagnosticEventKind",
+            "LinkageForwardFailureCategory",
+            "LinkageJournalClaimError",
+            "LinkageLiveSlavePowerVerificationError",
+            "LinkagePreflightError",
+            "LinkageRecoveryAuthority",
+            "LinkageRecoveryReason",
+            "LinkageRollbackError",
+            "LinkageRollbackFailure",
+            "LinkageRollbackFailureCategory",
+            "LinkageRollbackParticipant",
+            "LinkageRollbackStage",
+            "LinkageSafetyInterlock",
+            "LinkageStopReason",
+            "LinkageTestResult",
+            "LinkageTestSpec",
+            "LinkageTransactionBusyError",
+            "LinkageTransactionPhase",
+            "LinkageTransactionRecord",
+            "TemporaryLinkageController",
+            "schedule_structure_fingerprint",
+        ),
+        "jebao_flow.devices.linkage",
+    ),
+    "ReadOnlyObserver": "jebao_flow.devices.observer",
+    "DeviceRegistry": "jebao_flow.devices.registry",
+    **dict.fromkeys(
+        (
+            "ScheduleFlowExperimentController",
+            "ScheduleFlowExperimentResult",
+            "ScheduleFlowExperimentSpec",
+            "ScheduleFlowOutcome",
+            "classify_schedule_flow_sample",
+        ),
+        "jebao_flow.devices.schedule_flow_experiment",
+    ),
+    **dict.fromkeys(
+        (
+            "ScheduleActiveLinkageController",
+            "ScheduleAutoEvidence",
+            "ScheduleBoundaryExpectation",
+            "ScheduleLinkageApplyError",
+            "ScheduleLinkageBusyError",
+            "ScheduleLinkageDriftDimension",
+            "ScheduleLinkageError",
+            "ScheduleLinkageJournalClaimError",
+            "ScheduleLinkagePhase",
+            "ScheduleLinkagePreflight",
+            "ScheduleLinkagePreflightError",
+            "ScheduleLinkageRecord",
+            "ScheduleLinkageResult",
+            "ScheduleLinkageRollbackError",
+            "ScheduleLinkageRunFailure",
+            "ScheduleLinkageRunProgressEvent",
+            "ScheduleLinkageRunProgressKind",
+            "ScheduleLinkageSample",
+            "ScheduleLinkageSnapshot",
+            "ScheduleLinkageSpec",
+            "ScheduleLinkageStopReason",
+            "schedule_linkage_confirmation_token",
+            "schedule_linkage_run_progress_rank",
+        ),
+        "jebao_flow.devices.schedule_linkage",
+    ),
+    **dict.fromkeys(
+        (
+            "DeviceSchedulePatch",
+            "ObservationCompletion",
+            "ScheduleImageSnapshot",
+            "ScheduleSlotPatch",
+            "TemporaryScheduleController",
+            "TemporaryScheduleError",
+            "TemporaryScheduleErrorCode",
+            "TemporaryScheduleKind",
+            "TemporarySchedulePhase",
+            "TemporaryScheduleRecord",
+            "TemporaryScheduleResult",
+            "TemporaryScheduleSpec",
+            "behavior_neutral_unused_slot_patch",
+            "temporary_schedule_confirmation_token",
+        ),
+        "jebao_flow.devices.schedule_transaction",
+    ),
+    "SimulatedJebaoDevice": "jebao_flow.devices.simulator",
+    **dict.fromkeys(
+        (
+            "AttendedRestoreAuthority",
+            "DeviceVerificationError",
+            "DeviceVerificationErrorCode",
+            "DeviceVerificationPhase",
+            "DeviceVerificationRecord",
+            "DeviceVerificationRecoveryReason",
+            "DeviceVerificationResult",
+            "DeviceVerificationSnapshot",
+            "DeviceVerificationSpec",
+            "DeviceVerificationStopReason",
+            "FirstPhysicalWriteVerifier",
+            "JsonDeviceVerificationJournalStore",
+        ),
+        "jebao_flow.devices.verification",
+    ),
+}
 
 __all__ = [
     "ControlAckPowerMismatchError",
@@ -229,3 +264,19 @@ __all__ = [
     "classify_schedule_flow_sample",
     "temporary_schedule_confirmation_token",
 ]
+
+_EXPORTS = {name: (_MODULE_BY_EXPORT[name], name) for name in __all__}
+
+
+def __getattr__(name: str) -> object:
+    try:
+        module_name, attribute_name = _EXPORTS[name]
+    except KeyError as error:
+        raise AttributeError(name) from error
+    value = getattr(import_module(module_name), attribute_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

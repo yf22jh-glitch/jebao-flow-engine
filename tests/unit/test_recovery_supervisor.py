@@ -1,5 +1,6 @@
 import asyncio
 import os
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,10 @@ from jebao_flow.devices.verification import (
     DeviceVerificationPhase,
     DeviceVerificationRecord,
     DeviceVerificationRecoveryReason,
+)
+from jebao_flow.exact_restore_store import (
+    ExactRestoreJournalClaimError,
+    ExactRestoreJournalStore,
 )
 from jebao_flow.hardware_test import HardwareTestIntentPhase
 from jebao_flow.persistence.schedule_linkage import ScheduleLinkageJournalError
@@ -125,9 +130,7 @@ def _verification_record(
                 if safety
                 else DeviceVerificationPhase.LOWER_POWER_ACTIVE
             ),
-            recovery_reason=(
-                DeviceVerificationRecoveryReason.SAFETY_INTERLOCK if safety else None
-            ),
+            recovery_reason=(DeviceVerificationRecoveryReason.SAFETY_INTERLOCK if safety else None),
             created_at=now - timedelta(minutes=2) if stale else now - timedelta(seconds=1),
             updated_at=now - timedelta(minutes=2) if stale else now - timedelta(seconds=1),
             expires_at=now - timedelta(minutes=1) if stale else now + timedelta(seconds=5),
@@ -183,6 +186,7 @@ def _dependencies(
     verification_dispatch=None,
     schedule_dispatch=None,
     latch_present=False,
+    exact_restore_admission=None,
 ) -> RecoverySupervisorDependencies:
     async def unused_native(config, args) -> int:
         del config, args
@@ -203,6 +207,7 @@ def _dependencies(
         native_dispatch=native_dispatch or unused_native,
         verification_dispatch=verification_dispatch or unused_verification,
         schedule_dispatch=schedule_dispatch or unused_schedule,
+        exact_restore_admission=exact_restore_admission or (lambda: nullcontext(True)),
     )
 
 
@@ -252,6 +257,133 @@ async def test_temporary_schedule_journal_blocks_all_automatic_recovery() -> Non
     )
 
     assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
+    assert callbacks == 0
+
+
+async def test_exact_restore_journal_blocks_all_automatic_recovery() -> None:
+    callbacks = 0
+
+    async def dispatch(config, args) -> int:
+        nonlocal callbacks
+        del config, args
+        callbacks += 1
+        return 0
+
+    artifacts = RecoveryArtifacts(
+        native_journal=_native_record(),
+        exact_restore_journal=cast(
+            object,
+            SimpleNamespace(
+                version=1,
+                operation_id="exact-restore-operation",
+                phase="restoring",
+            ),
+        ),
+    )
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            artifacts,
+            native_dispatch=dispatch,
+            verification_dispatch=dispatch,
+            schedule_dispatch=dispatch,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
+    assert callbacks == 0
+
+
+async def test_exact_restore_created_after_scan_blocks_dispatch(tmp_path: Path) -> None:
+    callbacks = 0
+    store = ExactRestoreJournalStore._for_test(tmp_path / "exact-restore.json")
+
+    async def dispatch(config, args) -> int:
+        nonlocal callbacks
+        del config, args
+        callbacks += 1
+        return 0
+
+    @contextmanager
+    def exact_restore_wins_before_admission():
+        with store.claim():
+            store.create({"version": 1, "operation_id": "exact", "phase": "prepared"})
+        with store.claim():
+            yield store.load() is None
+
+    artifacts = RecoveryArtifacts(native_journal=_native_record())
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            artifacts,
+            native_dispatch=dispatch,
+            exact_restore_admission=exact_restore_wins_before_admission,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.ATTENDED_REQUIRED
+    assert callbacks == 0
+
+
+async def test_legacy_dispatch_holds_exact_claim_until_callback_finishes(tmp_path: Path) -> None:
+    callbacks = 0
+    owner = ExactRestoreJournalStore._for_test(tmp_path / "exact-restore.json")
+    contender = ExactRestoreJournalStore._for_test(tmp_path / "exact-restore.json")
+
+    @contextmanager
+    def exact_restore_admission():
+        with owner.claim():
+            yield owner.load() is None
+
+    async def dispatch(config, args) -> int:
+        nonlocal callbacks
+        del config, args
+        callbacks += 1
+        with pytest.raises(ExactRestoreJournalClaimError):
+            with contender.claim():
+                raise AssertionError("contender acquired during legacy dispatch")
+        return 0
+
+    artifacts = RecoveryArtifacts(native_journal=_native_record())
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            artifacts,
+            native_dispatch=dispatch,
+            exact_restore_admission=exact_restore_admission,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.RECOVERED
+    assert callbacks == 1
+    with contender.claim():
+        contender.create({"version": 1, "operation_id": "later", "phase": "prepared"})
+
+
+async def test_busy_exact_admission_defers_legacy_dispatch() -> None:
+    callbacks = 0
+
+    @contextmanager
+    def busy_admission():
+        raise ExactRestoreJournalClaimError("busy")
+        yield True  # pragma: no cover - contextmanager shape only
+
+    async def dispatch(config, args) -> int:
+        nonlocal callbacks
+        del config, args
+        callbacks += 1
+        return 0
+
+    supervisor = RecoverySupervisor(
+        _config(),
+        dependencies=_dependencies(
+            RecoveryArtifacts(native_journal=_native_record()),
+            native_dispatch=dispatch,
+            exact_restore_admission=busy_admission,
+        ),
+    )
+
+    assert await supervisor.run_once() is RecoverySupervisorStatus.BUSY
     assert callbacks == 0
 
 
@@ -322,11 +454,14 @@ async def test_one_workflow_dispatches_only_recovery_first_namespace(workflow: s
     assert called_workflow == workflow
     assert args.confirm is None
     assert args.recovery_first is True
-    assert args.command == {
-        "native": "recover-linkage",
-        "verification": "recover-device-verification",
-        "schedule": "recover-schedule-linkage",
-    }[workflow]
+    assert (
+        args.command
+        == {
+            "native": "recover-linkage",
+            "verification": "recover-device-verification",
+            "schedule": "recover-schedule-linkage",
+        }[workflow]
+    )
 
 
 @pytest.mark.parametrize(
@@ -386,9 +521,7 @@ async def test_recovery_required_schedule_intent_without_journal_requires_attend
         _config(),
         dependencies=_dependencies(
             RecoveryArtifacts(
-                schedule_intent=_schedule_intent(
-                    ScheduleLinkageIntentPhase.RECOVERY_REQUIRED
-                )
+                schedule_intent=_schedule_intent(ScheduleLinkageIntentPhase.RECOVERY_REQUIRED)
             )
         ),
     )
@@ -459,9 +592,7 @@ async def test_schedule_conflict_with_other_nonterminal_has_zero_callbacks(
         return 0
 
     values: dict[str, object] = {"schedule_intent": _schedule_intent()}
-    values[f"{other}_intent"] = (
-        _native_intent() if other == "native" else _verification_intent()
-    )
+    values[f"{other}_intent"] = _native_intent() if other == "native" else _verification_intent()
     supervisor = RecoverySupervisor(
         _config(),
         dependencies=_dependencies(
@@ -482,6 +613,7 @@ async def test_schedule_conflict_with_other_nonterminal_has_zero_callbacks(
         "native_linkage_journal_path",
         "schedule_linkage_journal_path",
         "temporary_schedule_journal_path",
+        "exact_restore_journal_path",
     ],
 )
 async def test_corrupt_artifact_is_error_with_zero_callbacks(
@@ -497,6 +629,7 @@ async def test_corrupt_artifact_is_error_with_zero_callbacks(
         "schedule_linkage_intent_path": tmp_path / "schedule-intent.json",
         "schedule_linkage_journal_path": tmp_path / "schedule-journal.json",
         "temporary_schedule_journal_path": tmp_path / "temporary-schedule.json",
+        "exact_restore_journal_path": tmp_path / "exact-restore.json",
     }
     corrupt = paths[corrupt_name]
     corrupt.write_text("not-json", encoding="utf-8")
@@ -575,9 +708,7 @@ async def test_schedule_candidate_requires_exact_intent_record_binding(
 async def test_schedule_journal_without_instance_bound_intent_is_error() -> None:
     supervisor = RecoverySupervisor(
         _config(),
-        dependencies=_dependencies(
-            RecoveryArtifacts(schedule_journal=_schedule_record())
-        ),
+        dependencies=_dependencies(RecoveryArtifacts(schedule_journal=_schedule_record())),
     )
 
     assert await supervisor.run_once() is RecoverySupervisorStatus.ERROR
@@ -692,6 +823,7 @@ async def test_persistent_latch_blocks_dispatch_until_cleared() -> None:
         latch_present=lambda: latch,
         native_dispatch=dispatch,
         verification_dispatch=dispatch,
+        exact_restore_admission=lambda: nullcontext(True),
     )
     supervisor = RecoverySupervisor(_config(), dependencies=dependencies)
 
@@ -934,6 +1066,7 @@ def test_artifact_reader_rejects_symlink_without_following_target(
     monkeypatch.setattr(module, "schedule_linkage_intent_path", lambda: tmp_path / "missing-4")
     monkeypatch.setattr(module, "schedule_linkage_journal_path", lambda: tmp_path / "missing-5")
     monkeypatch.setattr(module, "temporary_schedule_journal_path", lambda: tmp_path / "missing-6")
+    monkeypatch.setattr(module, "exact_restore_journal_path", lambda: tmp_path / "missing-7")
 
     with pytest.raises(RecoveryArtifactError):
         module._default_scan_artifacts()
@@ -954,6 +1087,7 @@ def test_artifact_reader_rejects_hardlink(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "schedule_linkage_intent_path", lambda: tmp_path / "missing-4")
     monkeypatch.setattr(module, "schedule_linkage_journal_path", lambda: tmp_path / "missing-5")
     monkeypatch.setattr(module, "temporary_schedule_journal_path", lambda: tmp_path / "missing-6")
+    monkeypatch.setattr(module, "exact_restore_journal_path", lambda: tmp_path / "missing-7")
 
     with pytest.raises(RecoveryArtifactError, match="metadata is unsafe"):
         module._default_scan_artifacts()
