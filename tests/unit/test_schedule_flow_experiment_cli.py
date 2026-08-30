@@ -1890,6 +1890,7 @@ async def test_preflight_persists_full_v3_intent_without_writes(monkeypatch, cap
     assert saved.phase is HardwareTestIntentPhase.ARMED
     assert saved.schedule_flow_spec.boundary_time == "12:15"
     assert saved.schedule_flow_spec.allow_expired_qualification is True
+    assert saved.schedule_flow_spec.role_observation_spec().allow_expired_qualification is True
     assert saved.schedule_image_digests == _digests()
     output = capsys.readouterr().out
     assert "no control or schedule frame was sent" in output

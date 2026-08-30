@@ -437,6 +437,7 @@ class ScheduleLinkageSpec(BaseModel):
     # diagnostic strict unless this journaled, opt-in evidence mode is explicitly selected.
     observe_slave_after_tuple_variance: bool = False
     complete_observation_epoch: bool = False
+    allow_expired_qualification: bool = False
     maximum_clock_skew_seconds: float = Field(default=2, ge=0.1, le=30)
     clock_advance_tolerance_seconds: float = Field(default=2, ge=0.1, le=10)
 

@@ -202,6 +202,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
             post_boundary_stability_seconds=self.post_boundary_stability_seconds,
             observe_slave_after_tuple_variance=True,
             complete_observation_epoch=True,
+            allow_expired_qualification=self.allow_expired_qualification,
             maximum_clock_skew_seconds=self.maximum_clock_skew_seconds,
             clock_advance_tolerance_seconds=self.clock_advance_tolerance_seconds,
         )
