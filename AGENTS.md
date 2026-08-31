@@ -129,12 +129,114 @@ ordered recovery만 허용합니다.
 
 [`Q2 attempt 05`](docs/runs/2026-08-30-q2-attempt-05.md)가 900초 epoch를 완료했고,
 fresh explicit raw에서 두 역할의 `independent`, 원 `TimerON`·manual controls와 두 432-byte
-schedule image의 byte-exact 복원을 확인했습니다. Q2는 이 pair·고정 계획 범위에서 YES/PASS로
-종결됐습니다.
+schedule image의 byte-exact 복원을 확인했습니다. 다만 양쪽에 같은 Mode 순서와 경계를 넣어
+master Mode 소유권을 판별하지 못했으므로, 확인 범위는 `async_slave` 상태의 staged Flow 차이와
+exact restore(Q2-narrow)까지입니다. master Mode·timing + slave per-mode Flow(Q2-target)는
+`UNKNOWN`입니다.
 
 이 기록을 포함한 문서 커밋부터 단회 해제는 소진됐으며 **§1 동결이 다시 적용됩니다.** 같은
 native write 실기를 반복하거나 위 하네스의 코드·테스트를 다시 수정하려면 repository
 maintainer의 새로운 명시적 승인과 별도 해제 커밋이 필요합니다.
+
+### 2026-08-31 Q2-target 판별 실기 단회 해제
+
+repository maintainer가 기존 운전 스케줄을 exact snapshot한 뒤 정지하고, 판별용 신규 스케줄을
+적용해 15분 동안 관측한 다음 원복하는 **Q2-target 실기 1회**를 명시적으로 승인했습니다.
+승인된 질문과 전체 절차는 commit `4b58b91`과 same-mode 전제의 지정 축소를 고정한
+후속 commit `8756f65`의
+[`Native ASYNC 모드별 slave Flow 실기 계획서`](docs/native-async-per-mode-flow-test-plan.md)가
+단일 출처입니다. 장비 write는 같은 계획의 현장 preflight가 모두 통과한 뒤에만 시작합니다.
+
+고정 계획은 다음과 같습니다. 장비별 safe manual Flow까지 포함한 여섯 값은 서로 다르며,
+승인 상한은 `60`입니다.
+
+- master manual `30`; A=`Sine / Flow 50 / Frequency 40`; B=`Constant / Flow 55 /
+  wire Frequency 0`
+- slave manual/common `35`; A=`Constant / Flow 45 / wire Frequency 0`; B=`Sine /
+  Flow 60 / Frequency 35`
+- 양쪽 A/B 경계는 동일한 device-local 절대 시각이고, 전체 observation epoch는 `900초`
+- 역할은 master=`master`, slave=`async_slave`; Sync·Independent 대조는 이번 해제에 포함하지 않음
+
+허용하는 코드 변경은 아래 여덟 항목뿐입니다.
+
+1. master와 slave 각각에 독립적인 A/B `Mode`, `Flow`, `Frequency`를 주는 고정 spec
+2. master safe manual `30`, slave safe manual/common `35`를 slot Flow와 분리
+3. 함수 시그니처만 장비별로 일반화하고 승인된 상수를 고정하는 2-slot encoder
+4. Mode 소유권과 Flow 소유권을 함께 판정하는 배타 classifier
+5. 첫 write 뒤 비안전 진단 오류만으로 조기 원복하지 않는 900초 completion rule
+6. explicit reply action을 포함한 원본 frame과 장비별 `NowTime` 진단 보존
+7. 위 고정 계획에 직접 대응하는 기존 단위 테스트와 fault-injection 테스트
+8. `schedule_linkage.py`의 pre-write 전제를 이번 고정 계획에 한해 지정 축소
+   - `_snapshots_from_states()`에서는 두 장비의 `before.mode` 동일 및 `after_mode` 동일 요구만
+     제거하고, 동일 `boundary_at`, 서로 다른 physical binding, slave A/B Flow 차이 및
+     slave-after/master-after Flow 차이는 유지
+   - `_assert_staged_auto_transition_preconditions()`에서는 장비별 `Constant -> Sine` 고정과
+     `snapshot.mode == before.mode` 요구만 이번 장비별 mode 쌍으로 교체하고, 2-entry 비순환,
+     `after_valid_until` 단일 창, 경계 후 안정 예산과 frequency allowlist는 유지
+   - master A=`Sine/40`과 두 Constant wire frequency=`0`을 근거로 frequency allowlist를
+     이번 고정 계획에 맞게 다시 기술
+   - `owned_staged_auto_transition_observation=False`로 전제 블록 전체를 끄는 우회는 불승인
+
+수정 허용 파일은 다음으로 한정합니다.
+
+- `src/jebao_flow/devices/schedule_flow_experiment.py`
+- raw/`NowTime` 진단 추가와 위 8항의 지정 전제 축소에 한한
+  `src/jebao_flow/devices/schedule_linkage.py`
+- 장비별 patch 전달에 실제 변경이 필요한 경우의
+  `src/jebao_flow/devices/schedule_transaction.py`
+- qualification 만료 방침에 필요한 최소 변경에 한한
+  `src/jebao_flow/schedule_flow_experiment_cli.py`
+- 위 변경에 직접 대응하는 기존 단위 테스트
+
+`devices/linkage.py`, `schedule_linkage_cli.py`, 일반 데몬, MQTT 경로는 계속 동결합니다. CLI에
+임의 Mode·Flow 값을 노출하는 범용 실험기, 새 장비-read pre-write gate, 새 실패 계층,
+Sync·Independent 대조, 같은 ASYNC 실기 반복은 승인하지 않습니다. 첫 write 뒤 900초 epoch에
+진입한 operation은 한 번만 허용하며, 첫 write 전 `NO-GO`가 정보 0으로 2회 연속되면 §7에 따라
+정지·보고합니다.
+
+이 단회에 한해 아래 통제 변경 세 건을 명시적으로 승인합니다.
+
+1. manifest에 고정한 지정 qualification operation의 기존 2/2 영수증에서 **만료 시각만** 무시.
+   영수증 부재·identity·operation 불일치는 우회 금지
+2. 보존 raw의 장비 시계 차이를 반영한 clock-skew gate `<=30초`
+3. 출력 상한을 이전 단회 `45`에서 이번 고정 계획의 `60`으로 재설정
+
+세 번째 항목은 일반 안전 상한의 완화가 아니라 여섯 개의 판별값을 가진 이번 고정 계획 전용
+상한입니다. `60`은 보존 baseline active schedule 범위(role A `30..60`, role B `50..80`) 안이며
+새 물리 출력 영역을 열지 않습니다.
+
+이 셋 외의 identity·single-write·durable journal·rollback 권한은 완화하지 않습니다. 기존
+스케줄 정지는 두 장비 각각에 `TimerOFF + independent + Constant + safe Flow + safe Frequency`를
+하나의 합성 frame으로 정확히 한 번 적용합니다. `TimerOFF` 단독 write로 latent manual
+`Flow=89`를 노출하지 않습니다.
+
+이 합성 frame은 새 write 경로가 아닙니다. 기존
+`ScheduleFlowExperimentController._stage_devices()`가 `SwitchON`을 포함한 여섯 제어 필드를
+하나의 `DeviceTarget`으로 구성해 장비마다 `write_target()`을 정확히 한 번 호출하고,
+`LanJebaoDevice._target_changes()`와 `_apply_changes()`가 그 mapping을 하나의 control payload로
+인코딩합니다. 따라서 `devices/linkage.py`나 `devices/lan.py` 수정은 필요하지 않습니다.
+`TimerOFF`를 먼저 보내거나 두 개 이상의 control frame으로 나누는 구현은 승인하지 않습니다.
+이 합성 target을 단일 payload로 preview할 수 없으면 첫 write 전에 `NO-GO`로 종료합니다.
+
+첫 hardware write 뒤에는 예상 밖 Mode·Flow·Auto tuple, 비원자 수렴, read timeout, timing skew,
+부분 적용 같은 **진단 오류만으로 900초 전에 원복하지 않습니다.** 즉시 ordered recovery로
+전환하는 조건은 다음뿐입니다.
+
+1. physical identity binding 불일치
+2. 실제 또는 보고된 출력이 `60` 초과
+3. 펌프·수조의 위험한 물리 동작
+4. 복구 권한·durable journal·현장 차단 수단 상실
+5. 현장 감시자 또는 사용자의 명시적 비상 정지
+
+종료 뒤 복구 순서는 `slave role detach → master role detach → 안전 합성 TimerOFF → slave/master
+원 432-byte schedule image → 원 outer controls/TimerON`입니다. writer는 write-side restore의
+terminal evidence를 fsync한 뒤 journal을 지우지 않고 종료합니다. 별도 fresh session 두 번의
+exact 검증이 통과한 뒤에만 journal 정리와 lease 해제를 수행합니다. 불일치하면 journal을 유지한
+`RECOVERY_REQUIRED`로 남기고 추가 write나 임의 승격을 금지합니다.
+
+900초 epoch, byte-exact restore, terminal journal, 새 `docs/runs/` 기록의 append-only 커밋이 모두
+완료되면 이 단회 해제는 자동 소진되고 §1 동결이 다시 적용됩니다. 복구가 남으면 새 실험은
+금지하고 이 operation의 ordered recovery와 read-only 검증만 허용합니다.
 
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
