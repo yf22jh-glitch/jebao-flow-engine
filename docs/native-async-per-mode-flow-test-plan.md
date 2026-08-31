@@ -97,6 +97,21 @@ master safe manual Flow `30`까지 포함한 `30, 35, 45, 50, 55, 60`은 모두 
 - 900초 동안 진단 오류를 기록하면서 계속 관측하는 completion rule
 - action byte를 포함한 원본 frame과 장비별 `NowTime` 보존
 - 위 고정 계획에 직접 대응하는 단위 테스트와 fault-injection 테스트
+- `schedule_linkage.py`의 기존 same-mode 전제를 이번 고정 계획에 한해서만 지정 축소
+
+마지막 항목은 새 게이트나 범용 topology 지원이 아닙니다. 기존 staged observation의 안전·시간
+전제는 유지한 채 다음 조건만 이번 고정 계획으로 교체합니다.
+
+- `_snapshots_from_states()`에서는 양쪽 `boundary_at` 동일, 서로 다른 physical binding,
+  `slave before.flow != slave after_flow`, `slave_after != master_after`를 유지하고, 두 장비의
+  `before.mode` 동일 및 `after_mode` 동일 요구만 제거
+- `_assert_staged_auto_transition_preconditions()`에서는 장비별 `Constant -> Sine` 고정과
+  `snapshot.mode == before.mode` 요구만 §3의 장비별 A/B mode 쌍으로 교체
+- 2-entry 비순환 schedule, `after_valid_until` 단일 창, 경계 후 안정 예산과 role-side
+  frequency allowlist는 유지하며, master A=`Sine/40`과 두 Constant wire frequency=`0`을
+  근거로 allowlist를 다시 고정
+- `owned_staged_auto_transition_observation`은 계속 `True`여야 합니다. 이를 `False`로 내려 위
+  전제 블록 전체를 우회하는 구현은 승인하지 않습니다.
 
 해제 커밋은 코드 변경 범위와 함께 다음 통제 완화 3건을 조항으로 명시합니다.
 
@@ -105,12 +120,17 @@ master safe manual Flow `30`까지 포함한 `30, 35, 45, 50, 55, 60`은 모두 
 2. 보존 raw의 장비 시계 차이를 반영한 clock-skew 게이트 완화(`<=30초`)
 3. 출력 상한을 기존 단회 승인 `45`에서 이번 고정 계획의 `60`으로 재설정
 
+세 번째 항목은 기존 물리 상한을 일반적으로 완화하는 것이 아니라 **서로 다른 여섯 값으로
+판별력을 확보한 이번 고정 계획 전용 상한**입니다. `60`은 두 장비의 보존 baseline active
+schedule 범위(role A `30..60`, role B `50..80`) 안이며 새 물리 출력 영역을 열지 않습니다.
+
 이 셋 외에 identity·single-write·durable journal·rollback 권한은 완화하지 않습니다.
 
 허용 파일은 다음으로 한정합니다.
 
 - `src/jebao_flow/devices/schedule_flow_experiment.py`
-- `src/jebao_flow/devices/schedule_linkage.py`의 raw/NowTime **진단 추가만**
+- `src/jebao_flow/devices/schedule_linkage.py`의 raw/NowTime 진단 추가와 위에 지정한
+  same-mode 전제 축소만
 - 장비별 patch 전달에 실제 변경이 필요한 경우의 `schedule_transaction.py`
 - qualification 만료 방침에 필요한 최소 `schedule_flow_experiment_cli.py` 변경
 - 위 변경에 직접 대응하는 기존 단위 테스트
@@ -334,7 +354,9 @@ protocol 판정은 실제 모터 파형·유량을 증명하지 않습니다. sl
 현장 영상·육안은 등급 (c) 보조 증거로만 남깁니다. 물리 관측이 없어도 §7.1~7.2 판정은
 성립하지만, protocol과 정면으로 모순되는 물리 관측이 있으면 실행 전체를 `UNKNOWN`으로 내립니다.
 
-첫 실기가 명확한 `YES`가 아니면 같은 ASYNC 실기를 반복하지 않습니다. 결과를 먼저 append-only
+첫 실기가 명확한 `YES`가 아니면 같은 ASYNC 실기를 반복하지 않습니다. 여기서 반복은 첫 write
+뒤 900초 epoch에 진입한 operation을 뜻합니다. 첫 write 전 `NO-GO`도 정보 0 실행으로 기록하며,
+그 실행이 2회 연속이면 `AGENTS.md` §7에 따라 즉시 정지·보고합니다. 결과를 먼저 append-only
 기록으로 커밋한 뒤 조건부 대조를 최대 하나만 별도 승인·별도 run으로 설계합니다.
 
 - `OWN_SCHEDULE`이면 `sync_slave` 대조
