@@ -1,0 +1,259 @@
+absence_means: UNKNOWN
+analysis_provenance:
+  input_artifact_digests_sha256:
+  - df6803b99548ffd68b910518cce33d4277859213a238b1ae4e1381671d29ddf2
+  raw_analyzer_commit: bd48d480d14303fd983f13d33b2db3ea27c0c4dc
+  raw_analyzer_source_digest_sha256: 1bb1ee4b0606ac34744f5d74170050f1c264ecf610433d2978d667906364f527
+  schema_generator_commit: null
+  schema_generator_source_digest_sha256: null
+claims:
+- claim_id: obs-a2f44ded609b-auto-cust-wav-freq.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: Auto_Cust_Wav_Freq.observed_values
+  value:
+  - 5
+- claim_id: obs-a2f44ded609b-autofeedtime.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: UNKNOWN
+  subject: AutoFeedTime.observed_values
+  value:
+  - 0
+- claim_id: obs-a2f44ded609b-autoflow.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: AutoFlow.observed_values
+  value:
+  - 50
+  - 70
+- claim_id: obs-a2f44ded609b-autofreq.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: AutoFreq.observed_values
+  value:
+  - 25
+  - 80
+- claim_id: obs-a2f44ded609b-automode.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: AutoMode.observed_values
+  value:
+  - sine
+- claim_id: obs-a2f44ded609b-cust-wav-freq.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L1
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: Cust_Wav_Freq.observed_values
+  value:
+  - 5
+- claim_id: obs-a2f44ded609b-feedtime.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L1
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: FeedTime.observed_values
+  value:
+  - 10
+- claim_id: obs-a2f44ded609b-flow.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L1
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: Flow.observed_values
+  value:
+  - 30
+  - 89
+- claim_id: obs-a2f44ded609b-frequency.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L1
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: Frequency.observed_values
+  value:
+  - 32
+  - 34
+- claim_id: obs-a2f44ded609b-linkage.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L1
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: Linkage.observed_values
+  value:
+  - independent
+- claim_id: obs-a2f44ded609b-mode.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L1
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: Mode.observed_values
+  value:
+  - constant
+  - random
+- claim_id: obs-a2f44ded609b-raw-status-size-bytes
+  evidence_tier: a
+  goal_tier: wire
+  layer: L0
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: raw_status_size_bytes
+  value: 452
+- claim_id: obs-a2f44ded609b-schedule.active-slot-count.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: schedule.active_slot_count.observed_values
+  value:
+  - 14
+- claim_id: obs-a2f44ded609b-schedule.slot-mode.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: schedule.slot_mode.observed_values
+  value:
+  - constant
+  - feed
+  - pulse
+  - sine
+  - tidal
+- claim_id: obs-a2f44ded609b-schedule.slot-parameter.custom-frequency.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: schedule.slot_parameter.custom_frequency.observed_values
+  value:
+  - 0
+- claim_id: obs-a2f44ded609b-schedule.slot-parameter.feed-time.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: schedule.slot_parameter.feed_time.observed_values
+  value:
+  - 0
+  - 15
+- claim_id: obs-a2f44ded609b-schedule.slot-parameter.flow.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: schedule.slot_parameter.flow.observed_values
+  value:
+  - 0
+  - 30
+  - 40
+  - 45
+  - 50
+  - 55
+  - 60
+  - 65
+  - 67
+  - 70
+  - 75
+  - 80
+- claim_id: obs-a2f44ded609b-schedule.slot-parameter.frequency.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L2
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: schedule.slot_parameter.frequency.observed_values
+  value:
+  - 0
+  - 15
+  - 25
+  - 40
+  - 60
+  - 70
+  - 80
+- claim_id: obs-a2f44ded609b-serial-payload-size-bytes
+  evidence_tier: a
+  goal_tier: wire
+  layer: L0
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: serial_payload_size_bytes
+  value: 453
+- claim_id: obs-a2f44ded609b-switchon.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L1
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: SwitchON.observed_values
+  value:
+  - true
+- claim_id: obs-a2f44ded609b-timeron.observed-values
+  evidence_tier: a
+  goal_tier: accepted
+  layer: L1
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: TimerON.observed_values
+  value:
+  - true
+- claim_id: obs-a2f44ded609b-transport-reply-action
+  evidence_tier: a
+  goal_tier: wire
+  layer: L0
+  product_key: 50dbc92221fd4d33ae69a1fedd43b555
+  source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+  status: PASS
+  subject: transport_reply_action
+  value: '0x03'
+claims_digest_sha256: 1deab66c99bdd53571dea97342f7018b358720140b5f20c6e997e42b4f569237
+kind: observation
+physical_effect_scope: out_of_scope_until_measurement_method_exists
+reproducible_without_private_artifacts: false
+schema_version: 1
+status: generated
