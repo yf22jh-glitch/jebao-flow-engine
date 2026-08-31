@@ -15,7 +15,7 @@ Capability 문서, 홈서버의 private 설정, 읽기 전용 discovery/probe �
 
 | 논리 역할 | 제품군 | 수량 | 현재 범위 | 쓰기 검증 |
 |---|---|---:|---|---|
-| 메인 수류 A/B | Local Wavemaker Pro | 2 | native Sync/Async와 software group | Q2 Async 슬롯별 독립 출력 YES/PASS, exact restore 완료 |
+| 메인 수류 A/B | Local Wavemaker Pro | 2 | native Sync/Async와 software group | ASYNC 상태의 staged Flow 차이와 exact restore 확인; Mode·timing 소유권은 UNKNOWN |
 | 바형 보조 수류 | Local Wavemaker with AP time-sync | 1 | software group의 보조 위상 | vendor/app상 native Async 없음, 장비 읽기만 확인 |
 | 리턴 펌프 | DC Pump Pro | 1 | 개별 UI 후보 | 읽기만 확인 |
 | 리턴 펌프 | Aquarium Pump | 1 | 개별 UI 후보 | 읽기만 확인 |
@@ -251,23 +251,25 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | read-only 관측만으로 전체 native mode와 accepted 범위를 확정할 수 있는가 | **NO / OUT OF READ-ONLY SCOPE** — 현재 값·기존 slot 관측과 전체 열거·허용 범위를 구분 |
 | Pro `AutoFeedTime=0`과 profile `1..60` 선언이 정합한가 | **UNKNOWN** — 36/36 raw에서 0, write admission 범위는 별도 승인 없이 완화 금지 |
 | 각 native mode 설정값의 물리 유량·파형 효과가 계측됐는가 | **UNKNOWN / OUT OF CURRENT MEASUREMENT SCOPE** |
-| (Q2) ASYNC에서 slave가 자기 B 슬롯의 출력을 독립 적용하는가 | **YES / PASS (2026-08-30, 이 Pro pair·고정 계획 범위)** — master 31→35와 별개로 slave 32→40, 900초 epoch와 exact restore 완료 |
+| (Q2-narrow) ASYNC 상태에서 slave의 staged B Flow가 master와 다르게 보고됐는가 | **CONFIRMED (2026-08-30, 이 Pro pair·고정 계획 범위)** — slave 32→40, master 31→35와 상이; 900초 epoch와 exact restore 완료 |
+| (Q2-target) slave가 master Mode·timing을 따르면서 자기 모드별 Flow를 적용하는가 | **UNKNOWN / 단회 판별 실기 승인** — 기존 실행은 양쪽 Mode·경계가 같아 비판별적; [신규 계획](native-async-per-mode-flow-test-plan.md) 참조 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |
 | 리턴·도징 actuator가 실기 검증됐는가 | NOT IN CURRENT TEST SCOPE |
 | 앱 없는 Wi-Fi provisioning과 control-mode reconnect restore가 준비됐는가 | NOT IMPLEMENTED |
 
-현재 **production grouping 전체 판정은 NO-GO**입니다. 다만 repository maintainer와 on-site
-hardware approver가 별도로 승인한 2026-08-30 Q2 단회 write 실기는 완료됐고, Q2 자체는 아래
-범위에서 닫혔습니다. 아래 읽기 전용 두-epoch 절차의 NO-GO와 선행조건 2 미확보는 그 별도
-절차에 관한 상태로 계속 유효하며, 완료된 단회 실기를 반복 실행하라는 뜻이 아닙니다.
+현재 **production grouping 전체 판정은 NO-GO**입니다. 2026-08-30 단회 write 실기는 아래의
+좁은 Flow 관측과 exact restore를 완료했지만, 사용자가 요구한 master Mode·timing + slave
+per-mode Flow 분할 질문은 닫지 못했습니다. 그 질문은 별도 승인된
+[`신규 판별 실기 계획`](native-async-per-mode-flow-test-plan.md)으로 한 번만 측정합니다.
 
-Q2 성공 판정은 실제 장비가 서로 다른 B 출력을 300초 이상 유지한 durable sample로 냈습니다.
-단회 실기는 `master=35`, `slave=40`을 900초 epoch 끝까지 관측했고 상충 sample이 없었습니다.
-상세 증거와 exact-restore raw는
+기존 단회 실기는 실제 장비가 서로 다른 B 출력을 300초 이상 유지한 durable sample을 냈습니다.
+`master=35`, `slave=40`을 900초 epoch 끝까지 관측했고 상충 sample이 없었습니다. 다만 두
+장비에 같은 Mode 순서와 경계를 staged했으므로 Mode 소유권을 판정하지 않습니다. 상세 증거,
+정정과 exact-restore raw는
 [`2026-08-30 Q2 attempt 05`](runs/2026-08-30-q2-attempt-05.md)에 있습니다.
 
-## Q2 단회 실기 결론 — 2026-08-30
+## 2026-08-30 Q2 단회 실기의 좁은 결론
 
 - 경계 전: master `constant/31`, async-slave `constant/32`
 - 비원자 갱신 중 첫 관측: master `constant/31`, async-slave `sine/40`
@@ -276,14 +278,16 @@ Q2 성공 판정은 실제 장비가 서로 다른 B 출력을 300초 이상 유
 - 복원: 두 역할 `independent`, 원 `TimerON`과 manual controls, 두 432-byte schedule image가
   fresh explicit raw에서 baseline과 byte-exact 일치
 
-따라서 이 두 Local Wavemaker Pro의 현재 펌웨어·설정에서는 async-slave가 master 출력에
-고정되지 않고 자기 스케줄 슬롯의 `AutoFlow`를 독립 적용합니다. 이는 protocol-reported
-`AutoFlow` 결론이며 물리 유량·파형·위상이나 다른 모델·펌웨어까지 증명하지 않습니다.
+따라서 이 두 Local Wavemaker Pro의 현재 펌웨어·설정에서는 `async_slave` 역할 상태에서도
+slave에 staged한 TimerON 스케줄과 master와 다른 `AutoFlow`가 유지됐습니다. 그러나 양쪽에
+같은 Mode 순서를 넣었으므로 **slave가 master Mode를 따랐는지 자기 Mode 스케줄을 실행했는지는
+증명하지 못했습니다.** protocol-reported Flow 외의 물리 유량·파형·위상도 증명하지 않습니다.
 
-## park 판정 (2026-08-28, Q2는 2026-08-30 해제·종결)
+## park 및 재개 판정
 
-아래는 2026-08-28 당시의 park 근거입니다. Q2는 이후 승인된 단회 실기로 YES/PASS가 됐고,
-Q1만 현재 범위 밖으로 계속 park합니다.
+아래는 2026-08-28 당시의 park 근거입니다. Q1은 현재 범위 밖으로 계속 park합니다. Q2의 좁은
+Flow 차이는 관측됐지만, Mode·timing 소유권 질문은 판별력 부족이 확인돼 신규 단회 실기로
+재개합니다.
 
 ### Q1 (manual `Flow` 독립) — PARKED / OUT OF CURRENT SCOPE
 
@@ -299,7 +303,13 @@ Q1도 `UNKNOWN`입니다. 당시 "유지되지 않음"으로 기록됐다가 del
 이 조건 없이 Q1 실기를 반복하지 않습니다. 슬레이브별 개별 출력이 필요하면 모든 펌프를
 `independent`로 두는 소프트웨어 그룹을 사용합니다.
 
-### Q2 (슬롯별 `AutoFlow` 독립) — CLOSED, 2026-08-30 YES/PASS
+### Q2-target (master Mode·timing + slave per-mode Flow) — UNKNOWN / 단회 재개 승인
+
+2026-08-30 실행은 master와 slave 양쪽에 동일한 Mode 순서와 경계를 넣어 이 질문에
+비판별적이었습니다. 현재 승인된 판별 실기는 master와 slave의 Mode를 반대로 넣고 여섯 개의
+겹치지 않는 Flow 값을 사용합니다. 계획과 중단·복구 기준은
+[`native-async-per-mode-flow-test-plan.md`](native-async-per-mode-flow-test-plan.md)가 단일
+출처입니다.
 
 ### 2026-08-28 당시 park 사유
 
@@ -329,8 +339,9 @@ Q1도 `UNKNOWN`입니다. 당시 "유지되지 않음"으로 기록됐다가 del
 승인하고 현장에서 감시하며, 그 승인 범위 안에서 에이전트가 원격으로 실행할 수 있습니다
 (앱 조작처럼 물리적 접근이 필요한 단계는 approver가 수행합니다).
 
-2026-08-30에는 두 역할의 별도 승인과 단회 해제 커밋으로 위 조건을 충족해 실기를 완료했습니다.
-Q2가 닫혔으므로 동일 native 실기를 다시 실행하려면 새로운 명시적 승인과 별도 해제가 필요합니다.
+2026-08-30에는 두 역할의 별도 승인과 단회 해제 커밋으로 좁은 Flow 관측을 완료했습니다. 현재
+판별 실기는 그 실행의 반복이 아니라 Mode 소유권을 가르는 새 질문이며, repository maintainer의
+새 명시적 승인과 별도 동결 해제 커밋을 요구합니다.
 
 
 
@@ -339,6 +350,10 @@ Q2가 닫혔으므로 동일 native 실기를 다시 실행하려면 새로운 �
 Q2를 `jebao-flow` write 없이 판정하려는 절차입니다. **남은 선행조건 2가 충족되기 전에는
 앱 live-write와 measurement epoch를 실행하지 않습니다.** 선행조건 1의 collector만 현재
 실행 가능하며, 그 transport·timing pilot은 완료됐습니다.
+
+이 역사적 절차는 양쪽 Mode를 같게 두므로 Q2-narrow의 Flow 차이만 판정하며,
+Q2-target(master Mode·timing + slave per-mode Flow)에는 비판별적입니다. Q2-target의 현재
+실행 기준은 [`신규 판별 실기 계획`](native-async-per-mode-flow-test-plan.md)을 따릅니다.
 
 ### "write 0회"의 정확한 범위
 

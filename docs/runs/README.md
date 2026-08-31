@@ -79,7 +79,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-08-30 Q2 attempt 02](2026-08-30-q2-attempt-02.md) | role write 전 복구 | nested role spec의 receipt authority 누락 |
 | [2026-08-30 Q2 attempt 03](2026-08-30-q2-attempt-03.md) | 두 role write 뒤 복구 | slave pair read 오류가 monitor 전 조기 원복을 유발 |
 | [2026-08-30 Q2 attempt 04](2026-08-30-q2-attempt-04.md) | write 전 거부 | preflight→run 사이 boundary lead 소진 |
-| [2026-08-30 Q2 attempt 05](2026-08-30-q2-attempt-05.md) | 900초 ASYNC epoch + exact restore | **Q2 YES**: slave 32→40, master 31→35와 독립; 원본 스케줄 byte-exact 복원 |
+| [2026-08-30 Q2 attempt 05](2026-08-30-q2-attempt-05.md) | 900초 ASYNC epoch + exact restore | slave staged Flow 32→40 및 byte-exact 복원 확인; Mode·timing 소유권은 비판별이므로 정정 절 참조 |
 
 ## 새 실행 기록 템플릿
 

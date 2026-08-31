@@ -8,8 +8,10 @@
 
 앱의 Pro slave 화면은 `Sync`·`Async` 선택과 공통 `Flow` 슬라이더 하나만 노출하고, slave의
 slot별 편집기는 노출하지 않습니다. 그래서 앱에서는 slave 출력이 모든 모드에 고정된 것처럼
-보입니다. 이는 앱 UI 제약이며 firmware 한계가 아닙니다. 실제 Q2 실기에서는 이 두 Pro의
-`async_slave`가 master와 다른 자기 slot `AutoFlow`를 900초 epoch 동안 적용했습니다.
+보입니다. 이것은 앱 UI 제약의 증거이지만 firmware가 master Mode와 slave per-mode Flow를
+분리 지원하는지는 아직 `?`입니다. 기존 Q2 실기는 `async_slave` 상태에서 slave의 staged
+`AutoFlow`가 master와 다르게 유지된 사실까지만 확인했고 Mode·timing 소유권은 구분하지
+못했습니다.
 
 ## 조사 범위와 근거
 
@@ -109,11 +111,13 @@ editor는 없습니다.
 - 이후 안정 조건 300초와 전체 epoch 900초 동안 35/40 유지, 상충 sample 0
 - 종료 후 두 장비 `Independent`, 원 control·TimerON, 두 432-byte schedule image byte-exact 복원
 
-따라서 이 pair와 계획 범위에서 Q2는 **YES/PASS**입니다. `Async Slave`가 master 35를 따라가지
-않고 자기 B slot의 40을 적용했습니다.
+이 실행은 `Async Slave` 상태에서 slave가 master 35가 아니라 자기 staged B slot의 40을
+보고하고 900초 유지한 사실을 확인했습니다. 하지만 양쪽 스케줄의 Mode와 경계가 같았으므로,
+slave가 자기 전체 스케줄을 실행한 것인지 master Mode를 따르면서 자기 Flow만 적용한 것인지는
+구분하지 못했습니다. 상세 정정은 해당 run 문서 하단을 따릅니다.
 
-아직 `?`인 항목은 manual slave `Flow` 독립 유지(Q1), 물리 유량·파형·위상, 다른 firmware와
-다른 장비 pair, 장기간 반복 신뢰도입니다.
+아직 `?`인 항목은 **master Mode·timing + slave per-mode Flow 분할**, manual slave `Flow`
+독립 유지(Q1), 물리 유량·파형·위상, 다른 firmware와 다른 장비 pair, 장기간 반복 신뢰도입니다.
 
 ### 선언·앱·장비 불일치
 
@@ -248,6 +252,7 @@ native mode와 Linkage는 없고 네 채널이 고정입니다.
 
 ## 남은 확인 항목
 
+- Pro `Async Slave`의 master Mode·timing + slave per-mode Flow 분할 지원
 - Pro manual slave `Flow` 독립 유지(Q1)
 - 세 수류모터의 물리 모델 라벨, 설치 방향, 실제 유량·파형·위상
 - bar의 현재 raw와 schedule 값, 장비 accepted 범위
