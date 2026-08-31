@@ -41,6 +41,7 @@ from jebao_flow.protocol.schedule_wire import (
     build_local_wavemaker_pro_schedule_control_payload,
     extract_local_wavemaker_pro_schedule_image,
 )
+from jebao_flow.protocol.session import STATE_REPLY_ACTION, RawStateCapture
 from jebao_flow.safety.limits import PowerLimits
 
 
@@ -143,6 +144,18 @@ class _FakeSession:
             raise ProtocolTimeoutError("simulated transient read timeout")
         return self.state
 
+    async def read_raw_state_capture(
+        self,
+        *,
+        accept_reports: bool = False,
+    ) -> RawStateCapture:
+        status_payload = await self.read_raw_state(accept_reports=accept_reports)
+        return RawStateCapture(
+            wire_frame=b"exact-reply-frame:" + status_payload,
+            action=STATE_REPLY_ACTION,
+            status_payload=status_payload,
+        )
+
     async def send_raw_control(self, control_payload: bytes) -> bytes:
         self.events.append("send-control")
         self.__class__.timeline.append(f"{self.instance_id}:send-control")
@@ -228,6 +241,36 @@ async def test_explicit_state_read_rejects_unsolicited_reports() -> None:
 
     assert ordinary == explicit.model_copy(update={"observed_at": ordinary.observed_at})
     assert _FakeSession.instances[0].read_accept_reports == [True, False]
+
+
+async def test_explicit_state_capture_returns_state_and_frame_from_one_reply_only_read() -> None:
+    _FakeSession.state = _pro_state(enabled=True, power=57)
+    device = _device()
+    await device.connect()
+
+    state, capture = await device.get_explicit_state_capture()
+
+    [session] = _FakeSession.instances
+    assert state.power == 57
+    assert capture.action == STATE_REPLY_ACTION
+    assert capture.status_payload == _FakeSession.state
+    assert capture.wire_frame == b"exact-reply-frame:" + _FakeSession.state
+    assert session.read_accept_reports == [False]
+    assert session.sent == []
+
+
+async def test_explicit_state_capture_failure_retires_and_quarantines_same_session() -> None:
+    _FakeSession.read_failures_remaining = 1
+    device = _device()
+    await device.connect()
+
+    with pytest.raises(ProtocolTimeoutError, match="simulated transient"):
+        await device.get_explicit_state_capture()
+
+    [session] = _FakeSession.instances
+    assert session.events[-1] == "quarantine"
+    with pytest.raises(DeviceConnectionError, match="retired session"):
+        await device.get_explicit_state_capture()
 
 
 async def test_heartbeat_is_serialized_read_only_transport_traffic() -> None:

@@ -62,7 +62,7 @@ from jebao_flow.protocol.schedule_wire import (
     validate_local_wavemaker_pro_slot_wire,
 )
 from jebao_flow.protocol.schema import DataType
-from jebao_flow.protocol.session import GizwitsSession
+from jebao_flow.protocol.session import GizwitsSession, RawStateCapture
 from jebao_flow.safety.limits import PowerLimits
 
 
@@ -81,6 +81,12 @@ class RawSession(Protocol):
     async def heartbeat(self) -> None: ...
 
     async def read_raw_state(self, *, accept_reports: bool = True) -> bytes: ...
+
+    async def read_raw_state_capture(
+        self,
+        *,
+        accept_reports: bool = False,
+    ) -> RawStateCapture: ...
 
     async def send_raw_control(self, control_payload: bytes) -> bytes: ...
 
@@ -304,6 +310,29 @@ class LanJebaoDevice(JebaoDevice):
 
     async def get_explicit_state(self) -> DeviceState:
         return await self._get_state(accept_reports=False)
+
+    async def get_explicit_state_capture(
+        self,
+    ) -> tuple[DeviceState, RawStateCapture]:
+        """Return decoded state and the exact frame from the same explicit read."""
+
+        async with self._io_lock:
+            if self._session_retired:
+                raise DeviceConnectionError(
+                    f"retired session for {self._device_id!r} must be replaced before reading"
+                )
+            try:
+                capture = await self._session.read_raw_state_capture(accept_reports=False)
+                state = self._decode_state(capture.status_payload)
+            except asyncio.CancelledError:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            except Exception:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            return state, capture
 
     async def heartbeat(self) -> None:
         """Exchange one GAgent heartbeat without emitting a device-control frame."""

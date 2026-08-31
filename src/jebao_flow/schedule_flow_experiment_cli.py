@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
+import os
 import signal
+import stat
 import sys
 from collections.abc import Awaitable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -43,6 +46,7 @@ from jebao_flow.devices.schedule_flow_experiment import (
     schedule_flow_stage_rank,
 )
 from jebao_flow.devices.schedule_linkage import (
+    ScheduleLinkageRawCapture,
     ScheduleLinkageRecord,
     ScheduleLinkageSample,
     ScheduleLinkageSnapshot,
@@ -61,6 +65,7 @@ from jebao_flow.hardware_guard import (
 )
 from jebao_flow.hardware_safety import (
     emergency_stop_latch_path,
+    hardware_safety_root,
     native_linkage_intent_path,
     native_linkage_journal_path,
     qualification_directory,
@@ -102,9 +107,10 @@ from jebao_flow.persistence import (
 
 _TOKEN_VERSION = 1
 _MAX_POWER = 45
-_BOUNDARY_MIN_LEAD_SECONDS = 240
-_BOUNDARY_MAX_LEAD_SECONDS = 300
-_RUN_MIN_LEAD_SECONDS = 240
+_FIXED_Q2_MAX_POWER = 60
+_BOUNDARY_MIN_LEAD_SECONDS = 540
+_BOUNDARY_MAX_LEAD_SECONDS = 600
+_RUN_MIN_LEAD_SECONDS = 510
 _LEGACY_TERMINAL_OUTCOMES = frozenset(
     {
         "armed_preview_cancelled",
@@ -118,6 +124,135 @@ _LEGACY_TERMINAL_OUTCOMES = frozenset(
 
 class ScheduleFlowCliError(HardwareTestError):
     """Sanitized, fail-closed refusal from the attended schedule-flow CLI."""
+
+
+class _PrivateRawCaptureSink:
+    """Owner-only append-and-fsync sink for exact frames; never exposes its host path."""
+
+    def __init__(self, operation_id: str) -> None:
+        operation_digest = hashlib.sha256(operation_id.encode()).hexdigest()
+        self.artifact_id = f"JFR-{operation_digest[:12]}"
+        self._path = hardware_safety_root() / f"schedule-flow-raw-{operation_digest[:20]}.jsonl"
+        self._descriptor = -1
+        self._digest = hashlib.sha256()
+        self.capture_count = 0
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        try:
+            self._descriptor = os.open(self._path, flags, 0o600)
+            os.fchmod(self._descriptor, 0o600)
+            metadata = os.fstat(self._descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1
+            ):
+                raise OSError("unsafe private raw artifact metadata")
+            self._append(
+                {
+                    "format": 1,
+                    "artifact_id": self.artifact_id,
+                    "operation_binding_sha256": operation_digest,
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            root_descriptor = os.open(
+                hardware_safety_root(),
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                os.fsync(root_descriptor)
+            finally:
+                os.close(root_descriptor)
+        except BaseException as error:
+            self.close_best_effort()
+            raise ScheduleFlowCliError("private raw artifact could not be created") from error
+
+    def __call__(self, observed: ScheduleLinkageRawCapture) -> None:
+        state = observed.state
+        device_time = (
+            state.schedule.device_local_time
+            if state.schedule is not None
+            else None
+        )
+        frame = observed.capture.wire_frame
+        self._append(
+            {
+                "pair_ordinal": observed.pair_ordinal,
+                "participant": observed.participant,
+                "read_started_at": observed.read_started_at.isoformat(),
+                "read_completed_at": observed.read_completed_at.isoformat(),
+                "monotonic_started_at": observed.monotonic_started_at,
+                "monotonic_completed_at": observed.monotonic_completed_at,
+                "device_local_time": (
+                    device_time.isoformat() if device_time is not None else None
+                ),
+                "transport_action": observed.capture.action,
+                "wire_frame_length": len(frame),
+                "wire_frame_sha256": hashlib.sha256(frame).hexdigest(),
+                "wire_frame_base64": base64.b64encode(frame).decode("ascii"),
+            }
+        )
+        self.capture_count += 1
+
+    @property
+    def artifact_digest(self) -> str:
+        return self._digest.hexdigest()
+
+    def close(self) -> None:
+        descriptor = self._descriptor
+        if descriptor < 0:
+            return
+        self._descriptor = -1
+        sync_error: OSError | None = None
+        try:
+            os.fsync(descriptor)
+        except OSError as error:
+            sync_error = error
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            raise ScheduleFlowCliError("private raw artifact close was not durable") from error
+        if sync_error is not None:
+            raise ScheduleFlowCliError(
+                "private raw artifact close was not durable"
+            ) from sync_error
+
+    def close_best_effort(self) -> None:
+        descriptor = self._descriptor
+        if descriptor < 0:
+            return
+        self._descriptor = -1
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+    def _append(self, value: Mapping[str, object]) -> None:
+        if self._descriptor < 0:
+            raise ScheduleFlowCliError("private raw artifact is not open")
+        encoded = (
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        pending = memoryview(encoded)
+        try:
+            while pending:
+                written = os.write(self._descriptor, pending)
+                if written <= 0:
+                    raise OSError("short private raw artifact write")
+                pending = pending[written:]
+            os.fsync(self._descriptor)
+        except OSError as error:
+            raise ScheduleFlowCliError("private raw artifact could not be persisted") from error
+        self._digest.update(encoded)
 
 
 def _fixed_spec(
@@ -138,11 +273,11 @@ def _fixed_spec(
         master_device_id=master_device_id,
         slave_device_id=slave_device_id,
         boundary_time=boundary_time,
-        master_before_flow=31,
-        slave_before_flow=32,
-        master_after_flow=35,
-        slave_after_flow=40,
-        sine_frequency=30,
+        master_before_flow=50,
+        slave_before_flow=45,
+        master_after_flow=55,
+        slave_after_flow=60,
+        sine_frequency=40,
         safe_frequency=20,
         # ScheduleLinkageController retains a 15-second rollback reserve.  A 915-second
         # authority therefore yields the maintainer-approved full 900-second read-only epoch.
@@ -164,23 +299,32 @@ def _fixed_spec(
         spec.master_after_flow,
         spec.slave_after_flow,
     )
-    if max(requested) > _MAX_POWER:
-        raise ScheduleFlowCliError("schedule-flow targets exceed the attended 45% cap")
+    attended_maximum = _attended_power_cap(spec)
+    if max(requested) > attended_maximum:
+        raise ScheduleFlowCliError(
+            f"schedule-flow targets exceed the attended {attended_maximum}% cap"
+        )
     return spec
 
 
+def _attended_power_cap(spec: ScheduleFlowExperimentSpec) -> int:
+    """Open the attended 60% ceiling only for the approved fixed-Q2 signature."""
+
+    return _FIXED_Q2_MAX_POWER if spec.is_fixed_q2_plan else _MAX_POWER
+
+
 def _next_boundary(clocks: Sequence[datetime]) -> str:
-    """Choose the next minute boundary 4-5 minutes after the freshest device clock."""
+    """Choose a boundary 9-10 minutes after the freshest device clock."""
 
     if len(clocks) != 2 or any(clock.tzinfo is not None for clock in clocks):
         raise ScheduleFlowCliError("both device-local clocks must be available and timezone-naive")
     earliest, latest = min(clocks), max(clocks)
     if (latest - earliest).total_seconds() > 30:
         raise ScheduleFlowCliError("device-local clocks exceed the preserved-raw allowance")
-    boundary = latest.replace(second=0, microsecond=0) + timedelta(minutes=5)
+    boundary = latest.replace(second=0, microsecond=0) + timedelta(minutes=10)
     lead = (boundary - latest).total_seconds()
     if not _BOUNDARY_MIN_LEAD_SECONDS <= lead <= _BOUNDARY_MAX_LEAD_SECONDS:
-        raise ScheduleFlowCliError("cannot choose a safe four-to-five-minute boundary")
+        raise ScheduleFlowCliError("cannot choose the fixed nine-to-ten-minute boundary")
     if boundary.date() != latest.date() or (boundary.hour == 0 and boundary.minute == 0):
         raise ScheduleFlowCliError("schedule-flow preflight cannot cross midnight")
     return boundary.strftime("%H:%M")
@@ -568,7 +712,11 @@ async def _preflight(
     if spec.sentinel_only:
         print("Plan: sparse unused-slot wire qualification only; no field or role activation.")
     else:
-        print("Plan: Constant master 31% / slave 32% -> Sine master 35% / slave 40%.")
+        print("Plan: pause Independent/Constant master 30% / slave 35%.")
+        print(
+            "Boundary plan: master Sine 50% F40 -> Constant 55%; "
+            "slave Constant 45% -> Sine 60% F35; roles master/async_slave."
+        )
         print("Observation: full 900s epoch with at least 300s stable post-boundary evidence.")
     print(f"Confirmation token: {token}")
     return 0
@@ -795,6 +943,7 @@ async def _run(
             if pending_evidence is None:
                 raise ScheduleFlowCliError("diagnostic intent evidence is unavailable")
             pending_stage_events = intent.schedule_flow_stage_events
+            controller: ScheduleFlowExperimentController | None = None
 
             def persist_stage_event(event: ScheduleFlowStageEvent) -> None:
                 nonlocal intent, pending_stage_events
@@ -873,6 +1022,10 @@ async def _run(
 
             def mark_terminal_before_outer_clear() -> None:
                 nonlocal intent, pending_evidence
+                if controller is None:
+                    raise ScheduleFlowCliError(
+                        "schedule-flow controller is unavailable before journal clear"
+                    )
                 if schedule_store.load() is not None or role_store.load() is not None:
                     raise ScheduleFlowCliError(
                         "nested schedule recovery remains before outer journal clear"
@@ -891,7 +1044,12 @@ async def _run(
                     result_updates["schedule_flow_sample"] = latest
                 if role_failure is not None:
                     result_updates["schedule_flow_role_failure"] = role_failure
-                if role_result is not None and latest is not None and latest.phase == "after":
+                if (
+                    role_result is not None
+                    and role_result.schedule_transition_verified
+                    and latest is not None
+                    and latest.phase == "after"
+                ):
                     outcome = classify_schedule_flow_sample(spec, latest)
                     result_updates.update(
                         {
@@ -957,28 +1115,32 @@ async def _run(
                 before_clear=mark_terminal_before_outer_clear,
                 confirmation_token_factory=_outer_token_factory(intent),
             )
-            controller = ScheduleFlowExperimentController(
-                devices,
-                confirming_outer,
-                schedule_store,
-                role_store,
-                safety_interlock=guard,
-                pause_authorizer=_pause_authorizer(qualification_store),
-                prerequisite_authorizer=_qualification_authorizer(qualification_store),
-                role_sample_observer=persist_sample,
-                diagnostic_event_observer=persist_diagnostic_event,
-                stage_event_observer=persist_stage_event,
-                schedule_snapshot_authorizer=_snapshot_authorizer(intent_store, intent),
-            )
             guard.clear()
             if not guard.permitted:
                 raise ScheduleFlowCliError("persistent safety latch became active")
+            raw_sink = _PrivateRawCaptureSink(spec.operation_id)
             try:
+                controller = ScheduleFlowExperimentController(
+                    devices,
+                    confirming_outer,
+                    schedule_store,
+                    role_store,
+                    safety_interlock=guard,
+                    pause_authorizer=_pause_authorizer(qualification_store),
+                    prerequisite_authorizer=_qualification_authorizer(qualification_store),
+                    role_sample_observer=persist_sample,
+                    role_raw_capture_observer=raw_sink,
+                    diagnostic_event_observer=persist_diagnostic_event,
+                    stage_event_observer=persist_stage_event,
+                    schedule_snapshot_authorizer=_snapshot_authorizer(intent_store, intent),
+                    fixed_q2_observation=spec.is_fixed_q2_plan,
+                )
                 result = await _await_with_stop_signals(
                     controller.run_experiment(spec),
                     task_name="schedule-flow-experiment",
                 )
             except BaseException:
+                raw_sink.close_best_effort()
                 pending_outer = outer_store.load()
                 pending = pending_outer is not None or any(
                     store.load() is not None for store in (schedule_store, role_store)
@@ -1003,7 +1165,9 @@ async def _run(
                             "updated_at": max(datetime.now(UTC), current.updated_at),
                         }
                     )
-                last_sample = controller.last_role_sample
+                last_sample = (
+                    controller.last_role_sample if controller is not None else None
+                )
                 if last_sample is not None:
                     current = current.model_copy(
                         update={
@@ -1011,7 +1175,9 @@ async def _run(
                             "updated_at": max(datetime.now(UTC), current.updated_at),
                         }
                     )
-                role_failure = controller.last_role_failure
+                role_failure = (
+                    controller.last_role_failure if controller is not None else None
+                )
                 if role_failure is not None:
                     current = current.model_copy(
                         update={
@@ -1046,6 +1212,7 @@ async def _run(
                         # evidence-only persistence error.
                         pass
                 raise
+            raw_sink.close()
 
         current = intent_store.load() or intent
         result_outcome = (
@@ -1100,6 +1267,11 @@ async def _run(
     if result_outcome != "wire_qualified":
         print(f"Stable observation: {result.stable_observation_seconds:g}s")
     print("Exact schedules and original control states were restored.")
+    print(
+        "Private raw artifact: "
+        f"id={raw_sink.artifact_id}, sha256={raw_sink.artifact_digest}, "
+        f"captures={raw_sink.capture_count}"
+    )
     return 0
 
 

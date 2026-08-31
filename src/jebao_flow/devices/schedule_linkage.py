@@ -46,6 +46,7 @@ from jebao_flow.protocol.models import (
     LinkageRole,
     ScheduleEntry,
 )
+from jebao_flow.protocol.session import STATE_REPLY_ACTION, RawStateCapture
 
 DeviceIdentifier = Annotated[
     str,
@@ -84,11 +85,20 @@ _STAGED_AUTO_PARTIAL_MAX_STALLED_SAMPLES = 3
 # Treat 30 seconds as a conservative early-boundary allowance: a larger hidden lag can only make
 # the attended experiment fail closed, never authorize an early Auto transition as schedule-led.
 _STAGED_CLOCK_STALENESS_ALLOWANCE_SECONDS = 30.0
+_FIXED_Q2_BOUNDARY_EXCLUSION_SECONDS = 60.0
 # One LAN session boundary can spend 5s closing, 5s connecting, 10s authenticating and 5s
 # querying.  Keep a further 5s scheduling margin and do not admit a convergence read unless that
 # whole path fits before the observation deadline, which preserves a separate rollback reserve.
 _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS = 30.0
 _SCHEDULE_LINKAGE_TEST_MAX_POWER = 45
+_FIXED_Q2_MAX_POWER = 60
+_FIXED_Q2_MASTER_MANUAL_POWER = 30
+_FIXED_Q2_SLAVE_MANUAL_POWER = 35
+_FIXED_Q2_MASTER_BEFORE = ("sine", 50, 40)
+_FIXED_Q2_MASTER_AFTER = ("constant", 55, 0)
+_FIXED_Q2_SLAVE_BEFORE = ("constant", 45, 0)
+_FIXED_Q2_SLAVE_AFTER = ("sine", 60, 35)
+_FIXED_Q2_SAFE_FREQUENCY = 20
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -483,6 +493,8 @@ class ScheduleLinkageSample(BaseModel):
     phase: Literal["before", "after"]
     master: ScheduleAutoEvidence
     slave: ScheduleAutoEvidence
+    master_before: ScheduleAutoEvidence | None = None
+    slave_before: ScheduleAutoEvidence | None = None
     master_manual_power: int = Field(ge=0, le=100)
     slave_manual_power: int = Field(ge=0, le=100)
     # Pro boundary reports may mirror the scheduled Mode/Frequency into the separate live
@@ -494,11 +506,24 @@ class ScheduleLinkageSample(BaseModel):
     slave_reported_frequency: int | None = Field(default=None, ge=0, le=100)
     master_linkage: Literal[LinkageRole.MASTER]
     slave_linkage: Literal[LinkageRole.ASYNC_SLAVE]
+    master_reply_action: int | None = Field(default=None, ge=0, le=255)
+    slave_reply_action: int | None = Field(default=None, ge=0, le=255)
+    master_frame_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    slave_frame_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    master_frame_length: int | None = Field(default=None, gt=0)
+    slave_frame_length: int | None = Field(default=None, gt=0)
+    master_device_time: datetime | None = None
+    slave_device_time: datetime | None = None
 
     @model_validator(mode="after")
     def validate_timestamp(self) -> Self:
         if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
             raise ValueError("sample timestamp must be timezone-aware")
+        for value in (self.master_device_time, self.slave_device_time):
+            if value is not None and value.tzinfo is not None:
+                raise ValueError("device-local sample timestamps must be timezone-naive")
+        if (self.master_before is None) != (self.slave_before is None):
+            raise ValueError("stable pre-boundary evidence must contain both participants")
         return self
 
 
@@ -744,6 +769,23 @@ PrerequisiteAuthorizer = Callable[
 ]
 SampleObserver = Callable[[ScheduleLinkageSample], None]
 ScheduleLinkageRunProgressObserver = Callable[[ScheduleLinkageRunProgressEvent], None]
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleLinkageRawCapture:
+    """Private exact frame and timing from one participant in one paired monitor read."""
+
+    pair_ordinal: int
+    participant: Literal["master", "slave"]
+    read_started_at: datetime
+    read_completed_at: datetime
+    monotonic_started_at: float
+    monotonic_completed_at: float
+    state: DeviceState
+    capture: RawStateCapture
+
+
+RawCaptureObserver = Callable[[ScheduleLinkageRawCapture], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1126,9 +1168,11 @@ class ScheduleActiveLinkageController:
         monotonic_clock: Callable[[], float] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         sample_observer: SampleObserver | None = None,
+        raw_capture_observer: RawCaptureObserver | None = None,
         progress_observer: ScheduleLinkageRunProgressObserver | None = None,
         refresh_sessions_before_critical_reads: bool = False,
         owned_staged_auto_transition_observation: bool = False,
+        owned_fixed_q2_observation: bool = False,
     ) -> None:
         self._devices = dict(devices)
         self._store = store
@@ -1137,6 +1181,7 @@ class ScheduleActiveLinkageController:
         self._monotonic_clock = monotonic_clock
         self._sleep = sleep
         self._sample_observer = sample_observer
+        self._raw_capture_observer = raw_capture_observer
         self._progress_observer = progress_observer
         self._refresh_sessions_before_critical_reads = (
             refresh_sessions_before_critical_reads
@@ -1144,6 +1189,9 @@ class ScheduleActiveLinkageController:
         self._owned_staged_auto_transition_observation = (
             owned_staged_auto_transition_observation
         )
+        self._owned_fixed_q2_observation = owned_fixed_q2_observation
+        if self._owned_fixed_q2_observation and not self._owned_staged_auto_transition_observation:
+            raise ValueError("fixed Q2 observation requires the owned staged monitor")
         self._run_lock = asyncio.Lock()
         self._active_operation_id: str | None = None
         self._safety_epoch: int | None = None
@@ -1156,6 +1204,10 @@ class ScheduleActiveLinkageController:
         self._run_failure: ScheduleLinkageRunFailure | None = None
         self._run_drift_dimensions: tuple[ScheduleLinkageDriftDimension, ...] = ()
         self._run_pair_participant: Literal["master", "slave"] | None = None
+        self._fixed_capture_pair_ordinal = 0
+        self._latest_fixed_captures: dict[str, ScheduleLinkageRawCapture] = {}
+        self._fixed_stable_before: dict[str, ScheduleAutoEvidence] = {}
+        self._raw_capture_persistence_failed = False
 
     @property
     def active_operation_id(self) -> str | None:
@@ -1337,6 +1389,10 @@ class ScheduleActiveLinkageController:
         self._stop_event = asyncio.Event()
         self._staged_role_frequency_allowlist = frozenset()
         self._staged_role_frequency_pins.clear()
+        self._fixed_capture_pair_ordinal = 0
+        self._latest_fixed_captures.clear()
+        self._fixed_stable_before.clear()
+        self._raw_capture_persistence_failed = False
         self._safety_epoch = self._safety_interlock.epoch
         started_at = datetime.now(UTC)
         started_monotonic = self._monotonic()
@@ -1498,6 +1554,8 @@ class ScheduleActiveLinkageController:
             self._staged_transition_not_before = None
             self._staged_role_frequency_allowlist = frozenset()
             self._staged_role_frequency_pins.clear()
+            self._latest_fixed_captures.clear()
+            self._fixed_stable_before.clear()
             self._run_failure = None
             self._run_drift_dimensions = ()
             self._run_pair_participant = None
@@ -1829,10 +1887,12 @@ class ScheduleActiveLinkageController:
                 "master and slave physical bindings must be distinct",
                 failure=ScheduleLinkageRunFailure.PREFLIGHT_PAIR_EVIDENCE,
             )
-        if (
-            master_expectation.boundary_at != slave_expectation.boundary_at
-            or master_expectation.before.mode != slave_expectation.before.mode
-            or master_expectation.after_mode != slave_expectation.after_mode
+        same_mode_plan = (
+            master_expectation.before.mode == slave_expectation.before.mode
+            and master_expectation.after_mode == slave_expectation.after_mode
+        )
+        if master_expectation.boundary_at != slave_expectation.boundary_at or (
+            not self._owned_fixed_q2_observation and not same_mode_plan
         ):
             raise ScheduleLinkagePreflightError(
                 "both devices must authorize the same absolute schedule boundary",
@@ -1875,6 +1935,9 @@ class ScheduleActiveLinkageController:
                 "staged Auto transition observation requires explicit critical reads",
                 failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
             )
+        if self._owned_fixed_q2_observation:
+            self._assert_fixed_q2_transition_preconditions(spec, states, snapshots)
+            return
         after_valid_until = {snapshot.expectation.after_valid_until for snapshot in snapshots}
         if len(after_valid_until) != 1:
             raise ScheduleLinkagePreflightError(
@@ -1937,6 +2000,127 @@ class ScheduleActiveLinkageController:
         # Zero is an approved role-side effect only because both token-bound A entries above
         # proved the Pro wire's ignored Constant frequency byte is exactly zero.
         frequency_allowlist.add(0)
+        self._staged_role_frequency_allowlist = frozenset(frequency_allowlist)
+
+    def _assert_fixed_q2_transition_preconditions(
+        self,
+        spec: ScheduleLinkageSpec,
+        states: Mapping[str, DeviceState],
+        snapshots: tuple[ScheduleLinkageSnapshot, ...],
+    ) -> None:
+        """Bind the widened cap and cross-mode monitor to the one approved schedule."""
+
+        after_valid_until = {snapshot.expectation.after_valid_until for snapshot in snapshots}
+        if len(after_valid_until) != 1:
+            raise ScheduleLinkagePreflightError(
+                "fixed Q2 entries must share one validity window",
+                failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
+            )
+        expected = {
+            spec.master_device_id: (
+                _FIXED_Q2_MASTER_MANUAL_POWER,
+                _FIXED_Q2_MASTER_BEFORE,
+                _FIXED_Q2_MASTER_AFTER,
+            ),
+            spec.slave_device_id: (
+                _FIXED_Q2_SLAVE_MANUAL_POWER,
+                _FIXED_Q2_SLAVE_BEFORE,
+                _FIXED_Q2_SLAVE_AFTER,
+            ),
+        }
+        frequency_allowlist = {0, _FIXED_Q2_SAFE_FREQUENCY, 35, 40}
+        for snapshot in snapshots:
+            state = states[snapshot.device_id]
+            schedule = state.schedule
+            manual_power, before_tuple, after_tuple = expected[snapshot.device_id]
+            capture_method = getattr(
+                self._get_device(snapshot.device_id),
+                "get_explicit_state_capture",
+                None,
+            )
+            if not callable(capture_method):
+                raise ScheduleLinkagePreflightError(
+                    "fixed Q2 raw capture interface is unavailable",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
+                )
+            if schedule is None:
+                raise ScheduleLinkagePreflightError(
+                    "fixed Q2 device has no staged schedule",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
+                )
+            entries = _validated_entries(schedule)
+            expectation = snapshot.expectation
+            if (
+                len(entries) != 2
+                or expectation.current_slot != entries[0].slot
+                or expectation.next_slot != entries[1].slot
+                or entries[0].slot != 0
+                or entries[1].slot != 1
+                or entries[0].start != "00:00"
+                or entries[0].end != entries[1].start
+                or entries[1].end != "23:59"
+                or _wall_seconds(entries[1].end) <= _wall_seconds(entries[1].start)
+                or snapshot.power != manual_power
+                or snapshot.mode != "constant"
+                or snapshot.frequency != _FIXED_Q2_SAFE_FREQUENCY
+            ):
+                raise ScheduleLinkagePreflightError(
+                    "fixed Q2 controls or two-entry schedule do not match the approved plan",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
+                )
+            for entry, expected_tuple in zip(
+                entries,
+                (before_tuple, after_tuple),
+                strict=True,
+            ):
+                expected_mode, expected_flow, expected_frequency = expected_tuple
+                if (
+                    entry.mode != expected_mode
+                    or entry.parameters.get("flow") != expected_flow
+                    or entry.parameters.get("frequency") != expected_frequency
+                    or entry.parameters.get("feed_time") != 0
+                    or entry.parameters.get("custom_frequency") != 0
+                ):
+                    raise ScheduleLinkagePreflightError(
+                        "fixed Q2 schedule bytes do not match the approved mode/Flow signature",
+                        failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
+                    )
+            if (
+                expectation.before.mode != before_tuple[0]
+                or expectation.before.flow != before_tuple[1]
+                or (
+                    before_tuple[0] == "sine"
+                    and expectation.before.frequency != before_tuple[2]
+                )
+                or expectation.after_mode != after_tuple[0]
+                or expectation.after_flow != after_tuple[1]
+                or (
+                    after_tuple[0] == "sine"
+                    and expectation.after_frequency != after_tuple[2]
+                )
+                or (
+                    after_tuple[0] == "constant"
+                    and expectation.after_frequency is not None
+                )
+            ):
+                raise ScheduleLinkagePreflightError(
+                    "fixed Q2 effective A/B evidence does not match the approved plan",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
+                )
+            stable_budget = (
+                spec.post_boundary_stability_seconds
+                + 2 * spec.verification_interval_seconds
+            )
+            if (
+                expectation.after_valid_until - expectation.boundary_at
+            ).total_seconds() <= stable_budget:
+                raise ScheduleLinkagePreflightError(
+                    "fixed Q2 next entry is too short for stable evidence",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
+                )
+            frequency_allowlist.add(expectation.before.frequency)
+            if expectation.after_frequency is not None:
+                frequency_allowlist.add(expectation.after_frequency)
         self._staged_role_frequency_allowlist = frozenset(frequency_allowlist)
 
     def _snapshot_from_state(
@@ -2014,7 +2198,7 @@ class ScheduleActiveLinkageController:
                 f"device {device.device_id!r} next AutoFlow is outside limits",
                 failure=ScheduleLinkageRunFailure.PREFLIGHT_POWER_GUARD,
             )
-        guarded_maximum = min(limits.max_power, _SCHEDULE_LINKAGE_TEST_MAX_POWER)
+        guarded_maximum = self._guarded_power_maximum(device.device_id)
         if state.power > guarded_maximum:
             raise ScheduleLinkagePreflightError(
                 f"device {device.device_id!r} manual fallback Flow exceeds "
@@ -2077,6 +2261,74 @@ class ScheduleActiveLinkageController:
                     task.cancel()
             await asyncio.gather(*read_tasks, return_exceptions=True)
         return dict(zip(ids, states, strict=True))
+
+    async def _read_fixed_q2_pair_captures(
+        self,
+        spec: ScheduleLinkageSpec,
+    ) -> dict[str, DeviceState]:
+        """Capture both decoded states and their exact explicit-reply frames once."""
+
+        self._fixed_capture_pair_ordinal += 1
+        ordinal = self._fixed_capture_pair_ordinal
+        participants = (
+            (spec.master_device_id, "master"),
+            (spec.slave_device_id, "slave"),
+        )
+
+        async def capture_one(
+            device_id: str,
+            participant: Literal["master", "slave"],
+        ) -> tuple[str, ScheduleLinkageRawCapture]:
+            device = self._get_device(device_id)
+            method = getattr(device, "get_explicit_state_capture", None)
+            if not callable(method):
+                raise ScheduleLinkageApplyError(
+                    "fixed Q2 raw capture interface disappeared during observation"
+                )
+            read_started_at = datetime.now(UTC)
+            monotonic_started_at = self._monotonic()
+            result = await method()
+            monotonic_completed_at = self._monotonic()
+            read_completed_at = datetime.now(UTC)
+            if (
+                not isinstance(result, tuple)
+                or len(result) != 2
+                or not isinstance(result[0], DeviceState)
+                or not isinstance(result[1], RawStateCapture)
+                or result[1].action != STATE_REPLY_ACTION
+            ):
+                raise ScheduleLinkageApplyError(
+                    "fixed Q2 capture did not return one explicit reply and decoded state"
+                )
+            observed = ScheduleLinkageRawCapture(
+                pair_ordinal=ordinal,
+                participant=participant,
+                read_started_at=read_started_at,
+                read_completed_at=read_completed_at,
+                monotonic_started_at=monotonic_started_at,
+                monotonic_completed_at=monotonic_completed_at,
+                state=result[0],
+                capture=result[1],
+            )
+            self._emit_raw_capture_best_effort(observed)
+            return device_id, observed
+
+        tasks = tuple(
+            asyncio.create_task(capture_one(device_id, participant))
+            for device_id, participant in participants
+        )
+        try:
+            captured = await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._latest_fixed_captures = dict(captured)
+        return {
+            device_id: observed.state
+            for device_id, observed in captured
+        }
 
     async def _heartbeat_pair(self, spec: ScheduleLinkageSpec) -> None:
         """Exchange paired read-only keepalives without leaving an uncertain peer running."""
@@ -2423,7 +2675,7 @@ class ScheduleActiveLinkageController:
         The durable intent and successful adapter return already authorize exact reverse-order
         compensation.  A missing or contradictory post-write read is measurement evidence, not
         a reason to erase the 15-minute epoch.  Identity, safety authority, the observation
-        deadline, and the attended 45% active-output cap remain hard stops.
+        deadline, and the plan-specific attended active-output cap remain hard stops.
         """
 
         if (
@@ -2483,11 +2735,7 @@ class ScheduleActiveLinkageController:
 
         for snapshot in record.snapshots:
             state = states[snapshot.device_id]
-            capabilities = self._get_device(snapshot.device_id).capabilities
-            guarded_maximum = min(
-                capabilities.power_limits.max_power,
-                _SCHEDULE_LINKAGE_TEST_MAX_POWER,
-            )
+            guarded_maximum = self._guarded_power_maximum(snapshot.device_id)
             active_flow = (
                 state.observed_attributes.get("AutoFlow")
                 if state.timer_enabled is True
@@ -3079,6 +3327,17 @@ class ScheduleActiveLinkageController:
     ) -> tuple[dict[str, DeviceState], float]:
         """Heartbeat-fence and read one staged pair without changing device state."""
 
+        if self._owned_fixed_q2_observation:
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR_STATE_READ
+            read_started_at = self._monotonic()
+            states = await self._read_fixed_q2_pair_captures(record.spec)
+            try:
+                self._assert_observation_deadline()
+            except ScheduleLinkageApplyError:
+                self._run_failure = ScheduleLinkageRunFailure.MONITOR_DEADLINE
+                raise
+            return states, read_started_at
+
         self._run_failure = ScheduleLinkageRunFailure.MONITOR_HEARTBEAT
         heartbeat_started_at = self._monotonic()
         try:
@@ -3118,7 +3377,9 @@ class ScheduleActiveLinkageController:
         self._validate_recovery_bindings(record, permit_disconnected=True)
         self._assert_staged_monitor_retry_authority(
             minimum_remaining_seconds=(
-                _STAGED_TRANSPORT_RETRY_DELAY_SECONDS
+                0
+                if self._owned_fixed_q2_observation
+                else _STAGED_TRANSPORT_RETRY_DELAY_SECONDS
                 + _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS
             )
         )
@@ -3199,7 +3460,11 @@ class ScheduleActiveLinkageController:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
         self._assert_staged_monitor_retry_authority(
-            minimum_remaining_seconds=_ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS
+            minimum_remaining_seconds=(
+                0
+                if self._owned_fixed_q2_observation
+                else _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS
+            )
         )
 
     def _assert_staged_monitor_retry_authority(
@@ -3231,6 +3496,42 @@ class ScheduleActiveLinkageController:
                 "staged monitor retry lacks a complete read-only session budget"
             )
 
+    def _fixed_q2_device_boundary_region(
+        self,
+        record: ScheduleLinkageRecord,
+        states: Mapping[str, DeviceState],
+    ) -> Literal["before", "excluded", "after"] | None:
+        """Classify the pair using each controller's device-local clock.
+
+        The fixed Q2 observation may count a sample only when both devices are more than sixty
+        seconds on the same side of their token-bound boundary.  Mixed sides and the inclusive
+        T-60 through T+60 interval are deliberately non-evidence.
+        """
+
+        if not self._owned_fixed_q2_observation:
+            return None
+        positions = tuple(
+            (
+                self._state_clock_for(
+                    snapshot.device_id,
+                    states[snapshot.device_id],
+                )
+                - snapshot.expectation.boundary_at
+            ).total_seconds()
+            for snapshot in record.snapshots
+        )
+        if all(
+            position < -_FIXED_Q2_BOUNDARY_EXCLUSION_SECONDS
+            for position in positions
+        ):
+            return "before"
+        if all(
+            position > _FIXED_Q2_BOUNDARY_EXCLUSION_SECONDS
+            for position in positions
+        ):
+            return "after"
+        return "excluded"
+
     async def _monitor_staged_auto_transition(
         self,
         record: ScheduleLinkageRecord,
@@ -3260,6 +3561,11 @@ class ScheduleActiveLinkageController:
         consecutive_after = 0
         previous_after: _StablePairEvidence | None = None
         stable_after_started_at: float | None = None
+        consecutive_before = 0
+        previous_before: _StablePairEvidence | None = None
+        stable_before_started_at: float | None = None
+        pre_boundary_verified = False
+        pre_boundary_conflicted = False
         transition_not_before = self._staged_transition_not_before
         if transition_not_before is None:
             raise ScheduleLinkageApplyError(
@@ -3303,11 +3609,7 @@ class ScheduleActiveLinkageController:
         def assert_no_unsafe_active_flow(states: Mapping[str, DeviceState]) -> None:
             for snapshot in record.snapshots:
                 state = states[snapshot.device_id]
-                capabilities = self._get_device(snapshot.device_id).capabilities
-                guarded_maximum = min(
-                    capabilities.power_limits.max_power,
-                    _SCHEDULE_LINKAGE_TEST_MAX_POWER,
-                )
+                guarded_maximum = self._guarded_power_maximum(snapshot.device_id)
                 if state.timer_enabled is True:
                     active_flow = state.observed_attributes.get("AutoFlow")
                 else:
@@ -3407,6 +3709,10 @@ class ScheduleActiveLinkageController:
                     states,
                     expected_roles,
                 )
+                fixed_boundary_region = self._fixed_q2_device_boundary_region(
+                    record,
+                    states,
+                )
             except ScheduleLinkageApplyError:
                 if not spec.complete_observation_epoch:
                     raise
@@ -3425,6 +3731,8 @@ class ScheduleActiveLinkageController:
                 for classification in classifications.values()
             )
             if (
+                not self._owned_fixed_q2_observation
+                and
                 sampled_at < transition_not_before
                 and any(
                     classification.side != "before" or classification.b_fields
@@ -3442,6 +3750,18 @@ class ScheduleActiveLinkageController:
                         "staged Auto evidence changed before the conservative boundary window"
                     )
                 record_diagnostic_issue("early_transition")
+                reset_candidate_tracking()
+                await wait_for_next_sample(heartbeat_started_at)
+                continue
+            if (
+                self._owned_fixed_q2_observation
+                and transition_verified
+                and fixed_boundary_region != "after"
+            ):
+                record_diagnostic_issue(
+                    "device_time_left_post_boundary_window",
+                    contradictory=True,
+                )
                 reset_candidate_tracking()
                 await wait_for_next_sample(heartbeat_started_at)
                 continue
@@ -3536,9 +3856,11 @@ class ScheduleActiveLinkageController:
                 for device_id, classification in classifications.items()
                 if classification.auto_side == "after"
             )
-            if all(side == "before" for side in sides.values()):
+            if all(side == "before" for side in sides.values()) and (
+                fixed_boundary_region in {None, "before"}
+            ):
                 try:
-                    self._assert_pair_sample(
+                    before_evidence = self._assert_pair_sample(
                         record,
                         states,
                         expected_roles,
@@ -3552,10 +3874,29 @@ class ScheduleActiveLinkageController:
                     reset_candidate_tracking()
                     await wait_for_next_sample(heartbeat_started_at)
                     continue
+                if before_evidence == previous_before:
+                    consecutive_before += 1
+                else:
+                    if pre_boundary_verified and previous_before is not None:
+                        pre_boundary_conflicted = True
+                    consecutive_before = 1
+                    previous_before = before_evidence
+                    stable_before_started_at = sampled_at
+                stable_before_for = (
+                    0.0
+                    if stable_before_started_at is None
+                    else sampled_at - stable_before_started_at
+                )
+                if consecutive_before >= 10 and stable_before_for >= 120:
+                    pre_boundary_verified = True
+                    self._fixed_stable_before = {
+                        device_id: _observed_auto(device_id, states[device_id])
+                        for device_id in expected_roles
+                    }
                 consecutive_after = 0
                 previous_after = None
                 stable_after_started_at = None
-            elif terminal_candidate:
+            elif terminal_candidate and fixed_boundary_region in {None, "after"}:
                 # The master's exact B tuple proves that the staged boundary has happened.  The
                 # slave may expose its own B Flow, follow the master's Flow, keep A's Flow, or
                 # even retain the exact A tuple; holding that bounded safe candidate stable is the
@@ -3575,6 +3916,12 @@ class ScheduleActiveLinkageController:
                     reset_candidate_tracking()
                     await wait_for_next_sample(heartbeat_started_at)
                     continue
+                if (
+                    transition_verified
+                    and previous_after is not None
+                    and evidence != previous_after
+                ):
+                    record_diagnostic_issue("post_stability_change", contradictory=True)
                 if previous_after == evidence:
                     consecutive_after += 1
                 else:
@@ -3589,6 +3936,10 @@ class ScheduleActiveLinkageController:
                 if (
                     consecutive_after >= 2
                     and stable_for >= spec.post_boundary_stability_seconds
+                    and (
+                        pre_boundary_verified
+                        or not self._owned_fixed_q2_observation
+                    )
                 ):
                     self._assert_observation_deadline()
                     if not spec.complete_observation_epoch:
@@ -3618,7 +3969,10 @@ class ScheduleActiveLinkageController:
             )
             return (
                 ScheduleLinkageStopReason.EPOCH_COMPLETED,
-                transition_verified and not contradictory_after_verification,
+                transition_verified
+                and not contradictory_after_verification
+                and not pre_boundary_conflicted
+                and not self._raw_capture_persistence_failed,
             )
         raise ScheduleLinkageApplyError(
             "staged Auto transition lacked two consecutive stable after samples"
@@ -3660,17 +4014,26 @@ class ScheduleActiveLinkageController:
             )
             state = states[snapshot.device_id]
             evidence = _observed_auto(snapshot.device_id, state)
-            auto_b_fields = self._staged_auto_b_fields(record, snapshot, evidence)
-            if evidence == snapshot.expectation.before:
+            fixed_slave = (
+                self._owned_fixed_q2_observation
+                and snapshot.device_id == record.spec.slave_device_id
+            )
+            if fixed_slave:
+                self._assert_fixed_q2_slave_candidate(snapshot, evidence)
+                auto_b_fields = frozenset()
                 auto_side: Literal["before", "transitional", "after"] = "before"
-            elif self._matches_after_evidence(record, snapshot, evidence):
-                auto_side = "after"
-            elif self._is_safe_staged_transitional_auto(record, snapshot, evidence):
-                auto_side = "transitional"
             else:
-                raise ScheduleLinkageApplyError(
-                    f"device {snapshot.device_id!r} reported an unknown staged Auto tuple"
-                )
+                auto_b_fields = self._staged_auto_b_fields(record, snapshot, evidence)
+                if evidence == snapshot.expectation.before:
+                    auto_side = "before"
+                elif self._matches_after_evidence(record, snapshot, evidence):
+                    auto_side = "after"
+                elif self._is_safe_staged_transitional_auto(record, snapshot, evidence):
+                    auto_side = "transitional"
+                else:
+                    raise ScheduleLinkageApplyError(
+                        f"device {snapshot.device_id!r} reported an unknown staged Auto tuple"
+                    )
             control_side, control_b_fields = self._classify_staged_control_side(
                 snapshot,
                 state,
@@ -3735,6 +4098,17 @@ class ScheduleActiveLinkageController:
     ]:
         """Classify the separate live Mode/Frequency pair against this device's own A/B."""
 
+        if self._owned_fixed_q2_observation:
+            if (
+                state.mode not in {"constant", "sine"}
+                or state.frequency is None
+                or state.frequency not in self._staged_role_frequency_allowlist
+            ):
+                raise ScheduleLinkageApplyError(
+                    "fixed Q2 live control pair is outside its approved frequency set"
+                )
+            return "before", frozenset()
+
         expectation = snapshot.expectation
         after_frequency = expectation.after_frequency
         if after_frequency is None:
@@ -3774,8 +4148,8 @@ class ScheduleActiveLinkageController:
         self._assert_auto_flow_safe(snapshot, evidence)
         if evidence.mode not in {expectation.before.mode, expectation.after_mode}:
             return False
-        # The owned staged plan is Constant-to-Sine.  Retaining None here prevents a transient
-        # feed tuple (and its AutoFeedTime) from being accepted as a boundary update.
+        # The owned staged plans use only Constant/Sine boundaries.  Retaining None here prevents
+        # a transient feed tuple (and its AutoFeedTime) from being accepted as a boundary update.
         if evidence.feed_time != expectation.before.feed_time:
             return False
         allowed_frequencies = {expectation.before.frequency}
@@ -3843,6 +4217,8 @@ class ScheduleActiveLinkageController:
         if phase != "ambiguous" and full_linkage_topology:
             master_state = states[record.spec.master_device_id]
             slave_state = states[record.spec.slave_device_id]
+            master_capture = self._latest_fixed_captures.get(record.spec.master_device_id)
+            slave_capture = self._latest_fixed_captures.get(record.spec.slave_device_id)
             if master_state.power is None or slave_state.power is None:
                 raise ScheduleLinkageApplyError("manual fallback Flow evidence is unavailable")
             sample = ScheduleLinkageSample(
@@ -3850,6 +4226,16 @@ class ScheduleActiveLinkageController:
                 phase=phase,
                 master=observed[record.spec.master_device_id],
                 slave=observed[record.spec.slave_device_id],
+                master_before=(
+                    self._fixed_stable_before.get(record.spec.master_device_id)
+                    if self._owned_fixed_q2_observation and phase == "after"
+                    else None
+                ),
+                slave_before=(
+                    self._fixed_stable_before.get(record.spec.slave_device_id)
+                    if self._owned_fixed_q2_observation and phase == "after"
+                    else None
+                ),
                 master_manual_power=master_state.power,
                 slave_manual_power=slave_state.power,
                 master_reported_mode=master_state.mode,
@@ -3858,6 +4244,42 @@ class ScheduleActiveLinkageController:
                 slave_reported_frequency=slave_state.frequency,
                 master_linkage=LinkageRole.MASTER,
                 slave_linkage=LinkageRole.ASYNC_SLAVE,
+                master_reply_action=(
+                    master_capture.capture.action if master_capture is not None else None
+                ),
+                slave_reply_action=(
+                    slave_capture.capture.action if slave_capture is not None else None
+                ),
+                master_frame_sha256=(
+                    hashlib.sha256(master_capture.capture.wire_frame).hexdigest()
+                    if master_capture is not None
+                    else None
+                ),
+                slave_frame_sha256=(
+                    hashlib.sha256(slave_capture.capture.wire_frame).hexdigest()
+                    if slave_capture is not None
+                    else None
+                ),
+                master_frame_length=(
+                    len(master_capture.capture.wire_frame)
+                    if master_capture is not None
+                    else None
+                ),
+                slave_frame_length=(
+                    len(slave_capture.capture.wire_frame)
+                    if slave_capture is not None
+                    else None
+                ),
+                master_device_time=(
+                    master_state.schedule.device_local_time
+                    if master_capture is not None and master_state.schedule is not None
+                    else None
+                ),
+                slave_device_time=(
+                    slave_state.schedule.device_local_time
+                    if slave_capture is not None and slave_state.schedule is not None
+                    else None
+                ),
             )
             # Evidence is useful even when the following strict expectation check fails.  A sink
             # is diagnostic only: persistence trouble must not interrupt role compensation.
@@ -3878,7 +4300,13 @@ class ScheduleActiveLinkageController:
                 observed_role=observed_role,
             )
             evidence = observed[snapshot.device_id]
-            if phase == "before":
+            fixed_slave = (
+                self._owned_fixed_q2_observation
+                and snapshot.device_id == record.spec.slave_device_id
+            )
+            if fixed_slave:
+                self._assert_fixed_q2_slave_candidate(snapshot, evidence)
+            elif phase == "before":
                 if evidence != snapshot.expectation.before:
                     raise ScheduleLinkageApplyError(
                         f"device {snapshot.device_id!r} pre-boundary Auto evidence drifted"
@@ -3912,6 +4340,12 @@ class ScheduleActiveLinkageController:
         """Match B exactly, except for the experiment's deliberately observed slave Flow."""
 
         expectation = snapshot.expectation
+        if (
+            self._owned_fixed_q2_observation
+            and snapshot.device_id == record.spec.slave_device_id
+        ):
+            self._assert_fixed_q2_slave_candidate(snapshot, evidence)
+            return True
         slave_variance = (
             record.spec.observe_slave_after_tuple_variance
             and snapshot.device_id == record.spec.slave_device_id
@@ -3936,6 +4370,21 @@ class ScheduleActiveLinkageController:
             return evidence.flow == expectation.after_flow
         return self._slave_flow_is_safe(snapshot, evidence)
 
+    def _assert_fixed_q2_slave_candidate(
+        self,
+        snapshot: ScheduleLinkageSnapshot,
+        evidence: ScheduleAutoEvidence,
+    ) -> None:
+        self._assert_auto_flow_safe(snapshot, evidence)
+        if (
+            evidence.mode not in {"constant", "sine"}
+            or evidence.feed_time is not None
+            or evidence.frequency not in self._staged_role_frequency_allowlist
+        ):
+            raise ScheduleLinkageApplyError(
+                "fixed Q2 slave Auto tuple is outside the approved candidate set"
+            )
+
     def _slave_flow_is_safe(
         self,
         snapshot: ScheduleLinkageSnapshot,
@@ -3951,7 +4400,7 @@ class ScheduleActiveLinkageController:
     ) -> None:
         capabilities = self._get_device(snapshot.device_id).capabilities
         limits = capabilities.power_limits
-        guarded_maximum = min(limits.max_power, _SCHEDULE_LINKAGE_TEST_MAX_POWER)
+        guarded_maximum = self._guarded_power_maximum(snapshot.device_id)
         if (
             not limits.min_power <= evidence.flow <= guarded_maximum
             or evidence.flow % capabilities.power_step
@@ -3960,6 +4409,15 @@ class ScheduleActiveLinkageController:
                 f"device {snapshot.device_id!r} observed unsafe AutoFlow"
             )
 
+    def _guarded_power_maximum(self, device_id: str) -> int:
+        capabilities = self._get_device(device_id).capabilities
+        approved_maximum = (
+            _FIXED_Q2_MAX_POWER
+            if self._owned_fixed_q2_observation
+            else _SCHEDULE_LINKAGE_TEST_MAX_POWER
+        )
+        return min(capabilities.power_limits.max_power, approved_maximum)
+
     def _emit_sample_best_effort(self, sample: ScheduleLinkageSample) -> None:
         if self._sample_observer is None:
             return
@@ -3967,6 +4425,17 @@ class ScheduleActiveLinkageController:
             self._sample_observer(sample)
         except BaseException:
             _LOGGER.warning("schedule-linkage sample evidence could not be persisted")
+
+    def _emit_raw_capture_best_effort(self, capture: ScheduleLinkageRawCapture) -> None:
+        observer = self._raw_capture_observer
+        if observer is None:
+            self._raw_capture_persistence_failed = True
+            return
+        try:
+            observer(capture)
+        except BaseException:
+            self._raw_capture_persistence_failed = True
+            _LOGGER.warning("schedule-linkage private raw evidence could not be persisted")
 
     def _set_pair_verification_failure(
         self,
@@ -4451,6 +4920,21 @@ class ScheduleActiveLinkageController:
     ) -> None:
         """Allow only the owned schedule's A/B live control pair while a role is linked."""
 
+        if self._owned_fixed_q2_observation:
+            if expected_role is LinkageRole.INDEPENDENT:
+                raise ScheduleLinkageApplyError(
+                    "fixed Q2 live control evidence is outside the linked monitor"
+                )
+            self._assert_snapshot_control_sets(
+                snapshot,
+                state,
+                expected_role,
+                allowed_modes=frozenset({"constant", "sine"}),
+                allowed_frequencies=self._staged_role_frequency_allowlist,
+                observed_role=observed_role,
+            )
+            return
+
         after_frequency = snapshot.expectation.after_frequency
         if (
             not self._owned_staged_auto_transition_observation
@@ -4850,6 +5334,7 @@ def _constant_time_equal(left: str, right: str) -> bool:
 
 __all__ = [
     "PrerequisiteAuthorizer",
+    "RawCaptureObserver",
     "ScheduleActiveLinkageController",
     "ScheduleAutoEvidence",
     "ScheduleBoundaryExpectation",
@@ -4864,6 +5349,7 @@ __all__ = [
     "ScheduleLinkagePhase",
     "ScheduleLinkagePreflight",
     "ScheduleLinkagePreflightError",
+    "ScheduleLinkageRawCapture",
     "ScheduleLinkageRecord",
     "ScheduleLinkageResult",
     "ScheduleLinkageRollbackError",

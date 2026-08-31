@@ -36,6 +36,7 @@ from jebao_flow.persistence.schedule_linkage import (
 from jebao_flow.protocol.errors import ProtocolConnectionError
 from jebao_flow.protocol.models import DeviceSchedule, DeviceTarget, LinkageRole, ScheduleEntry
 from jebao_flow.protocol.schedule_wire import decode_local_wavemaker_pro_slot_wire
+from jebao_flow.protocol.session import STATE_REPLY_ACTION, RawStateCapture
 
 
 def _entry(
@@ -138,6 +139,7 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         self.resume_ordinary_state_read = asyncio.Event()
         self.ordinary_state_read_cancelled_count = 0
         self.explicit_state_read_count = 0
+        self.explicit_state_capture_read_count = 0
         self.fail_explicit_state_reads_remaining = 0
         self.fail_explicit_state_read_numbers: set[int] = set()
         self.explicit_state_read_failures: dict[int, BaseException] = {}
@@ -411,6 +413,17 @@ class _ScheduleDevice(SimulatedJebaoDevice):
             }
         )
 
+    async def get_explicit_state_capture(self):
+        self.explicit_state_capture_read_count += 1
+        state = await self.get_explicit_state()
+        marker = f"{self.device_id}:{self.explicit_state_capture_read_count}".encode()
+        status_payload = marker.ljust(452, b"\x00")
+        return state, RawStateCapture(
+            wire_frame=b"exact-frame:" + status_payload,
+            action=STATE_REPLY_ACTION,
+            status_payload=status_payload,
+        )
+
     async def heartbeat(self) -> None:
         self.heartbeat_count += 1
         self.heartbeat_started_at.append(self.virtual_time.value)
@@ -637,6 +650,31 @@ def _staged_spec(**updates: object) -> ScheduleLinkageSpec:
     return _spec(**values)
 
 
+def _fixed_q2_role_spec() -> ScheduleLinkageSpec:
+    return ScheduleFlowExperimentSpec(
+        operation_id="fixed_q2",
+        qualification_operation_id="qualified_async_test",
+        master_device_id="master",
+        slave_device_id="slave",
+        boundary_time="18:11",
+        master_before_flow=50,
+        slave_before_flow=45,
+        master_after_flow=55,
+        slave_after_flow=60,
+        sine_frequency=40,
+        safe_frequency=20,
+        observation_window_seconds=915,
+        post_boundary_stability_seconds=300,
+        verification_interval_seconds=2,
+        minimum_lead_seconds=60,
+        ambiguous_band_seconds=1,
+        maximum_clock_skew_seconds=30,
+        clock_advance_tolerance_seconds=2,
+        sentinel_qualification=True,
+        full_epoch_after_roles=True,
+    ).role_observation_spec()
+
+
 def _controller(
     master: _ScheduleDevice,
     slave: _ScheduleDevice,
@@ -644,9 +682,11 @@ def _controller(
     *,
     authorizer=None,
     sample_observer=None,
+    raw_capture_observer=None,
     progress_observer=None,
     refresh_sessions_before_critical_reads: bool = False,
     owned_staged_auto_transition_observation: bool = False,
+    owned_fixed_q2_observation: bool = False,
     monotonic_clock=None,
     safety_interlock=None,
     sleep=None,
@@ -660,17 +700,195 @@ def _controller(
         monotonic_clock=monotonic_clock or master.virtual_time.monotonic,
         sleep=sleep or master.virtual_time.sleep,
         sample_observer=sample_observer,
+        raw_capture_observer=raw_capture_observer,
         progress_observer=progress_observer,
         refresh_sessions_before_critical_reads=refresh_sessions_before_critical_reads,
         owned_staged_auto_transition_observation=(
             owned_staged_auto_transition_observation
         ),
+        owned_fixed_q2_observation=owned_fixed_q2_observation,
     )
 
 
 def _assert_only_linkage_calls(*devices: _ScheduleDevice) -> None:
     assert all(call[0] == "write_linkage" for device in devices for call in device.calls)
     assert all(command.name == "linkage" for device in devices for command in device.commands)
+
+
+async def test_fixed_q2_pair_capture_uses_one_same_read_frame_per_device(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    captures = []
+    controller = _controller(
+        master,
+        slave,
+        JsonScheduleLinkageJournalStore(tmp_path / "fixed-q2-capture.json"),
+        raw_capture_observer=captures.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+
+    states = await controller._read_fixed_q2_pair_captures(  # noqa: SLF001
+        _fixed_q2_role_spec()
+    )
+
+    assert set(states) == {"master", "slave"}
+    assert master.explicit_state_capture_read_count == 1
+    assert slave.explicit_state_capture_read_count == 1
+    assert master.explicit_state_read_count == 1
+    assert slave.explicit_state_read_count == 1
+    assert sorted(capture.participant for capture in captures) == ["master", "slave"]
+    assert {capture.pair_ordinal for capture in captures} == {1}
+    assert all(capture.capture.action == STATE_REPLY_ACTION for capture in captures)
+    assert all(capture.capture.wire_frame.startswith(b"exact-frame:") for capture in captures)
+
+
+async def test_fixed_q2_raw_sink_failure_is_recorded_without_a_second_device_read(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+
+    def fail_to_persist(_capture) -> None:
+        raise OSError("simulated private raw sink failure")
+
+    controller = _controller(
+        master,
+        slave,
+        JsonScheduleLinkageJournalStore(tmp_path / "fixed-q2-raw-failure.json"),
+        raw_capture_observer=fail_to_persist,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+
+    await controller._read_fixed_q2_pair_captures(_fixed_q2_role_spec())  # noqa: SLF001
+
+    assert controller._raw_capture_persistence_failed is True  # noqa: SLF001
+    assert master.explicit_state_capture_read_count == 1
+    assert slave.explicit_state_capture_read_count == 1
+    assert master.explicit_state_read_count == 1
+    assert slave.explicit_state_read_count == 1
+
+
+async def test_fixed_q2_preconditions_accept_only_the_approved_opposite_mode_schedule(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 9),
+        linked_clock_step_seconds=1,
+    )
+    master.entries = (
+        _entry(0, "00:00", "18:11", "sine", flow=50, frequency=40, feed_time=0),
+        _entry(1, "18:11", "23:59", "constant", flow=55, frequency=0, feed_time=0),
+    )
+    slave.entries = (
+        _entry(0, "00:00", "18:11", "constant", flow=45, frequency=0, feed_time=0),
+        _entry(1, "18:11", "23:59", "sine", flow=60, frequency=35, feed_time=0),
+    )
+    await master.set_power(30)
+    await slave.set_power(35)
+    for device in (master, slave):
+        await device.set_mode("constant")
+        await device.set_frequency(20)
+        device.calls.clear()
+        device.commands.clear()
+    states = {
+        "master": (await master.get_state()).model_copy(
+            update={
+                "observed_attributes": {
+                    "AutoMode": "sine",
+                    "AutoFlow": 50,
+                    "AutoFreq": 40,
+                    "AutoFeedTime": 15,
+                }
+            }
+        ),
+        "slave": (await slave.get_state()).model_copy(
+            update={
+                "observed_attributes": {
+                    "AutoMode": "constant",
+                    "AutoFlow": 45,
+                    "AutoFreq": 5,
+                    "AutoFeedTime": 15,
+                }
+            }
+        ),
+    }
+    controller = _controller(
+        master,
+        slave,
+        JsonScheduleLinkageJournalStore(tmp_path / "fixed-q2-preconditions.json"),
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+
+    spec = _fixed_q2_role_spec()
+    snapshots = controller._snapshots_from_states(  # noqa: SLF001
+        spec,
+        states,
+    )
+
+    assert [snapshot.power for snapshot in snapshots] == [30, 35]
+    assert [snapshot.expectation.before.mode for snapshot in snapshots] == [
+        "sine",
+        "constant",
+    ]
+    assert [snapshot.expectation.after_mode for snapshot in snapshots] == [
+        "constant",
+        "sine",
+    ]
+    assert controller._staged_role_frequency_allowlist == {0, 5, 20, 35, 40}  # noqa: SLF001
+
+    now = datetime.now(UTC)
+    record = ScheduleLinkageRecord(
+        operation_id=spec.operation_id,
+        phase=ScheduleLinkagePhase.ACTIVE,
+        spec=spec,
+        snapshots=snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=915),
+        linkage_write_intent_device_ids=("master", "slave"),
+        linked_device_ids=("master", "slave"),
+    )
+    boundary = datetime(2026, 8, 26, 18, 11)
+    cases = (
+        ((-61, -61), "before"),
+        ((-61, -59), "excluded"),
+        ((-60, -60), "excluded"),
+        ((-61, 61), "excluded"),
+        ((60, 60), "excluded"),
+        ((61, 59), "excluded"),
+        ((61, 61), "after"),
+    )
+    for (master_position, slave_position), expected in cases:
+        positioned_states = {}
+        for device_id, position in (
+            ("master", master_position),
+            ("slave", slave_position),
+        ):
+            state = states[device_id]
+            assert state.schedule is not None
+            positioned_states[device_id] = state.model_copy(
+                update={
+                    "schedule": state.schedule.model_copy(
+                        update={
+                            "device_local_time": boundary + timedelta(seconds=position)
+                        }
+                    )
+                }
+            )
+        assert (
+            controller._fixed_q2_device_boundary_region(  # noqa: SLF001
+                record,
+                positioned_states,
+            )
+            == expected
+        )
 
 
 def _control_schedule_snapshot(

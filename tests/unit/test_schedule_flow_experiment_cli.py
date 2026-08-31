@@ -67,6 +67,11 @@ from jebao_flow.persistence.qualification import (
 from jebao_flow.protocol.models import LinkageRole
 
 
+@pytest.fixture(autouse=True)
+def _private_raw_capture_root(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(cli, "hardware_safety_root", lambda: tmp_path)
+
+
 def _binding(seed: str) -> PhysicalDeviceBinding:
     return PhysicalDeviceBinding.from_identifiers(
         vendor_device_id=f"vendor-{seed}",
@@ -90,8 +95,8 @@ def _snapshots() -> tuple[DeviceControlSnapshot, ...]:
             schedule_fingerprint=f"schedule-{seed}",
         )
         for device_id, seed, power in (
-            ("master", "01", 31),
-            ("slave", "02", 32),
+            ("master", "01", 30),
+            ("slave", "02", 35),
         )
     )
 
@@ -191,14 +196,39 @@ def _legacy_intent(
     )
 
 
-def _after_sample(*, master_flow: int = 35, slave_flow: int = 40) -> ScheduleLinkageSample:
+def _after_sample(
+    *,
+    master_flow: int = 55,
+    slave_flow: int = 60,
+    master_mode: str = "constant",
+    slave_mode: str = "constant",
+    master_frequency: int = 0,
+    slave_frequency: int = 0,
+    slave_before_mode: str = "sine",
+    slave_before_flow: int = 45,
+    slave_before_frequency: int = 40,
+) -> ScheduleLinkageSample:
     return ScheduleLinkageSample(
         observed_at=datetime.now(UTC),
         phase="after",
-        master=ScheduleAutoEvidence(mode="sine", flow=master_flow, frequency=30),
-        slave=ScheduleAutoEvidence(mode="sine", flow=slave_flow, frequency=30),
-        master_manual_power=31,
-        slave_manual_power=32,
+        master=ScheduleAutoEvidence(
+            mode=master_mode,
+            flow=master_flow,
+            frequency=master_frequency,
+        ),
+        slave=ScheduleAutoEvidence(
+            mode=slave_mode,
+            flow=slave_flow,
+            frequency=slave_frequency,
+        ),
+        master_before=ScheduleAutoEvidence(mode="sine", flow=50, frequency=40),
+        slave_before=ScheduleAutoEvidence(
+            mode=slave_before_mode,
+            flow=slave_before_flow,
+            frequency=slave_before_frequency,
+        ),
+        master_manual_power=30,
+        slave_manual_power=35,
         master_linkage=LinkageRole.MASTER,
         slave_linkage=LinkageRole.ASYNC_SLAVE,
     )
@@ -221,8 +251,8 @@ def test_fixed_plan_is_the_only_audited_field_shape() -> None:
         spec.slave_before_flow,
         spec.master_after_flow,
         spec.slave_after_flow,
-    ) == (31, 32, 35, 40)
-    assert spec.sine_frequency == 30
+    ) == (50, 45, 55, 60)
+    assert spec.sine_frequency == 40
     assert spec.safe_frequency == 20
     assert spec.post_boundary_stability_seconds == 300
     assert spec.observation_window_seconds == 915
@@ -232,6 +262,13 @@ def test_fixed_plan_is_the_only_audited_field_shape() -> None:
     assert spec.full_epoch_after_roles is True
     assert spec.outer_linkage_spec().duration_seconds == 1200
     assert spec.temporary_schedule_spec().observation_timeout_seconds == 1200
+    assert cli._attended_power_cap(spec) == 60  # noqa: SLF001
+    assert (
+        cli._attended_power_cap(  # noqa: SLF001
+            spec.model_copy(update={"slave_after_flow": 45})
+        )
+        == 45
+    )
 
 
 def test_sentinel_only_is_cli_parsed_and_confirmation_token_bound() -> None:
@@ -581,9 +618,9 @@ def test_boundary_uses_freshest_device_clock_and_refuses_large_skew_or_midnight(
     first = datetime(2026, 8, 27, 12, 10, 1)
     second = datetime(2026, 8, 27, 12, 10, 2)
 
-    assert cli._next_boundary((first, second)) == "12:15"  # noqa: SLF001
+    assert cli._next_boundary((first, second)) == "12:20"  # noqa: SLF001
     assert (  # noqa: SLF001
-        cli._next_boundary((first, second + timedelta(seconds=10))) == "12:15"
+        cli._next_boundary((first, second + timedelta(seconds=10))) == "12:20"
     )
     with pytest.raises(cli.ScheduleFlowCliError, match="preserved-raw allowance"):
         cli._next_boundary((first, second + timedelta(seconds=31)))  # noqa: SLF001
@@ -649,7 +686,7 @@ async def test_schedule_context_starts_both_device_reads_concurrently() -> None:
         },
         ("master", "slave"),
     )
-    assert cli._next_boundary(skewed) == "12:15"  # noqa: SLF001
+    assert cli._next_boundary(skewed) == "12:20"  # noqa: SLF001
 
 
 async def test_schedule_context_waits_for_the_sibling_read_before_raising() -> None:
@@ -695,9 +732,9 @@ async def test_schedule_context_waits_for_the_sibling_read_before_raising() -> N
     assert sibling_completed.is_set()
 
 
-def test_run_boundary_requires_the_full_four_to_five_minute_lead_window() -> None:
+def test_run_boundary_requires_the_fixed_nine_to_ten_minute_lead_window() -> None:
     cli._require_boundary_still_fresh(  # noqa: SLF001
-        "12:15",
+        "12:20",
         (
             datetime(2026, 8, 27, 12, 10),
             datetime(2026, 8, 27, 12, 10, 10),
@@ -705,11 +742,11 @@ def test_run_boundary_requires_the_full_four_to_five_minute_lead_window() -> Non
     )
     for outside in (
         datetime(2026, 8, 27, 12, 9, 59, 999000),
-        datetime(2026, 8, 27, 12, 11, 0, 1000),
+        datetime(2026, 8, 27, 12, 11, 30, 1000),
     ):
         with pytest.raises(cli.ScheduleFlowCliError, match="no longer"):
             cli._require_boundary_still_fresh(  # noqa: SLF001
-                "12:15",
+                "12:20",
                 (outside, outside),
             )
 
@@ -1195,20 +1232,58 @@ def test_terminal_stage_has_a_reserved_slot_and_coalesces_replay() -> None:
 
 
 @pytest.mark.parametrize(
-    ("slave_flow", "expected", "transition_verified"),
+    ("sample", "expected", "transition_verified"),
     (
-        (40, ScheduleFlowOutcome.PER_SLOT_POWER_VERIFIED, True),
-        (32, ScheduleFlowOutcome.SLAVE_FLOW_FIXED_AT_PREVIOUS, False),
-        (35, ScheduleFlowOutcome.SLAVE_FLOW_FOLLOWED_MASTER, False),
-        (37, ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE, False),
+        (_after_sample(), ScheduleFlowOutcome.PER_SLOT_POWER_VERIFIED, True),
+        (
+            _after_sample(
+                slave_mode="sine",
+                slave_frequency=35,
+                slave_before_mode="constant",
+                slave_before_frequency=0,
+            ),
+            ScheduleFlowOutcome.OWN_SCHEDULE,
+            False,
+        ),
+        (
+            _after_sample(slave_flow=55, slave_before_flow=50),
+            ScheduleFlowOutcome.FULL_MASTER_FOLLOW,
+            False,
+        ),
+        (
+            _after_sample(slave_flow=35, slave_before_flow=35),
+            ScheduleFlowOutcome.COMMON_MANUAL_FLOW,
+            False,
+        ),
+        (
+            _after_sample(slave_flow=45),
+            ScheduleFlowOutcome.A_SLOT_HOLD,
+            False,
+        ),
+        (
+            _after_sample(
+                slave_mode="sine",
+                slave_flow=55,
+                slave_frequency=35,
+                slave_before_mode="constant",
+                slave_before_flow=50,
+                slave_before_frequency=0,
+            ),
+            ScheduleFlowOutcome.REVERSE_SPLIT,
+            False,
+        ),
+        (
+            _after_sample(slave_flow=52),
+            ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE,
+            False,
+        ),
     ),
 )
 def test_v3_result_evidence_serializes_all_stable_classifications(
-    slave_flow: int,
+    sample: ScheduleLinkageSample,
     expected: ScheduleFlowOutcome,
     transition_verified: bool,
 ) -> None:
-    sample = _after_sample(slave_flow=slave_flow)
     intent = _intent(
         phase=HardwareTestIntentPhase.TERMINAL,
         outcome=expected.value,
@@ -1239,7 +1314,7 @@ def test_v3_result_evidence_rejects_classification_or_transition_mismatch() -> N
     with pytest.raises(ValidationError, match="outcome disagrees"):
         HardwareTestIntent.model_validate(
             intent.model_dump(mode="python")
-            | {"schedule_flow_outcome": ScheduleFlowOutcome.SLAVE_FLOW_FIXED_AT_PREVIOUS}
+            | {"schedule_flow_outcome": ScheduleFlowOutcome.OWN_SCHEDULE}
         )
 
 
@@ -1360,8 +1435,8 @@ def test_status_is_sanitized_but_prints_effective_sample(capsys) -> None:
         empty,
     ) == 0
     output = capsys.readouterr().out
-    assert "master=sine/35%" in output
-    assert "slave=sine/40%" in output
+    assert "master=constant/55%" in output
+    assert "slave=constant/60%" in output
     assert "Schedule transition verified: yes" in output
     assert "Stable slave tuple observed: yes" in output
     assert "Stable observation: 300s" in output
@@ -1889,12 +1964,15 @@ async def test_preflight_persists_full_v3_intent_without_writes(monkeypatch, cap
     assert saved is not None
     assert saved.version == 3
     assert saved.phase is HardwareTestIntentPhase.ARMED
-    assert saved.schedule_flow_spec.boundary_time == "12:15"
+    assert saved.schedule_flow_spec.boundary_time == "12:20"
     assert saved.schedule_flow_spec.allow_expired_qualification is True
     assert saved.schedule_flow_spec.role_observation_spec().allow_expired_qualification is True
     assert saved.schedule_image_digests == _digests()
     output = capsys.readouterr().out
     assert "no control or schedule frame was sent" in output
+    assert "pause Independent/Constant master 30% / slave 35%" in output
+    assert "master Sine 50% F40 -> Constant 55%" in output
+    assert "slave Constant 45% -> Sine 60% F35" in output
     assert _digests()[0].image_sha256 not in output
 
 
@@ -1932,14 +2010,55 @@ def _install_run_environment(monkeypatch, armed: HardwareTestIntent):
 
     async def capture_context(_devices, _device_ids):
         return armed.schedule_image_digests, (
-            datetime(2026, 8, 27, 12, 29, 59),
-            datetime(2026, 8, 27, 12, 30),
+            datetime(2026, 8, 27, 12, 24, 59),
+            datetime(2026, 8, 27, 12, 25),
         )
 
     monkeypatch.setattr(cli, "_build_devices", build)
     monkeypatch.setattr(cli, "_connected", _connected)
     monkeypatch.setattr(cli, "_capture_schedule_context", capture_context)
     return config, args
+
+
+@pytest.mark.asyncio
+async def test_run_closes_private_raw_sink_when_controller_construction_fails(
+    monkeypatch,
+) -> None:
+    armed = _intent()
+    intent_store = _MutableIntentStore(armed)
+    outer_store = _OuterStore()
+    schedule_store = _OuterStore()
+    role_store = _OuterStore()
+    config, args = _install_run_environment(monkeypatch, armed)
+    sink_events: list[str] = []
+
+    class Sink:
+        def __init__(self, _operation_id: str) -> None:
+            sink_events.append("opened")
+
+        def close_best_effort(self) -> None:
+            sink_events.append("closed")
+
+    class Controller:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("simulated controller construction failure")
+
+    monkeypatch.setattr(cli, "_PrivateRawCaptureSink", Sink)
+    monkeypatch.setattr(cli, "ScheduleFlowExperimentController", Controller)
+
+    with pytest.raises(RuntimeError, match="controller construction failure"):
+        await cli._run(  # noqa: SLF001
+            config,
+            args,
+            intent_store,
+            outer_store,
+            schedule_store,
+            role_store,
+            SimpleNamespace(),
+            _Guard(),
+        )
+
+    assert sink_events == ["opened", "closed"]
 
 
 @pytest.mark.asyncio
@@ -1991,8 +2110,8 @@ async def test_sentinel_only_terminal_is_durable_before_outer_clear(
 
     async def capture_context(_devices, _device_ids):
         return armed.schedule_image_digests, (
-            datetime(2026, 8, 27, 12, 29, 59),
-            datetime(2026, 8, 27, 12, 30),
+            datetime(2026, 8, 27, 12, 24, 59),
+            datetime(2026, 8, 27, 12, 25),
         )
 
     monkeypatch.setattr(cli, "_build_devices", build)
@@ -2114,8 +2233,8 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
 
     async def capture_context(_devices, _device_ids):
         return armed.schedule_image_digests, (
-            datetime(2026, 8, 27, 12, 29, 59),
-            datetime(2026, 8, 27, 12, 30),
+            datetime(2026, 8, 27, 12, 24, 59),
+            datetime(2026, 8, 27, 12, 25),
         )
 
     monkeypatch.setattr(cli, "_build_devices", build)
@@ -2174,7 +2293,12 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
                         occurred_at=now + timedelta(microseconds=index),
                     )
                 )
-            sample = _after_sample(slave_flow=32)
+            sample = _after_sample(
+                slave_mode="sine",
+                slave_frequency=35,
+                slave_before_mode="constant",
+                slave_before_frequency=0,
+            )
             self.last_role_sample = sample
             self.last_role_result = SimpleNamespace(schedule_transition_verified=True)
             self.observe(sample)
@@ -2182,7 +2306,7 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
             return ScheduleFlowExperimentResult(
                 operation_id=spec.operation_id,
                 sentinel_qualified=True,
-                outcome=ScheduleFlowOutcome.SLAVE_FLOW_FIXED_AT_PREVIOUS,
+                outcome=ScheduleFlowOutcome.OWN_SCHEDULE,
                 last_after_sample=sample,
                 schedule_transition_verified=False,
                 stable_slave_tuple_observed=True,
@@ -2204,11 +2328,11 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
     ) == 0
     terminal = intent_store.load()
     assert terminal.phase is HardwareTestIntentPhase.TERMINAL
-    assert terminal.schedule_flow_outcome is ScheduleFlowOutcome.SLAVE_FLOW_FIXED_AT_PREVIOUS
+    assert terminal.schedule_flow_outcome is ScheduleFlowOutcome.OWN_SCHEDULE
     assert terminal.schedule_transition_verified is False
     assert terminal.stable_slave_tuple_observed is True
     assert terminal.stable_observation_seconds == 300
-    assert terminal.schedule_flow_sample.slave.flow == 32
+    assert terminal.schedule_flow_sample.slave.flow == 60
     assert terminal.schedule_flow_stage_events[-1].stage is ScheduleFlowStage.OUTER_RESTORED
     retained_stages = {event.stage for event in terminal.schedule_flow_stage_events}
     assert {
@@ -2219,7 +2343,7 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
         ScheduleFlowStage.ROLE_DISARMED,
     } <= retained_stages
     output = capsys.readouterr().out
-    assert "slave_flow_fixed_at_previous" in output
+    assert "own_schedule" in output
     assert "Stable observation: 300s" in output
 
 
@@ -2453,8 +2577,8 @@ async def test_pause_failure_durably_records_outer_category_and_completed_restor
 
     async def capture_context(_devices, _device_ids):
         return armed.schedule_image_digests, (
-            datetime(2026, 8, 27, 12, 29, 59),
-            datetime(2026, 8, 27, 12, 30),
+            datetime(2026, 8, 27, 12, 24, 59),
+            datetime(2026, 8, 27, 12, 25),
         )
 
     monkeypatch.setattr(cli, "_build_devices", build)
