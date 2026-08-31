@@ -231,9 +231,20 @@ maintainer의 새로운 명시적 승인과 별도 해제 커밋이 필요합니
 
 문서·capability·config 정직성 수정은 별개로 보존·커밋합니다.
 
+### 2026-08-31 상태 정정
+
+위 수치와 "미커밋 변경" 서술은 capability branch가 아니라 **별도 main worktree에 격리된
+prototype**을 가리킵니다. 2026-08-31 재측정에서도 그 worktree의 `src/`·`tests/` diff는
+`+3412 / -260`이며 미커밋 상태입니다. capability 작업의 기준 commit `1e08cce`는 clean
+tree였습니다. 이 정정은 격리 prototype을 현재 구현으로 승격하거나 통째 병합을 승인하지
+않습니다.
+
+위에 기록된 검사 진동, `FRESH_CAPTURE_*` 우회, 30초 fresh-pair 복구 조건의 성공률 우려는
+이 정정으로 해소되지 않았습니다. 별도 증거가 생길 때까지 미해결 기술 경고로 유지합니다.
+
 ## 6. 작업 트랙 — 병렬
 
-두 트랙을 **병렬로** 진행합니다. 한쪽이 다른 쪽을 막지 않습니다.
+세 트랙을 **병렬로** 진행합니다. 한쪽이 다른 쪽을 막지 않습니다.
 
 **트랙 A — 증거 (Q2 판정) · 현재 `NO-GO / BLOCKED`**
 
@@ -257,6 +268,22 @@ maintainer의 새로운 명시적 승인과 별도 해제 커밋이 필요합니
 3. **software-independent actuator와 그룹 런타임** — `groups/manager.py`는 현재 스텁이고
    데몬에는 actuator가 없습니다. 이 작업은 Q2의 답이 PASS든 FAIL이든 필요하므로 트랙 A의
    결과를 기다리지 않습니다.
+
+**트랙 C — 수류모터 capability (2026-08-31 repository maintainer 승인 read-only 범위)**
+
+- preserved raw 오프라인 재분석과 기존 v2를 보존하는 가산적 3장비 read-only collector는
+  진행할 수 있습니다. 마지막 실기 기록이 `1e08cce`에 커밋되고 기준 tree가 clean이었으므로
+  §4의 코드 수정 순서 조건을 충족합니다. 이는 §1 동결 해제가 아닙니다.
+- 바형 수류모터는 승인된 384-byte exact restore가 없으므로 **관측 전용**입니다. 일반
+  actuator 트랙에서 generic restore가 준비되기 전에는 write하지 않습니다.
+- 0/100 endpoint나 범위 밖 값을 장비에 보내지 않습니다. schema 범위, 장비 read-back,
+  물리 효과는 서로 다른 claim으로 기록합니다.
+- 오프라인 재분석과 read-only 수집이 각각 새로 확정된 사실 0이면 §7의 2회 연속 정보 0
+  조건으로 멈추고 보고합니다.
+- 상세 판정·호환성 규칙은
+  [`docs/capabilities/README.md`](docs/capabilities/README.md)와
+  [`collector-v3-requirements.md`](docs/capabilities/collector-v3-requirements.md)가 단일
+  출처입니다.
 
 ## 7. `UNKNOWN`을 만났을 때 — park는 정상 종료입니다
 

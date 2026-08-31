@@ -240,6 +240,10 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | 앱이 만든 제3자 baseline을 복원할 승인된 exact restore 수단과 권한이 있는가 | **BLOCKING / 미확보** — 선행조건 2 |
 | native MASTER/SLAVE 역할 write와 Sync 복구가 검증됐는가 | PASS |
 | 최소 write-free read-only collector가 실기 검증됐는가 | PASS — 18/18 pair, 36/36 explicit reply, offline verify PASS |
+| 세 수류모터를 같은 증거 기준으로 read-only 수집할 수 있는가 | **NOT IMPLEMENTED** — 현재 collector와 predicate는 두 Pro 전용이며 가산적 v3가 필요 |
+| 바형 수류모터에 승인된 exact restore 수단이 있는가 | **NOT IMPLEMENTED / WRITE PROHIBITED** — 384-byte schedule snapshot·restore 부재 |
+| 출력·주파수의 장비 유효 endpoint와 step이 검증됐는가 | **UNKNOWN / ENDPOINT WRITE PROHIBITED** — schema 범위와 실제 안전 범위를 동일시하지 않음 |
+| 각 native mode 설정값의 물리 유량·파형 효과가 계측됐는가 | **UNKNOWN / OUT OF CURRENT MEASUREMENT SCOPE** |
 | (Q2) ASYNC에서 slave가 자기 B 슬롯의 출력을 독립 적용하는가 | **YES / PASS (2026-08-30, 이 Pro pair·고정 계획 범위)** — master 31→35와 별개로 slave 32→40, 900초 epoch와 exact restore 완료 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |

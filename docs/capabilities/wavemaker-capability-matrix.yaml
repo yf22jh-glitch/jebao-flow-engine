@@ -1,0 +1,86 @@
+schema_version: 1
+status: preregistered-skeleton
+absence_means: UNKNOWN
+physical_effect_scope: out_of_scope_until_measurement_method_exists
+
+analysis_provenance:
+  schema_generator_commit: null
+  schema_generator_source_digest_sha256: null
+  raw_analyzer_commit: null
+  raw_analyzer_source_digest_sha256: null
+  input_artifact_digests_sha256: []
+
+products:
+  - product_key: 50dbc92221fd4d33ae69a1fedd43b555
+    profile_name: local_wavemaker_pro
+    physical_model: unknown
+    observed_instances: 2
+  - product_key: 1d8c63eaccac4205b92c84d77d5a08fb
+    profile_name: local_wavemaker_ap_time_sync
+    physical_model: unknown
+    observed_instances: 1
+
+claim_schema:
+  required:
+    - claim_id
+    - product_key
+    - layer
+    - goal_tier
+    - subject
+    - value
+    - evidence_tier
+    - source
+    - status
+  optional:
+    - example_only
+    - withdrawn
+    - use_for_current_capability
+  additional_fields_allowed: false
+  enums:
+    layer: [L0, L1, L2, L3]
+    goal_tier: [wire, accepted, physical]
+    evidence_tier: [a, b, c, d]
+    status: [PASS, FAIL, UNKNOWN]
+  invariants:
+    - evidence_tier_d_requires_goal_tier_wire
+    - goal_tier_physical_requires_status_unknown
+    - withdrawn_true_requires_status_unknown
+
+# Generated schema claims and independently added observation claims will be stored here.
+# An empty list is complete by definition: every absent claim is UNKNOWN.
+claims: []
+
+worked_examples:
+  - example_only: true
+    claim_id: example-pro-flow-schema-range
+    product_key: 50dbc92221fd4d33ae69a1fedd43b555
+    layer: L1
+    goal_tier: wire
+    subject: Flow.schema_range
+    value: [0, 100]
+    evidence_tier: d
+    source: schema:jebao_flow.protocol.profiles@1e08cce09cfb03a25dff283b7659b0de122bbf7b
+    status: PASS
+
+  - example_only: true
+    claim_id: example-pro-raw-status-size
+    product_key: 50dbc92221fd4d33ae69a1fedd43b555
+    layer: L0
+    goal_tier: wire
+    subject: raw_status_size_bytes
+    value: 452
+    evidence_tier: a
+    source: artifact:JFS-a2f44ded609b34adab1425c1dcc40c0e#all-records
+    status: PASS
+
+  - example_only: true
+    claim_id: example-withdrawn-pro-async-slave-flow-persistence
+    product_key: 50dbc92221fd4d33ae69a1fedd43b555
+    layer: L1
+    goal_tier: accepted
+    subject: async_slave.independent_flow_persistence
+    value: false
+    evidence_tier: c
+    source: run:docs/runs/2026-08-26--2026-08-28-native-linkage-history.md#철회된-해석
+    status: UNKNOWN
+    withdrawn: true

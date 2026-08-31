@@ -37,7 +37,14 @@ power:
 capabilities:
   observed_readable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime]
   schema_declared_writable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime]
-  write_validated: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency]
+  write_validated: []
+  write_validated_migration_status: pending_tiered_claim_migration
+  legacy_write_validated_claim:
+    values: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency]
+    evidence_tier: c
+    status: UNKNOWN
+    use_for_current_capability: false
+    source: docs/runs/2026-08-26--2026-08-28-native-linkage-history.md#등급-c-reconstructed-operator-observation
   native_mode_values: [pulse, sine, constant, random, tidal, nutrient_transport, circulation, feed, custom]
   linkage_values: [independent, master, sync_slave, async_slave]
   faults_present: [overcurrent, overvoltage, overtemperature, undervoltage, locked_rotor, no_live_load, UART]
@@ -46,10 +53,12 @@ evidence:
   captured_at: 2026-08-27
   capture_environment: isolated IoT VLAN through home server and router
   notes:
+    - The legacy write_validated list is preserved above as an unmigrated tier-(c) reconstructed claim and is not current capability evidence.
+    - An empty write_validated list means tiered migration is pending, not that no successful writes have ever occurred.
     - Two devices returned complete 452-byte status payloads.
     - Both live reads decoded as powered on and independent linkage.
     - Bounded low-power register writes and exact restoration were read back on both devices.
-    - An async-slave-only Flow change did not persist; physical water flow was not validated.
+    - Delivery and full-state read-back of an async-slave-only Flow change were not proven; independent Flow remains unqualified. Physical water flow was not validated.
     - An up-to-150-second TimerON Async run stopped safely shortly after the planned slave Flow change.
     - The run issued zero of two qualification receipts and did not authorize schedule-linkage.
     - Automatic exact restore remained incomplete; a fresh attended recovery restored both snapshots.
