@@ -134,12 +134,22 @@ schedule 범위(role A `30..60`, role B `50..80`) 안이며 새 물리 출력 �
 - `src/jebao_flow/devices/schedule_flow_experiment.py`
 - `src/jebao_flow/devices/schedule_linkage.py`의 raw/NowTime 진단 추가와 위에 지정한
   same-mode 전제 축소만
+- `src/jebao_flow/devices/lan.py`의 가산적 read-only 변경만
+  - typing 전용 `RawSession` protocol에 기존 `read_raw_state_capture()` 계약 선언
+  - 기존 `_io_lock`과 단일 read를 유지하면서 decoded state와 그 read의 `RawStateCapture`를 함께
+    반환하는 공개 메서드 1개 추가
 - 장비별 patch 전달에 실제 변경이 필요한 경우의 `schedule_transaction.py`
 - qualification 만료 방침에 필요한 최소 `schedule_flow_experiment_cli.py` 변경
 - 위 변경에 직접 대응하는 기존 단위 테스트
 
 `devices/linkage.py`, `schedule_linkage_cli.py`, 일반 데몬과 MQTT 경로는 이번 해제에서 계속
-닫아 둡니다. 허용 실행은 §3 고정 계획의 native ASYNC 실기 1회뿐입니다. `sync_slave`나
+닫아 둡니다. `devices/lan.py`의 기존 `read_raw_state` 경로와 모든 write 경로도 바꾸지 않습니다.
+capture는 `protocol/session.py`가 같은 read에서 이미 생성한 값만 전달해야 하며 추가 round-trip,
+두 번째 세션, private `_session` 접근, 원본 frame 재구성을 금지합니다. 원본 wire frame은 공개
+sample이나 로그가 아니라 별도 private raw sink에만 전달하고, 공개 sample에는 reply action,
+frame SHA-256, `NowTime`, 길이만 남깁니다. 이 경로를 제공할 수 없으면 첫 write 전에 `NO-GO`입니다.
+
+허용 실행은 §3 고정 계획의 native ASYNC 실기 1회뿐입니다. `sync_slave`나
 `independent` 대조, 동일 실기 반복은 별도 승인 전에는 실행하지 않습니다.
 
 CLI에서 임의 값을 받는 범용 실험기로 넓히지 않습니다. 이번 승인 plan을 코드 상수 또는

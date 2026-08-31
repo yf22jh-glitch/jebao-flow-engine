@@ -184,14 +184,25 @@ repository maintainer가 기존 운전 스케줄을 exact snapshot한 뒤 정지
 - `src/jebao_flow/devices/schedule_flow_experiment.py`
 - raw/`NowTime` 진단 추가와 위 8항의 지정 전제 축소에 한한
   `src/jebao_flow/devices/schedule_linkage.py`
+- `src/jebao_flow/devices/lan.py`는 가산적 read-only 변경 두 가지에 한함
+  - typing 전용 `RawSession` protocol에 기존 `read_raw_state_capture()` 계약 선언
+  - 기존 `_io_lock`과 장비 read 1회를 그대로 유지하면서 decoded state와 같은 read의
+    `RawStateCapture`를 함께 반환하는 공개 메서드 1개 추가
 - 장비별 patch 전달에 실제 변경이 필요한 경우의
   `src/jebao_flow/devices/schedule_transaction.py`
 - qualification 만료 방침에 필요한 최소 변경에 한한
   `src/jebao_flow/schedule_flow_experiment_cli.py`
 - 위 변경에 직접 대응하는 기존 단위 테스트
 
-`devices/linkage.py`, `schedule_linkage_cli.py`, 일반 데몬, MQTT 경로는 계속 동결합니다. CLI에
-임의 Mode·Flow 값을 노출하는 범용 실험기, 새 장비-read pre-write gate, 새 실패 계층,
+`devices/linkage.py`, `schedule_linkage_cli.py`, 일반 데몬, MQTT 경로는 계속 동결합니다.
+`devices/lan.py`의 기존 `read_raw_state` 경로와 모든 write 경로도 변경하지 않습니다. capture는
+`protocol/session.py`가 같은 read에서 이미 생성한 뒤 버리던 값만 전달해야 하며, 추가 round-trip,
+두 번째 세션, private `_session` 접근, 원본 frame 재구성은 금지합니다. 원본 wire frame은
+`ScheduleLinkageSample`이나 공개 로그에 넣지 않고 별도 private raw sink로만 전달합니다. sample에는
+reply action, frame SHA-256, `NowTime`, 길이만 남깁니다. 이 capture 경로를 제공할 수 없으면 첫 write
+전에 `NO-GO`로 종료합니다.
+
+CLI에 임의 Mode·Flow 값을 노출하는 범용 실험기, 새 장비-read pre-write gate, 새 실패 계층,
 Sync·Independent 대조, 같은 ASYNC 실기 반복은 승인하지 않습니다. 첫 write 뒤 900초 epoch에
 진입한 operation은 한 번만 허용하며, 첫 write 전 `NO-GO`가 정보 0으로 2회 연속되면 §7에 따라
 정지·보고합니다.
@@ -216,7 +227,8 @@ Sync·Independent 대조, 같은 ASYNC 실기 반복은 승인하지 않습니�
 `ScheduleFlowExperimentController._stage_devices()`가 `SwitchON`을 포함한 여섯 제어 필드를
 하나의 `DeviceTarget`으로 구성해 장비마다 `write_target()`을 정확히 한 번 호출하고,
 `LanJebaoDevice._target_changes()`와 `_apply_changes()`가 그 mapping을 하나의 control payload로
-인코딩합니다. 따라서 `devices/linkage.py`나 `devices/lan.py` 수정은 필요하지 않습니다.
+인코딩합니다. 따라서 `devices/linkage.py` 수정이나 `devices/lan.py`의 write-path 수정은 필요하지
+않습니다.
 `TimerOFF`를 먼저 보내거나 두 개 이상의 control frame으로 나누는 구현은 승인하지 않습니다.
 이 합성 target을 단일 payload로 preview할 수 없으면 첫 write 전에 `NO-GO`로 종료합니다.
 
