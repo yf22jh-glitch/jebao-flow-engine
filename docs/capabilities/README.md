@@ -33,6 +33,47 @@ actuator 트랙에 포함합니다.
 오프라인 재분석과 3장비 read-only 수집이 각각 새로 확정된 사실을 만들지 못하면 두 번 연속
 정보 0으로 보고 `AGENTS.md` §7에 따라 코드 수정 없이 중단·보고합니다.
 
+## 현재 read-only 조사의 질문과 완료선
+
+이 트랙은 "지원한다"를 한 가지 뜻으로 합치지 않습니다. read-only raw가 답할 수 있는 것은
+현재 저장돼 있거나 활성화된 **관측값 집합**까지이며, 관측된 최솟값과 최댓값을 장비의 허용
+범위로 승격하지 않습니다.
+
+| 질문 | 현재 read-only로 가능한 판정 |
+|---|---|
+| profile이 선언한 L1/L2 mode·필드·범위 | `(d)` `wire` claim으로 기록 가능. 장비 수용 증거는 아님 |
+| raw frame의 크기·layout과 현재 L1 manual 값 | 해당 sample의 `(a)` 관측값으로 기록 가능 |
+| 현재 schedule에 실제 들어 있는 L2 mode·설정값 | 감사된 모델별 slot validator가 있을 때만 `(a)` 관측값으로 기록 가능 |
+| 장비가 수용하는 **전체** mode 열거 | 현재 값과 기존 schedule에 나타나지 않은 mode는 `UNKNOWN` |
+| 장비가 수용하는 최소·최대·step | endpoint·전이 write 없이는 `UNKNOWN`; 관측 min/max로 대체 금지 |
+| mode별 물리 유량·파형·위상 | 계측 수단이 없으므로 `UNKNOWN` |
+
+Local Wavemaker Pro는 감사된 `schedule_wire` 검증기가 있으므로 보존 raw의 유효 슬롯에서
+관측된 mode·설정값을 claim으로 만들 수 있습니다. 바형 Local Wavemaker는 현재 최상위 L0와
+L1/L2 필드의 관측값까지만 공개 claim으로 만들며, slot의 `flow`·`frequency`를 검증하는 감사된
+validator가 없으므로 `schedule.*` accepted claim은 발행하지 않습니다. private raw는 그대로
+보존하고 그 빈 칸은 `UNKNOWN`으로 남깁니다. schema 선언을 그대로 validator로 옮겨 스스로
+검증하는 구현은 만들지 않습니다.
+
+따라서 다음 3장비 collector의 완료 조건은 전체 mode·범위 확정이 아니라, 두 Pro와 바형의
+write-free explicit raw를 같은 provenance·durability 기준으로 보존하고 위 표의 답할 수 있는
+칸만 채우는 것입니다. 전체 mode 수용과 유효 endpoint·step은 별도 승인된 app/code write,
+복원 수단, 물리 계측 계획이 생길 때까지 후속 질문으로 남깁니다.
+
+## `AutoFeedTime=0` 관측의 처리
+
+[`observation-claim-set.JFS-a2f44ded609b34adab1425c1dcc40c0e.generated.yaml`](observation-claim-set.JFS-a2f44ded609b34adab1425c1dcc40c0e.generated.yaml)은
+두 Pro의 36개 sample 모두에서 최상위 `AutoFeedTime=0`을 보존했습니다. 현재 profile 선언은
+`1..60`이므로 이 필드만 `UNKNOWN`이며, 값 자체는 버리지 않았습니다. 같은 raw의 slot 수준
+`feed_time=0,15`는 별도의 mode-aware 규칙 아래 `PASS`입니다. 장비가 최상위 값 `0`을 돌려준
+이유는 아직 `UNKNOWN`입니다.
+
+profile numeric range는 문서만이 아니라 control payload encoder의 write admission에도
+사용됩니다. 따라서 이 관측만으로 profile 최소값을 `0`으로 낮추면 기존 write 범위를 넓히고,
+동일 raw의 판정을 소급해 `UNKNOWN`에서 `PASS`로 바꾸게 됩니다. capability read-only 트랙에서는
+`profiles.py`나 write validator를 수정하지 않습니다. 변경이 필요하면 별도 safety 검토와
+repository maintainer 승인을 먼저 받습니다.
+
 ## 서로 다른 다섯 층
 
 | 층 | 의미 | capability 판정 대상 |
@@ -69,6 +110,36 @@ read-back은 `accepted` 증거일 수 있지만 `physical` 증거가 아닙니�
 
 등급은 자동 승격되지 않습니다. 특히 `(d)` 범위가 곧 장비 수용 범위라는 뜻이 아니고,
 `(a)` read-back도 물리 효과를 증명하지 않습니다.
+
+## Vendor 앱 정적 근거
+
+설치된 Jebao 앱의 제품 정의와 UI 템플릿은 저장소의 Python schema와 출처가 다른 상류 자료입니다.
+따라서 앱 조사 결과를 기존 `(d) schema-declared` claim으로 가장하거나 장비가 값을 수용했다는
+근거로 사용하지 않습니다. 사람이 읽는 조사 문서에서는 다음 **출처 축**을 evidence tier와
+별도로 표기합니다.
+
+- `V` — 앱이 내려받은 vendor 제품 정의가 선언한 datapoint, layout, code space 또는 범위
+- `U` — 앱 UI 템플릿의 정적 render·save dataflow에서 확인한 노출·제약·직렬화 동작
+- `L` — `docs/runs/` 또는 보존 artifact가 뒷받침하는 실제 장비 관측
+- `?` — 위 자료로 닫히지 않은 항목
+
+`V`와 `U`는 출처 분류이지 새 evidence tier가 아닙니다. 현재 claim validator는 `a`~`d`만
+허용하므로 vendor-app 결과를 generated claim-set에 넣지 않습니다. 향후 기계 claim으로
+채택하려면 다음 source 문법과 별도 소유권·validator 규칙을 먼저 코드와 문서에 함께 추가해야
+합니다.
+
+```text
+vendor-app:<app-version>:product-definition:<safe-product-family>#<subject>
+vendor-ui:<app-version>:template:<safe-product-family>:newest-cached#<subject>
+```
+
+source에는 로컬 절대경로, device id, MAC, token, passcode 또는 공개 저장소에 없던 product key를
+넣지 않습니다. 원본 vendor JSON·JavaScript는 저장소에 복사하지 않고 상호운용에 필요한 파생
+인터페이스 사실만 기록합니다. `newest-cached`는 조사 당시 로컬 캐시에서 숫자상 가장 최신인
+템플릿이라는 뜻이며 서버의 전역 최신 버전이나 실제 활성 선택을 증명하지 않습니다.
+
+2026-08-31에 등록된 6대를 다섯 제품군으로 대조한 결과와 영문 UI 명칭은
+[`registered-device-app-analysis.md`](registered-device-app-analysis.md)에 있습니다.
 
 ## claim 형식과 판정
 
@@ -113,6 +184,14 @@ capability 판정은 다음 세 소유권 영역의 합집합입니다.
 - `observation-claim-set.<safe-series-id>.generated.yaml`: 검증된 preserved raw series 하나에서
   analyzer가 만든 불변 `(a)` observation claim-set의 소유자입니다. series마다 새 파일을 만들며
   기존 파일을 덮어쓰지 않습니다.
+
+한 series는 집계에 기여하는 canonical observation claim-set을 **정확히 하나만** 가집니다.
+파일명은 series id만으로 고정하고, analyzer commit이 바뀌어도 같은 series의 두 번째 aggregate
+claim-set을 만들거나 기존 파일을 덮어쓰지 않습니다. 향후 같은 raw를 새 규칙으로 다시 해석할
+필요가 생기면 그 결과는 우선 aggregate 밖의 진단으로만 남깁니다. canonical 판정을 교체하려면
+이전 판정을 보존하는 별도 adoption·supersession 형식과 validator 규칙을 먼저 설계·검토해야
+합니다. analyzer commit 축약만 파일명에 덧붙여 두 판정을 함께 집계하는 방식은 사용하지
+않습니다.
 
 최종 판정은 matrix의 `claims`와 schema claim-set, 존재하는 모든 observation claim-set을
 validator로 읽고 집계한 결과입니다. matrix의 빈 `claims`만 보고 schema claim이 없다고 해석하면

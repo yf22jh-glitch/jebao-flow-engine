@@ -15,8 +15,8 @@ Capability 문서, 홈서버의 private 설정, 읽기 전용 discovery/probe �
 
 | 논리 역할 | 제품군 | 수량 | 현재 범위 | 쓰기 검증 |
 |---|---|---:|---|---|
-| 메인 수류 A/B | Local Wavemaker Pro | 2 | native Sync/Async 시험 대상 | 저출력 control·Sync·exact restore 확인, Async 슬롯별 출력 미확인 |
-| 바형 보조 수류 | Local Wavemaker with AP time-sync | 1 | software group의 보조 위상 | 읽기만 확인 |
+| 메인 수류 A/B | Local Wavemaker Pro | 2 | native Sync/Async와 software group | Q2 Async 슬롯별 독립 출력 YES/PASS, exact restore 완료 |
+| 바형 보조 수류 | Local Wavemaker with AP time-sync | 1 | software group의 보조 위상 | vendor/app상 native Async 없음, 장비 읽기만 확인 |
 | 리턴 펌프 | DC Pump Pro | 1 | 개별 UI 후보 | 읽기만 확인 |
 | 리턴 펌프 | Aquarium Pump | 1 | 개별 UI 후보 | 읽기만 확인 |
 | 도징 펌프 | Dosing Pump | 1 | 개별 UI, 초기 actuator 제외 | 읽기만 확인 |
@@ -24,6 +24,11 @@ Capability 문서, 홈서버의 private 설정, 읽기 전용 discovery/probe �
 메인 수류 A/B만 같은 Pro product key와 `master`, `sync_slave`, `async_slave` 역할을
 지원합니다. 바형은 `independent`, `master`, `slave`만 지원하므로 Pro native pair에 넣지 않고,
 상위 software group에서 gain과 phase를 적용하는 보조 펌프로 취급합니다.
+
+설치된 앱의 vendor 제품 정의와 영문 UI 템플릿을 read-only로 대조한 전체 6대 결과는
+[`registered-device-app-analysis.md`](capabilities/registered-device-app-analysis.md)에 있습니다.
+앱 정적 선언은 장비 수용이나 물리 효과의 증거가 아니며, 해당 문서의 `V`·`U`·`L`·`?` 구분을
+유지합니다.
 
 ## 통신 규격 기준선
 
@@ -243,6 +248,8 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | 세 수류모터를 같은 증거 기준으로 read-only 수집할 수 있는가 | **NOT IMPLEMENTED** — 현재 collector와 predicate는 두 Pro 전용이며 가산적 v3가 필요 |
 | 바형 수류모터에 승인된 exact restore 수단이 있는가 | **NOT IMPLEMENTED / WRITE PROHIBITED** — 384-byte schedule snapshot·restore 부재 |
 | 출력·주파수의 장비 유효 endpoint와 step이 검증됐는가 | **UNKNOWN / ENDPOINT WRITE PROHIBITED** — schema 범위와 실제 안전 범위를 동일시하지 않음 |
+| read-only 관측만으로 전체 native mode와 accepted 범위를 확정할 수 있는가 | **NO / OUT OF READ-ONLY SCOPE** — 현재 값·기존 slot 관측과 전체 열거·허용 범위를 구분 |
+| Pro `AutoFeedTime=0`과 profile `1..60` 선언이 정합한가 | **UNKNOWN** — 36/36 raw에서 0, write admission 범위는 별도 승인 없이 완화 금지 |
 | 각 native mode 설정값의 물리 유량·파형 효과가 계측됐는가 | **UNKNOWN / OUT OF CURRENT MEASUREMENT SCOPE** |
 | (Q2) ASYNC에서 slave가 자기 B 슬롯의 출력을 독립 적용하는가 | **YES / PASS (2026-08-30, 이 Pro pair·고정 계획 범위)** — master 31→35와 별개로 slave 32→40, 900초 epoch와 exact restore 완료 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |

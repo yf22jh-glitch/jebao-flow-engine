@@ -3,6 +3,24 @@
 이 문서는 세 수류모터 capability 조사에 필요한 read-only collector 확장의 호환성과 증거
 요건을 고정합니다. 구현 전 요구사항이며 native ASYNC write 하네스 동결을 해제하지 않습니다.
 
+## 0. 이번 확장의 판정 범위
+
+v3의 첫 목표는 두 Pro와 바형 한 대의 write-free raw를 같은 기준으로 보존하는 것입니다.
+**전체 지원 mode 목록이나 장비 허용 범위를 확정하는 실험이 아닙니다.**
+
+- L0 frame·layout과 최상위 L1/L2 필드는 모델별 predicate를 통과한 현재 관측값만 claim으로
+  발행
+- Pro schedule slot은 기존 감사된 mode-aware validator를 통과한 값만 발행
+- 바형 schedule slot은 `flow`·`frequency`를 감사하는 validator가 없으므로 accepted claim
+  발행 0건. raw와 decode 결과는 private artifact에 보존하고 공개 판정은 `UNKNOWN`
+- sample에서 관측된 mode 집합은 전체 지원 mode 열거가 아니며, 관측 min/max는 accepted range가
+  아님
+- endpoint·step과 물리 유량·파형·위상은 이번 collector의 판정 대상이 아님
+
+pilot은 3장비 transport·timing과 artifact 완전성을 확인하고, 후속 evidence series가 위 범위의
+claim을 만듭니다. 바형 slot validator나 mode 전이 write를 이 단계의 누락 기능으로 추가하지
+않습니다.
+
 ## 1. v2 artifact 호환성
 
 v3는 기존 v2를 수정·대체하지 않고 병존하는 가산적 형식이어야 합니다.
@@ -26,6 +44,10 @@ v3는 기존 v2를 수정·대체하지 않고 병존하는 가산적 형식이�
 - expected physical identity binding을 fresh session과 각 sample에서 검증
 - 장비 write API, control encoder, frozen native ASYNC 모듈을 import·호출·노출하지 않음
 - static import-graph 검사와 transport 테스트로 control frame 0회를 증명
+- 기존 `read_only_collector.py`, `capability_raw_analyzer.py`, `capability_matrix.py`,
+  `profiles.py`, `schema.py`, `schedule.py`, `models.py`, `codec.py`, `schedule_wire.py`의 아홉
+  analyzer pin source는 수정하지 않음. v3 collector·CLI·verifier·analyzer는 신규 모듈로만
+  추가해 v2와 기존 observation provenance를 보존
 
 ## 3. 수집 프레임
 
@@ -67,9 +89,19 @@ Pro v2 predicate는 그대로 둡니다. 바형 predicate는 최소한 다음을
 `decode_status()`가 numeric schema range를 강제하지 않는다는 사실을 전제로 합니다. 값이 decode된
 것만으로 sample을 capability PASS로 올리지 않습니다.
 
+바형의 최상위 field predicate는 raw 길이, field 존재, enum code space, numeric schema 범위를
+각각 기록하되, numeric 범위 밖 read-back을 sample 전체에서 삭제하지 않습니다. 해당 값은
+그대로 보존하고 그 claim만 `UNKNOWN`으로 낮춥니다. `schedule.py`의 decode 성공이나 schema
+선언만으로 바형 slot의 `flow`·`frequency`를 `PASS`로 올리지 않습니다.
+
 ## 6. provenance와 공개 기록
 
 - collector source digest와 정확한 commit SHA를 manifest에 기록
 - private artifact는 opaque id, UTC span, identity binding SHA-256, artifact digest만 공개
 - `mcu_attributes_hex`·`extra_hex`는 두 Pro 값이 byte-identical인지 private 비교하기 전 공개 금지
 - capability generator와 raw analyzer는 collector와 별도 모듈로 유지
+- series 하나가 aggregate에 기여하는 canonical observation claim-set은 하나뿐이며 파일명은
+  `observation-claim-set.<safe-series-id>.generated.yaml`로 유지
+- analyzer source가 바뀐 뒤 같은 series를 다시 분석해 기존 파일을 덮어쓰거나, commit suffix만
+  다른 두 번째 claim-set을 aggregate에 추가하지 않음. 재해석은 별도 adoption·supersession
+  형식과 validator가 승인되기 전까지 aggregate 밖 진단으로만 취급
