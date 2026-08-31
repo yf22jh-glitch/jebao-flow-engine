@@ -108,8 +108,11 @@ master safe manual Flow `30`까지 포함한 `30, 35, 45, 50, 55, 60`은 모두 
 - `_assert_staged_auto_transition_preconditions()`에서는 장비별 `Constant -> Sine` 고정과
   `snapshot.mode == before.mode` 요구만 §3의 장비별 A/B mode 쌍으로 교체
 - 2-entry 비순환 schedule, `after_valid_until` 단일 창, 경계 후 안정 예산과 role-side
-  frequency allowlist는 유지하며, master A=`Sine/40`과 두 Constant wire frequency=`0`을
-  근거로 allowlist를 다시 고정
+  frequency allowlist는 유지하며, master A=`Sine/40`, slave B=`Sine/35`, 두 Constant wire
+  frequency=`0`을 근거로 allowlist를 다시 고정
+- `schedule_linkage.py`의 staged-flow 상한은 §3 고정 계획의 exact signature가 일치할 때만
+  `45`에서 `60`으로 선택합니다. 한 값이라도 다르면 기존 `45`를 유지하며 범용 상한이나 장비
+  limits는 변경하지 않습니다.
 - `owned_staged_auto_transition_observation`은 계속 `True`여야 합니다. 이를 `False`로 내려 위
   전제 블록 전체를 우회하는 구현은 승인하지 않습니다.
 

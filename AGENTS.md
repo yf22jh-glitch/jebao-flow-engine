@@ -173,8 +173,10 @@ repository maintainer가 기존 운전 스케줄을 exact snapshot한 뒤 정지
    - `_assert_staged_auto_transition_preconditions()`에서는 장비별 `Constant -> Sine` 고정과
      `snapshot.mode == before.mode` 요구만 이번 장비별 mode 쌍으로 교체하고, 2-entry 비순환,
      `after_valid_until` 단일 창, 경계 후 안정 예산과 frequency allowlist는 유지
-   - master A=`Sine/40`과 두 Constant wire frequency=`0`을 근거로 frequency allowlist를
-     이번 고정 계획에 맞게 다시 기술
+   - master A=`Sine/40`, slave B=`Sine/35`, 두 Constant wire frequency=`0`을 근거로
+     frequency allowlist를 이번 고정 계획에 맞게 다시 기술
+   - 이 고정 계획의 exact signature가 일치할 때만 내부 staged-flow 상한을 `45`에서 `60`으로
+     선택. 한 값이라도 다르면 기존 `45`를 유지하며, 범용 상한이나 장비 limits는 변경 금지
    - `owned_staged_auto_transition_observation=False`로 전제 블록 전체를 끄는 우회는 불승인
 
 수정 허용 파일은 다음으로 한정합니다.
