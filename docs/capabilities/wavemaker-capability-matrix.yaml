@@ -46,8 +46,10 @@ claim_schema:
     - goal_tier_physical_requires_status_unknown
     - withdrawn_true_requires_status_unknown
 
-# Generated schema claims and independently added observation claims will be stored here.
-# An empty list is complete by definition: every absent claim is UNKNOWN.
+# This list is reserved for human-preregistered claims. Generators never rewrite this file.
+# Schema claims live in schema-claim-set.generated.yaml; observation claims live in immutable
+# observation-claim-set.<safe-series-id>.generated.yaml files.
+# Absence means UNKNOWN only after aggregating this list with every generated claim-set file.
 claims: []
 
 worked_examples:

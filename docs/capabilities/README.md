@@ -102,12 +102,34 @@ read-back은 `accepted` 증거일 수 있지만 `physical` 증거가 아닙니�
 - `goal_tier: physical`이면 `status: UNKNOWN`
 - `withdrawn: true`이면 `status: UNKNOWN`이며 현재 capability 필터에서 제외
 
-`schema-declared` 행은 이후 generator가 `profiles.py`에서 만듭니다. 사람이 수백 행을 복사하지
-않습니다. generator는 같은 commit·입력에서 byte-identical 출력을 내야 하고 `(d)` 행만 생성할
-수 있습니다. 관측 `(a)`·`(b)`·`(c)` 행은 별도 분석 경로만 추가합니다.
+## 파일 소유권과 집계
+
+capability 판정은 다음 세 소유권 영역의 합집합입니다.
+
+- [`wavemaker-capability-matrix.yaml`](wavemaker-capability-matrix.yaml): 사람이 사전 등록한
+  claim과 예시의 소유자입니다. generator와 analyzer는 이 파일을 수정하지 않습니다.
+- [`schema-claim-set.generated.yaml`](schema-claim-set.generated.yaml): 고정된 source commit의
+  `profiles.py`와 `schedule.py`에서 generator가 만든 `(d)` schema claim의 소유자입니다.
+- `observation-claim-set.<safe-series-id>.generated.yaml`: 검증된 preserved raw series 하나에서
+  analyzer가 만든 불변 `(a)` observation claim-set의 소유자입니다. series마다 새 파일을 만들며
+  기존 파일을 덮어쓰지 않습니다.
+
+최종 판정은 matrix의 `claims`와 schema claim-set, 존재하는 모든 observation claim-set을
+validator로 읽고 집계한 결과입니다. matrix의 빈 `claims`만 보고 schema claim이 없다고 해석하면
+안 됩니다. 특정 claim의 부재가 `UNKNOWN`이라는 규칙도 이 전체 집계가 완전할 때만 적용합니다.
+matrix 자체는 기계 생성 claim을 기여하지 않으므로 `analysis_provenance`를 모두 `null` 또는 빈
+목록으로 유지하고, 각 생성 파일이 자신의 source commit·source digest·artifact digest를
+소유합니다.
+
+현재 `schema-declared` 행은 generator가
+[`schema-claim-set.generated.yaml`](schema-claim-set.generated.yaml)에 생성합니다. 사람이 수백
+행을 복사하지 않습니다. generator는 같은 commit·입력에서 byte-identical 출력을 내야 하고
+`(d)` 행만 생성할 수 있습니다. 관측 `(a)` 행은 별도 analyzer만 추가하며, `(b)`·`(c)`를
+이관할 경우에도 별도 소유권과 validator 규칙을 먼저 정의해야 합니다.
 
 `source`는 파생 출처를 드러내야 합니다. 관측 claim을 생성한 analyzer의 commit SHA와 source
-digest, 입력 artifact digest도 matrix의 `analysis_provenance`에 기록해야 합니다. 예:
+digest, 입력 artifact digest는 해당 observation claim-set의 `analysis_provenance`에 기록해야
+합니다. 예:
 
 ```text
 schema:jebao_flow.protocol.profiles@<commit-sha>
