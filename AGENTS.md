@@ -270,6 +270,68 @@ exact digest가 모두 일치했습니다. 추가 attended recovery는 없습니
 명시적 승인과 별도 해제 커밋이 필요합니다. 승인 전에는 Q2-target을 `UNKNOWN`으로 두고,
 software-independent actuator와 그룹 런타임을 기본 제품 경로로 진행합니다.
 
+### 2026-09-01 Q2-target topology 교정 단회 해제
+
+repository maintainer와 on-site hardware approver가 위 소진 기록과 원인 분석을 확인한 뒤,
+기존 반대 Mode 고정 계획을 **정확히 한 번 교정·재실행**하도록 새로 승인했습니다. 이 해제는
+[`2026-09-01 Q2-target 판별 시도`](docs/runs/2026-09-01-q2-target-9c982c60.md)가 실장비에서
+outer safe pause와 sentinel write·read-back·exact restore를 완료했지만, 본 field write 전에
+`TemporaryScheduleController._expected_images()`의 cross-device 동일-topology 전제에 막힌
+코드 내부 충돌만 바로잡기 위한 것입니다. 네트워크·펌웨어 가설을 새 게이트로 옮기지 않습니다.
+
+허용하는 source와 test 변경은 다음 두 파일로 한정합니다.
+
+- `src/jebao_flow/devices/schedule_transaction.py`
+- 위 변경을 직접 검증하는 `tests/unit/test_schedule_transaction.py`
+
+일반적인 topology 완화는 승인하지 않습니다. 기존 field-image 검증은 아래 exact fixed signature가
+모두 일치할 때만 서로 반대인 Mode topology를 허용합니다.
+
+- master: A=`Sine / Flow 50 / Frequency 40`, B=`Constant / Flow 55 / wire Frequency 0`
+- slave: A=`Constant / Flow 45 / wire Frequency 0`, B=`Sine / Flow 60 / Frequency 35`
+- 두 장비는 각각 정확히 2개의 연속·비순환 entry를 가지며 start/end와 하나의 A→B 경계 시각은
+  서로 일치
+
+서명 인식은 기존 `device_patches`와 patch가 적용된 image의 Mode·Flow·Frequency·경계 값에서만
+파생합니다. `TemporaryScheduleSpec`에 새 persisted field를 추가하거나 기존 confirmation·recovery
+token payload를 바꾸지 않습니다.
+
+Mode·Flow·Frequency·순서·경계 중 하나라도 이 서명과 다르면 기존 동일-topology 요구를 그대로
+적용합니다. identity와 서로 다른 physical binding, 출력 상한 `60`, 장비 min/max/step,
+single-write, durable journal, rollback 권한, sentinel qualification, 경계 후 300초 안정 조건과
+900초 complete epoch는 변경하지 않습니다. 새 실패 코드·새 pre-write 계층·범용 CLI·펌웨어 fake
+노브는 추가하지 않습니다.
+
+기존 field-image `if`에서 이 exact signature가 우회할 수 있는 것은
+`master_topology != slave_topology` 한 항뿐입니다. `slave_flows[0] != slave_flows[1]`과
+`master_flows[1] != slave_flows[1]` 판별 조건은 그대로 유지합니다.
+
+source 변경을 커밋하기 전에는 다음 write-free 검증을 모두 통과해야 합니다.
+
+1. 위 종료 실행 뒤 보존된 서로 다른 두 source-attested collector series의 raw에서 원 outer
+   controls와 두 432-byte schedule image를 다시 추출
+2. 그 exact image에 승인 patch를 적용한 `_expected_images()`가 고정 서명만 허용함을 확인
+3. Mode·Flow·Frequency·경계의 단일 값 변이, master/slave 역할 교환, entry 수·연속성·비순환
+   조건 변이와 다른 cross-device topology는 모두 기존처럼 거부
+4. 변경 전 golden confirmation token과 변경 후 token이 동일하고 새 필드가 canonical payload에
+   들어가지 않음을 확인
+5. 관련 테스트와 전체 suite 통과, exact commit Docker image 빌드, Claude의 read-only
+   `COMMIT_OK`
+
+그 뒤 새 operation id와 fresh device-local 경계를 사용해
+[`Native ASYNC 모드별 slave Flow 실기 계획서`](docs/native-async-per-mode-flow-test-plan.md)의
+동일한 고정 계획을 **실장비에서 한 번만** 실행합니다. 첫 hardware write 뒤에는 진단 불일치나
+일시적 read 오류만으로 중단하지 않고 900초 epoch를 끝까지 관측합니다. 조기 ordered recovery는
+기존 다섯 조건 — identity 불일치, 출력 `60` 초과, 구체적 물리 위험, journal·복구·현장 차단
+권한 상실, 명시적 비상 정지 — 에서만 시작합니다.
+
+종료 뒤에는 `slave role detach → master role detach → 안전 합성 TimerOFF → slave/master 원
+432-byte schedule image → 원 outer controls/TimerON` 순서로 복구하고, 서로 다른 두 fresh
+source-attested session의 raw에서 원 control과 두 image의 byte-exact 일치를 확인합니다. 결과는
+성공·실패와 무관하게 새 `docs/runs/` 파일에 append-only로 기록합니다. 이 한 operation과 복구·
+독립 검증이 끝나면 단회 해제는 자동 소진되고 §1 동결이 다시 적용됩니다. 자동 재시도는 없으며,
+복구가 남으면 새 실험 없이 해당 operation의 ordered recovery와 read-only 검증만 허용합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
