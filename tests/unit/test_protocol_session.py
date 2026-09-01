@@ -147,6 +147,7 @@ async def test_session_authenticates_skips_unsolicited_and_reads_state() -> None
 
 async def test_state_capture_retains_explicit_reply_action_and_rejects_report_provenance() -> None:
     received: list[tuple[int, bytes]] = []
+    observed: list[tuple[int, bool, bytes]] = []
 
     async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -192,7 +193,11 @@ async def test_state_capture_retains_explicit_reply_action_and_rejects_report_pr
     try:
         await session.connect()
         await session.authenticate()
-        capture = await session.read_raw_state_capture()
+        capture = await session.read_raw_state_capture(
+            state_frame_observer=lambda frame, selected: observed.append(
+                (frame.action, selected, frame.status_payload)
+            )
+        )
     finally:
         await session.disconnect()
         server.close()
@@ -206,11 +211,124 @@ async def test_state_capture_retains_explicit_reply_action_and_rejects_report_pr
         bytes([STATE_REPLY_ACTION]) + b"explicit",
     )
     assert capture.wire_frame == MAGIC + bytes((canonical[4] | 0x80, 0)) + canonical[5:]
+    assert observed == [
+        (STATE_REPORT_ACTION, False, b"report"),
+        (STATE_REPLY_ACTION, True, b"explicit"),
+    ]
     assert received == [
         (GizwitsCommand.PASSCODE_REQUEST, b""),
         (GizwitsCommand.LOGIN_REQUEST, b"\x00\x07private"),
         (GizwitsCommand.SERIAL_TRANSMIT_REQUEST, b"\x02"),
     ]
+
+
+async def test_state_frame_observer_preserves_report_before_strict_reply_timeout() -> None:
+    observed: list[tuple[int, bool, bytes]] = []
+
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await read_frame(reader)
+            passcode = b"private"
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.PASSCODE_RESPONSE,
+                    struct.pack(">H", len(passcode)) + passcode,
+                )
+            )
+            await writer.drain()
+            await read_frame(reader)
+            writer.write(encode_frame(GizwitsCommand.LOGIN_RESPONSE, b"\x00"))
+            await writer.drain()
+            await read_frame(reader)
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+                    bytes([STATE_REPORT_ACTION]) + b"report-only",
+                )
+            )
+            await writer.drain()
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    session = GizwitsSession(
+        "127.0.0.1",
+        port=port,
+        response_timeout_seconds=0.05,
+    )
+    try:
+        await session.connect()
+        await session.authenticate()
+        with pytest.raises(ProtocolTimeoutError):
+            await session.read_raw_state_capture(
+                accept_reports=False,
+                state_frame_observer=lambda frame, selected: observed.append(
+                    (frame.action, selected, frame.status_payload)
+                ),
+            )
+    finally:
+        await session.disconnect()
+        server.close()
+        await server.wait_closed()
+
+    assert observed == [(STATE_REPORT_ACTION, False, b"report-only")]
+    assert session.connected is False
+    assert session.authenticated is False
+
+
+async def test_state_frame_observer_failure_does_not_change_selected_reply(caplog) -> None:
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await read_frame(reader)
+            passcode = b"private"
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.PASSCODE_RESPONSE,
+                    struct.pack(">H", len(passcode)) + passcode,
+                )
+            )
+            await writer.drain()
+            await read_frame(reader)
+            writer.write(encode_frame(GizwitsCommand.LOGIN_RESPONSE, b"\x00"))
+            await writer.drain()
+            await read_frame(reader)
+            writer.write(
+                encode_frame(
+                    GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+                    bytes([STATE_REPLY_ACTION]) + b"explicit",
+                )
+            )
+            await writer.drain()
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    def fail_observer(_frame, _selected) -> None:
+        raise RuntimeError("private observer detail")
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    session = GizwitsSession("127.0.0.1", port=port)
+    try:
+        await session.connect()
+        await session.authenticate()
+        capture = await session.read_raw_state_capture(
+            accept_reports=False,
+            state_frame_observer=fail_observer,
+        )
+    finally:
+        await session.disconnect()
+        server.close()
+        await server.wait_closed()
+
+    assert capture.action == STATE_REPLY_ACTION
+    assert capture.status_payload == b"explicit"
+    assert "state_frame_observer_failed" in caplog.text
+    assert "private observer detail" not in caplog.text
 
 
 async def test_heartbeat_ignores_more_than_skip_budget_of_async_reports() -> None:

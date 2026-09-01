@@ -50,6 +50,34 @@ class RawStateCapture:
         return bytes((self.action,)) + self.status_payload
 
 
+StateFrameObserver = Callable[[RawStateCapture, bool], None]
+_ExchangeFrameObserver = Callable[[GizwitsFrame, bool], None]
+
+
+def _raw_state_capture_from_frame(frame: GizwitsFrame) -> RawStateCapture:
+    """Retain one already-decoded state frame without issuing another network read."""
+
+    if not frame.payload:
+        raise UnexpectedResponseError("device returned an empty state payload")
+    action = frame.payload[0]
+    if action not in {STATE_REPLY_ACTION, STATE_REPORT_ACTION}:
+        raise UnexpectedResponseError(f"unexpected state action 0x{action:02x}")
+    if frame.wire_bytes is None:
+        raise UnexpectedResponseError("state response is missing its original wire frame")
+    captured = decode_frame(frame.wire_bytes)
+    if (
+        captured.command != frame.command
+        or captured.flag != frame.flag
+        or captured.payload != frame.payload
+    ):
+        raise UnexpectedResponseError("state response wire frame does not match decoded state")
+    return RawStateCapture(
+        wire_frame=frame.wire_bytes,
+        action=action,
+        status_payload=frame.payload[1:],
+    )
+
+
 def _is_async_state_report(frame: GizwitsFrame) -> bool:
     """Return whether a frame is one valid unsolicited P0 state report.
 
@@ -198,8 +226,15 @@ class ReadOnlyGizwitsSession:
         self,
         *,
         accept_reports: bool = False,
+        state_frame_observer: StateFrameObserver | None = None,
     ) -> RawStateCapture:
-        """Read state while retaining whether the serial payload was a reply or report."""
+        """Read state while retaining whether the serial payload was a reply or report.
+
+        ``state_frame_observer`` is diagnostic only. It sees recognised state frames before the
+        acceptance policy or any product-schema decoder can discard them. The boolean is true
+        only when that frame satisfies this read. Observer failures never change transport
+        selection, timeouts, or connection quarantine.
+        """
 
         self._require_authenticated()
 
@@ -214,31 +249,24 @@ class ReadOnlyGizwitsSession:
             # deliberately left to the schema decoder above this transport layer.
             return bool(frame.payload) and frame.payload[0] in accepted_actions
 
+        def observe_state_frame(frame: GizwitsFrame, selected: bool) -> None:
+            if (
+                state_frame_observer is None
+                or frame.command != GizwitsCommand.SERIAL_TRANSMIT_RESPONSE
+                or not frame.payload
+                or frame.payload[0] not in {STATE_REPLY_ACTION, STATE_REPORT_ACTION}
+            ):
+                return
+            state_frame_observer(_raw_state_capture_from_frame(frame), selected)
+
         response = await self._exchange(
             GizwitsCommand.SERIAL_TRANSMIT_REQUEST,
             bytes([READ_STATE_ACTION]),
             expected={GizwitsCommand.SERIAL_TRANSMIT_RESPONSE},
             response_predicate=is_usable_state,
+            frame_observer=observe_state_frame,
         )
-        if not response.payload:
-            raise UnexpectedResponseError("device returned an empty state payload")
-        action = response.payload[0]
-        if action not in {STATE_REPLY_ACTION, STATE_REPORT_ACTION}:
-            raise UnexpectedResponseError(f"unexpected state action 0x{action:02x}")
-        if response.wire_bytes is None:
-            raise UnexpectedResponseError("state response is missing its original wire frame")
-        captured = decode_frame(response.wire_bytes)
-        if (
-            captured.command != response.command
-            or captured.flag != response.flag
-            or captured.payload != response.payload
-        ):
-            raise UnexpectedResponseError("state response wire frame does not match decoded state")
-        return RawStateCapture(
-            wire_frame=response.wire_bytes,
-            action=action,
-            status_payload=response.payload[1:],
-        )
+        return _raw_state_capture_from_frame(response)
 
     async def _exchange(
         self,
@@ -247,6 +275,7 @@ class ReadOnlyGizwitsSession:
         *,
         expected: Collection[int | GizwitsCommand],
         response_predicate: Callable[[GizwitsFrame], bool] | None = None,
+        frame_observer: _ExchangeFrameObserver | None = None,
     ) -> GizwitsFrame:
         reader, writer = self._require_connection()
         expected_values = {int(value) for value in expected}
@@ -259,9 +288,15 @@ class ReadOnlyGizwitsSession:
                     skipped_frames = 0
                     while skipped_frames <= self.max_skipped_frames:
                         frame = await read_frame(reader)
-                        if frame.command in expected_values and (
+                        selected = frame.command in expected_values and (
                             response_predicate is None or response_predicate(frame)
-                        ):
+                        )
+                        if frame_observer is not None:
+                            try:
+                                frame_observer(frame, selected)
+                            except Exception:
+                                _LOGGER.warning("state_frame_observer_failed")
+                        if selected:
                             return frame
                         if _is_async_state_report(frame):
                             _LOGGER.debug(
@@ -408,6 +443,7 @@ __all__ = [
     "READ_STATE_ACTION",
     "RawStateCapture",
     "ReadOnlyGizwitsSession",
+    "StateFrameObserver",
     "STATE_REPLY_ACTION",
     "STATE_REPORT_ACTION",
 ]
