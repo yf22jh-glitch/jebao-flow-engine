@@ -1,10 +1,15 @@
 # Native ASYNC 모드별 slave Flow 실기 계획서
 
-> 상태: **REVIEWED DRAFT — repository maintainer 실행 승인, 동결 해제·현장 preflight 전,
-> 장비 write 0회**
+> 상태: **EXECUTED ONCE — Q2-target UNKNOWN, 단회 승인 소진, exact restore 검증 완료**
 >
 > 이 문서는 기존 운전 스케줄을 exact snapshot한 뒤 정지하고, 판별용 임시 스케줄을 새로
 > 적용해 관측한 다음 원래 상태로 byte-exact 복원하는 단회 실기 계획입니다.
+>
+> 2026-09-01 실행은 outer pause와 sentinel qualification·restore를 완료했지만, 반대 방향
+> Mode topology가 기존 field-schedule 동일-topology guard에 걸려 **첫 field schedule write
+> 전에 종료**됐습니다. Q2-target은 계속 `UNKNOWN`이며, 원복은 fresh explicit raw 두 회로
+> 확인했습니다. 상세 기록은
+> [`2026-09-01 Q2-target 판별 시도`](runs/2026-09-01-q2-target-9c982c60.md)입니다.
 
 ## 1. 이번에 답할 질문
 
@@ -417,3 +422,14 @@ journal, 중복 억제, 최소 명령 간격, 전환 지연 한계를 먼저 정
   2회 연속이면 코드를 더 고치거나 반복하지 않고 `AGENTS.md` §7에 따라 정지·보고합니다.
 - 이번 run 기록이 커밋되기 전에는 결과별 후속 actuator나 대조를 위한 `src/` 변경을 시작하지
   않습니다.
+
+## 10. 2026-09-01 실행 결과
+
+- outer safe pause와 sentinel snapshot·write·verify·restore는 각 `2/2` 완료했습니다.
+- field snapshot `2/2` 뒤, master `Sine -> Constant`와 slave `Constant -> Sine`의 topology가
+  다르다는 이유로 기존 `TemporaryScheduleController` guard가 `unsafe_initial_state`를 냈습니다.
+- 첫 field schedule write, `TimerON` arm, native role write와 900초 epoch는 실행되지 않았습니다.
+- 자동 rollback 뒤 두 번의 독립 fresh collector에서 원 controls와 두 schedule image digest가
+  모두 일치했습니다.
+- 따라서 이 실행은 펌웨어 질문을 답하지 못했고 Q2-target은 `UNKNOWN`입니다. 단회 승인은
+  소진됐으며 별도 승인·동결 해제 없이 반복하지 않습니다.

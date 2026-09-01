@@ -252,6 +252,24 @@ exact 검증이 통과한 뒤에만 journal 정리와 lease 해제를 수행합�
 완료되면 이 단회 해제는 자동 소진되고 §1 동결이 다시 적용됩니다. 복구가 남으면 새 실험은
 금지하고 이 operation의 ordered recovery와 read-only 검증만 허용합니다.
 
+### 2026-09-01 Q2-target 단회 실행 종료
+
+[`Q2-target 판별 시도`](docs/runs/2026-09-01-q2-target-9c982c60.md)는 outer safe pause와
+sentinel qualification·restore를 완료한 뒤, 본 field schedule의 첫 write 전에 기존
+동일-topology guard에서 종료됐습니다. master `Sine -> Constant`와 slave
+`Constant -> Sine`은 의도한 판별 계획이지만, `schedule_transaction.py`의 field image 검증은
+두 장비 topology의 완전 동일성을 계속 요구했습니다. 따라서 native role과 900초 epoch에는
+도달하지 못했고 Q2-target은 `UNKNOWN`입니다.
+
+write-side rollback은 terminal로 끝났고 journal 3종은 비었습니다. 이후 서로 다른 두 fresh
+source-attested collector session에서 원 control 여섯 필드와 두 432-byte schedule image의
+exact digest가 모두 일치했습니다. 추가 attended recovery는 없습니다.
+
+실장비 write를 포함한 단회 operation은 이 실행으로 **소진**됐으며 §1 동결이 다시 적용됩니다.
+같은 실험을 재시도하거나 동결 하네스의 코드·테스트를 수정하려면 repository maintainer의 새로운
+명시적 승인과 별도 해제 커밋이 필요합니다. 승인 전에는 Q2-target을 `UNKNOWN`으로 두고,
+software-independent actuator와 그룹 런타임을 기본 제품 경로로 진행합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,

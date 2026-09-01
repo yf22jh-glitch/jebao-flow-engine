@@ -252,7 +252,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | Pro `AutoFeedTime=0`과 profile `1..60` 선언이 정합한가 | **UNKNOWN** — 36/36 raw에서 0, write admission 범위는 별도 승인 없이 완화 금지 |
 | 각 native mode 설정값의 물리 유량·파형 효과가 계측됐는가 | **UNKNOWN / OUT OF CURRENT MEASUREMENT SCOPE** |
 | (Q2-narrow) ASYNC 상태에서 slave의 staged B Flow가 master와 다르게 보고됐는가 | **CONFIRMED (2026-08-30, 이 Pro pair·고정 계획 범위)** — slave 32→40, master 31→35와 상이; 900초 epoch와 exact restore 완료 |
-| (Q2-target) slave가 master Mode·timing을 따르면서 자기 모드별 Flow를 적용하는가 | **UNKNOWN / 단회 판별 실기 승인** — 기존 실행은 양쪽 Mode·경계가 같아 비판별적; [신규 계획](native-async-per-mode-flow-test-plan.md) 참조 |
+| (Q2-target) slave가 master Mode·timing을 따르면서 자기 모드별 Flow를 적용하는가 | **UNKNOWN / 단회 실행 소진 (2026-09-01)** — 반대 Mode 계획이 첫 field write 전 기존 동일-topology guard에서 거부됨; [실행 기록](runs/2026-09-01-q2-target-9c982c60.md) 참조 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |
 | 리턴·도징 actuator가 실기 검증됐는가 | NOT IN CURRENT TEST SCOPE |
@@ -260,8 +260,9 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 
 현재 **production grouping 전체 판정은 NO-GO**입니다. 2026-08-30 단회 write 실기는 아래의
 좁은 Flow 관측과 exact restore를 완료했지만, 사용자가 요구한 master Mode·timing + slave
-per-mode Flow 분할 질문은 닫지 못했습니다. 그 질문은 별도 승인된
-[`신규 판별 실기 계획`](native-async-per-mode-flow-test-plan.md)으로 한 번만 측정합니다.
+per-mode Flow 분할 질문은 닫지 못했습니다. 2026-09-01 판별 실기는 반대 Mode 계획을 적용하기
+전 기존 동일-topology guard에서 종료됐고 exact restore만 다시 확인했습니다. 따라서 질문은
+계속 `UNKNOWN`이고 단회 승인은 소진됐습니다.
 
 기존 단회 실기는 실제 장비가 서로 다른 B 출력을 300초 이상 유지한 durable sample을 냈습니다.
 `master=35`, `slave=40`을 900초 epoch 끝까지 관측했고 상충 sample이 없었습니다. 다만 두
@@ -303,13 +304,19 @@ Q1도 `UNKNOWN`입니다. 당시 "유지되지 않음"으로 기록됐다가 del
 이 조건 없이 Q1 실기를 반복하지 않습니다. 슬레이브별 개별 출력이 필요하면 모든 펌프를
 `independent`로 두는 소프트웨어 그룹을 사용합니다.
 
-### Q2-target (master Mode·timing + slave per-mode Flow) — UNKNOWN / 단회 재개 승인
+### Q2-target (master Mode·timing + slave per-mode Flow) — UNKNOWN / 단회 실행 소진
 
 2026-08-30 실행은 master와 slave 양쪽에 동일한 Mode 순서와 경계를 넣어 이 질문에
-비판별적이었습니다. 현재 승인된 판별 실기는 master와 slave의 Mode를 반대로 넣고 여섯 개의
-겹치지 않는 Flow 값을 사용합니다. 계획과 중단·복구 기준은
-[`native-async-per-mode-flow-test-plan.md`](native-async-per-mode-flow-test-plan.md)가 단일
-출처입니다.
+비판별적이었습니다. 2026-09-01에는 반대 Mode와 여섯 개의 겹치지 않는 Flow 값을 가진 단회
+판별 실기를 실행했지만, `TemporaryScheduleController`의 기존 동일-topology 전제가 첫 field
+schedule write 전에 계획을 거부했습니다. outer pause와 sentinel write는 자동 rollback됐고,
+fresh explicit raw 두 회에서 원 control과 두 432-byte schedule image의 exact restore를
+확인했습니다. 상세 기록은
+[`2026-09-01 Q2-target 판별 시도`](runs/2026-09-01-q2-target-9c982c60.md)입니다.
+
+이 질문은 계속 `UNKNOWN`입니다. 같은 실기를 반복하려면 repository maintainer의 새로운 명시적
+승인과 별도 동결 해제 커밋이 필요합니다. 승인 전 기본 경로는 질문을 park하고
+software-independent actuator와 그룹 런타임을 진행하는 것입니다.
 
 ### 2026-08-28 당시 park 사유
 
