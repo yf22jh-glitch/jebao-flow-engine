@@ -1024,7 +1024,13 @@ class TemporaryScheduleController:
     ) -> dict[str, bytes]:
         source = {snapshot.device_id: snapshot.image_bytes for snapshot in snapshots}
         expected: dict[str, bytes] = {}
-        field_evidence: list[tuple[tuple[tuple[str, str, str], ...], tuple[int, int]]] = []
+        field_evidence: list[
+            tuple[
+                tuple[tuple[str, str, str], ...],
+                tuple[int, int],
+                tuple[int, int],
+            ]
+        ] = []
         for patch in spec.device_patches:
             image = source[patch.device_id]
             for slot in patch.slots:
@@ -1073,10 +1079,18 @@ class TemporaryScheduleController:
                     )
                 )
         if field_evidence:
-            master_topology, master_flows = field_evidence[0]
-            slave_topology, slave_flows = field_evidence[1]
+            master_topology, master_flows, master_frequencies = field_evidence[0]
+            slave_topology, slave_flows, slave_frequencies = field_evidence[1]
+            fixed_q2_opposing_topology = _is_fixed_q2_opposing_topology(
+                master_topology=master_topology,
+                master_flows=master_flows,
+                master_frequencies=master_frequencies,
+                slave_topology=slave_topology,
+                slave_flows=slave_flows,
+                slave_frequencies=slave_frequencies,
+            )
             if (
-                master_topology != slave_topology
+                (master_topology != slave_topology and not fixed_q2_opposing_topology)
                 or slave_flows[0] == slave_flows[1]
                 or master_flows[1] == slave_flows[1]
             ):
@@ -1184,7 +1198,11 @@ class TemporaryScheduleController:
         self,
         device_id: str,
         image: bytes,
-    ) -> tuple[tuple[tuple[str, str, str], ...], tuple[int, int]]:
+    ) -> tuple[
+        tuple[tuple[str, str, str], ...],
+        tuple[int, int],
+        tuple[int, int],
+    ]:
         entries = tuple(
             entry
             for index in range(LOCAL_WAVEMAKER_PRO_SLOT_COUNT)
@@ -1215,8 +1233,7 @@ class TemporaryScheduleController:
             flow = entry.parameters["flow"]
             feed_stop = entry.mode == "feed" and flow == 0
             if not feed_stop and (
-                not limits.min_power <= flow <= limits.max_power
-                or flow % capabilities.power_step
+                not limits.min_power <= flow <= limits.max_power or flow % capabilities.power_step
             ):
                 raise TemporarySchedulePreflightError(
                     TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE
@@ -1228,7 +1245,8 @@ class TemporaryScheduleController:
             raise TemporarySchedulePreflightError(TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE)
         topology = tuple((entry.start, entry.end, entry.mode) for entry in ordered)
         flows = tuple(entry.parameters["flow"] for entry in ordered)
-        return topology, (flows[0], flows[1])
+        frequencies = tuple(entry.parameters["frequency"] for entry in ordered)
+        return topology, (flows[0], flows[1]), (frequencies[0], frequencies[1])
 
     async def _rollback_uninterruptibly(self, record: TemporaryScheduleRecord) -> None:
         task = asyncio.create_task(self._rollback(record))
@@ -1629,6 +1647,40 @@ def _constant_time_equal(left: str, right: str) -> bool:
 def _wall_minutes(value: str) -> int:
     hour_text, minute_text = value.split(":", maxsplit=1)
     return int(hour_text) * 60 + int(minute_text)
+
+
+def _is_fixed_q2_opposing_topology(
+    *,
+    master_topology: tuple[tuple[str, str, str], ...],
+    master_flows: tuple[int, int],
+    master_frequencies: tuple[int, int],
+    slave_topology: tuple[tuple[str, str, str], ...],
+    slave_flows: tuple[int, int],
+    slave_frequencies: tuple[int, int],
+) -> bool:
+    """Recognize only the one authorized attended opposing-mode discriminator.
+
+    The 2026-09-01 run reached the field-image preflight with this exact plan and restored all
+    earlier writes.  The follow-up approval permits only this decoded final-image signature;
+    adding a persisted spec flag would change existing confirmation and recovery authority
+    tokens.
+    """
+
+    master_windows = tuple((start, end) for start, end, _mode in master_topology)
+    slave_windows = tuple((start, end) for start, end, _mode in slave_topology)
+    master_modes = tuple(mode for _start, _end, mode in master_topology)
+    slave_modes = tuple(mode for _start, _end, mode in slave_topology)
+    return (
+        len(master_topology) == 2
+        and len(slave_topology) == 2
+        and master_windows == slave_windows
+        and master_modes == ("sine", "constant")
+        and slave_modes == ("constant", "sine")
+        and master_flows == (50, 55)
+        and slave_flows == (45, 60)
+        and master_frequencies == (40, 0)
+        and slave_frequencies == (0, 35)
+    )
 
 
 def _consume_observation_result(task: asyncio.Task[ObservationCompletion]) -> None:

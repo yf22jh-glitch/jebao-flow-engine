@@ -39,6 +39,7 @@ from jebao_flow.devices.schedule_transaction import (
     TemporaryScheduleRollbackUnsafeError,
     TemporaryScheduleSpec,
     behavior_neutral_unused_slot_patch,
+    temporary_schedule_confirmation_token,
 )
 from jebao_flow.devices.simulator import SimulatedJebaoDevice
 from jebao_flow.persistence.schedule_transaction import JsonTemporaryScheduleJournalStore
@@ -79,11 +80,25 @@ def _active_wire(
     flow: int,
     mode: int = 2,
     start_hour: int = 0,
+    start_minute: int = 0,
     end_hour: int = 24,
     end_minute: int = 0,
+    frequency: int | None = None,
 ) -> bytes:
+    if frequency is None:
+        frequency = 20 if mode == 1 else 0
     return bytes(
-        (start_hour, 0, end_hour, end_minute, mode, flow, 20 if mode == 1 else 0, 0, 0)
+        (
+            start_hour,
+            start_minute,
+            end_hour,
+            end_minute,
+            mode,
+            flow,
+            frequency,
+            0,
+            0,
+        )
     )
 
 
@@ -92,19 +107,82 @@ def _field_slots(
     before_flow: int,
     after_flow: int,
     boundary_hour: int = 12,
+    boundary_minute: int = 0,
+    before_mode: int = 2,
+    before_frequency: int | None = None,
+    after_mode: int = 1,
+    after_frequency: int | None = None,
+    after_start_hour: int | None = None,
+    after_start_minute: int | None = None,
 ) -> tuple[ScheduleSlotPatch, ...]:
+    if after_start_hour is None:
+        after_start_hour = boundary_hour
+    if after_start_minute is None:
+        after_start_minute = boundary_minute
     wires = (
-        _active_wire(flow=before_flow, start_hour=0, end_hour=boundary_hour),
+        _active_wire(
+            flow=before_flow,
+            mode=before_mode,
+            start_hour=0,
+            end_hour=boundary_hour,
+            end_minute=boundary_minute,
+            frequency=before_frequency,
+        ),
         _active_wire(
             flow=after_flow,
-            mode=1,
-            start_hour=boundary_hour,
+            mode=after_mode,
+            start_hour=after_start_hour,
+            start_minute=after_start_minute,
             end_hour=23,
             end_minute=59,
+            frequency=after_frequency,
         ),
         *(LOCAL_WAVEMAKER_PRO_UNUSED_EE for _ in range(46)),
     )
     return tuple(ScheduleSlotPatch.from_wire(index, wire) for index, wire in enumerate(wires))
+
+
+def _fixed_q2_spec(
+    *,
+    operation_id: str = "fixed-q2-test",
+    master_before: tuple[int, int, int] = (1, 50, 40),
+    master_after: tuple[int, int, int] = (2, 55, 0),
+    slave_before: tuple[int, int, int] = (2, 45, 0),
+    slave_after: tuple[int, int, int] = (1, 60, 35),
+    master_boundary: tuple[int, int] = (12, 0),
+    slave_boundary: tuple[int, int] = (12, 0),
+    swap_roles: bool = False,
+) -> TemporaryScheduleSpec:
+    master_patch = DeviceSchedulePatch(
+        device_id="left",
+        slots=_field_slots(
+            before_mode=master_before[0],
+            before_flow=master_before[1],
+            before_frequency=master_before[2],
+            after_mode=master_after[0],
+            after_flow=master_after[1],
+            after_frequency=master_after[2],
+            boundary_hour=master_boundary[0],
+            boundary_minute=master_boundary[1],
+        ),
+    )
+    slave_patch = DeviceSchedulePatch(
+        device_id="right",
+        slots=_field_slots(
+            before_mode=slave_before[0],
+            before_flow=slave_before[1],
+            before_frequency=slave_before[2],
+            after_mode=slave_after[0],
+            after_flow=slave_after[1],
+            after_frequency=slave_after[2],
+            boundary_hour=slave_boundary[0],
+            boundary_minute=slave_boundary[1],
+        ),
+    )
+    patches = (master_patch, slave_patch)
+    if swap_roles:
+        patches = tuple(reversed(patches))
+    return TemporaryScheduleSpec(operation_id=operation_id, device_patches=patches)
 
 
 class _ScheduleDevice(SimulatedJebaoDevice):
@@ -308,6 +386,32 @@ def _controller(
     )
 
 
+def _expected_images_for_spec(spec: TemporaryScheduleSpec) -> dict[str, bytes]:
+    left = _ScheduleDevice("left", _original_image())
+    right = _ScheduleDevice("right", _original_image(invert=True))
+    assert left.physical_binding is not None
+    assert right.physical_binding is not None
+    snapshots = (
+        ScheduleImageSnapshot.from_image(
+            device_id="left",
+            physical_binding=left.physical_binding,
+            image=left.image,
+        ),
+        ScheduleImageSnapshot.from_image(
+            device_id="right",
+            physical_binding=right.physical_binding,
+            image=right.image,
+        ),
+    )
+    controller = _controller(
+        left,
+        right,
+        _MemoryStore(),
+        LinkageSafetyInterlock(initially_permitted=True),
+    )
+    return controller._expected_images(spec, snapshots)  # noqa: SLF001
+
+
 @pytest.mark.asyncio
 async def test_stages_selected_slots_then_restores_all_48_exactly() -> None:
     events: list[str] = []
@@ -432,9 +536,7 @@ async def test_nonzero_feed_flow_cannot_bypass_transaction_power_limit() -> None
             bytes((12, 0, 24, 0, 7, flow, 0, 15, 0)),
             *(LOCAL_WAVEMAKER_PRO_UNUSED_EE for _ in range(46)),
         )
-        return tuple(
-            ScheduleSlotPatch.from_wire(index, wire) for index, wire in enumerate(wires)
-        )
+        return tuple(ScheduleSlotPatch.from_wire(index, wire) for index, wire in enumerate(wires))
 
     spec = TemporaryScheduleSpec(
         device_patches=(
@@ -1172,6 +1274,178 @@ async def test_field_schedule_requires_distinguishable_slave_a_to_b_evidence(
     assert store.record is None
     assert left.writes == []
     assert right.writes == []
+
+
+def test_fixed_q2_opposing_topology_is_accepted_by_exact_image_preflight() -> None:
+    expected = _expected_images_for_spec(_fixed_q2_spec())
+
+    assert set(expected) == {"left", "right"}
+    assert get_local_wavemaker_pro_slot_wire(expected["left"], 0) == _active_wire(
+        flow=50,
+        mode=1,
+        end_hour=12,
+        frequency=40,
+    )
+    assert get_local_wavemaker_pro_slot_wire(expected["left"], 1) == _active_wire(
+        flow=55,
+        mode=2,
+        start_hour=12,
+        end_hour=23,
+        end_minute=59,
+        frequency=0,
+    )
+    assert get_local_wavemaker_pro_slot_wire(expected["right"], 0) == _active_wire(
+        flow=45,
+        mode=2,
+        end_hour=12,
+        frequency=0,
+    )
+    assert get_local_wavemaker_pro_slot_wire(expected["right"], 1) == _active_wire(
+        flow=60,
+        mode=1,
+        start_hour=12,
+        end_hour=23,
+        end_minute=59,
+        frequency=35,
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"master_before": (0, 50, 40)},
+        {"master_before": (1, 49, 40)},
+        {"master_before": (1, 50, 39)},
+        {"slave_boundary": (12, 1)},
+        {"slave_after": (3, 60, 35)},
+        {"swap_roles": True},
+    ],
+    ids=(
+        "mode",
+        "flow",
+        "frequency",
+        "boundary",
+        "other-cross-device-topology",
+        "master-slave-role-swap",
+    ),
+)
+def test_fixed_q2_topology_exception_rejects_nonexact_values(
+    overrides: dict[str, object],
+) -> None:
+    spec = _fixed_q2_spec(**overrides)  # type: ignore[arg-type]
+
+    with pytest.raises(TemporarySchedulePreflightError) as captured:
+        _expected_images_for_spec(spec)
+
+    assert captured.value.code is TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE
+
+
+def test_fixed_q2_topology_exception_rejects_a_third_active_entry() -> None:
+    spec = _fixed_q2_spec()
+    master, slave = spec.device_patches
+    slots = list(master.slots)
+    slots[2] = ScheduleSlotPatch.from_wire(
+        2,
+        _active_wire(
+            flow=50,
+            mode=2,
+            start_hour=23,
+            start_minute=59,
+            end_hour=24,
+            frequency=0,
+        ),
+    )
+    mutated = TemporaryScheduleSpec(
+        operation_id=spec.operation_id,
+        device_patches=(
+            master.model_copy(update={"slots": tuple(slots)}),
+            slave,
+        ),
+    )
+
+    with pytest.raises(TemporarySchedulePreflightError) as captured:
+        _expected_images_for_spec(mutated)
+
+    assert captured.value.code is TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE
+
+
+def test_fixed_q2_topology_exception_rejects_a_schedule_gap() -> None:
+    spec = _fixed_q2_spec()
+    master, slave = spec.device_patches
+    mutated_master = DeviceSchedulePatch(
+        device_id=master.device_id,
+        slots=_field_slots(
+            before_mode=1,
+            before_flow=50,
+            before_frequency=40,
+            after_mode=2,
+            after_flow=55,
+            after_frequency=0,
+            boundary_hour=12,
+            after_start_hour=13,
+        ),
+    )
+    mutated = TemporaryScheduleSpec(
+        operation_id=spec.operation_id,
+        device_patches=(mutated_master, slave),
+    )
+
+    with pytest.raises(TemporarySchedulePreflightError) as captured:
+        _expected_images_for_spec(mutated)
+
+    assert captured.value.code is TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE
+
+
+def test_fixed_q2_topology_exception_rejects_a_repeated_mode_cycle() -> None:
+    spec = _fixed_q2_spec(master_after=(1, 55, 0))
+
+    with pytest.raises(TemporarySchedulePreflightError) as captured:
+        _expected_images_for_spec(spec)
+
+    assert captured.value.code is TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE
+
+
+def test_fixed_q2_signature_does_not_change_confirmation_token_payload() -> None:
+    spec = _fixed_q2_spec(operation_id="fixed-q2-token")
+    master_binding = PhysicalDeviceBinding(
+        vendor_device_id_digest="a" * 64,
+        mac_address_digest="b" * 64,
+        product_key=LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+        config_fingerprint="c" * 64,
+    )
+    slave_binding = PhysicalDeviceBinding(
+        vendor_device_id_digest="d" * 64,
+        mac_address_digest="e" * 64,
+        product_key=LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+        config_fingerprint="f" * 64,
+    )
+    snapshots = (
+        ScheduleImageSnapshot.from_image(
+            device_id="left",
+            physical_binding=master_binding,
+            image=LOCAL_WAVEMAKER_PRO_UNUSED_ZERO * LOCAL_WAVEMAKER_PRO_SLOT_COUNT,
+        ),
+        ScheduleImageSnapshot.from_image(
+            device_id="right",
+            physical_binding=slave_binding,
+            image=LOCAL_WAVEMAKER_PRO_UNUSED_EE * LOCAL_WAVEMAKER_PRO_SLOT_COUNT,
+        ),
+    )
+
+    assert set(spec.model_dump(mode="json")) == {
+        "operation_id",
+        "kind",
+        "device_patches",
+        "forward_timeout_seconds",
+        "observation_timeout_seconds",
+        "observation_cancel_timeout_seconds",
+        "disarm_verify_timeout_seconds",
+        "restore_timeout_seconds",
+        "recovery_authority_seconds",
+    }
+    assert temporary_schedule_confirmation_token(spec, snapshots) == (
+        "0a1fd15ec75e89873cc2bb6dd005274bddf64be7e8938ab23b67b66873f78bdd"
+    )
 
 
 def test_field_spec_requires_all_48_slots_and_sentinel_kind_for_neutral_patch() -> None:
