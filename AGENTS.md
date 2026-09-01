@@ -332,6 +332,28 @@ source-attested session의 raw에서 원 control과 두 image의 byte-exact 일�
 독립 검증이 끝나면 단회 해제는 자동 소진되고 §1 동결이 다시 적용됩니다. 자동 재시도는 없으며,
 복구가 남으면 새 실험 없이 해당 operation의 ordered recovery와 read-only 검증만 허용합니다.
 
+### 2026-09-01 Q2-target topology 교정 단회 실행 종료
+
+[`Q2-target topology 교정 실행`](docs/runs/2026-09-01-q2-target-corrected-a3adb738.md)은 fixed
+field schedule과 `TimerON`을 적용하고 900초 observation epoch를 끝까지 수행했습니다. master
+explicit raw 91개의 오프라인 재분석은 `Sine/AutoFlow50 -> Constant/AutoFlow55` Mode·Flow 전환과
+399.464초 유지를 확인했습니다. Constant 슬롯의 wire `Frequency=0`과 보고 `AutoFreq=5` 차이는
+해석하지 않습니다. slave가 포함된 pair read는 90회 모두 `monitor_state_read`로 실패해 slave
+raw와 유효 pair sample은 0개였습니다. 따라서 master Mode·Flow 전환만 확인됐고 Q2-target은
+계속 `UNKNOWN`입니다.
+
+write-side ordered rollback은 terminal로 완료됐고 rollback failure·recovery reason은 0입니다.
+이후 서로 다른 두 fresh source-attested collector session에서 원 control 여섯 필드와 두
+432-byte schedule image digest가 모두 일치했습니다. private config도 원 digest로 relock됐고
+`dry_run=true`, write-enabled device 0을 확인했습니다.
+
+topology 교정 단회 operation은 이 실행으로 **소진**됐으며 §1 동결이 다시 적용됩니다. 자동
+재시도는 없습니다. 새 실장 write를 승인하기 전에 보존 raw와 exact commit으로 live ASYNC
+slave의 role/state-dependent explicit reply와 pair-read 경로를 write 없이 먼저 분석합니다.
+이후에도 Q2-target 실기가 필요하면 repository maintainer의 새로운 명시적 승인과 별도 해제
+커밋이 필요합니다. 기본 제품
+경로는 software-independent actuator와 그룹 런타임입니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,

@@ -252,7 +252,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | Pro `AutoFeedTime=0`과 profile `1..60` 선언이 정합한가 | **UNKNOWN** — 36/36 raw에서 0, write admission 범위는 별도 승인 없이 완화 금지 |
 | 각 native mode 설정값의 물리 유량·파형 효과가 계측됐는가 | **UNKNOWN / OUT OF CURRENT MEASUREMENT SCOPE** |
 | (Q2-narrow) ASYNC 상태에서 slave의 staged B Flow가 master와 다르게 보고됐는가 | **CONFIRMED (2026-08-30, 이 Pro pair·고정 계획 범위)** — slave 32→40, master 31→35와 상이; 900초 epoch와 exact restore 완료 |
-| (Q2-target) slave가 master Mode·timing을 따르면서 자기 모드별 Flow를 적용하는가 | **UNKNOWN / 단회 실행 소진 (2026-09-01)** — 반대 Mode 계획이 첫 field write 전 기존 동일-topology guard에서 거부됨; [실행 기록](runs/2026-09-01-q2-target-9c982c60.md) 참조 |
+| (Q2-target) slave가 master Mode·timing을 따르면서 자기 모드별 Flow를 적용하는가 | **UNKNOWN / 교정 단회 실행 소진 (2026-09-01)** — master 반대 Mode 전환은 raw 91개로 확인했지만 slave pair read가 90회 모두 실패해 slave raw가 없음; [실행 기록](runs/2026-09-01-q2-target-corrected-a3adb738.md) 참조 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |
 | 리턴·도징 actuator가 실기 검증됐는가 | NOT IN CURRENT TEST SCOPE |
@@ -260,9 +260,11 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 
 현재 **production grouping 전체 판정은 NO-GO**입니다. 2026-08-30 단회 write 실기는 아래의
 좁은 Flow 관측과 exact restore를 완료했지만, 사용자가 요구한 master Mode·timing + slave
-per-mode Flow 분할 질문은 닫지 못했습니다. 2026-09-01 판별 실기는 반대 Mode 계획을 적용하기
-전 기존 동일-topology guard에서 종료됐고 exact restore만 다시 확인했습니다. 따라서 질문은
-계속 `UNKNOWN`이고 단회 승인은 소진됐습니다.
+per-mode Flow 분할 질문은 닫지 못했습니다. 2026-09-01 첫 판별 실기는 반대 Mode 계획을 적용하기
+전 기존 동일-topology guard에서 종료됐습니다. topology를 교정한 단회 실행은 field schedule,
+TimerON과 900초 epoch에 도달했고 master Mode·Flow 전환을 raw 재분석으로 확인했지만, slave pair read가 90회 모두
+실패해 slave raw를 하나도 얻지 못했습니다. 따라서 질문은 계속 `UNKNOWN`이고 교정 단회 승인도
+소진됐습니다. 두 실행 모두 종료 후 fresh raw 두 회에서 exact restore를 확인했습니다.
 
 기존 단회 실기는 실제 장비가 서로 다른 B 출력을 300초 이상 유지한 durable sample을 냈습니다.
 `master=35`, `slave=40`을 900초 epoch 끝까지 관측했고 상충 sample이 없었습니다. 다만 두
@@ -307,16 +309,27 @@ Q1도 `UNKNOWN`입니다. 당시 "유지되지 않음"으로 기록됐다가 del
 ### Q2-target (master Mode·timing + slave per-mode Flow) — UNKNOWN / 단회 실행 소진
 
 2026-08-30 실행은 master와 slave 양쪽에 동일한 Mode 순서와 경계를 넣어 이 질문에
-비판별적이었습니다. 2026-09-01에는 반대 Mode와 여섯 개의 겹치지 않는 Flow 값을 가진 단회
+비판별적이었습니다. 2026-09-01에는 반대 Mode와 여섯 개의 겹치지 않는 Flow 값을 가진 첫 단회
 판별 실기를 실행했지만, `TemporaryScheduleController`의 기존 동일-topology 전제가 첫 field
-schedule write 전에 계획을 거부했습니다. outer pause와 sentinel write는 자동 rollback됐고,
-fresh explicit raw 두 회에서 원 control과 두 432-byte schedule image의 exact restore를
-확인했습니다. 상세 기록은
+schedule write 전에 계획을 거부했습니다. 상세 기록은
 [`2026-09-01 Q2-target 판별 시도`](runs/2026-09-01-q2-target-9c982c60.md)입니다.
 
-이 질문은 계속 `UNKNOWN`입니다. 같은 실기를 반복하려면 repository maintainer의 새로운 명시적
-승인과 별도 동결 해제 커밋이 필요합니다. 승인 전 기본 경로는 질문을 park하고
-software-independent actuator와 그룹 런타임을 진행하는 것입니다.
+같은 날 별도 승인과 해제 커밋으로 topology만 교정해 한 번 더 실행했습니다. 이번에는 field
+schedule과 TimerON을 적용하고 900초 epoch를 완주했으며, master explicit raw 91개의 오프라인
+재분석에서 `Sine/AutoFlow50 -> Constant/AutoFlow55` Mode·Flow 전환과 399.464초 유지가
+확인됐습니다. Constant 슬롯의 wire `Frequency=0`과 보고 `AutoFreq=5` 차이는 해석하지 않습니다.
+그러나 slave가 포함된 pair read는 90회 모두 `monitor_state_read`로 실패해 slave raw가
+0개였습니다. 종료 후 fresh source-attested collector 두 회에서는 원 control과 두 432-byte
+schedule image의 exact restore가
+다시 확인됐습니다. 상세 기록은
+[`2026-09-01 Q2-target topology 교정 실행`](runs/2026-09-01-q2-target-corrected-a3adb738.md)입니다.
+
+이 질문은 계속 `UNKNOWN`입니다. 교정 단회 승인도 소진됐습니다. 같은 실기를 반복하기 전에
+보존 raw와 exact commit으로 live ASYNC slave의 role/state-dependent explicit reply와 pair-read
+경로를 write 없이 분석해야 합니다. 그 뒤에도 실기가 필요하면 repository maintainer의 새로운
+명시적 승인과
+별도 동결 해제 커밋이 필요합니다. 승인 전 기본 경로는 질문을 park하고 software-independent
+actuator와 그룹 런타임을 진행하는 것입니다.
 
 ### 2026-08-28 당시 park 사유
 

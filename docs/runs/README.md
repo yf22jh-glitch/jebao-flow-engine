@@ -81,6 +81,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-08-30 Q2 attempt 04](2026-08-30-q2-attempt-04.md) | write 전 거부 | preflight→run 사이 boundary lead 소진 |
 | [2026-08-30 Q2 attempt 05](2026-08-30-q2-attempt-05.md) | 900초 ASYNC epoch + exact restore | slave staged Flow 32→40 및 byte-exact 복원 확인; Mode·timing 소유권은 비판별이므로 정정 절 참조 |
 | [2026-09-01 Q2-target 판별 시도](2026-09-01-q2-target-9c982c60.md) | field write 전 거부 + exact restore | 반대 Mode 계획이 기존 동일-topology guard에서 거부됨; Q2-target은 UNKNOWN, fresh raw 원복 검증 2회 PASS |
+| [2026-09-01 Q2-target topology 교정 실행](2026-09-01-q2-target-corrected-a3adb738.md) | 900초 epoch + master raw 91 + exact restore | master Mode·Flow 전환만 raw 재분석으로 확인; slave pair read 90회 실패로 Q2-target은 UNKNOWN, fresh raw 원복 검증 2회 PASS |
 
 ## 새 실행 기록 템플릿
 
