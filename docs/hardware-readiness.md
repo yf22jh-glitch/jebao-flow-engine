@@ -506,6 +506,27 @@ controls와 48개 9-byte slot을 직접 재도출했으므로 아래 장비 상�
 완전히 종료한 뒤 fresh explicit baseline을 새로 보존해야 합니다. 에이전트가 이 값을 우회하거나
 restore 경로에서 clamp하지 않습니다.
 
+### 2026-09-01 current live admission 재확인
+
+exact `89119bc`의 source-attested write-free collector가
+[`JFS-780584017739a4b193c5bb157d557802`](runs/2026-09-01-current-baseline-78058401.md)
+에서 2/2 pair와 4/4 explicit-reply raw frame을 보존했고 offline verify를 통과했습니다. 두 fresh
+sample 모두 역할 A는 latent manual `constant / Flow=30 / Frequency=32`, 역할 B는
+`random / Flow=89 / Frequency=34`였으며 `TimerON / independent`였습니다. 두 schedule
+image digest도 값이 커밋된 2026-09-01 corrected-run restore 기록과 byte-exact하게
+같았습니다.
+
+따라서 위 표의 역할 B `Flow=89`와 non-feed schedule `Flow=50..80`은
+`2026-09-01T14:19:19Z..14:20:11Z` current raw에서도 재도출됐고, 두 값을 비교한
+`89 > 80` admission FAIL이 유지됩니다. exact explicit-reply frame은 등급 (a)이고 이 raw에서
+두 값이 오프라인 재도출됐습니다. persisted decoded summary는 등급 (b)이며 raw 재계산과
+일치했습니다.
+
+이 artifact는 **pre-normalization baseline**입니다. 앱 정규화가 역할 B의 manual controls를
+바꾸므로 정규화 직후부터 이 artifact를 복원 기준으로 쓸 수 없고 선행조건 2를 해소하지도
+않습니다. **앱 정규화와 정규화 후 fresh baseline 재보존 전에는 어떤 ASYNC role write도 여전히
+`NO-GO`입니다.**
+
 **이 조건을 만족하지 못하면 관측은 `NO-GO`로 남깁니다.** 이 항목은 동결된 ASYNC 실험
 하네스를 재가동하라는 뜻이 **아닙니다.** 하네스 재가동은 [`AGENTS.md`](../AGENTS.md) §1의
 해제 절차를 따로 거쳐야 합니다.
