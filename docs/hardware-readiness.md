@@ -370,6 +370,22 @@ write-side rollback은 terminal로 끝났고 서로 다른 두 fresh collector�
 앱과 같은 `0 -> 2 -> 3` role sequence, stale report를 배제하는 fresh post-boundary evidence,
 기존 identity·single-write·journal·rollback 권한을 함께 고정할 때만 검토합니다.
 
+#### 2026-09-02 앱 role sequence 교정 재개 결정 — 계획만 승인, write 권한 미생성
+
+repository maintainer는 위 `UNKNOWN` 뒤 앱과 같은 `independent -> sync_slave -> async_slave`
+순서를 한 번 적용하고, `sync_slave` write 뒤 새 paired session에서 master=`master`,
+slave=`sync_slave`, 양쪽 `TimerON`, temporary schedule image와 Flow 상한을 적극 확인한 경우에만
+`async_slave`로 진행하라고 지시했습니다. stale backlog를 배제하기 위해 boundary monitor도
+pair마다 transport를 새로 만듭니다. 질문·판정·write·복원 범위는
+[`앱-sequence 교정 단회 계획`](native-async-slave-slot-flow-app-sequence-recheck.md)에 고정합니다.
+
+repository maintainer 겸 on-site hardware approver는 물리 차단 수단의 구체적 열거를 면제하고
+현장에 수습 가능한 인원이 있다고 확인했습니다(등급 (c) reconstructed operator observation).
+이 operation별 결정은 위 설치 환경 기준선과 매 실기 직전 GO/NO-GO의 물리 전원 차단 체크박스를
+충족으로 바꾸지 않습니다. 계획 문서 커밋만으로 동결이 해제되거나 장비 write 권한이 생기지
+않습니다. 실제 실행에는 [`AGENTS.md`](../AGENTS.md) §1의 별도 단회 해제 커밋과 첫 write 직전
+유효한 물리 차단 확인이 계속 필요합니다.
+
 ### 2026-08-28 당시 park 사유
 
 - 실기 13회 중 이 질문(슬롯별 `AutoFlow` 독립 적용)을 **직접 시도한 것은 5회**이고, 그중
