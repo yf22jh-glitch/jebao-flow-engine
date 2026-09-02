@@ -115,6 +115,44 @@ editor는 없습니다.
 - slave Flow slider는 role과 별도인 `{Flow: value}` partial write입니다. 이 화면에는 다른
   장비를 지정하거나 두 장비를 handshake하는 별도 pairing command가 없습니다.
 
+#### 2026-09-02 schedule 저장과 실행 소유권 call chain
+
+같은 세 cached Pro template에서 role과 schedule 경로를 함께 다시 추적했습니다.
+
+- cached vendor product definition `V`는 entity 1개, id `0..69`의 datapoint 70개를 선언합니다.
+  id `0..12`는 power·timer·`Linkage`·manual/current-auto controls, id `13..60`은
+  `AutoTime00..47`, id `61..62`는 장비 날짜·시각, id `63..69`는 fault입니다. 빈 id도,
+  `MasterID`·`PairID`·native group·schedule-owner/reference datapoint도 없습니다. 다만 이것은
+  vendor protocol에 노출된 datapoint가 없다는 뜻이며 firmware 내부의 peer discovery까지
+  부정하지 않습니다.
+- template root는 host가 넘긴 현재 `screenProps.device`와 `screenProps.deviceData` 한 쌍을
+  singleton store에 binding합니다. `sendCmd(payload)`는 그 current-screen target context의 host
+  `callService("sendCmd", payload)`를 호출하며, payload에 peer device id나 master id를 추가하지
+  않습니다.
+- Linkage 화면의 모든 role 선택은 위 current target에 `{Linkage: value}`만 보냅니다. schedule
+  화면의 slot 저장은 같은 target에 `{AutoTimeNN: [9 bytes]}`를 보내고, reset도 그 target의
+  `AutoTime00..47`만 보냅니다. 개별 장비 화면에서는 장비별 write이며, role write가 master
+  schedule을 slave로 복사하거나 schedule owner/reference를 설정하는 호출은 없습니다. host가
+  일반 app-group screen의 `sendCmd`를 어떻게 fan-out하는지는 이 template 밖이라 여기서
+  일반화하지 않습니다.
+- template에는 Gizwits host의 일반 `groupID` 표시와 `deviceGroup` 화면 진입 코드가 있지만,
+  Linkage handler는 `groupID`를 읽지 않고 role·schedule command에도 group/master/pair 식별자를
+  넣지 않습니다. 따라서 이 일반 앱 그룹 메타데이터를 native Linkage pairing 증거로 쓰지
+  않습니다.
+- schedule 화면이 active로 표시하는 조건은 `TimerON && Linkage in {0, 1}`입니다. slave role
+  `2`·`3`에서 timer toggle을 사용하면 같은 payload가 `Linkage=0`도 넣어 먼저 independent로
+  detach합니다. 정상 Linkage UI도 master 영역에만 Schedule·Manual 진입을 두고, slave 영역에는
+  Sync·Async와 단일 `Flow`만 둡니다.
+
+따라서 정적 `U` 코드로 확정되는 것은 **개별 장비 화면의 `AutoTime` image가 장비별 target에
+저장되고, 앱의 Linkage 경로가 master image를 slave에 복사하지 않는다**는 사실입니다. 앱의 정상
+제어 모델은 master를 schedule/mode/timing 조작 주체로 취급하고 slave에는 role과 공통 `Flow`만
+노출합니다.
+그러나 `Linkage`를 받은 뒤 firmware가 master의 mode·timing을 따르는지, slave의 로컬
+`AutoTime`을 실행하는지는 이 JavaScript 밖의 runtime 동작이므로 정적 코드만으로 판정하지
+않습니다. 이를 구분하려면 master와 slave의 mode·frequency 또는 boundary가 다른 staged image를
+넣은 뒤 Sync 상태의 fresh raw를 비교해야 합니다.
+
 [`2026-09-02 Q2-slotflow 실행`](../runs/2026-09-02-q2-slotflow-a00f4b1.md)의 하네스는
 `write_linkage(async_slave)` 한 번으로 `{Linkage: 3}`을 보내 direct `0 -> 3`으로 전환했습니다.
 final Linkage datapoint는 앱과 같지만 **UI transition sequence는 동등하지 않습니다.** 이 정적

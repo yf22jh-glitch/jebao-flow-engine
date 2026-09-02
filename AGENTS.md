@@ -574,6 +574,33 @@ byte-exact 검증을 완료하고 새 `docs/runs/` 기록을 append-only로 커�
 §1 동결이 다시 적용됩니다. 비-terminal intent가 남으면 새 실험과 fixed 상수 변경을 금지하고,
 이 source의 exact image로 해당 operation의 기존 attended recovery와 read-only 검증만 허용합니다.
 
+### 2026-09-02 앱 role sequence 교정 Q2-slotflow 단회 실행 종료
+
+exact `ced43a9` image로 앱과 같은 첫 단계인 `independent -> sync_slave`를 수행했습니다. fresh raw
+pair에서 master=`master`, slave=`sync_slave`, 양쪽 `TimerON`, 서로 다른 exact temporary schedule
+image의 장비별 보존과 bounded active Flow `40`·`35`를 확인했습니다. Sync 역할 지정과 장비별
+schedule image 보존은 성립했지만, 양쪽 A의 mode·frequency·boundary가 같아 runtime에서 master
+schedule을 따랐는지 slave 로컬 schedule을 실행했는지는 판별하지 못했습니다. 그러나 slave의
+inactive manual `Mode/Frequency`가 saved safe manual `Constant/F20`이 아니라 active A와 같은
+`Sine/F50`으로 보고됐고, existing audited snapshot-control assertion이
+`slave_pair_slave_state / mode,frequency`로 거부했습니다.
+
+canonical progress가 `sync_verified`에 도달하지 않아 `async_intent`와 두 번째 slave role write는
+생성되지 않았습니다. 따라서 `async_slave` write는 0회이고 900초 epoch도 시작하지 않았으며,
+Q2-slotflow는 계속 `UNKNOWN`입니다. automatic ordered rollback은 terminal `outer_restored`로
+끝났고, 서로 다른 두 source-attested fresh collector에서 원 controls와 두 432-byte schedule
+image를 byte-exact하게 검증했습니다. 상세 증거는
+[`2026-09-02 앱-sequence 교정 실행`](docs/runs/2026-09-02-q2-slotflow-appseq-sync-gate-ced43a9.md)에
+있습니다.
+
+이 기록 커밋부터 `9a51786`의 단회 해제는 **소진**되고 §1 동결이 다시 적용됩니다. 같은 질문의
+오늘 두 번째 live operation이므로 §7에 따라 자동 재시도나 즉시 source 수정을 하지 않습니다.
+질문은 다시 park하고 software-independent 제품 트랙을 진행합니다. native 최적화를 다시 열려면
+먼저 master/slave의 staged mode·frequency 또는 boundary를 다르게 해 Sync runtime schedule
+소유권을 구분하는 새 계획이 필요합니다. 그 결과 위에서만 inactive manual drift와 core Sync
+권한을 분리한 ASYNC 계획을 세우며, repository maintainer의 새 승인, 별도 해제 커밋과 on-site
+hardware approver 승인이 모두 필요합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,

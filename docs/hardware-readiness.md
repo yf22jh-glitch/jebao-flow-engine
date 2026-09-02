@@ -253,7 +253,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | 각 native mode 설정값의 물리 유량·파형 효과가 계측됐는가 | **UNKNOWN / OUT OF CURRENT MEASUREMENT SCOPE** |
 | (Q2-narrow) ASYNC 상태에서 slave의 staged B Flow가 master와 다르게 보고됐는가 | **CONFIRMED (2026-08-30, 이 Pro pair·고정 계획·하네스 direct `0→3` role 전환 범위)** — slave 32→40, master 31→35와 상이; 900초 epoch와 exact restore 완료 |
 | (Q2-target) slave가 master Mode·timing을 따르면서 자기 모드별 Flow를 적용하는가 | **UNKNOWN / 교정 단회 실행 소진 (2026-09-01)** — master 반대 Mode 전환은 raw 91개로 확인했지만 slave pair read가 90회 모두 실패해 slave raw가 없음; [실행 기록](runs/2026-09-01-q2-target-corrected-a3adb738.md) 참조 |
-| (Q2-slotflow) 같은 Mode·경계에서 slave가 자기 슬롯별 `Flow 35→47`을 적용하는가 | **UNKNOWN / 단회 실행 소진 (2026-09-02)** — master `40→35`는 확인했지만 slave 411 report가 모두 경계 전 backlog였고, 앱 `0→2→3`과 하네스 `0→3` role sequence도 달랐음; [실행 기록](runs/2026-09-02-q2-slotflow-a00f4b1.md) 참조 |
+| (Q2-slotflow) 같은 Mode·경계에서 slave가 자기 슬롯별 `Flow 35→47`을 적용하는가 | **UNKNOWN / 앱-sequence 단회 실행 소진 (2026-09-02)** — 앱과 같은 Sync 단계에서 master·sync-slave 지정, 양쪽 `TimerON`, 장비별 temporary schedule image 보존과 bounded active state를 확인했지만 runtime schedule 소유권은 판별하지 못했고 inactive manual `Mode/Frequency` drift gate가 ASYNC write 전에 중단; [실행 기록](runs/2026-09-02-q2-slotflow-appseq-sync-gate-ced43a9.md) 참조 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |
 | 리턴·도징 actuator가 실기 검증됐는가 | NOT IN CURRENT TEST SCOPE |
@@ -385,6 +385,37 @@ repository maintainer 겸 on-site hardware approver는 물리 차단 수단의 �
 충족으로 바꾸지 않습니다. 계획 문서 커밋만으로 동결이 해제되거나 장비 write 권한이 생기지
 않습니다. 실제 실행에는 [`AGENTS.md`](../AGENTS.md) §1의 별도 단회 해제 커밋과 첫 write 직전
 유효한 물리 차단 확인이 계속 필요합니다.
+
+#### 2026-09-02 앱 role sequence 교정 실행 — Sync 지정 확인, Q2-slotflow UNKNOWN
+
+별도 해제와 exact `ced43a9` image로 앱과 같은 첫 단계인 `independent -> sync_slave`를 한 번
+적용했습니다. 직후 fresh raw pair에서 master=`master`, slave=`sync_slave`, 양쪽 `TimerON`,
+서로 다른 temporary schedule image가 장비별로 그대로 남아 있고 active Flow `40`·`35`인 bounded
+state가 확인됐습니다. 따라서 앱 sequence의 Sync 역할 지정, TimerON, 장비별 schedule image
+보존은 실제 장비에서 성립합니다. 다만 양쪽 A의 mode·frequency·boundary가 같았으므로 이 raw는
+master schedule 추종과 slave 로컬 schedule 실행을 구분하지 않습니다.
+
+같은 slave raw에서 inactive manual tuple은 staged safe manual `Constant/35/F20`이 아니라 active
+A와 같은 `Sine/35/F50`이었습니다. 기존 audited pair assertion은 saved snapshot과 다른
+`Mode/Frequency`를 drift로 거부했고, durable contract에 따라 `async_slave` write는 0회였습니다.
+이 변화가 firmware의 active-slot mirror인지 다른 role side effect인지는 확정하지 않습니다.
+ASYNC와 900초 boundary epoch에 도달하지 않았으므로 slave의 `35 -> 47` 적용은 계속
+`UNKNOWN`입니다. 상세 raw·진단·복원 증거는
+[`2026-09-02 앱-sequence 교정 실행`](runs/2026-09-02-q2-slotflow-appseq-sync-gate-ced43a9.md)에
+있습니다.
+
+automatic rollback은 terminal `outer_restored`로 끝났고, 서로 다른 두 source-attested fresh
+collector가 모두 `2/2 pair`, `4/4 action 0x03`, offline verify PASS를 냈습니다. 원 control 여섯
+필드와 두 432-byte schedule image digest는 pre-write baseline과 byte-exact하게 같았습니다.
+Home Assistant는 재시작하거나 조작하지 않았고 locked recovery runtime만 실행 전후 stop/start
+했습니다.
+
+이 실행은 같은 질문에 대한 오늘 두 번째 live operation이므로 §7에 따라 세 번째 실기를 하지
+않고 다시 park합니다. 대안은 (1) Q2와 무관하게 software-independent actuator·그룹 런타임을
+진행하거나, (2) native 최적화 가치가 남는다고 새로 판단할 때 먼저 master/slave staged
+mode·frequency 또는 boundary를 다르게 한 최소 Sync 관측으로 runtime schedule 소유권을 구분한
+뒤, 그 결과 위에서 inactive manual `Mode/Frequency` drift와 core Sync 권한을 분리한 ASYNC
+계획·새 승인·별도 단회 해제를 만드는 것입니다. park해도 제품 경로에는 영향이 없습니다.
 
 ### 2026-08-28 당시 park 사유
 
