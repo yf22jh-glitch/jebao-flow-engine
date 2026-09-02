@@ -198,15 +198,15 @@ def _legacy_intent(
 
 def _after_sample(
     *,
-    master_flow: int = 55,
-    slave_flow: int = 60,
+    master_flow: int = 35,
+    slave_flow: int = 47,
     master_mode: str = "constant",
     slave_mode: str = "constant",
     master_frequency: int = 0,
     slave_frequency: int = 0,
     slave_before_mode: str = "sine",
-    slave_before_flow: int = 45,
-    slave_before_frequency: int = 40,
+    slave_before_flow: int = 35,
+    slave_before_frequency: int = 50,
 ) -> ScheduleLinkageSample:
     return ScheduleLinkageSample(
         observed_at=datetime.now(UTC),
@@ -221,7 +221,7 @@ def _after_sample(
             flow=slave_flow,
             frequency=slave_frequency,
         ),
-        master_before=ScheduleAutoEvidence(mode="sine", flow=50, frequency=40),
+        master_before=ScheduleAutoEvidence(mode="sine", flow=40, frequency=50),
         slave_before=ScheduleAutoEvidence(
             mode=slave_before_mode,
             flow=slave_before_flow,
@@ -251,8 +251,8 @@ def test_fixed_plan_is_the_only_audited_field_shape() -> None:
         spec.slave_before_flow,
         spec.master_after_flow,
         spec.slave_after_flow,
-    ) == (50, 45, 55, 60)
-    assert spec.sine_frequency == 40
+    ) == (40, 35, 35, 47)
+    assert spec.sine_frequency == 50
     assert spec.safe_frequency == 20
     assert spec.post_boundary_stability_seconds == 300
     assert spec.observation_window_seconds == 915
@@ -262,10 +262,10 @@ def test_fixed_plan_is_the_only_audited_field_shape() -> None:
     assert spec.full_epoch_after_roles is True
     assert spec.outer_linkage_spec().duration_seconds == 1200
     assert spec.temporary_schedule_spec().observation_timeout_seconds == 1200
-    assert cli._attended_power_cap(spec) == 60  # noqa: SLF001
+    assert cli._attended_power_cap(spec) == 47  # noqa: SLF001
     assert (
         cli._attended_power_cap(  # noqa: SLF001
-            spec.model_copy(update={"slave_after_flow": 45})
+            spec.model_copy(update={"slave_after_flow": 44})
         )
         == 45
     )
@@ -1236,17 +1236,7 @@ def test_terminal_stage_has_a_reserved_slot_and_coalesces_replay() -> None:
     (
         (_after_sample(), ScheduleFlowOutcome.PER_SLOT_POWER_VERIFIED, True),
         (
-            _after_sample(
-                slave_mode="sine",
-                slave_frequency=35,
-                slave_before_mode="constant",
-                slave_before_frequency=0,
-            ),
-            ScheduleFlowOutcome.OWN_SCHEDULE,
-            False,
-        ),
-        (
-            _after_sample(slave_flow=55, slave_before_flow=50),
+            _after_sample(slave_flow=35, slave_before_flow=40),
             ScheduleFlowOutcome.FULL_MASTER_FOLLOW,
             False,
         ),
@@ -1256,24 +1246,7 @@ def test_terminal_stage_has_a_reserved_slot_and_coalesces_replay() -> None:
             False,
         ),
         (
-            _after_sample(slave_flow=45),
-            ScheduleFlowOutcome.A_SLOT_HOLD,
-            False,
-        ),
-        (
-            _after_sample(
-                slave_mode="sine",
-                slave_flow=55,
-                slave_frequency=35,
-                slave_before_mode="constant",
-                slave_before_flow=50,
-                slave_before_frequency=0,
-            ),
-            ScheduleFlowOutcome.REVERSE_SPLIT,
-            False,
-        ),
-        (
-            _after_sample(slave_flow=52),
+            _after_sample(slave_flow=46),
             ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE,
             False,
         ),
@@ -1435,8 +1408,8 @@ def test_status_is_sanitized_but_prints_effective_sample(capsys) -> None:
         empty,
     ) == 0
     output = capsys.readouterr().out
-    assert "master=constant/55%" in output
-    assert "slave=constant/60%" in output
+    assert "master=constant/35%" in output
+    assert "slave=constant/47%" in output
     assert "Schedule transition verified: yes" in output
     assert "Stable slave tuple observed: yes" in output
     assert "Stable observation: 300s" in output
@@ -1971,8 +1944,8 @@ async def test_preflight_persists_full_v3_intent_without_writes(monkeypatch, cap
     output = capsys.readouterr().out
     assert "no control or schedule frame was sent" in output
     assert "pause Independent/Constant master 30% / slave 35%" in output
-    assert "master Sine 50% F40 -> Constant 55%" in output
-    assert "slave Constant 45% -> Sine 60% F35" in output
+    assert "master Sine 40% F50 -> Constant 35%" in output
+    assert "slave Sine 35% F50 -> Constant 47%" in output
     assert _digests()[0].image_sha256 not in output
 
 
@@ -2293,12 +2266,7 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
                         occurred_at=now + timedelta(microseconds=index),
                     )
                 )
-            sample = _after_sample(
-                slave_mode="sine",
-                slave_frequency=35,
-                slave_before_mode="constant",
-                slave_before_frequency=0,
-            )
+            sample = _after_sample(slave_flow=35, slave_before_flow=40)
             self.last_role_sample = sample
             self.last_role_result = SimpleNamespace(schedule_transition_verified=True)
             self.observe(sample)
@@ -2306,7 +2274,7 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
             return ScheduleFlowExperimentResult(
                 operation_id=spec.operation_id,
                 sentinel_qualified=True,
-                outcome=ScheduleFlowOutcome.OWN_SCHEDULE,
+                outcome=ScheduleFlowOutcome.FULL_MASTER_FOLLOW,
                 last_after_sample=sample,
                 schedule_transition_verified=False,
                 stable_slave_tuple_observed=True,
@@ -2328,11 +2296,11 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
     ) == 0
     terminal = intent_store.load()
     assert terminal.phase is HardwareTestIntentPhase.TERMINAL
-    assert terminal.schedule_flow_outcome is ScheduleFlowOutcome.OWN_SCHEDULE
+    assert terminal.schedule_flow_outcome is ScheduleFlowOutcome.FULL_MASTER_FOLLOW
     assert terminal.schedule_transition_verified is False
     assert terminal.stable_slave_tuple_observed is True
     assert terminal.stable_observation_seconds == 300
-    assert terminal.schedule_flow_sample.slave.flow == 60
+    assert terminal.schedule_flow_sample.slave.flow == 35
     assert terminal.schedule_flow_stage_events[-1].stage is ScheduleFlowStage.OUTER_RESTORED
     retained_stages = {event.stage for event in terminal.schedule_flow_stage_events}
     assert {
@@ -2343,7 +2311,7 @@ async def test_run_durably_records_negative_stable_outcome_before_outer_clear(
         ScheduleFlowStage.ROLE_DISARMED,
     } <= retained_stages
     output = capsys.readouterr().out
-    assert "own_schedule" in output
+    assert "full_master_follow" in output
     assert "Stable observation: 300s" in output
 
 

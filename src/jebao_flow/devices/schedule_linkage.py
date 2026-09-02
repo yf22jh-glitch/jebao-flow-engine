@@ -46,7 +46,11 @@ from jebao_flow.protocol.models import (
     LinkageRole,
     ScheduleEntry,
 )
-from jebao_flow.protocol.session import STATE_REPLY_ACTION, RawStateCapture
+from jebao_flow.protocol.session import (
+    STATE_REPLY_ACTION,
+    STATE_REPORT_ACTION,
+    RawStateCapture,
+)
 
 DeviceIdentifier = Annotated[
     str,
@@ -91,13 +95,13 @@ _FIXED_Q2_BOUNDARY_EXCLUSION_SECONDS = 60.0
 # whole path fits before the observation deadline, which preserves a separate rollback reserve.
 _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS = 30.0
 _SCHEDULE_LINKAGE_TEST_MAX_POWER = 45
-_FIXED_Q2_MAX_POWER = 60
+_FIXED_Q2_MAX_POWER = 47
 _FIXED_Q2_MASTER_MANUAL_POWER = 30
 _FIXED_Q2_SLAVE_MANUAL_POWER = 35
-_FIXED_Q2_MASTER_BEFORE = ("sine", 50, 40)
-_FIXED_Q2_MASTER_AFTER = ("constant", 55, 0)
-_FIXED_Q2_SLAVE_BEFORE = ("constant", 45, 0)
-_FIXED_Q2_SLAVE_AFTER = ("sine", 60, 35)
+_FIXED_Q2_MASTER_BEFORE = ("sine", 40, 50)
+_FIXED_Q2_MASTER_AFTER = ("constant", 35, 0)
+_FIXED_Q2_SLAVE_BEFORE = ("sine", 35, 50)
+_FIXED_Q2_SLAVE_AFTER = ("constant", 47, 0)
 _FIXED_Q2_SAFE_FREQUENCY = 20
 _LOGGER = logging.getLogger(__name__)
 
@@ -2008,7 +2012,7 @@ class ScheduleActiveLinkageController:
         states: Mapping[str, DeviceState],
         snapshots: tuple[ScheduleLinkageSnapshot, ...],
     ) -> None:
-        """Bind the widened cap and cross-mode monitor to the one approved schedule."""
+        """Bind the widened cap and same-mode monitor to the one approved schedule."""
 
         after_valid_until = {snapshot.expectation.after_valid_until for snapshot in snapshots}
         if len(after_valid_until) != 1:
@@ -2028,19 +2032,19 @@ class ScheduleActiveLinkageController:
                 _FIXED_Q2_SLAVE_AFTER,
             ),
         }
-        frequency_allowlist = {0, _FIXED_Q2_SAFE_FREQUENCY, 35, 40}
+        frequency_allowlist = {0, _FIXED_Q2_SAFE_FREQUENCY, 50}
         for snapshot in snapshots:
             state = states[snapshot.device_id]
             schedule = state.schedule
             manual_power, before_tuple, after_tuple = expected[snapshot.device_id]
             capture_method = getattr(
                 self._get_device(snapshot.device_id),
-                "get_explicit_state_capture",
+                "get_report_capable_state_capture",
                 None,
             )
             if not callable(capture_method):
                 raise ScheduleLinkagePreflightError(
-                    "fixed Q2 raw capture interface is unavailable",
+                    "fixed Q2 report-capable raw capture interface is unavailable",
                     failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
                 )
             if schedule is None:
@@ -2266,7 +2270,7 @@ class ScheduleActiveLinkageController:
         self,
         spec: ScheduleLinkageSpec,
     ) -> dict[str, DeviceState]:
-        """Capture both decoded states and their exact explicit-reply frames once."""
+        """Capture both decoded states and their exact recognised state frames once."""
 
         self._fixed_capture_pair_ordinal += 1
         ordinal = self._fixed_capture_pair_ordinal
@@ -2280,10 +2284,10 @@ class ScheduleActiveLinkageController:
             participant: Literal["master", "slave"],
         ) -> tuple[str, ScheduleLinkageRawCapture]:
             device = self._get_device(device_id)
-            method = getattr(device, "get_explicit_state_capture", None)
+            method = getattr(device, "get_report_capable_state_capture", None)
             if not callable(method):
                 raise ScheduleLinkageApplyError(
-                    "fixed Q2 raw capture interface disappeared during observation"
+                    "fixed Q2 report-capable raw capture interface disappeared during observation"
                 )
             read_started_at = datetime.now(UTC)
             monotonic_started_at = self._monotonic()
@@ -2295,10 +2299,10 @@ class ScheduleActiveLinkageController:
                 or len(result) != 2
                 or not isinstance(result[0], DeviceState)
                 or not isinstance(result[1], RawStateCapture)
-                or result[1].action != STATE_REPLY_ACTION
+                or result[1].action not in {STATE_REPLY_ACTION, STATE_REPORT_ACTION}
             ):
                 raise ScheduleLinkageApplyError(
-                    "fixed Q2 capture did not return one explicit reply and decoded state"
+                    "fixed Q2 capture did not return one recognised state frame and decoded state"
                 )
             observed = ScheduleLinkageRawCapture(
                 pair_ordinal=ordinal,

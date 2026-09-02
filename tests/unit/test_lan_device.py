@@ -41,7 +41,11 @@ from jebao_flow.protocol.schedule_wire import (
     build_local_wavemaker_pro_schedule_control_payload,
     extract_local_wavemaker_pro_schedule_image,
 )
-from jebao_flow.protocol.session import STATE_REPLY_ACTION, RawStateCapture
+from jebao_flow.protocol.session import (
+    STATE_REPLY_ACTION,
+    STATE_REPORT_ACTION,
+    RawStateCapture,
+)
 from jebao_flow.safety.limits import PowerLimits
 
 
@@ -88,6 +92,7 @@ class _FakeSession:
     read_failures_disconnect = False
     send_failure: Exception | None = None
     heartbeat_failure: BaseException | None = None
+    capture_action = STATE_REPLY_ACTION
 
     def __init__(self, address: str) -> None:
         self.instance_id = len(self.__class__.instances)
@@ -152,7 +157,7 @@ class _FakeSession:
         status_payload = await self.read_raw_state(accept_reports=accept_reports)
         return RawStateCapture(
             wire_frame=b"exact-reply-frame:" + status_payload,
-            action=STATE_REPLY_ACTION,
+            action=self.__class__.capture_action,
             status_payload=status_payload,
         )
 
@@ -174,6 +179,7 @@ def _reset_fake_session() -> None:
     _FakeSession.read_failures_disconnect = False
     _FakeSession.send_failure = None
     _FakeSession.heartbeat_failure = None
+    _FakeSession.capture_action = STATE_REPLY_ACTION
 
 
 def _device(
@@ -256,6 +262,25 @@ async def test_explicit_state_capture_returns_state_and_frame_from_one_reply_onl
     assert capture.status_payload == _FakeSession.state
     assert capture.wire_frame == b"exact-reply-frame:" + _FakeSession.state
     assert session.read_accept_reports == [False]
+    assert session.sent == []
+
+
+@pytest.mark.parametrize("action", (STATE_REPLY_ACTION, STATE_REPORT_ACTION))
+async def test_report_capable_state_capture_returns_selected_recognised_frame(
+    action: int,
+) -> None:
+    _FakeSession.state = _pro_state(enabled=True, power=58)
+    _FakeSession.capture_action = action
+    device = _device()
+    await device.connect()
+
+    state, capture = await device.get_report_capable_state_capture()
+
+    [session] = _FakeSession.instances
+    assert state.power == 58
+    assert capture.action == action
+    assert capture.status_payload == _FakeSession.state
+    assert session.read_accept_reports == [True]
     assert session.sent == []
 
 

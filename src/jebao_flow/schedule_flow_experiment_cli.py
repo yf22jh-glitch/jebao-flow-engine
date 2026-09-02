@@ -107,7 +107,7 @@ from jebao_flow.persistence import (
 
 _TOKEN_VERSION = 1
 _MAX_POWER = 45
-_FIXED_Q2_MAX_POWER = 60
+_FIXED_Q2_MAX_POWER = 47
 _BOUNDARY_MIN_LEAD_SECONDS = 540
 _BOUNDARY_MAX_LEAD_SECONDS = 600
 _RUN_MIN_LEAD_SECONDS = 510
@@ -273,11 +273,11 @@ def _fixed_spec(
         master_device_id=master_device_id,
         slave_device_id=slave_device_id,
         boundary_time=boundary_time,
-        master_before_flow=50,
-        slave_before_flow=45,
-        master_after_flow=55,
-        slave_after_flow=60,
-        sine_frequency=40,
+        master_before_flow=40,
+        slave_before_flow=35,
+        master_after_flow=35,
+        slave_after_flow=47,
+        sine_frequency=50,
         safe_frequency=20,
         # ScheduleLinkageController retains a 15-second rollback reserve.  A 915-second
         # authority therefore yields the maintainer-approved full 900-second read-only epoch.
@@ -308,7 +308,7 @@ def _fixed_spec(
 
 
 def _attended_power_cap(spec: ScheduleFlowExperimentSpec) -> int:
-    """Open the attended 60% ceiling only for the approved fixed-Q2 signature."""
+    """Open the attended 47% ceiling only for the approved fixed-Q2 signature."""
 
     return _FIXED_Q2_MAX_POWER if spec.is_fixed_q2_plan else _MAX_POWER
 
@@ -714,8 +714,8 @@ async def _preflight(
     else:
         print("Plan: pause Independent/Constant master 30% / slave 35%.")
         print(
-            "Boundary plan: master Sine 50% F40 -> Constant 55%; "
-            "slave Constant 45% -> Sine 60% F35; roles master/async_slave."
+            "Boundary plan: master Sine 40% F50 -> Constant 35%; "
+            "slave Sine 35% F50 -> Constant 47%; roles master/async_slave."
         )
         print("Observation: full 900s epoch with at least 300s stable post-boundary evidence.")
     print(f"Confirmation token: {token}")

@@ -81,11 +81,11 @@ def _spec(**updates: object) -> ScheduleFlowExperimentSpec:
 
 def _fixed_q2_spec(**updates: object) -> ScheduleFlowExperimentSpec:
     values: dict[str, object] = {
-        "master_before_flow": 50,
-        "slave_before_flow": 45,
-        "master_after_flow": 55,
-        "slave_after_flow": 60,
-        "sine_frequency": 40,
+        "master_before_flow": 40,
+        "slave_before_flow": 35,
+        "master_after_flow": 35,
+        "slave_after_flow": 47,
+        "sine_frequency": 50,
         "safe_frequency": 20,
         "observation_window_seconds": 915,
         "post_boundary_stability_seconds": 300,
@@ -134,22 +134,22 @@ def _after_sample(
 def _fixed_q2_after_sample(
     *,
     slave_before_mode: str = "sine",
-    slave_before_flow: int = 45,
-    slave_before_frequency: int = 40,
+    slave_before_flow: int = 35,
+    slave_before_frequency: int = 50,
     slave_after_mode: str = "constant",
-    slave_after_flow: int = 60,
+    slave_after_flow: int = 47,
     slave_after_frequency: int = 5,
 ) -> ScheduleLinkageSample:
     return ScheduleLinkageSample(
         observed_at=datetime.now(UTC),
         phase="after",
-        master=ScheduleAutoEvidence(mode="constant", flow=55, frequency=5),
+        master=ScheduleAutoEvidence(mode="constant", flow=35, frequency=5),
         slave=ScheduleAutoEvidence(
             mode=slave_after_mode,
             flow=slave_after_flow,
             frequency=slave_after_frequency,
         ),
-        master_before=ScheduleAutoEvidence(mode="sine", flow=50, frequency=40),
+        master_before=ScheduleAutoEvidence(mode="sine", flow=40, frequency=50),
         slave_before=ScheduleAutoEvidence(
             mode=slave_before_mode,
             flow=slave_before_flow,
@@ -292,7 +292,7 @@ def test_plan_builds_two_distinguishable_segments_and_clears_every_other_slot() 
     assert all(slot.wire_bytes == LOCAL_WAVEMAKER_PRO_UNUSED_EE for slot in slave.slots[2:])
 
 
-def test_fixed_q2_plan_builds_opposite_mode_trajectories_and_safe_manual_controls() -> None:
+def test_fixed_q2_plan_builds_same_mode_trajectories_and_safe_manual_controls() -> None:
     spec = _fixed_q2_spec()
 
     master_patch, slave_patch = spec.temporary_schedule_spec().device_patches
@@ -314,23 +314,23 @@ def test_fixed_q2_plan_builds_opposite_mode_trajectories_and_safe_manual_control
         "constant",
     ]
     assert [entry.mode for entry in slave_entries if entry is not None] == [
-        "constant",
         "sine",
+        "constant",
     ]
     assert [entry.parameters["flow"] for entry in master_entries if entry is not None] == [
-        50,
-        55,
+        40,
+        35,
     ]
     assert [entry.parameters["flow"] for entry in slave_entries if entry is not None] == [
-        45,
-        60,
+        35,
+        47,
     ]
     assert [
         entry.parameters["frequency"] for entry in master_entries if entry is not None
-    ] == [40, 0]
+    ] == [50, 0]
     assert [
         entry.parameters["frequency"] for entry in slave_entries if entry is not None
-    ] == [0, 35]
+    ] == [50, 0]
 
 
 def test_plan_binds_five_minute_stability_to_role_observation() -> None:
@@ -1568,17 +1568,8 @@ def test_slave_remaining_constant_with_its_prior_flow_is_preserved_as_fixed_flow
         ),
         (
             _fixed_q2_after_sample(
-                slave_before_mode="constant",
-                slave_before_frequency=5,
-                slave_after_mode="sine",
-                slave_after_frequency=35,
-            ),
-            ScheduleFlowOutcome.OWN_SCHEDULE,
-        ),
-        (
-            _fixed_q2_after_sample(
-                slave_before_flow=50,
-                slave_after_flow=55,
+                slave_before_flow=40,
+                slave_after_flow=35,
             ),
             ScheduleFlowOutcome.FULL_MASTER_FOLLOW,
         ),
@@ -1590,24 +1581,9 @@ def test_slave_remaining_constant_with_its_prior_flow_is_preserved_as_fixed_flow
             ScheduleFlowOutcome.COMMON_MANUAL_FLOW,
         ),
         (
-            _fixed_q2_after_sample(slave_after_flow=45),
-            ScheduleFlowOutcome.A_SLOT_HOLD,
-        ),
-        (
-            _fixed_q2_after_sample(
-                slave_before_mode="constant",
-                slave_before_flow=50,
-                slave_before_frequency=5,
-                slave_after_mode="sine",
-                slave_after_flow=55,
-                slave_after_frequency=35,
-            ),
-            ScheduleFlowOutcome.REVERSE_SPLIT,
-        ),
-        (
             _fixed_q2_after_sample(
                 slave_after_mode="sine",
-                slave_after_frequency=35,
+                slave_after_frequency=50,
             ),
             ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE,
         ),
@@ -1620,20 +1596,18 @@ def test_fixed_q2_classifier_uses_the_complete_before_after_trajectory(
     assert classify_schedule_flow_sample(_fixed_q2_spec(), sample) is expected
 
 
-def test_fixed_q2_own_schedule_sine_60_can_never_be_the_yes_cell() -> None:
-    own_schedule = _fixed_q2_after_sample(
-        slave_before_mode="constant",
-        slave_before_frequency=5,
-        slave_after_mode="sine",
-        slave_after_frequency=35,
+def test_fixed_q2_full_master_flow_can_never_be_the_yes_cell() -> None:
+    full_master = _fixed_q2_after_sample(
+        slave_before_flow=40,
+        slave_after_flow=35,
     )
 
     assert (
-        classify_schedule_flow_sample(_fixed_q2_spec(), own_schedule)
-        is ScheduleFlowOutcome.OWN_SCHEDULE
+        classify_schedule_flow_sample(_fixed_q2_spec(), full_master)
+        is ScheduleFlowOutcome.FULL_MASTER_FOLLOW
     )
     assert (
-        classify_schedule_flow_sample(_fixed_q2_spec(), own_schedule)
+        classify_schedule_flow_sample(_fixed_q2_spec(), full_master)
         is not ScheduleFlowOutcome.PER_SLOT_POWER_VERIFIED
     )
 
@@ -1648,7 +1622,7 @@ def test_fixed_q2_own_schedule_sine_60_can_never_be_the_yes_cell() -> None:
             update={
                 "master_before": ScheduleAutoEvidence(
                     mode="constant",
-                    flow=50,
+                    flow=40,
                     frequency=5,
                 )
             }
@@ -1667,11 +1641,11 @@ def test_fixed_q2_classifier_refuses_yes_without_exact_stable_master_pre_evidenc
 @pytest.mark.parametrize(
     ("field", "different_value"),
     (
-        ("master_before_flow", 49),
-        ("slave_before_flow", 44),
-        ("master_after_flow", 54),
-        ("slave_after_flow", 59),
-        ("sine_frequency", 39),
+        ("master_before_flow", 39),
+        ("slave_before_flow", 34),
+        ("master_after_flow", 34),
+        ("slave_after_flow", 46),
+        ("sine_frequency", 49),
     ),
 )
 def test_fixed_q2_cap_opens_only_for_the_exact_five_value_signature(
@@ -1682,7 +1656,7 @@ def test_fixed_q2_cap_opens_only_for_the_exact_five_value_signature(
     slave = _PauseDevice("slave", power=35, events=[])
     controller = _staged_controller(master, slave)
     exact = _fixed_q2_spec()
-    changed = _fixed_q2_spec(**{field: different_value})
+    changed = exact.model_copy(update={field: different_value})
 
     controller._assert_experiment_power_guard(exact)  # noqa: SLF001
     assert changed.is_fixed_q2_plan is False

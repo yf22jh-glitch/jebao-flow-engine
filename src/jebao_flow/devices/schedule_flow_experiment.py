@@ -94,11 +94,10 @@ _STAGED_A_CONVERGENCE_TIMEOUT_SECONDS = 30.0
 _STAGED_A_CONVERGENCE_RETRY_SECONDS = 1.0
 _STAGED_CURRENT_AUTO_MODES = frozenset({"constant", "pulse", "sine", "feed"})
 _SCHEDULE_FLOW_TEST_MAX_POWER = 45
-_FIXED_Q2_MAX_POWER = 60
-_FIXED_Q2_SIGNATURE = (50, 45, 55, 60, 40)
+_FIXED_Q2_MAX_POWER = 47
+_FIXED_Q2_SIGNATURE = (40, 35, 35, 47, 50)
 _FIXED_Q2_MASTER_MANUAL_POWER = 30
 _FIXED_Q2_SLAVE_MANUAL_POWER = 35
-_FIXED_Q2_SLAVE_SINE_FREQUENCY = 35
 _FIXED_Q2_SAFE_FREQUENCY = 20
 # TimerON staging, fresh role preflight, and exact inverse restoration are outside the fixed
 # read-only role epoch.  Keep their existing hard 20-minute ceiling while reserving enough time
@@ -167,7 +166,10 @@ class ScheduleFlowExperimentSpec(BaseModel):
             raise ValueError("the experiment boundary cannot be midnight")
         if self.slave_before_flow == self.slave_after_flow:
             raise ValueError("the slave schedule must request a different A and B flow")
-        if self.slave_before_flow == self.master_after_flow:
+        if (
+            self.slave_before_flow == self.master_after_flow
+            and not _is_fixed_q2_plan(self)
+        ):
             raise ValueError("the prior slave flow must differ from the next master flow")
         if self.master_after_flow == self.slave_after_flow:
             raise ValueError("the post-boundary slave flow must differ from the master")
@@ -262,12 +264,12 @@ class ScheduleFlowExperimentSpec(BaseModel):
             slave_patch = _two_segment_patch(
                 self.slave_device_id,
                 boundary_time=self.boundary_time,
-                before_mode="constant",
+                before_mode="sine",
                 before_flow=self.slave_before_flow,
-                before_frequency=0,
-                after_mode="sine",
+                before_frequency=self.sine_frequency,
+                after_mode="constant",
                 after_flow=self.slave_after_flow,
-                after_frequency=_FIXED_Q2_SLAVE_SINE_FREQUENCY,
+                after_frequency=0,
             )
         else:
             master_patch = _two_segment_patch(
@@ -311,7 +313,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
 
 
 def _is_fixed_q2_plan(spec: ScheduleFlowExperimentSpec) -> bool:
-    """Recognize the one token-compatible cross-mode plan without adding persisted fields."""
+    """Recognize the one token-compatible same-mode plan without adding persisted fields."""
 
     return (
         spec.master_before_flow,
@@ -2274,14 +2276,6 @@ def classify_schedule_flow_sample(
         ):
             return ScheduleFlowOutcome.PER_SLOT_POWER_VERIFIED
         if (
-            slave_before.mode == "constant"
-            and slave_before.flow == spec.slave_before_flow
-            and slave_mode == "sine"
-            and slave_flow == spec.slave_after_flow
-            and sample.slave.frequency == _FIXED_Q2_SLAVE_SINE_FREQUENCY
-        ):
-            return ScheduleFlowOutcome.OWN_SCHEDULE
-        if (
             slave_before.mode == "sine"
             and slave_before.flow == spec.master_before_flow
             and slave_before.frequency == spec.sine_frequency
@@ -2299,13 +2293,6 @@ def classify_schedule_flow_sample(
             and slave_flow == spec.slave_before_flow
         ):
             return ScheduleFlowOutcome.A_SLOT_HOLD
-        if (
-            slave_before.mode == "constant"
-            and slave_before.flow == spec.master_before_flow
-            and slave_mode == "sine"
-            and slave_flow == spec.master_after_flow
-        ):
-            return ScheduleFlowOutcome.REVERSE_SPLIT
         return ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
 
     if (

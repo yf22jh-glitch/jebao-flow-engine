@@ -334,6 +334,29 @@ class LanJebaoDevice(JebaoDevice):
                 raise
             return state, capture
 
+    async def get_report_capable_state_capture(
+        self,
+    ) -> tuple[DeviceState, RawStateCapture]:
+        """Return decoded state and the exact selected reply or state-report frame."""
+
+        async with self._io_lock:
+            if self._session_retired:
+                raise DeviceConnectionError(
+                    f"retired session for {self._device_id!r} must be replaced before reading"
+                )
+            try:
+                capture = await self._session.read_raw_state_capture(accept_reports=True)
+                state = self._decode_state(capture.status_payload)
+            except asyncio.CancelledError:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            except Exception:
+                self._session_retired = True
+                self._quarantine_session_now(self._session)
+                raise
+            return state, capture
+
     async def heartbeat(self) -> None:
         """Exchange one GAgent heartbeat without emitting a device-control frame."""
 

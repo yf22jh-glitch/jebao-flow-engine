@@ -36,7 +36,11 @@ from jebao_flow.persistence.schedule_linkage import (
 from jebao_flow.protocol.errors import ProtocolConnectionError
 from jebao_flow.protocol.models import DeviceSchedule, DeviceTarget, LinkageRole, ScheduleEntry
 from jebao_flow.protocol.schedule_wire import decode_local_wavemaker_pro_slot_wire
-from jebao_flow.protocol.session import STATE_REPLY_ACTION, RawStateCapture
+from jebao_flow.protocol.session import (
+    STATE_REPLY_ACTION,
+    STATE_REPORT_ACTION,
+    RawStateCapture,
+)
 
 
 def _entry(
@@ -140,6 +144,8 @@ class _ScheduleDevice(SimulatedJebaoDevice):
         self.ordinary_state_read_cancelled_count = 0
         self.explicit_state_read_count = 0
         self.explicit_state_capture_read_count = 0
+        self.report_capable_state_capture_read_count = 0
+        self.report_capable_capture_action = STATE_REPLY_ACTION
         self.fail_explicit_state_reads_remaining = 0
         self.fail_explicit_state_read_numbers: set[int] = set()
         self.explicit_state_read_failures: dict[int, BaseException] = {}
@@ -424,6 +430,20 @@ class _ScheduleDevice(SimulatedJebaoDevice):
             status_payload=status_payload,
         )
 
+    async def get_report_capable_state_capture(self):
+        self.report_capable_state_capture_read_count += 1
+        state = await self.get_explicit_state()
+        marker = (
+            f"{self.device_id}:report-capable:"
+            f"{self.report_capable_state_capture_read_count}"
+        ).encode()
+        status_payload = marker.ljust(452, b"\x00")
+        return state, RawStateCapture(
+            wire_frame=b"recognised-state-frame:" + status_payload,
+            action=self.report_capable_capture_action,
+            status_payload=status_payload,
+        )
+
     async def heartbeat(self) -> None:
         self.heartbeat_count += 1
         self.heartbeat_started_at.append(self.virtual_time.value)
@@ -657,11 +677,11 @@ def _fixed_q2_role_spec() -> ScheduleLinkageSpec:
         master_device_id="master",
         slave_device_id="slave",
         boundary_time="18:11",
-        master_before_flow=50,
-        slave_before_flow=45,
-        master_after_flow=55,
-        slave_after_flow=60,
-        sine_frequency=40,
+        master_before_flow=40,
+        slave_before_flow=35,
+        master_after_flow=35,
+        slave_after_flow=47,
+        sine_frequency=50,
         safe_frequency=20,
         observation_window_seconds=915,
         post_boundary_stability_seconds=300,
@@ -715,10 +735,13 @@ def _assert_only_linkage_calls(*devices: _ScheduleDevice) -> None:
     assert all(command.name == "linkage" for device in devices for command in device.commands)
 
 
+@pytest.mark.parametrize("slave_action", (STATE_REPLY_ACTION, STATE_REPORT_ACTION))
 async def test_fixed_q2_pair_capture_uses_one_same_read_frame_per_device(
     tmp_path: Path,
+    slave_action: int,
 ) -> None:
     master, slave = await _ready_staged_pair()
+    slave.report_capable_capture_action = slave_action
     captures = []
     controller = _controller(
         master,
@@ -735,14 +758,21 @@ async def test_fixed_q2_pair_capture_uses_one_same_read_frame_per_device(
     )
 
     assert set(states) == {"master", "slave"}
-    assert master.explicit_state_capture_read_count == 1
-    assert slave.explicit_state_capture_read_count == 1
+    assert master.report_capable_state_capture_read_count == 1
+    assert slave.report_capable_state_capture_read_count == 1
+    assert master.explicit_state_capture_read_count == 0
+    assert slave.explicit_state_capture_read_count == 0
     assert master.explicit_state_read_count == 1
     assert slave.explicit_state_read_count == 1
     assert sorted(capture.participant for capture in captures) == ["master", "slave"]
     assert {capture.pair_ordinal for capture in captures} == {1}
-    assert all(capture.capture.action == STATE_REPLY_ACTION for capture in captures)
-    assert all(capture.capture.wire_frame.startswith(b"exact-frame:") for capture in captures)
+    assert {
+        capture.participant: capture.capture.action for capture in captures
+    } == {"master": STATE_REPLY_ACTION, "slave": slave_action}
+    assert all(
+        capture.capture.wire_frame.startswith(b"recognised-state-frame:")
+        for capture in captures
+    )
 
 
 async def test_fixed_q2_raw_sink_failure_is_recorded_without_a_second_device_read(
@@ -766,13 +796,15 @@ async def test_fixed_q2_raw_sink_failure_is_recorded_without_a_second_device_rea
     await controller._read_fixed_q2_pair_captures(_fixed_q2_role_spec())  # noqa: SLF001
 
     assert controller._raw_capture_persistence_failed is True  # noqa: SLF001
-    assert master.explicit_state_capture_read_count == 1
-    assert slave.explicit_state_capture_read_count == 1
+    assert master.report_capable_state_capture_read_count == 1
+    assert slave.report_capable_state_capture_read_count == 1
+    assert master.explicit_state_capture_read_count == 0
+    assert slave.explicit_state_capture_read_count == 0
     assert master.explicit_state_read_count == 1
     assert slave.explicit_state_read_count == 1
 
 
-async def test_fixed_q2_preconditions_accept_only_the_approved_opposite_mode_schedule(
+async def test_fixed_q2_preconditions_accept_only_the_approved_same_mode_schedule(
     tmp_path: Path,
 ) -> None:
     master, slave = await _ready_pair(
@@ -780,12 +812,12 @@ async def test_fixed_q2_preconditions_accept_only_the_approved_opposite_mode_sch
         linked_clock_step_seconds=1,
     )
     master.entries = (
-        _entry(0, "00:00", "18:11", "sine", flow=50, frequency=40, feed_time=0),
-        _entry(1, "18:11", "23:59", "constant", flow=55, frequency=0, feed_time=0),
+        _entry(0, "00:00", "18:11", "sine", flow=40, frequency=50, feed_time=0),
+        _entry(1, "18:11", "23:59", "constant", flow=35, frequency=0, feed_time=0),
     )
     slave.entries = (
-        _entry(0, "00:00", "18:11", "constant", flow=45, frequency=0, feed_time=0),
-        _entry(1, "18:11", "23:59", "sine", flow=60, frequency=35, feed_time=0),
+        _entry(0, "00:00", "18:11", "sine", flow=35, frequency=50, feed_time=0),
+        _entry(1, "18:11", "23:59", "constant", flow=47, frequency=0, feed_time=0),
     )
     await master.set_power(30)
     await slave.set_power(35)
@@ -799,8 +831,8 @@ async def test_fixed_q2_preconditions_accept_only_the_approved_opposite_mode_sch
             update={
                 "observed_attributes": {
                     "AutoMode": "sine",
-                    "AutoFlow": 50,
-                    "AutoFreq": 40,
+                    "AutoFlow": 40,
+                    "AutoFreq": 50,
                     "AutoFeedTime": 15,
                 }
             }
@@ -808,9 +840,9 @@ async def test_fixed_q2_preconditions_accept_only_the_approved_opposite_mode_sch
         "slave": (await slave.get_state()).model_copy(
             update={
                 "observed_attributes": {
-                    "AutoMode": "constant",
-                    "AutoFlow": 45,
-                    "AutoFreq": 5,
+                    "AutoMode": "sine",
+                    "AutoFlow": 35,
+                    "AutoFreq": 50,
                     "AutoFeedTime": 15,
                 }
             }
@@ -835,13 +867,13 @@ async def test_fixed_q2_preconditions_accept_only_the_approved_opposite_mode_sch
     assert [snapshot.power for snapshot in snapshots] == [30, 35]
     assert [snapshot.expectation.before.mode for snapshot in snapshots] == [
         "sine",
-        "constant",
+        "sine",
     ]
     assert [snapshot.expectation.after_mode for snapshot in snapshots] == [
         "constant",
-        "sine",
+        "constant",
     ]
-    assert controller._staged_role_frequency_allowlist == {0, 5, 20, 35, 40}  # noqa: SLF001
+    assert controller._staged_role_frequency_allowlist == {0, 20, 50}  # noqa: SLF001
 
     now = datetime.now(UTC)
     record = ScheduleLinkageRecord(
