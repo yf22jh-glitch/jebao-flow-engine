@@ -454,6 +454,126 @@ operation의 자동 재시도는 없습니다. corrected 실기가 필요하면 
 명시적 승인, 앱과 같은 `independent -> sync_slave -> async_slave` sequence와 fresh post-boundary
 slave evidence를 고정한 별도 해제 커밋, 그리고 on-site hardware approver 승인이 모두 필요합니다.
 
+### 2026-09-02 앱 role sequence 교정 Q2-slotflow 단회 해제
+
+repository maintainer가 위 `UNKNOWN`과 cached Pro 앱의 role dataflow를 확인한 뒤, 기존 fixed
+schedule은 그대로 두고 앱과 같은 `independent -> sync_slave -> async_slave` 순서와 매 pair의
+fresh transport만 교정한 **실장비 operation 1회**를 명시적으로 승인했습니다. 특히
+`sync_slave`를 적용한 다음 새 paired read에서 해당 두 장비가 실제 master·sync slave로 지정돼
+동작하는지 확인하기 전에는 `async_slave`를 보내지 말라고 지시했습니다. 질문·판정·복원 계약의
+단일 출처는 commit `9c0e274`의
+[`Native ASYNC slave 슬롯별 Flow 앱-sequence 교정 단회 계획`](docs/native-async-slave-slot-flow-app-sequence-recheck.md)
+입니다.
+
+schedule·safe manual·판정 signature와 상한은 직전 실행에서 변경하지 않습니다.
+
+- master safe manual `Constant / Flow 30 / Frequency 20`
+- slave safe manual `Constant / Flow 35 / Frequency 20`
+- master A=`Sine / Flow 40 / Frequency 50`, B=`Constant / Flow 35 / wire Frequency 0`
+- slave A=`Sine / Flow 35 / Frequency 50`, B=`Constant / Flow 47 / wire Frequency 0`
+- 두 장비의 A/B 경계는 동일한 device-local 절대 시각, complete observation epoch는 `900초`,
+  boundary exclusion은 `T-60초`부터 `T+60초`, post-boundary 안정은 최소 `300초`
+- temporary schedule·native role authority 아래 guarded Flow 상한은 `47`
+
+이번 단회에서 허용하는 source 변경은
+`src/jebao_flow/devices/schedule_linkage.py` 하나뿐입니다. 직접 대응하는
+`tests/unit/test_schedule_linkage_transaction.py`를 수정하고, persisted record의 기본값 추가가
+기존 outer event·CLI 직렬화 테스트에 직접 영향을 줄 때만
+`tests/unit/test_schedule_flow_experiment.py`와
+`tests/unit/test_schedule_flow_experiment_cli.py`를 함께 수정할 수 있습니다.
+
+다음 파일과 경로는 변경하지 않습니다.
+
+- `src/jebao_flow/devices/schedule_flow_experiment.py`의 fixed schedule·classifier·상한
+- `src/jebao_flow/devices/schedule_transaction.py`, `src/jebao_flow/devices/linkage.py`,
+  `src/jebao_flow/devices/lan.py`
+- 두 CLI source, 일반 daemon·MQTT, LAN read/write API, rollback write path와 persistence store
+
+role write는 다음 durable 순서로만 수행합니다.
+
+1. master intent를 먼저 fsync하고 기존 `Linkage=master`를 정확히 한 번 보낸 뒤 기존 fresh pair
+   검증을 완료합니다.
+2. slave의 기존 write intent와 새 `sync_intent`를 같은 durable successor에 fsync한 뒤
+   `Linkage=sync_slave`를 정확히 한 번 보냅니다. ACK나 read-back이 불명확해도 같은 control
+   frame을 재전송하지 않습니다.
+3. adapter가 target 일치를 확인해 정상 반환한 뒤에도 새 paired session에서 recognised state
+   frame을 장비별 한 번씩만 읽습니다. physical binding·online/no-error/`SwitchON`,
+   master=`master`·slave=`sync_slave`, 양쪽 `TimerON`, 양쪽 temporary schedule fingerprint,
+   양쪽 active Flow `<=47`을 모두 적극 확인한 경우에만 `sync_verified`를 fsync합니다.
+4. 위 확인이 하나라도 실패하거나 불명확하면 `async_slave` write는 **0회**이며, 관측 raw와
+   진단을 남기고 ordered rollback으로 갑니다.
+5. `sync_verified` 뒤 `async_intent`를 fsync하고 나서만 `Linkage=async_slave`를 정확히 한 번
+   보냅니다. adapter 정상 반환을 `async_returned`로 fsync한 뒤 기존 final pair 검증과 monitor로
+   진행합니다. 이 frame도 재전송하지 않습니다.
+
+slave progress는 새 실행에서만 `sync_then_async`로 표시하며 canonical prefix는
+`() -> sync_intent -> sync_verified -> async_intent -> async_returned`뿐입니다. 기존 journal은
+기본 `direct`로 계속 읽습니다. recovery가 write 전에 허용하는 slave role은 durable prefix와
+detach 상태에 따라 다음으로 제한합니다.
+
+- `()`: `independent`
+- `sync_intent`: `independent | sync_slave`
+- `sync_verified`: `sync_slave`
+- `async_intent`: `sync_slave | async_slave`
+- `async_returned`: `async_slave`
+- slave detach 기록 뒤: `independent`
+
+이 세부 progress는 기존 master-first `linkage_write_intent_device_ids`·`linked_device_ids`를
+대체하지 않고 합성합니다. recovery는 기존 역순인 slave detach 뒤 master detach를 유지합니다.
+중간 `sync_slave`가 manual DP를 바꾸지 않는다고 가정하지 않으며, exact role-only detach가 그
+부수 drift로 terminal이 되지 못하면 소유된 outer journal의 기존 audited external-disarm proof만
+사용합니다. 새 복구 write·새 recovery path는 만들지 않습니다.
+
+fixed monitor는 각 pair마다 기존 paired disconnect/connect의 uninterruptible boundary를 끝낸 뒤
+새 session에서 장비별 recognised frame을 정확히 한 번 선택합니다. 같은 session의 두 번째 판정
+read와 같은 ordinal의 transport retry는 금지합니다. 한 participant가 실패해도 형제의 성공 raw는
+보존하며, action `0x03`과 `0x04`의 구성·frame-local `NowTime`·host read 구간을 분리 기록합니다.
+`0x04`는 explicit reply나 ACK로 부르지 않고, staging/TimerON arming 뒤이며 같은 boundary side인
+frame만 판정합니다. sync 중간 확인에 쓰인 첫 raw pair ordinal은 monitor 판정 sample로 세지
+않고, `async_returned` 뒤 다음 ordinal부터 boundary monitor를 시작합니다.
+
+monitor acquisition은 paired refresh와 capture 전체에 `8초` authority deadline을 두고, acquisition
+완료 뒤 다음 시작까지 최소 `10초`를 기다립니다. 연속 acquisition failure가 `3회`면 새 연결을
+중단하고 `UNKNOWN` ordered rollback으로 갑니다. 900초 동안 최대 paired refresh `91회`, device
+connect/auth `182회`이며, 정상 active-Flow 점검 간격은 최대 약 `18초`입니다. uninterruptible
+refresh의 component timeout과 세 번의 연속 실패가 겹치면 마지막 valid sample 이후 최대 약
+`90초` 동안 새 sample로 Flow 상한을 평가하지 못할 수 있음을 실행 전에 기록합니다. refresh와
+capture 오류는 reason뿐 아니라 allow-listed 예외 class도 남깁니다. 실행 기록에는 실제 paired
+refresh·device connect/auth 횟수와 transport 예외 class 분포를 남기고, `async_slave`에 반복
+재연결·재인증을 가한 첫 실행이라는 measurement confound도 판정과 분리해 명시합니다.
+
+physical identity·서로 다른 binding, 장비 limits·step, single-write, durable journal·fsync,
+attended lease, stop·safety authority, exact ordered rollback은 완화하지 않습니다. 첫 hardware write
+뒤 조기 ordered recovery 조건은 다음 다섯 가지뿐입니다.
+
+1. physical identity binding 불일치
+2. temporary schedule·native role authority 아래 실제 또는 보고된 Flow가 `47` 초과
+3. 펌프·수조의 구체적 위험 동작
+4. durable journal·복구 권한·현장 물리 차단 수단 상실
+5. 현장 감시자 또는 사용자의 명시적 비상 정지
+
+diagnostic read 오류, action `0x04`, bounded tuple 불일치는 같은 write를 재전송할 이유가 아닙니다.
+sync 중간의 적극 확인 실패는 다음 write 권한을 만들지 않으며, monitor의 연속 실패 상한은 새
+연결 폭주를 끝내는 measurement 종료일 뿐 여섯 번째 물리 safety condition이 아닙니다.
+
+source commit 전에는 직접 unit·fault-injection 테스트와 전체 suite를 통과시키고 Claude의
+read-only `COMMIT_OK`를 받습니다. exact commit의 Linux/amd64 image를 만들고 revision·fixed
+signature·Flow 상한을 대조한 뒤, 장비 write 0인 fresh baseline collector로 두 physical binding,
+원 controls와 두 432-byte schedule image를 다시 보존합니다. live config는 정확히 두 Pro만
+write-enabled여야 하고 다른 Observer·writer·recovery supervisor가 없어야 하며, TCP 12416 연결
+0과 attended lease 단일 보유를 첫 write 직전에 다시 확인합니다.
+
+repository maintainer 겸 on-site hardware approver는 물리 차단 수단의 구체적 열거를 면제하고
+현장에 수습 가능한 인원이 있다고 확인했습니다. 이 operation별 결정은
+`docs/hardware-readiness.md`의 물리 전원 차단 확인 항목을 충족으로 바꾸거나 삭제하지 않습니다.
+실제 첫 write는 그 문서의 유효한 조건을 다시 확인한 뒤에만 시작합니다.
+
+실행은 새 operation id와 fresh device-local 경계로 정확히 한 번만 수행합니다. 결과와 무관하게
+기존 ordered restore와 서로 다른 두 source-attested fresh collector의 원 controls·두 image
+byte-exact 검증을 완료하고 새 `docs/runs/` 기록을 append-only로 커밋하면 이 해제는 자동 소진되고
+§1 동결이 다시 적용됩니다. 비-terminal intent가 남으면 새 실험과 fixed 상수 변경을 금지하고,
+이 source의 exact image로 해당 operation의 기존 attended recovery와 read-only 검증만 허용합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
