@@ -24,6 +24,8 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageRunFailure,
     ScheduleLinkageRunProgressEvent,
     ScheduleLinkageRunProgressKind,
+    ScheduleLinkageSlaveRoleProgress,
+    ScheduleLinkageSlaveRoleSequence,
     ScheduleLinkageSpec,
     ScheduleLinkageStopReason,
     schedule_linkage_confirmation_token,
@@ -517,6 +519,30 @@ class _RecordingStore(JsonScheduleLinkageJournalStore):
         super().save(record)
 
 
+class _UnitScheduleLinkageStore:
+    """Minimal exact-successor store for direct private-method fault tests."""
+
+    def __init__(self) -> None:
+        self.record: ScheduleLinkageRecord | None = None
+
+    def load(self) -> ScheduleLinkageRecord | None:
+        return self.record
+
+    def create(self, record: ScheduleLinkageRecord) -> None:
+        assert self.record is None
+        self.record = record
+
+    def save(self, record: ScheduleLinkageRecord) -> None:
+        assert self.record is not None
+        self.record = record
+
+    def confirms_lease_successor(self, record: ScheduleLinkageRecord) -> bool:
+        return self.record == record
+
+    def clear(self) -> None:
+        self.record = None
+
+
 class _VirtualTime:
     def __init__(self, advance_per_sleep: float = 20) -> None:
         self.value = 0.0
@@ -695,6 +721,100 @@ def _fixed_q2_role_spec() -> ScheduleLinkageSpec:
     ).role_observation_spec()
 
 
+async def _fixed_q2_app_sequence_record(
+    controller: ScheduleActiveLinkageController,
+    store: _UnitScheduleLinkageStore,
+    master: _ScheduleDevice,
+    slave: _ScheduleDevice,
+) -> tuple[ScheduleLinkageRecord, object]:
+    """Prepare the exact durable master successor immediately before slave Sync."""
+
+    for device in (master, slave):
+        device.base_clock = datetime(2026, 8, 26, 18, 9, 20)
+    master.entries = (
+        _entry(0, "00:00", "18:11", "sine", flow=40, frequency=50, feed_time=0),
+        _entry(1, "18:11", "23:59", "constant", flow=35, frequency=0, feed_time=0),
+    )
+    slave.entries = (
+        _entry(0, "00:00", "18:11", "sine", flow=35, frequency=50, feed_time=0),
+        _entry(1, "18:11", "23:59", "constant", flow=47, frequency=0, feed_time=0),
+    )
+    await master.set_power(30)
+    await slave.set_power(35)
+    for device in (master, slave):
+        await device.set_mode("constant")
+        await device.set_frequency(20)
+        device.calls.clear()
+        device.commands.clear()
+    states = {
+        "master": (await master.get_state()).model_copy(
+            update={
+                "observed_attributes": {
+                    "AutoMode": "sine",
+                    "AutoFlow": 40,
+                    "AutoFreq": 50,
+                    "AutoFeedTime": 15,
+                }
+            }
+        ),
+        "slave": (await slave.get_state()).model_copy(
+            update={
+                "observed_attributes": {
+                    "AutoMode": "sine",
+                    "AutoFlow": 35,
+                    "AutoFreq": 50,
+                    "AutoFeedTime": 15,
+                }
+            }
+        ),
+    }
+    spec = _fixed_q2_role_spec()
+    snapshots = controller._snapshots_from_states(spec, states)  # noqa: SLF001
+    await master.set_linkage(LinkageRole.MASTER)
+    master.commands.clear()
+    now = datetime.now(UTC)
+    record = ScheduleLinkageRecord(
+        operation_id=spec.operation_id,
+        phase=ScheduleLinkagePhase.APPLYING,
+        spec=spec,
+        snapshots=snapshots,
+        created_at=now,
+        updated_at=now,
+        expires_at=now + timedelta(seconds=spec.observation_window_seconds),
+        linkage_write_intent_device_ids=("master",),
+        linked_device_ids=("master",),
+        slave_role_sequence=ScheduleLinkageSlaveRoleSequence.SYNC_THEN_ASYNC,
+    )
+    store.create(record)
+    controller._active_operation_id = spec.operation_id  # noqa: SLF001
+    controller._stop_event = asyncio.Event()  # noqa: SLF001
+    controller._safety_epoch = controller._safety_interlock.epoch  # noqa: SLF001
+    controller._forward_deadline = master.virtual_time.monotonic() + 600  # noqa: SLF001
+    controller._observation_deadline = (  # noqa: SLF001
+        master.virtual_time.monotonic() + 900
+    )
+    controller._staged_transition_not_before = 0  # noqa: SLF001
+    return record, controller._clock_anchor(  # noqa: SLF001
+        states,
+        master.virtual_time.monotonic(),
+    )
+
+
+def _queue_fixed_q2_before_auto_evidence(
+    device: _ScheduleDevice,
+    role: LinkageRole,
+    *,
+    flow: int,
+    reads: int,
+) -> None:
+    """Make linked verification reads report the fixed plan's staged A slot."""
+
+    device.reported_auto_update_sequences_by_role[role] = [
+        {"AutoMode": "sine", "AutoFlow": flow, "AutoFreq": 50}
+        for _ in range(reads)
+    ]
+
+
 def _controller(
     master: _ScheduleDevice,
     slave: _ScheduleDevice,
@@ -802,6 +922,765 @@ async def test_fixed_q2_raw_sink_failure_is_recorded_without_a_second_device_rea
     assert slave.explicit_state_capture_read_count == 0
     assert master.explicit_state_read_count == 1
     assert slave.explicit_state_read_count == 1
+
+
+async def test_fixed_q2_preserves_successful_sibling_raw_when_peer_capture_fails(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_staged_pair()
+    captures = []
+    slave.fail_explicit_state_read_numbers.add(1)
+    controller = _controller(
+        master,
+        slave,
+        JsonScheduleLinkageJournalStore(tmp_path / "fixed-q2-sibling-raw.json"),
+        raw_capture_observer=captures.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+
+    with pytest.raises(ProtocolConnectionError):
+        await controller._read_fixed_q2_pair_captures(  # noqa: SLF001
+            _fixed_q2_role_spec()
+        )
+
+    assert [capture.participant for capture in captures] == ["master"]
+    assert master.report_capable_state_capture_read_count == 1
+    assert slave.report_capable_state_capture_read_count == 1
+    assert set(controller._latest_fixed_captures) == {"master"}  # noqa: SLF001
+
+
+async def test_fixed_q2_verifies_sync_pair_before_one_async_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    captures = []
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=captures.append,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    _queue_fixed_q2_before_auto_evidence(
+        master,
+        LinkageRole.MASTER,
+        flow=40,
+        reads=1,
+    )
+    _queue_fixed_q2_before_auto_evidence(
+        slave,
+        LinkageRole.SYNC_SLAVE,
+        flow=35,
+        reads=1,
+    )
+
+    record = await controller._prepare_fixed_q2_slave_sequence(record)  # noqa: SLF001
+
+    assert record.slave_role_progress == (
+        ScheduleLinkageSlaveRoleProgress.SYNC_INTENT,
+        ScheduleLinkageSlaveRoleProgress.SYNC_VERIFIED,
+        ScheduleLinkageSlaveRoleProgress.ASYNC_INTENT,
+    )
+    assert slave.calls == [("write_linkage", LinkageRole.SYNC_SLAVE)]
+    assert (await master.get_state()).linkage is LinkageRole.MASTER
+    assert (await slave.get_state()).linkage is LinkageRole.SYNC_SLAVE
+    assert {capture.pair_ordinal for capture in captures} == {1}
+    assert {capture.participant for capture in captures} == {"master", "slave"}
+
+    _queue_fixed_q2_before_auto_evidence(
+        master,
+        LinkageRole.MASTER,
+        flow=40,
+        reads=2,
+    )
+    _queue_fixed_q2_before_auto_evidence(
+        slave,
+        LinkageRole.ASYNC_SLAVE,
+        flow=35,
+        reads=2,
+    )
+
+    record, _clock_anchor = await controller._link_device(  # noqa: SLF001
+        record,
+        record.spec.slave_device_id,
+        LinkageRole.ASYNC_SLAVE,
+        clock_anchor,
+        intent_already_persisted=True,
+    )
+
+    assert record.slave_role_progress == tuple(ScheduleLinkageSlaveRoleProgress)
+    assert record.linked_device_ids == ("master", "slave")
+    assert [call[1] for call in slave.calls] == [
+        LinkageRole.SYNC_SLAVE,
+        LinkageRole.ASYNC_SLAVE,
+    ]
+
+    await controller._rollback_uninterruptibly(record)  # noqa: SLF001
+    assert store.load() is None
+    assert (await master.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert (await slave.get_state()).linkage is LinkageRole.INDEPENDENT
+    assert [call[1] for call in slave.calls] == [
+        LinkageRole.SYNC_SLAVE,
+        LinkageRole.ASYNC_SLAVE,
+        LinkageRole.INDEPENDENT,
+    ]
+
+
+async def test_fixed_q2_sync_verification_failure_sends_no_async_write(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, _clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    slave.reported_state_updates_by_role[LinkageRole.SYNC_SLAVE] = {
+        "timer_enabled": False
+    }
+    _queue_fixed_q2_before_auto_evidence(
+        master,
+        LinkageRole.MASTER,
+        flow=40,
+        reads=1,
+    )
+    _queue_fixed_q2_before_auto_evidence(
+        slave,
+        LinkageRole.SYNC_SLAVE,
+        flow=35,
+        reads=1,
+    )
+
+    with pytest.raises(
+        ScheduleLinkageApplyError,
+        match="changed outside Linkage",
+    ):
+        await controller._prepare_fixed_q2_slave_sequence(record)  # noqa: SLF001
+
+    durable = store.load()
+    assert durable is not None
+    assert durable.slave_role_progress == (
+        ScheduleLinkageSlaveRoleProgress.SYNC_INTENT,
+    )
+    assert slave.calls == [("write_linkage", LinkageRole.SYNC_SLAVE)]
+    _queue_fixed_q2_before_auto_evidence(
+        master,
+        LinkageRole.MASTER,
+        flow=40,
+        reads=1,
+    )
+    _queue_fixed_q2_before_auto_evidence(
+        slave,
+        LinkageRole.SYNC_SLAVE,
+        flow=35,
+        reads=1,
+    )
+    await controller._rollback_uninterruptibly(record)  # noqa: SLF001
+    assert store.load() is None
+    assert [call[1] for call in slave.calls] == [
+        LinkageRole.SYNC_SLAVE,
+        LinkageRole.INDEPENDENT,
+    ]
+
+
+@pytest.mark.parametrize("participant", ("master", "slave"))
+async def test_fixed_q2_sync_role_readback_mismatch_sends_no_async_write(
+    tmp_path: Path,
+    participant: str,
+) -> None:
+    del tmp_path
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, _clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    target = master if participant == "master" else slave
+    actual_role = (
+        LinkageRole.MASTER if participant == "master" else LinkageRole.SYNC_SLAVE
+    )
+    target.reported_state_updates_by_role[actual_role] = {
+        "linkage": LinkageRole.INDEPENDENT
+    }
+    _queue_fixed_q2_before_auto_evidence(
+        master,
+        LinkageRole.MASTER,
+        flow=40,
+        reads=1,
+    )
+    _queue_fixed_q2_before_auto_evidence(
+        slave,
+        LinkageRole.SYNC_SLAVE,
+        flow=35,
+        reads=1,
+    )
+
+    with pytest.raises(
+        ScheduleLinkageApplyError,
+        match="changed outside Linkage",
+    ):
+        await controller._prepare_fixed_q2_slave_sequence(record)  # noqa: SLF001
+
+    durable = store.load()
+    assert durable is not None
+    assert durable.slave_role_progress == (
+        ScheduleLinkageSlaveRoleProgress.SYNC_INTENT,
+    )
+    assert slave.calls == [("write_linkage", LinkageRole.SYNC_SLAVE)]
+
+
+async def test_fixed_q2_sync_missing_active_flow_sends_no_async_write(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, _clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    slave.reported_state_updates_by_role[LinkageRole.SYNC_SLAVE] = {
+        "observed_attributes": {
+            "AutoMode": "sine",
+            "AutoFreq": 50,
+        }
+    }
+    _queue_fixed_q2_before_auto_evidence(
+        master,
+        LinkageRole.MASTER,
+        flow=40,
+        reads=1,
+    )
+
+    with pytest.raises(
+        ScheduleLinkagePreflightError,
+        match="invalid AutoFlow",
+    ):
+        await controller._prepare_fixed_q2_slave_sequence(record)  # noqa: SLF001
+
+    durable = store.load()
+    assert durable is not None
+    assert durable.slave_role_progress == (
+        ScheduleLinkageSlaveRoleProgress.SYNC_INTENT,
+    )
+    assert slave.calls == [("write_linkage", LinkageRole.SYNC_SLAVE)]
+
+
+@pytest.mark.parametrize("mismatch", ("schedule", "active_flow_cap"))
+async def test_fixed_q2_sync_state_mismatch_sends_no_async_write(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    del tmp_path
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, _clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    if mismatch == "schedule":
+        slave.reported_schedule_drift_roles.add(LinkageRole.SYNC_SLAVE)
+        _queue_fixed_q2_before_auto_evidence(
+            slave,
+            LinkageRole.SYNC_SLAVE,
+            flow=35,
+            reads=1,
+        )
+    else:
+        slave.reported_auto_updates_by_role[LinkageRole.SYNC_SLAVE] = {
+            "AutoMode": "sine",
+            "AutoFlow": 48,
+            "AutoFreq": 50,
+        }
+    _queue_fixed_q2_before_auto_evidence(
+        master,
+        LinkageRole.MASTER,
+        flow=40,
+        reads=1,
+    )
+
+    with pytest.raises(ScheduleLinkageApplyError):
+        await controller._prepare_fixed_q2_slave_sequence(record)  # noqa: SLF001
+
+    durable = store.load()
+    assert durable is not None
+    assert durable.slave_role_progress == (
+        ScheduleLinkageSlaveRoleProgress.SYNC_INTENT,
+    )
+    assert slave.calls == [("write_linkage", LinkageRole.SYNC_SLAVE)]
+
+
+async def test_fixed_q2_sync_ack_loss_stops_before_async_and_recovers(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, _clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    slave.fail_after_apply_roles.add(LinkageRole.SYNC_SLAVE)
+
+    with pytest.raises(RuntimeError, match="ACK loss after apply"):
+        await controller._prepare_fixed_q2_slave_sequence(record)  # noqa: SLF001
+
+    durable = store.load()
+    assert durable is not None
+    assert durable.slave_role_progress == (
+        ScheduleLinkageSlaveRoleProgress.SYNC_INTENT,
+    )
+    assert (await slave.get_state()).linkage is LinkageRole.SYNC_SLAVE
+    assert slave.calls == [("write_linkage", LinkageRole.SYNC_SLAVE)]
+    _queue_fixed_q2_before_auto_evidence(
+        master,
+        LinkageRole.MASTER,
+        flow=40,
+        reads=1,
+    )
+    _queue_fixed_q2_before_auto_evidence(
+        slave,
+        LinkageRole.SYNC_SLAVE,
+        flow=35,
+        reads=1,
+    )
+
+    await controller._rollback_uninterruptibly(record)  # noqa: SLF001
+
+    assert store.load() is None
+    assert [call[1] for call in slave.calls] == [
+        LinkageRole.SYNC_SLAVE,
+        LinkageRole.INDEPENDENT,
+    ]
+
+
+async def test_fixed_q2_async_ack_loss_keeps_recoverable_intent_without_resend(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    _queue_fixed_q2_before_auto_evidence(
+        master,
+        LinkageRole.MASTER,
+        flow=40,
+        reads=1,
+    )
+    _queue_fixed_q2_before_auto_evidence(
+        slave,
+        LinkageRole.SYNC_SLAVE,
+        flow=35,
+        reads=1,
+    )
+    record = await controller._prepare_fixed_q2_slave_sequence(record)  # noqa: SLF001
+    slave.fail_after_apply_roles.add(LinkageRole.ASYNC_SLAVE)
+
+    with pytest.raises(RuntimeError, match="ACK loss after apply"):
+        await controller._link_device(  # noqa: SLF001
+            record,
+            record.spec.slave_device_id,
+            LinkageRole.ASYNC_SLAVE,
+            clock_anchor,
+            intent_already_persisted=True,
+        )
+
+    durable = store.load()
+    assert durable is not None
+    assert durable.slave_role_progress == (
+        ScheduleLinkageSlaveRoleProgress.SYNC_INTENT,
+        ScheduleLinkageSlaveRoleProgress.SYNC_VERIFIED,
+        ScheduleLinkageSlaveRoleProgress.ASYNC_INTENT,
+    )
+    assert (await slave.get_state()).linkage is LinkageRole.ASYNC_SLAVE
+    assert [call[1] for call in slave.calls] == [
+        LinkageRole.SYNC_SLAVE,
+        LinkageRole.ASYNC_SLAVE,
+    ]
+    _queue_fixed_q2_before_auto_evidence(
+        master,
+        LinkageRole.MASTER,
+        flow=40,
+        reads=1,
+    )
+    _queue_fixed_q2_before_auto_evidence(
+        slave,
+        LinkageRole.ASYNC_SLAVE,
+        flow=35,
+        reads=1,
+    )
+
+    await controller._rollback_uninterruptibly(record)  # noqa: SLF001
+
+    assert store.load() is None
+    assert [call[1] for call in slave.calls] == [
+        LinkageRole.SYNC_SLAVE,
+        LinkageRole.ASYNC_SLAVE,
+        LinkageRole.INDEPENDENT,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("progress_length", "expected"),
+    (
+        (1, {LinkageRole.INDEPENDENT, LinkageRole.SYNC_SLAVE}),
+        (2, {LinkageRole.SYNC_SLAVE}),
+        (3, {LinkageRole.SYNC_SLAVE, LinkageRole.ASYNC_SLAVE}),
+        (4, {LinkageRole.ASYNC_SLAVE}),
+    ),
+)
+async def test_fixed_q2_recovery_roles_follow_durable_slave_prefix(
+    tmp_path: Path,
+    progress_length: int,
+    expected: set[LinkageRole],
+) -> None:
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, _clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    progress = tuple(ScheduleLinkageSlaveRoleProgress)[:progress_length]
+    record = record.model_copy(
+        update={
+            "linkage_write_intent_device_ids": ("master", "slave"),
+            "slave_role_progress": progress,
+        }
+    )
+
+    assert controller._allowed_recovery_roles(  # noqa: SLF001
+        record,
+        record.spec.slave_device_id,
+    ) == expected
+
+
+async def test_existing_role_journal_defaults_to_direct_slave_sequence(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, _clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    payload = record.model_dump(mode="json")
+    payload.pop("slave_role_sequence")
+    payload.pop("slave_role_progress")
+
+    decoded = ScheduleLinkageRecord.model_validate(payload)
+
+    assert decoded.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.DIRECT
+    assert decoded.slave_role_progress == ()
+
+
+async def test_sync_then_async_journal_rejects_invalid_role_progress(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, _clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    payload = record.model_dump(mode="json")
+
+    with pytest.raises(ValidationError, match="canonical prefix"):
+        ScheduleLinkageRecord.model_validate(
+            {
+                **payload,
+                "linkage_write_intent_device_ids": ["master", "slave"],
+                "slave_role_progress": ["sync_verified"],
+            }
+        )
+    with pytest.raises(ValidationError, match="intent and progress"):
+        ScheduleLinkageRecord.model_validate(
+            {
+                **payload,
+                "slave_role_progress": ["sync_intent"],
+            }
+        )
+    with pytest.raises(ValidationError, match="complete role progress"):
+        ScheduleLinkageRecord.model_validate(
+            {
+                **payload,
+                "linkage_write_intent_device_ids": ["master", "slave"],
+                "linked_device_ids": ["master", "slave"],
+                "slave_role_progress": [
+                    "sync_intent",
+                    "sync_verified",
+                    "async_intent",
+                ],
+            }
+        )
+    with pytest.raises(ValidationError, match="direct slave role sequence"):
+        ScheduleLinkageRecord.model_validate(
+            {
+                **payload,
+                "slave_role_sequence": "direct",
+                "linkage_write_intent_device_ids": ["master", "slave"],
+                "slave_role_progress": ["sync_intent"],
+            }
+        )
+
+
+async def test_fixed_q2_failed_fresh_refresh_does_not_poison_next_pair(
+    tmp_path: Path,
+) -> None:
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+    )
+    record, _clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    await master.set_linkage(LinkageRole.MASTER)
+    await slave.set_linkage(LinkageRole.ASYNC_SLAVE)
+    record = record.model_copy(
+        update={
+            "phase": ScheduleLinkagePhase.ACTIVE,
+            "linkage_write_intent_device_ids": ("master", "slave"),
+            "linked_device_ids": ("master", "slave"),
+            "slave_role_progress": tuple(ScheduleLinkageSlaveRoleProgress),
+        }
+    )
+    store.save(record)
+    slave.fail_after_connect_numbers.add(1)
+
+    with pytest.raises(RuntimeError, match="session refresh failure"):
+        await controller._acquire_fixed_q2_monitor_pair(record)  # noqa: SLF001
+
+    states, _read_started_at = await controller._acquire_fixed_q2_monitor_pair(  # noqa: SLF001
+        record
+    )
+
+    assert set(states) == {"master", "slave"}
+    assert master.connected is True
+    assert slave.connected is True
+    assert master.session_connect_count == slave.session_connect_count == 2
+    assert master.session_disconnect_count == slave.session_disconnect_count == 2
+
+
+async def test_fixed_q2_three_acquisition_failures_end_unknown_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master, slave = await _ready_pair(
+        clock=datetime(2026, 8, 26, 18, 10, 20),
+        linked_clock_step_seconds=1,
+    )
+    sleeps: list[float] = []
+
+    async def exact_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        master.virtual_time.value += seconds
+        await asyncio.sleep(0)
+
+    store = _UnitScheduleLinkageStore()
+    controller = _controller(
+        master,
+        slave,
+        store,
+        raw_capture_observer=lambda _capture: None,
+        refresh_sessions_before_critical_reads=True,
+        owned_staged_auto_transition_observation=True,
+        owned_fixed_q2_observation=True,
+        sleep=exact_sleep,
+    )
+    record, _clock_anchor = await _fixed_q2_app_sequence_record(
+        controller,
+        store,
+        master,
+        slave,
+    )
+    await master.set_linkage(LinkageRole.MASTER)
+    await slave.set_linkage(LinkageRole.ASYNC_SLAVE)
+    record = record.model_copy(
+        update={
+            "phase": ScheduleLinkagePhase.ACTIVE,
+            "linkage_write_intent_device_ids": ("master", "slave"),
+            "linked_device_ids": ("master", "slave"),
+            "slave_role_progress": tuple(ScheduleLinkageSlaveRoleProgress),
+        }
+    )
+    store.save(record)
+    attempts = 0
+
+    async def fail_one_fresh_pair(_record: ScheduleLinkageRecord):
+        nonlocal attempts
+        attempts += 1
+        raise ProtocolConnectionError("simulated fresh pair failure")
+
+    monkeypatch.setattr(
+        controller,
+        "_acquire_staged_monitor_pair_with_retry",
+        fail_one_fresh_pair,
+    )
+
+    stop_reason, verified = await controller._monitor_staged_auto_transition(  # noqa: SLF001
+        record
+    )
+
+    assert stop_reason is ScheduleLinkageStopReason.EPOCH_COMPLETED
+    assert verified is False
+    assert attempts == 3
+    assert sleeps == [10.0, 10.0]
 
 
 async def test_fixed_q2_preconditions_accept_only_the_approved_same_mode_schedule(

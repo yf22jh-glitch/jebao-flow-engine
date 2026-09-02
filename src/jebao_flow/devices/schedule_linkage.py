@@ -103,6 +103,9 @@ _FIXED_Q2_MASTER_AFTER = ("constant", 35, 0)
 _FIXED_Q2_SLAVE_BEFORE = ("sine", 35, 50)
 _FIXED_Q2_SLAVE_AFTER = ("constant", 47, 0)
 _FIXED_Q2_SAFE_FREQUENCY = 20
+_FIXED_Q2_MONITOR_PAUSE_SECONDS = 10.0
+_FIXED_Q2_ACQUISITION_AUTHORITY_SECONDS = 8.0
+_FIXED_Q2_MAX_CONSECUTIVE_ACQUISITION_FAILURES = 3
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -148,6 +151,25 @@ class ScheduleLinkagePhase(StrEnum):
     ACTIVE = "active"
     ROLLING_BACK = "rolling_back"
     RECOVERY_REQUIRED = "recovery_required"
+
+
+class ScheduleLinkageSlaveRoleSequence(StrEnum):
+    """Durable slave role construction selected for one transaction."""
+
+    DIRECT = "direct"
+    SYNC_THEN_ASYNC = "sync_then_async"
+
+
+class ScheduleLinkageSlaveRoleProgress(StrEnum):
+    """Canonical durable prefix for the fixed app-equivalent slave sequence."""
+
+    SYNC_INTENT = "sync_intent"
+    SYNC_VERIFIED = "sync_verified"
+    ASYNC_INTENT = "async_intent"
+    ASYNC_RETURNED = "async_returned"
+
+
+_SYNC_THEN_ASYNC_PROGRESS = tuple(ScheduleLinkageSlaveRoleProgress)
 
 
 class ScheduleLinkageStopReason(StrEnum):
@@ -696,6 +718,10 @@ class ScheduleLinkageRecord(BaseModel):
     linkage_write_intent_device_ids: tuple[str, ...] = ()
     linked_device_ids: tuple[str, ...] = ()
     detached_device_ids: tuple[str, ...] = ()
+    slave_role_sequence: ScheduleLinkageSlaveRoleSequence = (
+        ScheduleLinkageSlaveRoleSequence.DIRECT
+    )
+    slave_role_progress: tuple[ScheduleLinkageSlaveRoleProgress, ...] = ()
     error: str | None = Field(default=None, max_length=512)
 
     @model_validator(mode="after")
@@ -718,6 +744,7 @@ class ScheduleLinkageRecord(BaseModel):
         intents = self.linkage_write_intent_device_ids
         linked = self.linked_device_ids
         detached = self.detached_device_ids
+        slave_progress = self.slave_role_progress
         if intents not in ((), expected_ids[:1], expected_ids):
             raise ValueError("linkage write intents must be a master-first prefix")
         if linked != intents[: len(linked)]:
@@ -725,6 +752,21 @@ class ScheduleLinkageRecord(BaseModel):
         detach_order = tuple(reversed(intents))
         if detached != detach_order[: len(detached)]:
             raise ValueError("detached progress must be a strict slave-to-master prefix")
+        if self.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.DIRECT:
+            if slave_progress:
+                raise ValueError("direct slave role sequence cannot have staged progress")
+        else:
+            if slave_progress != _SYNC_THEN_ASYNC_PROGRESS[: len(slave_progress)]:
+                raise ValueError("slave role progress must be a canonical prefix")
+            slave_intended = expected_ids[1] in intents
+            if slave_intended != bool(slave_progress):
+                raise ValueError(
+                    "sync-then-async slave intent and progress must be durable together"
+                )
+            if expected_ids[1] in linked and slave_progress != _SYNC_THEN_ASYNC_PROGRESS:
+                raise ValueError(
+                    "linked sync-then-async slave needs the complete role progress"
+                )
         if self.phase is ScheduleLinkagePhase.PREPARED and (intents or linked or detached):
             raise ValueError("prepared journal cannot contain physical-write progress")
         if self.phase is ScheduleLinkagePhase.PREPARED and self.error is not None:
@@ -1212,6 +1254,8 @@ class ScheduleActiveLinkageController:
         self._latest_fixed_captures: dict[str, ScheduleLinkageRawCapture] = {}
         self._fixed_stable_before: dict[str, ScheduleAutoEvidence] = {}
         self._raw_capture_persistence_failed = False
+        self._paired_session_refresh_count = 0
+        self._device_connect_attempt_count = 0
 
     @property
     def active_operation_id(self) -> str | None:
@@ -1463,6 +1507,11 @@ class ScheduleActiveLinkageController:
                 created_at=started_at,
                 updated_at=started_at,
                 expires_at=started_at + timedelta(seconds=spec.observation_window_seconds),
+                slave_role_sequence=(
+                    ScheduleLinkageSlaveRoleSequence.SYNC_THEN_ASYNC
+                    if self._owned_fixed_q2_observation
+                    else ScheduleLinkageSlaveRoleSequence.DIRECT
+                ),
             )
             self._store.create(record)
             journal_created = True
@@ -1495,11 +1544,16 @@ class ScheduleActiveLinkageController:
                 LinkageRole.MASTER,
                 clock_anchor,
             )
+            intent_already_persisted = False
+            if self._owned_fixed_q2_observation:
+                record = await self._prepare_fixed_q2_slave_sequence(record)
+                intent_already_persisted = True
             record, clock_anchor = await self._link_device(
                 record,
                 spec.slave_device_id,
                 LinkageRole.ASYNC_SLAVE,
                 clock_anchor,
+                intent_already_persisted=intent_already_persisted,
             )
             self._run_failure = ScheduleLinkageRunFailure.MONITOR
             record = self._begin_complete_observation_epoch(record)
@@ -2322,13 +2376,28 @@ class ScheduleActiveLinkageController:
             for device_id, participant in participants
         )
         try:
-            captured = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+        captured = [
+            result
+            for result in results
+            if not isinstance(result, BaseException)
+        ]
         self._latest_fixed_captures = dict(captured)
+        failure = next(
+            (
+                result
+                for result in results
+                if isinstance(result, BaseException)
+            ),
+            None,
+        )
+        if failure is not None:
+            raise failure
         return {
             device_id: observed.state
             for device_id, observed in captured
@@ -2523,6 +2592,8 @@ class ScheduleActiveLinkageController:
         device_id: str,
         role: LinkageRole,
         previous_anchor: _ClockAnchor,
+        *,
+        intent_already_persisted: bool = False,
     ) -> tuple[ScheduleLinkageRecord, _ClockAnchor]:
         if role is LinkageRole.MASTER:
             intent_failure = ScheduleLinkageRunFailure.MASTER_INTENT
@@ -2558,20 +2629,46 @@ class ScheduleActiveLinkageController:
                 ScheduleLinkageRunProgressKind.SLAVE_PAIR_STATE_READ_RETRY_STARTED
             )
             pair_verified = ScheduleLinkageRunProgressKind.SLAVE_PAIR_VERIFIED
-        self._run_failure = intent_failure
-        self._emit_progress_best_effort(intent_started)
-        intents = (*record.linkage_write_intent_device_ids, device_id)
-        record = record.model_copy(
-            update={
-                "linkage_write_intent_device_ids": intents,
-                "updated_at": self._record_now(record),
-            }
-        )
-        self._store.save(record)
-        self._emit_progress_best_effort(intent_persisted)
+        if intent_already_persisted:
+            expected_ids = (
+                record.spec.master_device_id,
+                record.spec.slave_device_id,
+            )
+            if (
+                not self._owned_fixed_q2_observation
+                or role is not LinkageRole.ASYNC_SLAVE
+                or device_id != record.spec.slave_device_id
+                or record.linkage_write_intent_device_ids != expected_ids
+                or record.linked_device_ids != expected_ids[:1]
+                or record.slave_role_sequence
+                is not ScheduleLinkageSlaveRoleSequence.SYNC_THEN_ASYNC
+                or record.slave_role_progress
+                != _SYNC_THEN_ASYNC_PROGRESS[:3]
+            ):
+                raise ScheduleLinkageApplyError(
+                    "fixed slave async write lacks its exact durable sync successor"
+                )
+            intents = record.linkage_write_intent_device_ids
+        else:
+            self._run_failure = intent_failure
+            self._emit_progress_best_effort(intent_started)
+            intents = (*record.linkage_write_intent_device_ids, device_id)
+            record = record.model_copy(
+                update={
+                    "linkage_write_intent_device_ids": intents,
+                    "updated_at": self._record_now(record),
+                }
+            )
+            self._store.save(record)
+            self._emit_progress_best_effort(intent_persisted)
         self._run_failure = adapter_failure
         self._emit_progress_best_effort(adapter_started)
         await self._get_device(device_id).write_linkage(role, guard=self._forward_write_allowed)
+        if intent_already_persisted:
+            record = self._advance_fixed_slave_role_progress(
+                record,
+                ScheduleLinkageSlaveRoleProgress.ASYNC_RETURNED,
+            )
         self._emit_progress_best_effort(adapter_completed)
         self._run_failure = pair_failure
         self._run_pair_participant = "master" if role is LinkageRole.MASTER else "slave"
@@ -2666,6 +2763,132 @@ class ScheduleActiveLinkageController:
             else self._clock_anchor(states, sampled_at)
         )
         return record, next_anchor
+
+    async def _prepare_fixed_q2_slave_sequence(
+        self,
+        record: ScheduleLinkageRecord,
+    ) -> ScheduleLinkageRecord:
+        """Apply and actively verify the app's Sync intermediate before Async."""
+
+        expected_ids = (
+            record.spec.master_device_id,
+            record.spec.slave_device_id,
+        )
+        if (
+            record.phase is not ScheduleLinkagePhase.APPLYING
+            or record.slave_role_sequence
+            is not ScheduleLinkageSlaveRoleSequence.SYNC_THEN_ASYNC
+            or record.linkage_write_intent_device_ids != expected_ids[:1]
+            or record.linked_device_ids != expected_ids[:1]
+            or record.detached_device_ids
+            or record.slave_role_progress
+        ):
+            raise ScheduleLinkageApplyError(
+                "fixed slave sync write lacks the exact durable master successor"
+            )
+
+        self._run_failure = ScheduleLinkageRunFailure.SLAVE_INTENT
+        self._run_pair_participant = "slave"
+        self._emit_progress_best_effort(
+            ScheduleLinkageRunProgressKind.SLAVE_INTENT_STARTED
+        )
+        record = record.model_copy(
+            update={
+                "linkage_write_intent_device_ids": expected_ids,
+                "slave_role_progress": (
+                    ScheduleLinkageSlaveRoleProgress.SYNC_INTENT,
+                ),
+                "updated_at": self._record_now(record),
+            }
+        )
+        self._store.save(record)
+        self._emit_progress_best_effort(
+            ScheduleLinkageRunProgressKind.SLAVE_INTENT_PERSISTED
+        )
+
+        self._run_failure = ScheduleLinkageRunFailure.SLAVE_ADAPTER_WRITE
+        self._emit_progress_best_effort(
+            ScheduleLinkageRunProgressKind.SLAVE_ADAPTER_WRITE_STARTED
+        )
+        _LOGGER.warning("q2-observation applying sync intermediate role")
+        await self._get_device(record.spec.slave_device_id).write_linkage(
+            LinkageRole.SYNC_SLAVE,
+            guard=self._forward_write_allowed,
+        )
+        self._emit_progress_best_effort(
+            ScheduleLinkageRunProgressKind.SLAVE_ADAPTER_WRITE_COMPLETED
+        )
+
+        self._run_failure = ScheduleLinkageRunFailure.SLAVE_PAIR_VERIFICATION
+        self._set_pair_verification_failure("session_refresh")
+        await self._refresh_pair_sessions_uninterruptibly(record.spec)
+        self._validate_recovery_bindings(record)
+        self._set_pair_verification_failure("state_read")
+        states = await self._read_fixed_q2_pair_captures(record.spec)
+        self._validate_recovery_bindings(record)
+        self._set_pair_verification_failure("deadline")
+        self._assert_observation_deadline()
+        self._set_pair_verification_checkpoint()
+        self._assert_fixed_q2_sync_intermediate(record, states)
+        record = self._advance_fixed_slave_role_progress(
+            record,
+            ScheduleLinkageSlaveRoleProgress.SYNC_VERIFIED,
+        )
+        _LOGGER.warning(
+            "q2-observation verified master and sync-slave intermediate roles"
+        )
+        record = self._advance_fixed_slave_role_progress(
+            record,
+            ScheduleLinkageSlaveRoleProgress.ASYNC_INTENT,
+        )
+        self._run_pair_participant = None
+        return record
+
+    def _advance_fixed_slave_role_progress(
+        self,
+        record: ScheduleLinkageRecord,
+        progress: ScheduleLinkageSlaveRoleProgress,
+    ) -> ScheduleLinkageRecord:
+        """Persist exactly the next canonical app-sequence milestone."""
+
+        current = record.slave_role_progress
+        if (
+            record.slave_role_sequence
+            is not ScheduleLinkageSlaveRoleSequence.SYNC_THEN_ASYNC
+            or len(current) >= len(_SYNC_THEN_ASYNC_PROGRESS)
+            or progress is not _SYNC_THEN_ASYNC_PROGRESS[len(current)]
+        ):
+            raise ScheduleLinkageApplyError(
+                "fixed slave role progress is not the next canonical successor"
+            )
+        updated = record.model_copy(
+            update={
+                "slave_role_progress": (*current, progress),
+                "updated_at": self._record_now(record),
+            }
+        )
+        self._store.save(updated)
+        return updated
+
+    def _assert_fixed_q2_sync_intermediate(
+        self,
+        record: ScheduleLinkageRecord,
+        states: Mapping[str, DeviceState],
+    ) -> None:
+        """Reuse the audited pair assertion before authorizing Async."""
+
+        expected_roles = {
+            record.spec.master_device_id: LinkageRole.MASTER,
+            record.spec.slave_device_id: LinkageRole.SYNC_SLAVE,
+        }
+        self._assert_pair_sample(
+            record,
+            states,
+            expected_roles,
+            phase="before",
+            emit_sample=False,
+        )
+        self._assert_attended_active_flow_cap(record, states)
 
     def _continue_complete_epoch_after_role_verification_error(
         self,
@@ -3366,6 +3589,10 @@ class ScheduleActiveLinkageController:
     ) -> tuple[dict[str, DeviceState], float, bool]:
         """Retry one transport-only acquisition on a fresh, exact paired session."""
 
+        if self._owned_fixed_q2_observation:
+            states, read_started_at = await self._acquire_fixed_q2_monitor_pair(record)
+            return states, read_started_at, False
+
         try:
             states, heartbeat_started_at = await self._acquire_staged_monitor_pair(record)
             return states, heartbeat_started_at, False
@@ -3399,6 +3626,30 @@ class ScheduleActiveLinkageController:
         self._assert_staged_monitor_retry_authority(minimum_remaining_seconds=0)
         states, heartbeat_started_at = await self._acquire_staged_monitor_pair(record)
         return states, heartbeat_started_at, True
+
+    async def _acquire_fixed_q2_monitor_pair(
+        self,
+        record: ScheduleLinkageRecord,
+    ) -> tuple[dict[str, DeviceState], float]:
+        """Acquire one bounded fixed-Q2 pair on newly authenticated transports."""
+
+        self._assert_staged_monitor_retry_record(record)
+        async with asyncio.timeout(_FIXED_Q2_ACQUISITION_AUTHORITY_SECONDS):
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR_SESSION_REFRESH
+            await self._refresh_pair_sessions_uninterruptibly(record.spec)
+            self._validate_recovery_bindings(record)
+            self._assert_staged_monitor_retry_record(record)
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR_STATE_READ
+            read_started_at = self._monotonic()
+            states = await self._read_fixed_q2_pair_captures(record.spec)
+        self._validate_recovery_bindings(record)
+        self._assert_staged_monitor_retry_record(record)
+        try:
+            self._assert_observation_deadline()
+        except ScheduleLinkageApplyError:
+            self._run_failure = ScheduleLinkageRunFailure.MONITOR_DEADLINE
+            raise
+        return states, read_started_at
 
     def _assert_staged_monitor_retry_record(
         self,
@@ -3578,6 +3829,10 @@ class ScheduleActiveLinkageController:
         transition_verified = False
         contradictory_after_verification = False
         diagnostic_issue_count = 0
+        consecutive_acquisition_failures = 0
+        fixed_acquisition_attempts = 0
+        fixed_acquisition_successes = 0
+        fixed_error_classes: dict[str, int] = {}
 
         def reset_candidate_tracking() -> None:
             nonlocal consecutive_after, previous_after, stable_after_started_at
@@ -3595,6 +3850,7 @@ class ScheduleActiveLinkageController:
             reason: str,
             *,
             contradictory: bool = False,
+            error: BaseException | None = None,
         ) -> None:
             nonlocal diagnostic_issue_count, contradictory_after_verification
             diagnostic_issue_count += 1
@@ -3603,11 +3859,33 @@ class ScheduleActiveLinkageController:
             failure = self._run_failure.value if self._run_failure is not None else "monitor"
             dimensions = ",".join(value.value for value in self._run_drift_dimensions) or "none"
             _LOGGER.warning(
-                "q2-observation continued issue=%s failure=%s drift=%s count=%d",
+                "q2-observation continued issue=%s failure=%s drift=%s "
+                "error=%s count=%d",
                 reason,
                 failure,
                 dimensions,
+                type(error).__name__ if error is not None else "none",
                 diagnostic_issue_count,
+            )
+
+        def log_fixed_acquisition_summary(reason: str) -> None:
+            if not self._owned_fixed_q2_observation:
+                return
+            error_classes = ",".join(
+                f"{name}:{count}"
+                for name, count in sorted(fixed_error_classes.items())
+            ) or "none"
+            _LOGGER.warning(
+                "q2-observation fresh-session summary reason=%s attempts=%d "
+                "successes=%d failures=%d pair_refreshes=%d "
+                "device_connect_attempts=%d error_classes=%s",
+                reason,
+                fixed_acquisition_attempts,
+                fixed_acquisition_successes,
+                fixed_acquisition_attempts - fixed_acquisition_successes,
+                self._paired_session_refresh_count,
+                self._device_connect_attempt_count,
+                error_classes,
             )
 
         def assert_no_unsafe_active_flow(states: Mapping[str, DeviceState]) -> None:
@@ -3654,6 +3932,9 @@ class ScheduleActiveLinkageController:
             )
 
         async def wait_for_next_sample(heartbeat_started_at: float | None = None) -> None:
+            if self._owned_fixed_q2_observation:
+                await self._sleep(_FIXED_Q2_MONITOR_PAUSE_SECONDS)
+                return
             elapsed = (
                 0.0
                 if heartbeat_started_at is None
@@ -3675,6 +3956,8 @@ class ScheduleActiveLinkageController:
                 raise ScheduleLinkageApplyError(
                     "schedule-linkage safety authority was revoked"
                 )
+            if self._owned_fixed_q2_observation:
+                fixed_acquisition_attempts += 1
             try:
                 states, heartbeat_started_at, transport_retried = (
                     await self._acquire_staged_monitor_pair_with_retry(record)
@@ -3685,15 +3968,31 @@ class ScheduleActiveLinkageController:
                 if self._run_failure is ScheduleLinkageRunFailure.MONITOR_DEADLINE:
                     break
                 raise
-            except Exception:
+            except Exception as error:
                 if not spec.complete_observation_epoch:
                     raise
                 if not self._active_observation_allowed() or self._stop_requested():
                     raise
-                record_diagnostic_issue("read")
+                if self._owned_fixed_q2_observation:
+                    consecutive_acquisition_failures += 1
+                    error_name = type(error).__name__
+                    fixed_error_classes[error_name] = (
+                        fixed_error_classes.get(error_name, 0) + 1
+                    )
+                record_diagnostic_issue("read", error=error)
                 reset_candidate_tracking()
+                if (
+                    self._owned_fixed_q2_observation
+                    and consecutive_acquisition_failures
+                    >= _FIXED_Q2_MAX_CONSECUTIVE_ACQUISITION_FAILURES
+                ):
+                    log_fixed_acquisition_summary("consecutive_failure_limit")
+                    return ScheduleLinkageStopReason.EPOCH_COMPLETED, False
                 await wait_for_next_sample()
                 continue
+            if self._owned_fixed_q2_observation:
+                consecutive_acquisition_failures = 0
+                fixed_acquisition_successes += 1
             sampled_at = self._monotonic()
             if sampled_at > self._require_observation_deadline():
                 break
@@ -3965,6 +4264,7 @@ class ScheduleActiveLinkageController:
             self._run_drift_dimensions = ()
             await wait_for_next_sample(heartbeat_started_at)
         if spec.complete_observation_epoch:
+            log_fixed_acquisition_summary("epoch_completed")
             _LOGGER.warning(
                 "q2-observation epoch completed verified=%s contradictory=%s issues=%d",
                 transition_verified,
@@ -4576,6 +4876,8 @@ class ScheduleActiveLinkageController:
             self._get_device(device_id)
             for device_id in (spec.master_device_id, spec.slave_device_id)
         )
+        self._paired_session_refresh_count += 1
+        self._device_connect_attempt_count += len(devices)
         disconnect_results = await asyncio.gather(
             *(device.disconnect() for device in devices),
             return_exceptions=True,
@@ -4748,6 +5050,11 @@ class ScheduleActiveLinkageController:
     ) -> None:
         """Reject same-identity journals that regress any durable mutation progress."""
 
+        if caller.slave_role_sequence is not durable.slave_role_sequence:
+            raise ScheduleLinkageRollbackError(
+                "schedule-linkage durable slave role sequence changed before rollback"
+            )
+
         progress = (
             (
                 caller.linkage_write_intent_device_ids,
@@ -4755,6 +5062,7 @@ class ScheduleActiveLinkageController:
             ),
             (caller.linked_device_ids, durable.linked_device_ids),
             (caller.detached_device_ids, durable.detached_device_ids),
+            (caller.slave_role_progress, durable.slave_role_progress),
         )
         if any(later[: len(earlier)] != earlier for earlier, later in progress):
             raise ScheduleLinkageRollbackError(
@@ -4767,12 +5075,6 @@ class ScheduleActiveLinkageController:
     ) -> None:
         """Prove current roles are reachable from this exact intent before any write."""
 
-        role_by_device = {
-            record.spec.master_device_id: LinkageRole.MASTER,
-            record.spec.slave_device_id: LinkageRole.ASYNC_SLAVE,
-        }
-        intended = set(record.linkage_write_intent_device_ids)
-        detached = set(record.detached_device_ids)
         try:
             await self._refresh_pair_sessions_if_enabled(record.spec)
             self._validate_recovery_bindings(record)
@@ -4794,9 +5096,7 @@ class ScheduleActiveLinkageController:
                 )
             for snapshot in record.snapshots:
                 state = states_by_id[snapshot.device_id]
-                allowed = {LinkageRole.INDEPENDENT}
-                if snapshot.device_id in intended and snapshot.device_id not in detached:
-                    allowed.add(role_by_device[snapshot.device_id])
+                allowed = self._allowed_recovery_roles(record, snapshot.device_id)
                 if state.linkage not in allowed:
                     raise ScheduleLinkageApplyError(
                         f"device {snapshot.device_id!r} role is outside durable intent"
@@ -4827,6 +5127,35 @@ class ScheduleActiveLinkageController:
             raise ScheduleLinkageRollbackError(
                 "controller role topology does not match durable recovery intent"
             ) from error
+
+    @staticmethod
+    def _allowed_recovery_roles(
+        record: ScheduleLinkageRecord,
+        device_id: str,
+    ) -> set[LinkageRole]:
+        """Return only roles reachable from the exact durable mutation prefix."""
+
+        intended = set(record.linkage_write_intent_device_ids)
+        detached = set(record.detached_device_ids)
+        if device_id in detached or device_id not in intended:
+            return {LinkageRole.INDEPENDENT}
+        if device_id == record.spec.master_device_id:
+            return {LinkageRole.INDEPENDENT, LinkageRole.MASTER}
+        if record.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.DIRECT:
+            return {LinkageRole.INDEPENDENT, LinkageRole.ASYNC_SLAVE}
+
+        progress = record.slave_role_progress
+        if progress == _SYNC_THEN_ASYNC_PROGRESS[:1]:
+            return {LinkageRole.INDEPENDENT, LinkageRole.SYNC_SLAVE}
+        if progress == _SYNC_THEN_ASYNC_PROGRESS[:2]:
+            return {LinkageRole.SYNC_SLAVE}
+        if progress == _SYNC_THEN_ASYNC_PROGRESS[:3]:
+            return {LinkageRole.SYNC_SLAVE, LinkageRole.ASYNC_SLAVE}
+        if progress == _SYNC_THEN_ASYNC_PROGRESS:
+            return {LinkageRole.ASYNC_SLAVE}
+        raise ScheduleLinkageRollbackError(
+            "sync-then-async recovery has no canonical durable slave prefix"
+        )
 
     async def _reconcile_detached(
         self,
