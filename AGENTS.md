@@ -354,6 +354,84 @@ slave의 role/state-dependent explicit reply와 pair-read 경로를 write 없이
 커밋이 필요합니다. 기본 제품
 경로는 software-independent actuator와 그룹 런타임입니다.
 
+### 2026-09-02 동일-Mode slave 슬롯별 Flow 재검증 단회 해제
+
+repository maintainer가 현재 두 Pro의 controls와 432-byte schedule image를 백업한 뒤 앱 UI를
+거치지 않고 임시 schedule을 넣어, master의 Mode·경계를 따르는 `async_slave`가 자기 슬롯별
+`Flow`를 적용하는지 관측하고 원상복구하는 **실기 1회**를 명시적으로 승인했습니다. 질문과
+판정·복원 계약의 단일 출처는 commit `6c51dda`의
+[`Native ASYNC slave 슬롯별 Flow 단회 재검증 계획`](docs/native-async-slave-slot-flow-recheck.md)
+입니다. 실제 장비 write는 on-site hardware approver가 현장에서 감시하고 구체적인 물리 전원
+차단 수단을 확인한 뒤에만 시작합니다.
+
+이번 exact signature는 다음뿐입니다.
+
+- master safe manual `Constant / Flow 30 / Frequency 20`
+- slave safe manual `Constant / Flow 35 / Frequency 20`
+- master A=`Sine / Flow 40 / Frequency 50`, B=`Constant / Flow 35 / wire Frequency 0`
+- slave A=`Sine / Flow 35 / Frequency 50`, B=`Constant / Flow 47 / wire Frequency 0`
+- 두 장비의 A/B 경계는 동일한 device-local 절대 시각, 역할은 master=`master`,
+  slave=`async_slave`, complete observation epoch는 `900초`
+
+Mode 소유권은 이번 판정 대상이 아닙니다. slave가 master의 `Sine -> Constant` Mode·경계를
+따르는 동안 slave raw의 `AutoFlow`가 stable `35 -> 47`을 만드는지만 판정합니다. master의
+`40 -> 35` 경계가 유효한데 slave가 `35` 고정, master Flow 추종 또는 다른 stable Flow를
+보고하면 `FAIL`이며, usable slave raw나 안정 sample이 없으면 `UNKNOWN`입니다. 어느 결과도
+같은 operation의 자동 재시도를 허용하지 않습니다.
+
+허용하는 source와 test 변경은 아래로 한정합니다.
+
+1. `src/jebao_flow/devices/schedule_flow_experiment.py`
+   - 위 exact five-value signature, 두 장비 모두 `Sine -> Constant`인 schedule, Flow 상한 `47`
+   - `slave A == master B == 35`를 이 signature에서만 허용
+   - slave `Sine/35/F50 -> Constant/47`을 PASS로 분류하고 나머지를 배타 분류
+2. `src/jebao_flow/devices/schedule_linkage.py`
+   - 위 exact A/B 상수·Frequency allowlist·Flow 상한 `47`
+   - fixed monitor가 같은 read에서 선택된 recognised action `0x03` 또는 `0x04`의 raw frame과
+     decoded state를 보존하도록 지정 축소
+3. `src/jebao_flow/devices/lan.py`
+   - 기존 `_io_lock` 안에서 `read_raw_state_capture(accept_reports=True)`를 정확히 한 번 호출해
+     decoded state와 같은 `RawStateCapture`를 반환하는 가산적 read-only 메서드 1개
+4. `src/jebao_flow/schedule_flow_experiment_cli.py`
+   - 임의 값 옵션 없이 위 exact signature만 구성
+5. 위 변경에 직접 대응하는 기존 unit·fault-injection tests
+
+`schedule_transaction.py`의 topology 예외는 사용하지 않습니다. 두 temporary image는 동일한
+`Sine -> Constant` topology이므로 기존 동일-topology 검증을 그대로 통과해야 합니다.
+`devices/linkage.py`, `devices/schedule_transaction.py`, `schedule_linkage_cli.py`, 일반 daemon·MQTT
+경로와 LAN write path는 수정하지 않습니다.
+
+action `0x04`는 explicit reply나 요청 ACK로 부르지 않습니다. participant, action, exact frame
+digest·길이, device-local `NowTime`, host read 구간을 private raw sink에 보존하고, 같은 boundary
+exclusion side의 master/slave frame pair만 판정에 사용합니다. 한쪽 raw 부재·decode 실패는
+`UNKNOWN` 근거이지 재시도 근거가 아닙니다.
+
+이번 단회에 한해 exact physical binding과 qualification operation이 일치하는 기존 영수증에서
+만료 시각만 무시할 수 있습니다. 영수증 부재·identity·operation 불일치, 장비 limits/step,
+single-write, durable journal, rollback 권한은 완화하지 않습니다. `Frequency=50`은 current raw의
+동일 product waveform-frequency envelope 안에서 이 exact signature에만 허용하며 endpoint·step
+전체를 검증했다고 일반화하지 않습니다.
+
+시작은 장비별 `TimerOFF + independent + Constant + safe Flow + Frequency 20`을 하나의 control
+frame으로 정확히 한 번 적용합니다. 종료는 기존 audited 순서인 `slave role detach → master role
+detach → safe TimerOFF → slave/master 원 432-byte schedule image → 원 outer controls/TimerON`을
+사용합니다. 자동 rollback이 terminal로 끝나지 않으면 새 실험이나 임의 write를 하지 않고,
+남은 journal을 소유한 기존 `recover_experiment()` attended recovery만 운영자가 수동 호출합니다.
+
+첫 hardware write 뒤 조기 ordered recovery 조건은 다음 다섯 가지뿐입니다.
+
+1. physical identity binding 불일치
+2. temporary schedule authority 또는 native 역할이 활성인 동안 실제 또는 보고된 Flow가 `47`
+   초과
+3. 펌프·수조의 위험한 물리 동작
+4. durable journal·복구 권한·현장 물리 차단 수단 상실
+5. 현장 감시자 또는 사용자의 명시적 비상 정지
+
+결과와 무관하게 terminal write-side restore와 서로 다른 두 fresh source-attested collector의 원
+controls·두 image exact 검증을 끝내고 새 `docs/runs/` 기록을 커밋하면 이 단회 해제는 자동
+소진되고 §1 동결이 다시 적용됩니다. 복구가 남으면 새 실험은 금지하고 해당 operation의 ordered
+recovery와 read-only 검증만 허용합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
