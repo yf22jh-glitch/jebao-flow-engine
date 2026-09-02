@@ -242,7 +242,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | ASYNC 대상 두 Pro를 정확히 식별했는가 | PASS |
 | 필요한 로컬 transport와 Pro wire schema가 있는가 | PASS |
 | 동결 write 하네스가 자신이 저장한 schedule image를 exact restore할 수 있는가 | PASS — 기존 하네스 capability 범위 |
-| 앱이 만든 제3자 baseline을 복원할 승인된 exact restore 수단과 권한이 있는가 | **BLOCKING / 미확보** — 선행조건 2 |
+| 앱이 만든 제3자 baseline을 standalone으로 복원할 승인된 exact restore 수단과 권한이 있는가 | **BLOCKING / 미확보** — 선행조건 2; integrated harness가 자기 baseline을 소유하는 단회와 구분 |
 | native MASTER/SLAVE 역할 write와 Sync 복구가 검증됐는가 | PASS |
 | 최소 write-free read-only collector가 실기 검증됐는가 | PASS — 18/18 pair, 36/36 explicit reply, offline verify PASS |
 | 세 수류모터를 같은 증거 기준으로 read-only 수집할 수 있는가 | **NOT IMPLEMENTED** — 현재 collector와 predicate는 두 Pro 전용이며 가산적 v3가 필요 |
@@ -524,8 +524,34 @@ image digest도 값이 커밋된 2026-09-01 corrected-run restore 기록과 byte
 
 이 artifact는 **pre-normalization baseline**입니다. 앱 정규화가 역할 B의 manual controls를
 바꾸므로 정규화 직후부터 이 artifact를 복원 기준으로 쓸 수 없고 선행조건 2를 해소하지도
-않습니다. **앱 정규화와 정규화 후 fresh baseline 재보존 전에는 어떤 ASYNC role write도 여전히
-`NO-GO`입니다.**
+않습니다. 앱 또는 standalone restore 수단에 의존하는 ASYNC role operation은 앱 정규화와
+정규화 후 fresh baseline 재보존 전까지 `NO-GO`입니다.
+
+### integrated harness가 자기 baseline을 소유하는 단회와의 구분
+
+위 standalone `NO-GO`는 동결 write 하네스가 자기 operation 시작 시 snapshot한 baseline과 exact
+rollback을 직접 소유하는 capability까지 철회하지 않습니다. 이 capability는 2026-08-30 attempt
+05와 2026-09-01 corrected run에서 원 controls와 두 432-byte image의 byte-exact 복원을 완료했고,
+현재 판정 표에서도 별도 PASS로 유지합니다.
+
+repository maintainer가 2026-09-02에 요청한
+[`동일-Mode slave 슬롯별 Flow 단회 재검증`](native-async-slave-slot-flow-recheck.md)은 앱이나
+standalone restore를 사용하지 않습니다. 이 한 operation은 아래 조건을 모두 만족할 때만 기존
+integrated capability 안에서 admission을 검토합니다.
+
+- fresh preflight가 원 controls와 두 image를 새 operation journal에 직접 fsync
+- 시작 시 B의 latent `Flow=89`를 그대로 둔 채 `TimerOFF`를 보내지 않고,
+  `TimerOFF + independent + Constant + Flow 35 + Frequency 20`을 한 frame으로 적용
+- 종료 시 role detach와 safe TimerOFF 뒤 원 image를 먼저 복원하고, 원 `TimerON + Flow=89`를
+  나머지 원 controls와 같은 기존 audited outer-control frame으로 복원. 자동 rollback이
+  terminal이 아니면 기존 attended recovery만 수동 호출하고 새 실험·임의 write는 금지
+- fixed plan의 Flow 상한 `47`, exact Frequency `50`, single-write, identity, journal, rollback
+  권한을 별도 동결 해제 커밋에 고정
+- 현장 감시자와 즉시 사용 가능한 물리 전원 차단 수단을 첫 write 전에 확인
+
+이 지정 구분은 standalone restore 선행조건 2를 PASS로 바꾸거나, 다른 ASYNC role write를
+허용하거나, B의 `89 > 80` admission FAIL을 지우지 않습니다. 위 exact integrated operation이
+아니면 기존 `NO-GO`를 그대로 적용합니다.
 
 **이 조건을 만족하지 못하면 관측은 `NO-GO`로 남깁니다.** 이 항목은 동결된 ASYNC 실험
 하네스를 재가동하라는 뜻이 **아닙니다.** 하네스 재가동은 [`AGENTS.md`](../AGENTS.md) §1의
