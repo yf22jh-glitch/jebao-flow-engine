@@ -158,3 +158,32 @@ single-write, journal fsync 또는 rollback authority는 우회하지 않습니�
 write-side restore와 서로 다른 두 fresh collector의 exact 검증이 끝나면 단회 해제가 자동
 소진됩니다. 복구가 남으면 새 실험은 금지하고 해당 operation의 ordered recovery와 read-only
 검증만 허용합니다.
+
+## 2026-09-02 실행 결과
+
+exact `a00f4b1` image로 위 operation을 한 번 실행하고 전체 900초 epoch를 완료했습니다.
+master는 device-local `12:20` 경계에서 계획한 `Sine/40/F50 -> Constant/35` 전환을 보였습니다.
+그러나 slave가 남긴 action `0x04` report 411개는 모두 frame-local `NowTime`이 경계 전이었고,
+host 수신 대비 지연이 약 16.7초에서 491.1초로 증가했습니다. 이 report backlog는 valid
+post-boundary sample이 아니므로 slave가 `35`에 고정됐다고 판정하지 않습니다. slave action
+구성은 `0x03=0`, `0x04=411`이고 valid post pair는 0개라 결과는 **`UNKNOWN`**입니다.
+
+411개 slave frame은 모두 `TimerON=true`, `Linkage=async_slave`였고 같은 temporary schedule
+image에 A=`Sine/35/F50`, B=`Constant/47/F0`가 저장돼 있었습니다. 따라서 Timer가 꺼졌거나
+B slot staging이 누락된 것이 아니라, 경계 후 fresh slave frame을 관측하지 못한 것입니다.
+
+실행 후 앱 명령 동등성을 정적으로 재검토했습니다. 검사한 cached Pro template의 Linkage UI는
+independent slave에 `Linkage=2`를 먼저 보내고, 그 상태에서 별도 Async 선택으로 `Linkage=3`을
+보냅니다. 각 호출은 partial role write이며 Flow·Timer·schedule을 합성하지 않습니다. 이번
+하네스는 `Linkage=3`을 한 번 보내 direct `0 -> 3`으로 전환했으므로 앱 UI의 `0 -> 2 -> 3`
+sequence와 동등하지 않습니다. intermediate `2`가 native schedule 동작의 필수 전이인지는
+여전히 `UNKNOWN`입니다.
+
+ordered rollback은 `outer_restored` terminal로 끝났고, writer 종료 뒤 서로 다른 두 fresh
+source-attested collector에서 원 controls와 두 432-byte schedule image digest가 pre-write
+baseline과 byte-exact하게 일치했습니다. 상세 artifact와 증거 등급은
+[`2026-09-02 Q2-slotflow 실행 기록`](runs/2026-09-02-q2-slotflow-a00f4b1.md)에 있습니다.
+
+이 결과로 단회 해제는 소진됐습니다. 자동 재시도하지 않습니다. corrected run이 필요하면 새
+승인·별도 해제로 앱과 같은 `independent -> sync_slave -> async_slave` exactly-once sequence와
+fresh post-boundary slave evidence를 함께 고정해야 합니다.

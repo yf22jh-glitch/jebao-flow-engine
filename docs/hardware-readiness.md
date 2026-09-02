@@ -251,8 +251,9 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | read-only 관측만으로 전체 native mode와 accepted 범위를 확정할 수 있는가 | **NO / OUT OF READ-ONLY SCOPE** — 현재 값·기존 slot 관측과 전체 열거·허용 범위를 구분 |
 | Pro `AutoFeedTime=0`과 profile `1..60` 선언이 정합한가 | **UNKNOWN** — 36/36 raw에서 0, write admission 범위는 별도 승인 없이 완화 금지 |
 | 각 native mode 설정값의 물리 유량·파형 효과가 계측됐는가 | **UNKNOWN / OUT OF CURRENT MEASUREMENT SCOPE** |
-| (Q2-narrow) ASYNC 상태에서 slave의 staged B Flow가 master와 다르게 보고됐는가 | **CONFIRMED (2026-08-30, 이 Pro pair·고정 계획 범위)** — slave 32→40, master 31→35와 상이; 900초 epoch와 exact restore 완료 |
+| (Q2-narrow) ASYNC 상태에서 slave의 staged B Flow가 master와 다르게 보고됐는가 | **CONFIRMED (2026-08-30, 이 Pro pair·고정 계획·하네스 direct `0→3` role 전환 범위)** — slave 32→40, master 31→35와 상이; 900초 epoch와 exact restore 완료 |
 | (Q2-target) slave가 master Mode·timing을 따르면서 자기 모드별 Flow를 적용하는가 | **UNKNOWN / 교정 단회 실행 소진 (2026-09-01)** — master 반대 Mode 전환은 raw 91개로 확인했지만 slave pair read가 90회 모두 실패해 slave raw가 없음; [실행 기록](runs/2026-09-01-q2-target-corrected-a3adb738.md) 참조 |
+| (Q2-slotflow) 같은 Mode·경계에서 slave가 자기 슬롯별 `Flow 35→47`을 적용하는가 | **UNKNOWN / 단회 실행 소진 (2026-09-02)** — master `40→35`는 확인했지만 slave 411 report가 모두 경계 전 backlog였고, 앱 `0→2→3`과 하네스 `0→3` role sequence도 달랐음; [실행 기록](runs/2026-09-02-q2-slotflow-a00f4b1.md) 참조 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |
 | 리턴·도징 actuator가 실기 검증됐는가 | NOT IN CURRENT TEST SCOPE |
@@ -265,6 +266,12 @@ per-mode Flow 분할 질문은 닫지 못했습니다. 2026-09-01 첫 판별 실
 TimerON과 900초 epoch에 도달했고 master Mode·Flow 전환을 raw 재분석으로 확인했지만, slave pair read가 90회 모두
 실패해 slave raw를 하나도 얻지 못했습니다. 따라서 질문은 계속 `UNKNOWN`이고 교정 단회 승인도
 소진됐습니다. 두 실행 모두 종료 후 fresh raw 두 회에서 exact restore를 확인했습니다.
+
+2026-09-02 추가: 동일-Mode 단회는 master의 `40 -> 35` 전환을 확인했지만 slave action `0x04`
+411개가 모두 device-local 경계 전 report backlog였고, 앱의
+`independent -> sync_slave -> async_slave`와 다른 direct role 전환을 사용했습니다. 따라서
+Q2-slotflow도 계속 `UNKNOWN`이고 해당 단회 승인은 소진됐습니다. 이 실행도 종료 후 fresh raw
+두 회에서 exact restore를 확인했습니다.
 
 기존 단회 실기는 실제 장비가 서로 다른 B 출력을 300초 이상 유지한 durable sample을 냈습니다.
 `master=35`, `slave=40`을 900초 epoch 끝까지 관측했고 상충 sample이 없었습니다. 다만 두
@@ -330,6 +337,38 @@ schedule image의 exact restore가
 명시적 승인과
 별도 동결 해제 커밋이 필요합니다. 승인 전 기본 경로는 질문을 park하고 software-independent
 actuator와 그룹 런타임을 진행하는 것입니다.
+
+### Q2-slotflow (master Mode·경계 + slave 슬롯별 Flow) — UNKNOWN / 단회 실행 소진
+
+2026-09-02에는 사용자가 지정한 동일-Mode 계획으로 master
+`Sine/F50/Flow40 -> Constant/Flow35`, slave
+`Sine/F50/Flow35 -> Constant/Flow47`을 같은 device-local 경계에 넣고 900초를 관측했습니다.
+master raw는 `40 -> 35` 경계를 확인했습니다. slave raw sink에도 411개의 action `0x04` report가
+남았지만 frame-local `NowTime`은 첫 `12:12:00`부터 마지막 `12:19:00`까지 모두 `12:20:00`
+경계 전이었습니다. host 수신 대비 지연은 약 16.7초에서 491.1초로 커졌으므로, 경계 후 수신된
+`Sine/35`를 경계 후 상태로 읽지 않습니다. valid post-boundary slave sample은 0개이고 판정은
+`UNKNOWN`입니다. 상세 raw·복원 증거는
+[`2026-09-02 Q2-slotflow 재검증`](runs/2026-09-02-q2-slotflow-a00f4b1.md)에 있습니다.
+
+같은 411개 raw를 exact `a00f4b1` decoder로 전수 재도출하면 모두 `TimerON=true`,
+`Linkage=async_slave`이고 temporary schedule image 안의 B entry도 `Constant/47/F0`로
+존재합니다. 따라서 role 진입이 Timer를 끄거나 B slot write가 사라졌다고 볼 근거는 없습니다.
+다만 이 frame들이 모두 경계 전이므로 B 전이가 실제 일어났는지는 여전히 판정하지 못합니다.
+
+실행 후 cached Pro app template의 Linkage UI dataflow를 다시 추적했습니다. 앱은 independent
+slave에서 먼저 `Linkage=2`를 보내 Slave/Sync 상태를 만들고, 그 뒤 활성화되는 Async 선택이
+별도 `Linkage=3`을 보냅니다. role write는 partial object이며 Flow·Timer·schedule을 함께 보내지
+않습니다. 반면 이번 하네스는 `Linkage=3` 한 번으로 직접 전환했습니다. final datapoint는 같지만
+앱 UI와 sequence가 동등하지 않으며, intermediate `sync_slave` 전이가 펌웨어 동작에 필요한지는
+아직 측정하지 않았습니다. 이전 attempt 05는 같은 direct `0 -> 3` 경로에서도 slave
+`32 -> 40`을 관측했으므로 이 차이를 이번 미관측의 원인으로 확정하지도 않습니다. 따라서 이번
+결과를 native capability `FAIL`로 쓰지 않습니다.
+
+write-side rollback은 terminal로 끝났고 서로 다른 두 fresh collector에서 원 control 여섯 필드와
+두 432-byte schedule image digest가 pre-write baseline과 byte-exact하게 일치했습니다. 이 단회는
+소진됐으며 자동 재시도하지 않습니다. corrected run은 새 명시 승인과 별도 동결 해제 커밋으로
+앱과 같은 `0 -> 2 -> 3` role sequence, stale report를 배제하는 fresh post-boundary evidence,
+기존 identity·single-write·journal·rollback 권한을 함께 고정할 때만 검토합니다.
 
 ### 2026-08-28 당시 park 사유
 
@@ -556,6 +595,11 @@ integrated capability 안에서 admission을 검토합니다.
 **이 조건을 만족하지 못하면 관측은 `NO-GO`로 남깁니다.** 이 항목은 동결된 ASYNC 실험
 하네스를 재가동하라는 뜻이 **아닙니다.** 하네스 재가동은 [`AGENTS.md`](../AGENTS.md) §1의
 해제 절차를 따로 거쳐야 합니다.
+
+위 exact integrated operation은 2026-09-02에 한 번 실행되고 terminal restore와 두 fresh
+collector 검증까지 끝나 **소진**됐습니다. 위 목록은 당시 admission 근거이지 현재 살아 있는
+write 권한이 아닙니다. 결과와 새로 발견된 앱 role sequence 차이는
+[`Q2-slotflow 실행 기록`](runs/2026-09-02-q2-slotflow-a00f4b1.md)을 따릅니다.
 
 ## 앱 live-write의 대체 통제
 

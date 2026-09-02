@@ -84,6 +84,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-01 Q2-target topology 교정 실행](2026-09-01-q2-target-corrected-a3adb738.md) | 900초 epoch + master raw 91 + exact restore | master Mode·Flow 전환만 raw 재분석으로 확인; slave pair read 90회 실패로 Q2-target은 UNKNOWN, fresh raw 원복 검증 2회 PASS |
 | [2026-09-01 independent transport probe](2026-09-01-transport-probe-independent-c5b4eaeb.md) | write 0 + strict read 2회 | independent 두 Pro 모두 explicit `0x03`과 raw 보존 PASS; ASYNC 원인은 계속 UNKNOWN |
 | [2026-09-01 current baseline 재확인](2026-09-01-current-baseline-78058401.md) | 2 pair / 4 raw frame, write 0 | 역할 B latent `Flow=89`가 현재도 유지됨을 재확인; restore admission FAIL, Q2-target은 UNKNOWN |
+| [2026-09-02 Q2-slotflow 재검증](2026-09-02-q2-slotflow-a00f4b1.md) | 900초 epoch + state frame 822 + exact restore | master `40→35`는 확인; slave 411 report가 모두 경계 전 backlog이고 앱 `0→2→3`과 하네스 `0→3`이 달라 slot Flow는 UNKNOWN |
 
 ## 새 실행 기록 템플릿
 

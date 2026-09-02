@@ -101,6 +101,34 @@ editor는 없습니다.
 따라서 제바오 앱만으로는 `Async Slave`의 slot별 `AutoFlow`를 편집할 수 없습니다. 앱에 보이는
 공통 slave `Flow`와 장비 안에 저장되는 slot별 `AutoFlow`를 별도 속성으로 취급해야 합니다.
 
+#### 2026-09-02 Linkage UI command sequence 재추적
+
+검사한 세 cached Pro template에서 관련 `U` dataflow는 같았습니다.
+
+- 공통 `sendCmd`는 호출마다 받은 partial object 하나를 100ms 뒤 전송하고, 앞선 호출과
+  batch하지 않습니다. local state의 optimistic merge는 wire payload 합성이 아닙니다.
+- Linkage 선택은 `{Linkage: value}`만 보냅니다. `TimerON`, `Flow`, `Mode`, `Frequency` 또는
+  schedule slot은 role write에 자동으로 포함되지 않습니다.
+- independent 상태에서 UI의 Slave 버튼은 `Linkage=2`(`Sync Slave`)를 보냅니다. Sync와 Async
+  선택 버튼은 current role이 2 또는 3일 때만 활성화되므로, 앱 UI로 Async를 만들면 이어서
+  별도 `Linkage=3` write가 발생합니다. 즉 UI sequence는 `0 -> 2 -> 3`입니다.
+- slave Flow slider는 role과 별도인 `{Flow: value}` partial write입니다. 이 화면에는 다른
+  장비를 지정하거나 두 장비를 handshake하는 별도 pairing command가 없습니다.
+
+[`2026-09-02 Q2-slotflow 실행`](../runs/2026-09-02-q2-slotflow-a00f4b1.md)의 하네스는
+`write_linkage(async_slave)` 한 번으로 `{Linkage: 3}`을 보내 direct `0 -> 3`으로 전환했습니다.
+final Linkage datapoint는 앱과 같지만 **UI transition sequence는 동등하지 않습니다.** 이 정적
+차이만으로 intermediate Sync 상태가 펌웨어에 필수라고 주장하지 않습니다. 다만 해당 run은 fresh
+post-boundary slave frame도 없으므로, 앱 비동등 condition에서 나온 결과를 native capability
+`FAIL`로 승격할 수 없습니다.
+
+2026-08-30 attempt 05도 같은 direct `0 -> 3` 하네스 경로에서 slave staged Flow
+`32 -> 40`을 관측했습니다. 따라서 UI sequence 차이는 app-equivalence gap이지만 2026-09-02
+미관측의 원인으로 확정되지 않았습니다.
+
+이 결론은 검사 시점의 cached template에 대한 정적 `U` 추적입니다. runtime packet capture나
+장비가 만든 (a)/(b)/(c) 증거가 아니며, 다른 앱 template/version에 일반화하지 않습니다.
+
 ### 실제 장비에서 확인된 범위
 
 [`Q2 attempt 05`](../runs/2026-08-30-q2-attempt-05.md)의 `L` 증거로 다음을 확정했습니다.

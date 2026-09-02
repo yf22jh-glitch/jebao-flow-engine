@@ -432,6 +432,28 @@ controls·두 image exact 검증을 끝내고 새 `docs/runs/` 기록을 커밋�
 소진되고 §1 동결이 다시 적용됩니다. 복구가 남으면 새 실험은 금지하고 해당 operation의 ordered
 recovery와 read-only 검증만 허용합니다.
 
+### 2026-09-02 동일-Mode slave 슬롯별 Flow 단회 실행 종료
+
+[`Q2-slotflow 재검증`](docs/runs/2026-09-02-q2-slotflow-a00f4b1.md)은 fixed schedule과
+`TimerON`을 적용하고 900초 epoch를 끝까지 수행했습니다. master raw는 device-local 경계에서
+`Sine/40/F50 -> Constant/35` 전환을 보였습니다. slave raw는 action `0x04` 411개가 남았지만
+frame-local `NowTime`이 모두 경계 전이었고 host 수신 대비 지연이 계속 커진 report backlog라,
+유효한 post-boundary slave sample은 0개였습니다. 따라서 slave의 슬롯별 `35 -> 47` 적용은
+`PASS`나 `FAIL`로 분류하지 않고 계속 `UNKNOWN`입니다.
+
+실행 뒤 cached Pro app template을 정적으로 교차검증한 결과, 앱 UI는 independent slave에 먼저
+`Linkage=2`를 적용한 뒤 별도 `Linkage=3`을 보내 `sync_slave -> async_slave`로 전환합니다.
+이번 하네스는 `Linkage=3` 한 번으로 직접 전환했으므로 앱의 role construction과 sequence가
+동등하지 않습니다. intermediate role의 펌웨어 의미는 아직 `UNKNOWN`이며, 이 차이를 native
+capability `FAIL` 근거로 사용하지 않습니다.
+
+write-side rollback은 terminal `outer_restored`로 끝났고, 서로 다른 두 fresh source-attested
+collector에서 원 controls와 두 432-byte schedule image digest가 byte-exact하게 일치했습니다.
+이 기록 커밋부터 `13c5068`의 단회 해제는 **소진**되고 §1 동결이 다시 적용됩니다. 같은
+operation의 자동 재시도는 없습니다. corrected 실기가 필요하면 repository maintainer의 새로운
+명시적 승인, 앱과 같은 `independent -> sync_slave -> async_slave` sequence와 fresh post-boundary
+slave evidence를 고정한 별도 해제 커밋, 그리고 on-site hardware approver 승인이 모두 필요합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
