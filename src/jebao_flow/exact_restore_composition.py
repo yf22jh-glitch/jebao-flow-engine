@@ -27,6 +27,7 @@ from pydantic import (
     Field,
     StringConstraints,
     ValidationError,
+    model_serializer,
     model_validator,
 )
 
@@ -114,6 +115,14 @@ class ExactRestoreRoleOperation(BaseModel):
     power_policy: RestorePowerPolicy
     safe_constant_power: int = Field(ge=0, le=100)
     safe_constant_frequency: int = Field(ge=0, le=100)
+    accepted_latent_manual_power: int | None = Field(default=None, ge=0, le=100)
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_compatible(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        if self.accepted_latent_manual_power is None:
+            payload.pop("accepted_latent_manual_power", None)
+        return payload
 
     @model_validator(mode="after")
     def validate_safe_target(self) -> Self:
@@ -139,9 +148,17 @@ class ExactRestoreOperationManifest(BaseModel):
     version: Literal[1] = 1
     operation_nonce: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
     evidence: ExactRestoreArtifactReference
+    corroborating_evidence: ExactRestoreArtifactReference | None = None
     devices: tuple[ExactRestoreRoleOperation, ExactRestoreRoleOperation]
     verification_policy: ExactRestoreVerificationPolicy
     network: ExactRestoreNetworkPolicy = Field(default_factory=ExactRestoreNetworkPolicy)
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_compatible(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        if self.corroborating_evidence is None:
+            payload.pop("corroborating_evidence", None)
+        return payload
 
     @model_validator(mode="after")
     def validate_pair(self) -> Self:
@@ -156,6 +173,17 @@ class ExactRestoreOperationManifest(BaseModel):
             self.verification_policy.max_observation_age_seconds
         ):
             raise ValueError("identity age cannot exceed the observation age")
+        if any(
+            item.accepted_latent_manual_power is not None for item in self.devices
+        ) and self.corroborating_evidence is None:
+            raise ValueError("accepted latent manual power requires corroborating evidence")
+        if self.corroborating_evidence is not None and (
+            self.evidence.plan_artifact_id
+            == self.corroborating_evidence.plan_artifact_id
+            or self.evidence.series_artifact_id
+            == self.corroborating_evidence.series_artifact_id
+        ):
+            raise ValueError("corroborating evidence must reference an independent capture")
         return self
 
     @property
@@ -406,16 +434,21 @@ def _parse_utc(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def build_verified_baseline(
+@dataclass(frozen=True, slots=True)
+class _VerifiedBaselineCapture:
+    devices: tuple[ExactRestoreDeviceBaseline, ExactRestoreDeviceBaseline]
+    evidence: ExactRestoreEvidenceReference
+    captured_at: datetime
+
+
+def _build_verified_baseline_capture(
     manifest: ExactRestoreOperationManifest,
     targets: Mapping[ExactRestoreRole, CaptureTarget],
+    evidence: ExactRestoreArtifactReference,
     artifact: VerifiedPilotPairArtifact,
     *,
-    now: datetime | None = None,
-) -> ExactRestoreBaseline:
-    """Decode one fully verified preserved pair without substituting manifest state claims."""
-
-    evidence = manifest.evidence
+    current: datetime,
+) -> _VerifiedBaselineCapture:
     if (
         artifact.plan_artifact_id != evidence.plan_artifact_id
         or artifact.plan_sha256 != evidence.plan_sha256
@@ -434,7 +467,6 @@ def build_verified_baseline(
         _parse_utc(sample.read.completed_utc) for sample in artifact.samples
     )
     captured_at = max(sample_completion_times)
-    current = now or datetime.now(UTC)
     if (
         current.tzinfo is None
         or current.utcoffset() != timedelta(0)
@@ -479,12 +511,13 @@ def build_verified_baseline(
                     schedule=schedule,
                     power_policy=operation.power_policy,
                     raw_frame_sha256=sample.raw_wire_frame_sha256,
+                    accepted_latent_manual_power=operation.accepted_latent_manual_power,
                 )
             )
         except ValueError as error:
             raise ExactRestoreCompositionError("baseline_admission_failed") from error
 
-    return ExactRestoreBaseline(
+    return _VerifiedBaselineCapture(
         devices=(devices[0], devices[1]),
         evidence=ExactRestoreEvidenceReference(
             plan_artifact_id=artifact.plan_artifact_id,
@@ -492,8 +525,79 @@ def build_verified_baseline(
             pair_ordinal=artifact.ordinal,
             pair_manifest_sha256=artifact.pair_manifest_sha256,
         ),
-        verification_policy=manifest.verification_policy,
         captured_at=captured_at,
+    )
+
+
+def _require_exact_corroboration(
+    primary: _VerifiedBaselineCapture,
+    corroborating: _VerifiedBaselineCapture,
+) -> None:
+    if (
+        primary.evidence.plan_artifact_id == corroborating.evidence.plan_artifact_id
+        or primary.evidence.series_artifact_id == corroborating.evidence.series_artifact_id
+        or primary.evidence.pair_manifest_sha256
+        == corroborating.evidence.pair_manifest_sha256
+    ):
+        raise ExactRestoreCompositionError("baseline_corroboration_not_independent")
+    for first, second in zip(primary.devices, corroborating.devices, strict=True):
+        if (
+            first.role is not second.role
+            or first.logical_id != second.logical_id
+            or first.physical_binding != second.physical_binding
+            or first.outer != second.outer
+            or first.schedule.image_bytes != second.schedule.image_bytes
+        ):
+            raise ExactRestoreCompositionError("baseline_corroboration_mismatch")
+
+
+def build_verified_baseline(
+    manifest: ExactRestoreOperationManifest,
+    targets: Mapping[ExactRestoreRole, CaptureTarget],
+    artifact: VerifiedPilotPairArtifact,
+    corroborating_artifact: VerifiedPilotPairArtifact | None = None,
+    *,
+    now: datetime | None = None,
+) -> ExactRestoreBaseline:
+    """Decode and cross-check preserved pairs without substituting manifest state claims."""
+
+    current = now or datetime.now(UTC)
+    primary = _build_verified_baseline_capture(
+        manifest,
+        targets,
+        manifest.evidence,
+        artifact,
+        current=current,
+    )
+    corroborating_reference = manifest.corroborating_evidence
+    if corroborating_reference is None:
+        if corroborating_artifact is not None:
+            raise ExactRestoreCompositionError("baseline_corroboration_unexpected")
+        corroborating = None
+    else:
+        if corroborating_artifact is None:
+            raise ExactRestoreCompositionError("baseline_corroboration_missing")
+        corroborating = _build_verified_baseline_capture(
+            manifest,
+            targets,
+            corroborating_reference,
+            corroborating_artifact,
+            current=current,
+        )
+        _require_exact_corroboration(primary, corroborating)
+
+    return ExactRestoreBaseline(
+        devices=primary.devices,
+        evidence=primary.evidence,
+        corroborating_evidence=(
+            corroborating.evidence if corroborating is not None else None
+        ),
+        verification_policy=manifest.verification_policy,
+        captured_at=(
+            min(primary.captured_at, corroborating.captured_at)
+            if corroborating is not None
+            else primary.captured_at
+        ),
     )
 
 
@@ -510,25 +614,45 @@ def safe_targets_for_manifest(
     )  # type: ignore[return-value]
 
 
-def extract_manifest_pair(
-    manifest: ExactRestoreOperationManifest,
+def _extract_referenced_pair(
+    evidence: ExactRestoreArtifactReference,
     artifact_root: str | Path,
 ) -> VerifiedPilotPairArtifact:
     store = PilotSeriesStore(Path(artifact_root))
-    reference = store.load(manifest.evidence.series_artifact_id)
+    reference = store.load(evidence.series_artifact_id)
     if (
-        reference.plan_artifact_id != manifest.evidence.plan_artifact_id
-        or reference.plan_sha256 != manifest.evidence.plan_sha256
+        reference.plan_artifact_id != evidence.plan_artifact_id
+        or reference.plan_sha256 != evidence.plan_sha256
     ):
         raise ExactRestoreCompositionError("baseline_artifact_mismatch")
     try:
         return store.extract_verified_accepted_pair(
             reference,
-            expected_series_sha256=manifest.evidence.series_sha256,
-            ordinal=manifest.evidence.accepted_pair_ordinal,
+            expected_series_sha256=evidence.series_sha256,
+            ordinal=evidence.accepted_pair_ordinal,
         )
     except Exception as error:
         raise ExactRestoreCompositionError("baseline_artifact_invalid") from error
+
+
+def extract_manifest_pair(
+    manifest: ExactRestoreOperationManifest,
+    artifact_root: str | Path,
+) -> VerifiedPilotPairArtifact:
+    return _extract_referenced_pair(manifest.evidence, artifact_root)
+
+
+def extract_manifest_pairs(
+    manifest: ExactRestoreOperationManifest,
+    artifact_root: str | Path,
+) -> tuple[VerifiedPilotPairArtifact, VerifiedPilotPairArtifact | None]:
+    primary = _extract_referenced_pair(manifest.evidence, artifact_root)
+    corroborating = (
+        _extract_referenced_pair(manifest.corroborating_evidence, artifact_root)
+        if manifest.corroborating_evidence is not None
+        else None
+    )
+    return primary, corroborating
 
 
 def _safe_read_legacy_intent_phase(path: Path) -> str | None:
@@ -784,8 +908,14 @@ def prepare_operation(
     """Create PREPARED under the global lease; no device network operation occurs."""
 
     targets = select_operation_targets(config, manifest)
-    artifact = extract_manifest_pair(manifest, artifact_root)
-    baseline = build_verified_baseline(manifest, targets, artifact, now=now)
+    artifact, corroborating_artifact = extract_manifest_pairs(manifest, artifact_root)
+    baseline = build_verified_baseline(
+        manifest,
+        targets,
+        artifact,
+        corroborating_artifact,
+        now=now,
+    )
     record = prepare_exact_restore_record(
         baseline,
         safe_targets_for_manifest(manifest),
@@ -892,6 +1022,22 @@ def load_bound_record(composition: ExactRestoreComposition) -> ExactRestoreRecor
         raise ExactRestoreCompositionError("operation_manifest_mismatch")
     if record.safe_targets != safe_targets_for_manifest(composition.manifest):
         raise ExactRestoreCompositionError("operation_manifest_mismatch")
+    evidence_pairs = (
+        (record.baseline.evidence, composition.manifest.evidence),
+        (
+            record.baseline.corroborating_evidence,
+            composition.manifest.corroborating_evidence,
+        ),
+    )
+    for baseline_evidence, manifest_evidence in evidence_pairs:
+        if (baseline_evidence is None) is not (manifest_evidence is None):
+            raise ExactRestoreCompositionError("operation_manifest_mismatch")
+        if baseline_evidence is not None and manifest_evidence is not None and (
+            baseline_evidence.plan_artifact_id != manifest_evidence.plan_artifact_id
+            or baseline_evidence.series_artifact_id != manifest_evidence.series_artifact_id
+            or baseline_evidence.pair_ordinal != manifest_evidence.accepted_pair_ordinal
+        ):
+            raise ExactRestoreCompositionError("operation_manifest_mismatch")
     for role in (ExactRestoreRole.MASTER, ExactRestoreRole.SLAVE):
         baseline = record.baseline.for_role(role)
         target = composition.targets[role]
@@ -900,6 +1046,8 @@ def load_bound_record(composition: ExactRestoreComposition) -> ExactRestoreRecor
             baseline.logical_id != target.logical_id
             or baseline.physical_binding != _physical_binding_for_target(target)
             or baseline.power_policy != operation.power_policy
+            or baseline.accepted_latent_manual_power
+            != operation.accepted_latent_manual_power
         ):
             raise ExactRestoreCompositionError("operation_manifest_mismatch")
     return record
@@ -926,6 +1074,7 @@ __all__ = [
     "ExactRestoreOperationManifest",
     "build_verified_baseline",
     "extract_manifest_pair",
+    "extract_manifest_pairs",
     "load_bound_record",
     "load_locked_config",
     "load_operation_manifest",

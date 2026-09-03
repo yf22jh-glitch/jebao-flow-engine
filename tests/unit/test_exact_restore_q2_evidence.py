@@ -546,6 +546,41 @@ def test_bundle_file_cannot_claim_a_different_embedded_artifact(tmp_path: Path) 
         archive.load(expected.artifact_id)
 
 
+def test_legacy_bundle_without_new_optional_keys_round_trips_byte_exactly(tmp_path: Path) -> None:
+    _receipts_archive, archive = _archives(tmp_path)
+    manifest = _manifest()
+    record, sentinel, baseline = _qualified_chain(manifest)
+    expected = _bundle(manifest, sentinel, baseline, record)
+    payload = expected.model_dump(mode="json")
+    embedded_baseline = payload["qualified_record"]["baseline"]
+
+    assert "corroborating_evidence" not in embedded_baseline
+    assert all(
+        "accepted_latent_manual_power" not in device
+        for device in embedded_baseline["devices"]
+    )
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    artifact_name = f"exact-restore-q2-qualified-{expected.artifact_id[4:]}.json"
+    stored_path = tmp_path / "safety" / artifact_name
+    stored_path.write_bytes(canonical)
+    stored_path.chmod(0o600)
+
+    loaded = archive.load(expected.artifact_id)
+
+    assert loaded == expected
+    assert json.dumps(
+        loaded.model_dump(mode="json"),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii") == canonical
+
+
 def test_bundle_cannot_expand_manifest_handoff_window(tmp_path: Path) -> None:
     manifest = _manifest()
     record, sentinel, baseline = _qualified_chain(manifest)

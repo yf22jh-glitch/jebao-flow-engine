@@ -124,6 +124,7 @@ def _device_baseline(
     policy_max_power: int = 80,
     attended_max_power: int = 70,
     power_step: int = 10,
+    accepted_latent_manual_power: int | None = None,
 ) -> ExactRestoreDeviceBaseline:
     label = role.value
     return ExactRestoreDeviceBaseline(
@@ -146,6 +147,7 @@ def _device_baseline(
             attended_max_power=attended_max_power,
         ),
         raw_frame_sha256=_digest(f"{label}-baseline-frame"),
+        accepted_latent_manual_power=accepted_latent_manual_power,
     )
 
 
@@ -157,6 +159,9 @@ def _baseline(
     slave_schedule_flow: int = 70,
     master_schedule_mode: str = "constant",
     slave_schedule_mode: str = "constant",
+    master_accepted_latent_manual_power: int | None = None,
+    slave_accepted_latent_manual_power: int | None = None,
+    corroborating_evidence: ExactRestoreEvidenceReference | None = None,
 ) -> ExactRestoreBaseline:
     return ExactRestoreBaseline(
         devices=(
@@ -165,12 +170,14 @@ def _baseline(
                 manual_power=master_manual_power,
                 schedule_flow=master_schedule_flow,
                 schedule_mode=master_schedule_mode,
+                accepted_latent_manual_power=master_accepted_latent_manual_power,
             ),
             _device_baseline(
                 ExactRestoreRole.SLAVE,
                 manual_power=slave_manual_power,
                 schedule_flow=slave_schedule_flow,
                 schedule_mode=slave_schedule_mode,
+                accepted_latent_manual_power=slave_accepted_latent_manual_power,
             ),
         ),
         evidence=ExactRestoreEvidenceReference(
@@ -179,11 +186,21 @@ def _baseline(
             pair_ordinal=0,
             pair_manifest_sha256=_digest("pair-manifest"),
         ),
+        corroborating_evidence=corroborating_evidence,
         verification_policy=ExactRestoreVerificationPolicy(
             max_observation_age_seconds=30,
             max_final_pair_gap_seconds=20,
         ),
         captured_at=NOW,
+    )
+
+
+def _corroborating_evidence() -> ExactRestoreEvidenceReference:
+    return ExactRestoreEvidenceReference(
+        plan_artifact_id="JFP-test-plan-corroborating",
+        series_artifact_id="JFS-test-series-corroborating",
+        pair_ordinal=0,
+        pair_manifest_sha256=_digest("pair-manifest-corroborating"),
     )
 
 
@@ -1072,6 +1089,96 @@ def test_latent_manual_flow_cannot_exceed_active_non_feed_schedule_ceiling() -> 
         )
 
 
+def test_exact_latent_manual_power_can_cross_only_the_relative_schedule_ceiling() -> None:
+    accepted = _device_baseline(
+        ExactRestoreRole.SLAVE,
+        manual_power=89,
+        schedule_flow=80,
+        policy_max_power=100,
+        attended_max_power=89,
+        power_step=1,
+        accepted_latent_manual_power=89,
+    )
+
+    assert accepted.outer.power == 89
+    assert accepted.accepted_latent_manual_power == 89
+    with pytest.raises(ValueError, match="accepted exact value"):
+        _device_baseline(
+            ExactRestoreRole.SLAVE,
+            manual_power=89,
+            schedule_flow=80,
+            policy_max_power=100,
+            attended_max_power=89,
+            power_step=1,
+            accepted_latent_manual_power=88,
+        )
+    with pytest.raises(ValueError, match="attended safe policy"):
+        _device_baseline(
+            ExactRestoreRole.SLAVE,
+            manual_power=89,
+            schedule_flow=80,
+            policy_max_power=100,
+            attended_max_power=88,
+            power_step=1,
+            accepted_latent_manual_power=89,
+        )
+
+
+def test_accepted_latent_manual_power_requires_independent_corroborating_evidence() -> None:
+    with pytest.raises(ValueError, match="requires corroborating evidence"):
+        _baseline(
+            master_accepted_latent_manual_power=50,
+            slave_accepted_latent_manual_power=60,
+        )
+
+    baseline = _baseline(
+        master_accepted_latent_manual_power=50,
+        slave_accepted_latent_manual_power=60,
+        corroborating_evidence=_corroborating_evidence(),
+    )
+    assert baseline.corroborating_evidence == _corroborating_evidence()
+
+    same_pair = _corroborating_evidence().model_copy(
+        update={"pair_manifest_sha256": baseline.evidence.pair_manifest_sha256}
+    )
+    with pytest.raises(ValueError, match="independent capture"):
+        _baseline(
+            master_accepted_latent_manual_power=50,
+            slave_accepted_latent_manual_power=60,
+            corroborating_evidence=same_pair,
+        )
+
+
+def test_legacy_optional_fields_preserve_canonical_record_digests_and_round_trip() -> None:
+    baseline = _baseline()
+    record = prepare_exact_restore_record(
+        baseline,
+        _safe_targets(),
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
+        operation_id="legacy-compatibility",
+        now=NOW,
+    )
+    baseline_payload = baseline.model_dump(mode="json")
+    record_payload = record.model_dump(mode="json")
+
+    assert "corroborating_evidence" not in baseline_payload
+    assert all(
+        "accepted_latent_manual_power" not in device
+        for device in baseline_payload["devices"]
+    )
+    assert baseline.baseline_sha256 == (
+        "ab6291ea6837afd73efb5d95c35a779bf9762c4153ed5b135c6b30c276625c68"
+    )
+    assert record.action_plan_sha256 == (
+        "a49cca5058fb04b209b230868c321c90436b7f309b3c6be4955a408365b08920"
+    )
+    assert record.authority_context_sha256 == (
+        "b51c874c51125d54a4d42def1b0fe73b36f968b244319956642a2274be94caac"
+    )
+    assert ExactRestoreBaseline.model_validate(baseline_payload) == baseline
+    assert ExactRestoreRecord.model_validate(record_payload) == record
+
+
 @pytest.mark.asyncio
 async def test_wrong_observed_identity_stops_before_any_write() -> None:
     controller, store, guard, harness, _armed = _armed_controller()
@@ -1155,8 +1262,17 @@ async def test_recovery_required_uses_separate_authority_and_no_inflight_can_res
     with pytest.raises(ExactRestoreRecoveryRequired):
         await controller.execute()
 
-    latched = ExactRestoreRecord.model_validate(store.load())
+    legacy_payload = json.loads(json.dumps(store.load()))
+    embedded_baseline = legacy_payload["baseline"]
+    assert "corroborating_evidence" not in embedded_baseline
+    assert all(
+        "accepted_latent_manual_power" not in device
+        for device in embedded_baseline["devices"]
+    )
+    store.record = legacy_payload
+    latched = ExactRestoreRecord.model_validate(legacy_payload)
     assert latched.phase is ExactRestorePhase.RECOVERY_REQUIRED
+    assert latched.authority is not None
     assert latched.inflight is None
     with pytest.raises(ExactRestorePreflightError):
         await controller.execute()

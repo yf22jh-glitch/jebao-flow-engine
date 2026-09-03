@@ -10,16 +10,24 @@ from pathlib import Path
 import pytest
 
 from jebao_flow.config import AppConfig
-from jebao_flow.exact_restore import ExactRestoreRole
+from jebao_flow.exact_restore import (
+    ExactRestoreCycle,
+    ExactRestoreRole,
+    prepare_exact_restore_record,
+)
 from jebao_flow.exact_restore_composition import (
+    ExactRestoreComposition,
     ExactRestoreCompositionError,
     ExactRestoreOperationManifest,
     _PacedRestoreWriter,
     _SharedRolePacer,
     build_verified_baseline,
+    extract_manifest_pairs,
+    load_bound_record,
     load_locked_config,
     load_operation_manifest,
     require_cross_workflow_quiescent,
+    safe_targets_for_manifest,
     select_operation_targets,
 )
 from jebao_flow.protocol.codec import GizwitsCommand, encode_frame
@@ -130,6 +138,26 @@ def _manifest() -> ExactRestoreOperationManifest:
     return ExactRestoreOperationManifest.model_validate(_manifest_dict())
 
 
+def _corroborated_manifest_dict() -> dict[str, object]:
+    payload = _manifest_dict()
+    payload["corroborating_evidence"] = {
+        "plan_artifact_id": "JFP-corroborating",
+        "plan_sha256": "f" * 64,
+        "series_artifact_id": "JFS-corroborating",
+        "series_sha256": "9" * 64,
+        "accepted_pair_ordinal": 3,
+    }
+    devices = payload["devices"]
+    assert isinstance(devices, list)
+    devices[0]["accepted_latent_manual_power"] = 35
+    devices[1]["accepted_latent_manual_power"] = 40
+    return payload
+
+
+def _corroborated_manifest() -> ExactRestoreOperationManifest:
+    return ExactRestoreOperationManifest.model_validate(_corroborated_manifest_dict())
+
+
 def _wire(*, flow: int, schedule_flow: int) -> bytes:
     raw = bytearray(LOCAL_WAVEMAKER_PRO_RAW_STATUS_SIZE)
     raw[0] = 0b00000011  # ON, TimerON, independent, no fault bits.
@@ -197,6 +225,18 @@ def _artifact(config: AppConfig) -> VerifiedPilotPairArtifact:
     )
 
 
+def _corroborating_artifact(config: AppConfig) -> VerifiedPilotPairArtifact:
+    return replace(
+        _artifact(config),
+        plan_artifact_id="JFP-corroborating",
+        plan_sha256="f" * 64,
+        series_id="JFS-corroborating",
+        series_sha256="9" * 64,
+        ordinal=3,
+        pair_manifest_sha256="8" * 64,
+    )
+
+
 def test_manifest_digest_binds_every_field_and_yields_opaque_operation_id() -> None:
     first = _manifest()
     changed = _manifest_dict()
@@ -207,6 +247,47 @@ def test_manifest_digest_binds_every_field_and_yields_opaque_operation_id() -> N
     assert first.baseline_operation_id.startswith("er-baseline-")
     assert first.sentinel_operation_id != first.baseline_operation_id
     assert first.sentinel_operation_id != second.sentinel_operation_id
+
+
+def test_legacy_manifest_serialization_preserves_digest_operation_ids_and_round_trip() -> None:
+    manifest = _manifest()
+    payload = manifest.model_dump(mode="json")
+
+    assert "corroborating_evidence" not in payload
+    assert all("accepted_latent_manual_power" not in device for device in payload["devices"])
+    assert manifest.manifest_sha256 == (
+        "0030516a478d64935fe3bd0e5d52155b6928ebeaaddab21703a6e1cc71f07361"
+    )
+    assert manifest.sentinel_operation_id == (
+        "er-sentinel-61b4213d78db247e6cf38920825c8e658249b7a73d262fef07e86008a438c648"
+    )
+    assert manifest.baseline_operation_id == (
+        "er-baseline-3a4dd43501e462139490a75cdb679041bc6e6012ac021024d7bee1a7106a0893"
+    )
+    assert manifest.final_restore_operation_id == (
+        "er-final-b23421f8558d76b3b75876129c81ae0c868ab4e8b81eda3faebdb43c857bd532"
+    )
+    assert ExactRestoreOperationManifest.model_validate(payload) == manifest
+
+
+def test_exact_latent_manual_power_requires_distinct_manifest_corroboration() -> None:
+    missing = _manifest_dict()
+    devices = missing["devices"]
+    assert isinstance(devices, list)
+    devices[1]["accepted_latent_manual_power"] = 40
+    with pytest.raises(ValueError, match="requires corroborating evidence"):
+        ExactRestoreOperationManifest.model_validate(missing)
+
+    duplicated = _corroborated_manifest_dict()
+    duplicated["corroborating_evidence"] = duplicated["evidence"]
+    with pytest.raises(ValueError, match="independent capture"):
+        ExactRestoreOperationManifest.model_validate(duplicated)
+
+    manifest = _corroborated_manifest()
+    assert manifest.devices[0].accepted_latent_manual_power == 35
+    assert manifest.devices[1].accepted_latent_manual_power == 40
+    assert "accepted_latent_manual_power" in manifest.model_dump(mode="json")["devices"][0]
+    assert "corroborating_evidence" in manifest.model_dump(mode="json")
 
 
 def test_attended_policy_cannot_expand_configured_device_limits() -> None:
@@ -255,6 +336,234 @@ def test_verified_pair_decodes_raw_into_admitted_exact_baseline() -> None:
     assert baseline.devices[0].outer.linkage.value == "independent"
     assert baseline.devices[1].schedule.image_bytes[:9] == bytes((0, 0, 24, 0, 2, 70, 30, 0, 0))
     assert baseline.evidence.pair_manifest_sha256 == "e" * 64
+
+
+def test_two_independent_pairs_build_one_exactly_corroborated_baseline() -> None:
+    config = _config()
+    manifest = _corroborated_manifest()
+    targets = select_operation_targets(config, manifest)
+    primary = _artifact(config)
+    corroborating = _corroborating_artifact(config)
+
+    baseline = build_verified_baseline(
+        manifest,
+        targets,
+        primary,
+        corroborating,
+        now=NOW,
+    )
+
+    assert baseline.evidence.pair_manifest_sha256 == primary.pair_manifest_sha256
+    assert baseline.corroborating_evidence is not None
+    assert (
+        baseline.corroborating_evidence.pair_manifest_sha256
+        == corroborating.pair_manifest_sha256
+    )
+    assert [device.accepted_latent_manual_power for device in baseline.devices] == [35, 40]
+
+
+def test_bound_record_rechecks_both_manifest_references_and_exact_latent_values() -> None:
+    config = _config()
+    manifest = _corroborated_manifest()
+    targets = select_operation_targets(config, manifest)
+    baseline = build_verified_baseline(
+        manifest,
+        targets,
+        _artifact(config),
+        _corroborating_artifact(config),
+        now=NOW,
+    )
+
+    def composition_for(record):
+        class Store:
+            def load(self):
+                return record.model_dump(mode="json")
+
+        return ExactRestoreComposition(
+            manifest=manifest,
+            config=config,
+            targets=targets,
+            controller=object(),
+            store=Store(),
+            guard=object(),
+            observer=object(),
+        )
+
+    record = prepare_exact_restore_record(
+        baseline,
+        safe_targets_for_manifest(manifest),
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
+        operation_id=manifest.sentinel_operation_id,
+        now=NOW,
+    )
+    assert load_bound_record(composition_for(record)) == record
+
+    wrong_evidence = baseline.evidence.model_copy(
+        update={"series_artifact_id": "JFS-wrong-primary"}
+    )
+    wrong_baseline = baseline.model_copy(update={"evidence": wrong_evidence})
+    wrong_record = prepare_exact_restore_record(
+        wrong_baseline,
+        safe_targets_for_manifest(manifest),
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
+        operation_id=manifest.sentinel_operation_id,
+        now=NOW,
+    )
+    with pytest.raises(ExactRestoreCompositionError, match="operation_manifest_mismatch"):
+        load_bound_record(composition_for(wrong_record))
+
+    wrong_slave = baseline.devices[1].model_copy(
+        update={
+            "outer": baseline.devices[1].outer.model_copy(update={"power": 39}),
+            "accepted_latent_manual_power": 39,
+        }
+    )
+    wrong_baseline = baseline.model_copy(
+        update={"devices": (baseline.devices[0], wrong_slave)}
+    )
+    wrong_record = prepare_exact_restore_record(
+        wrong_baseline,
+        safe_targets_for_manifest(manifest),
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
+        operation_id=manifest.sentinel_operation_id,
+        now=NOW,
+    )
+    with pytest.raises(ExactRestoreCompositionError, match="operation_manifest_mismatch"):
+        load_bound_record(composition_for(wrong_record))
+
+
+def test_manifest_pairs_are_loaded_and_verified_independently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jebao_flow.exact_restore_composition as module
+
+    manifest = _corroborated_manifest()
+    primary = _artifact(_config())
+    corroborating = _corroborating_artifact(_config())
+    artifacts = {
+        primary.series_id: primary,
+        corroborating.series_id: corroborating,
+    }
+    references = {
+        primary.series_id: manifest.evidence,
+        corroborating.series_id: manifest.corroborating_evidence,
+    }
+    calls: list[tuple[str, str, int]] = []
+
+    class Store:
+        def __init__(self, _root: Path) -> None: ...
+
+        def load(self, series_id: str):
+            evidence = references[series_id]
+            assert evidence is not None
+            return type(
+                "Reference",
+                (),
+                {
+                    "plan_artifact_id": evidence.plan_artifact_id,
+                    "plan_sha256": evidence.plan_sha256,
+                },
+            )()
+
+        def extract_verified_accepted_pair(
+            self,
+            reference,
+            *,
+            expected_series_sha256: str,
+            ordinal: int,
+        ) -> VerifiedPilotPairArtifact:
+            series_id = next(
+                value
+                for value, evidence in references.items()
+                if evidence is not None
+                and evidence.plan_artifact_id == reference.plan_artifact_id
+            )
+            calls.append((series_id, expected_series_sha256, ordinal))
+            return artifacts[series_id]
+
+    monkeypatch.setattr(module, "PilotSeriesStore", Store)
+
+    assert extract_manifest_pairs(manifest, tmp_path) == (primary, corroborating)
+    assert calls == [
+        (primary.series_id, manifest.evidence.series_sha256, 2),
+        (
+            corroborating.series_id,
+            manifest.corroborating_evidence.series_sha256,
+            3,
+        ),
+    ]
+
+
+def test_corroborating_pair_must_match_outer_controls_and_schedule_bytes_exactly() -> None:
+    config = _config()
+    manifest = _corroborated_manifest()
+    targets = select_operation_targets(config, manifest)
+    corroborating = _corroborating_artifact(config)
+    changed_wire = _wire(flow=40, schedule_flow=71)
+    changed_slave = replace(
+        corroborating.samples[1],
+        raw_wire_frame=changed_wire,
+        raw_wire_frame_sha256=hashlib.sha256(changed_wire).hexdigest(),
+    )
+    changed_pair = replace(
+        corroborating,
+        samples=(corroborating.samples[0], changed_slave),
+    )
+
+    with pytest.raises(ExactRestoreCompositionError, match="baseline_corroboration_mismatch"):
+        build_verified_baseline(
+            manifest,
+            targets,
+            _artifact(config),
+            changed_pair,
+            now=NOW,
+        )
+
+    with pytest.raises(
+        ExactRestoreCompositionError,
+        match="baseline_corroboration_not_independent",
+    ):
+        build_verified_baseline(
+            manifest,
+            targets,
+            _artifact(config),
+            replace(
+                corroborating,
+                pair_manifest_sha256=_artifact(config).pair_manifest_sha256,
+            ),
+            now=NOW,
+        )
+
+
+def test_corroborating_pair_independently_enforces_pair_gap_and_observation_age() -> None:
+    config = _config()
+    manifest = _corroborated_manifest()
+    targets = select_operation_targets(config, manifest)
+    primary = _artifact(config)
+    corroborating = _corroborating_artifact(config)
+
+    with pytest.raises(ExactRestoreCompositionError, match="baseline_pair_gap_exceeded"):
+        build_verified_baseline(
+            manifest,
+            targets,
+            primary,
+            replace(corroborating, pair_completion_gap_ns=21_000_000_000),
+            now=NOW,
+        )
+
+    stale_read = _interval(NOW - timedelta(minutes=2), 100)
+    stale_samples = tuple(
+        replace(sample, read=stale_read) for sample in corroborating.samples
+    )
+    with pytest.raises(ExactRestoreCompositionError, match="baseline_observation_expired"):
+        build_verified_baseline(
+            manifest,
+            targets,
+            primary,
+            replace(corroborating, samples=stale_samples),
+            now=NOW,
+        )
 
 
 def test_verified_pair_fails_closed_on_expiry_pair_gap_and_binding() -> None:

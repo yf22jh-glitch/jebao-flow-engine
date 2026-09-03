@@ -25,6 +25,7 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -257,6 +258,14 @@ class ExactRestoreDeviceBaseline(BaseModel):
     schedule: ExactScheduleImage
     power_policy: RestorePowerPolicy
     raw_frame_sha256: Sha256Digest
+    accepted_latent_manual_power: int | None = Field(default=None, ge=0, le=100)
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_compatible(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        if self.accepted_latent_manual_power is None:
+            payload.pop("accepted_latent_manual_power", None)
+        return payload
 
     @model_validator(mode="after")
     def validate_v1_admission(self) -> Self:
@@ -283,7 +292,15 @@ class ExactRestoreDeviceBaseline(BaseModel):
         ]
         if not active_non_feed_flows:
             raise ValueError("baseline requires an active non-feed schedule flow ceiling")
-        if self.outer.power > max(active_non_feed_flows):
+        if (
+            self.accepted_latent_manual_power is not None
+            and self.outer.power != self.accepted_latent_manual_power
+        ):
+            raise ValueError("latent manual power does not match the accepted exact value")
+        if (
+            self.outer.power > max(active_non_feed_flows)
+            and self.outer.power != self.accepted_latent_manual_power
+        ):
             raise ValueError("latent manual power exceeds the active non-feed schedule ceiling")
         return self
 
@@ -306,8 +323,16 @@ class ExactRestoreBaseline(BaseModel):
 
     devices: tuple[ExactRestoreDeviceBaseline, ExactRestoreDeviceBaseline]
     evidence: ExactRestoreEvidenceReference
+    corroborating_evidence: ExactRestoreEvidenceReference | None = None
     verification_policy: ExactRestoreVerificationPolicy
     captured_at: datetime
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_compatible(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        if self.corroborating_evidence is None:
+            payload.pop("corroborating_evidence", None)
+        return payload
 
     @field_validator("captured_at")
     @classmethod
@@ -325,6 +350,19 @@ class ExactRestoreBaseline(BaseModel):
             raise ValueError("baseline logical devices must be distinct")
         if self.devices[0].identity_binding_sha256 == self.devices[1].identity_binding_sha256:
             raise ValueError("baseline physical bindings must be distinct")
+        if any(
+            device.accepted_latent_manual_power is not None for device in self.devices
+        ) and self.corroborating_evidence is None:
+            raise ValueError("accepted latent manual power requires corroborating evidence")
+        if self.corroborating_evidence is not None and (
+            self.evidence.plan_artifact_id
+            == self.corroborating_evidence.plan_artifact_id
+            or self.evidence.series_artifact_id
+            == self.corroborating_evidence.series_artifact_id
+            or self.evidence.pair_manifest_sha256
+            == self.corroborating_evidence.pair_manifest_sha256
+        ):
+            raise ValueError("corroborating evidence must reference an independent capture")
         return self
 
     @property
