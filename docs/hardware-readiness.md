@@ -935,3 +935,42 @@ raw를 보존하므로 **분류 규칙은 실기를 다시 태우지 않고 다�
 기준, 유효/무효 경계 수와 버린 사유, opaque artifact id, UTC span, SHA-256 identity binding,
 digest를 함께 남깁니다. 관측으로도 결론이 나지 않으면 그 사실과 이유를 기록하고 park를
 유지합니다.
+
+## 2026-09-03 앱 주도 단일 전환 계획 — 준비 중 / live-write NO-GO
+
+repository maintainer는 frozen harness가 schedule을 구성하는 대신 on-site approver가 제바오
+앱으로 장비별 schedule을 저장하고 `master`/`async_slave`를 지정하는 경로를 우선하기로
+결정했습니다. 상세 계약은
+[`Native app-driven ASYNC single-transition observation`](native-app-async-single-transition-observation.md)
+을 따릅니다.
+
+이 변경으로 Q2 판정은 아직 바뀌지 않습니다. 아래 세 선행조건이 모두 닫히기 전에는 앱 schedule
+또는 role write를 시작하지 않습니다.
+
+1. 현재 baseline의 역할 B manual `Random / Flow 89`를 operation manifest에 exact 값으로
+   지목하고 attended authority에 결속하는 standalone exact-restore admission. 기존 persisted
+   record 호환용 `None`은 ceiling 초과 예외를 열지 않으며, 이번 manifest는 exact 숫자를 요구
+2. 실제 baseline과 temporary mutation에서 standalone 경로가 두 schedule image와 outer controls를
+   byte-exact 복원했다는 별도 attended qualification과 두 fresh collector 검증
+3. ASYNC에서 action `0x03` 또는 `0x04`를 fresh session당 한 번 수용하고 action·device-local
+   `NowTime`·raw frame을 보존하는 report-capable read-only collector
+
+역할 B의 `Flow 89` 값은 current schedule 상한이 아닙니다. preserved raw에서는 `TimerON=true`인
+별도 manual register였고, repository maintainer는 과거 standalone Random 89 시험의 잔여
+dummy로 기억한다고 확인했습니다. 값은 등급 (a), 발생 원인 기억은 등급 (c)입니다. 같은
+approver는 이번 operation의 restore 중 이 값이 잠시 active가 될 가능성을 수용했습니다. 이
+결정은 현재 두 schedule을 byte-exact 복원하는 이번 operation에만 적용합니다.
+
+앱을 열기 전 서로 다른 두 strict fresh collector로 각 장비의 current 432-byte image와 outer
+controls를 이중 보존하고 두 결과의 byte-exact 일치를 요구합니다. 앱 조작 종료 후 code restore가
+그 원본 bytes를 장비별로 다시 쓰고, writer 종료 뒤 서로 다른 두 strict fresh collector가 exact
+일치를 확인해야만 복원 완료입니다. 앱에서 사람이 slot을 다시 입력한 결과는 primary restore로
+인정하지 않습니다.
+
+두 baseline은 사람의 사전 대조만으로 끝내지 않습니다. manifest와 durable baseline에 primary와
+corroborating artifact reference·digest를 함께 결속하고, composition이 양쪽 raw에서 identity,
+outer controls와 schedule bytes의 exact 일치를 확인한 뒤에만 restore journal을 만들 수 있습니다.
+
+**Home Assistant는 재시작하거나 조작하지 않습니다.** read-only preflight에서 HA의 Jebao TCP
+connection이 보이면 에이전트가 integration을 끄지 않고 이 operation을 `NO-GO`로 중단해
+보고합니다. 앱과 collector도 동시에 실행하지 않습니다.

@@ -751,6 +751,43 @@ ordered restore, 서로 다른 두 source-attested fresh collector의 원 contro
 적용됩니다. 비-terminal intent가 남으면 새 실험·fixed 상수 변경을 금지하고 이 exact source/image의
 기존 attended recovery와 read-only 검증만 허용합니다.
 
+### 2026-09-03 Sync-only 단회 해제 미사용 종료와 앱 주도 경로 전환
+
+repository maintainer는 위 Sync-only 구현 준비 중, 제바오 앱에서 장비별 schedule을 직접
+저장하고 `master`/`async_slave`로 전환한 뒤 read-only raw를 관측하는 경로를 우선하기로
+결정했습니다. 2026-09-03에 “진행해”라고 명시적으로 승인했으며, 현재 두 장비의 432-byte
+schedule image를 장비별 원본 바이트로 복원하는 것을 최우선 조건으로 다시 확인했습니다.
+
+commit `9c9be19ad8fd224fac6bc57485a2121b59ace624`의 Sync-only 해제는 hardware write 없이,
+source commit 없이 **미사용 종료**합니다. 이 기록부터 위 네 frozen source와 직접 테스트에는
+§1 동결을 다시 적용하며, `9c9be19`를 이후 Sync write나 미완성 구현의 권한으로 재사용하지
+않습니다. 준비 중이던 미커밋 prototype은 별도 stash에 격리됐고 현재 tree나 실행 image의
+구성요소가 아닙니다.
+
+새 앱 주도 계획은
+[`Native app-driven ASYNC single-transition observation`](docs/native-app-async-single-transition-observation.md)
+을 따릅니다. 앱 live-write는 §1 동결 대상이 아니지만 별도의 attended operation이며, 앱 write
+전에 qualified standalone exact restore와 report-capable write-free collector, 서로 다른 두
+fresh baseline의 byte-exact 교차확인이 모두 필요합니다. 이 계획을 위한 `exact_restore*`와
+별도 read-only collector 변경은 frozen native schedule/linkage harness를 import·호출·노출하지
+않는 범위에 한정합니다.
+
+`exact_restore*`는 §1의 native ASYNC write 하네스 동결 범위 밖에 있는 별도 attended 도구입니다.
+그 도구가 장비에 write하는 Phase 1 qualification과 Phase 4 final restore는 각각 고유 operation
+id, on-site hardware approver의 해당 operation 승인·현장 감시·중단 수단 확인, 대면 attended
+grant를 모두 요구합니다. 앱 operation의 승인이나 아래 `Flow 89` 수용을 이 두 grant로 대신하지
+않습니다.
+
+repository maintainer 겸 on-site hardware approver는 역할 B의 manual `Random / Flow 89 /
+Frequency 34`가 과거 standalone 시험의 미사용 잔여값이라고 기억한다고 확인했고, 이번
+operation의 exact restore 중 그 값이 잠시 active가 될 가능성을 수용했습니다. 값 자체는
+preserved raw 등급 (a), 발생 원인과 수용 결정은 등급 (c)로 분리합니다. 이 operation별 수용은
+다른 operation의 power authority로 이월하지 않습니다.
+
+**Home Assistant는 이 경로에서 재시작·reload·disable·설정 변경·service call하지 않습니다.**
+first write 전 HA의 직접 Jebao connection이 관측되면 에이전트가 이를 끄지 않고 `NO-GO`로
+멈춰 repository maintainer에게 보고합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
