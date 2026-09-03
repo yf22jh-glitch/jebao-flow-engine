@@ -601,6 +601,156 @@ image를 byte-exact하게 검증했습니다. 상세 증거는
 권한을 분리한 ASYNC 계획을 세우며, repository maintainer의 새 승인, 별도 해제 커밋과 on-site
 hardware approver 승인이 모두 필요합니다.
 
+### 2026-09-03 Sync runtime schedule 소유권 단회 해제
+
+repository maintainer는 commit
+`b276c7ccb751a8b5a2f082dced331bc3be04f717`의
+[`Native Sync schedule 소유권 최소 단회 계획`](docs/native-sync-schedule-ownership-recheck.md)과
+§7의 네 대안을 검토한 뒤 “진행하자”라고 답해, **계획된 구현과 Sync-only 실장비 operation
+1회**를 명시적으로 승인했습니다. 이 승인은 repository maintainer 권한이며, 첫 hardware write에
+필요한 on-site hardware approver의 operation별 승인·현장 감시·중단 수단 확인을 대신하지 않습니다.
+
+이 단회가 닫을 질문은 `master`와 `sync_slave`가 서로 다른 432-byte image를 보유할 때 slave의
+protocol-reported schedule content와 전이 시각을 master/slave 중 누가 소유하는가입니다. cached
+Pro 앱에서 `TimerON`을 먼저 arm한 뒤 Slave를 선택하는 경로는 partial `{Linkage:2}` 한 건만
+보내며 별도 pairing·master id·schedule copy command가 없습니다. 따라서 같은 순서와 wire action을
+사용하되, 앱 정적 trace를 firmware runtime 증거로 승격하지 않습니다.
+
+고정 값과 시간은 다음뿐입니다.
+
+- master safe manual `Constant / Flow 30 / F20`, A=`Sine / Flow 35 / F30`,
+  B=`Constant / Flow 30 / wire F0`, boundary=`T`
+- slave safe manual `Constant / Flow 31 / F20`, A=`Constant / Flow 32 / wire F0`,
+  B=`Sine / Flow 40 / F30`, boundary=`T+5분`
+- fixed signature `(35, 32, 30, 40, 30)`, Flow write 집합 `{30,31,32,35,40}`,
+  temporary schedule·role authority의 guarded maximum `41`
+- master boundary는 fresh device-local clock의 다음 정시 분 +7분, preflight lead
+  `(360,420]초`, execution 직전 minimum lead `380초`
+- `ScheduleFlowExperimentSpec.minimum_lead_seconds=60`, outer observation `915초`, reserve `15초`,
+  complete epoch `900초`, post-boundary stability `30초`, boundary exclusion `±60초`
+- frequency write 집합 `{0,20,30}`, recognised read allowlist `{0,5,20,30}`. Constant wire F0의
+  보고 F5는 진단으로 보존하고 attribution을 바꾸지 않음
+
+role write는 master=`Linkage=master` 한 번, slave=`Linkage=sync_slave` 한 번뿐입니다.
+`async_slave` write는 **0회**입니다. 장비별 safe control·temporary schedule·TimerON 여섯 건과
+두 role write를 합친 forward intended change는 정확히 여덟 건이며, 각 intended change는 durable
+intent-before-write와 기존 exactly-once/no-resend 계약을 유지합니다.
+
+이번 해제에서 허용하는 source와 직접 테스트는 다음으로 한정합니다.
+
+1. `src/jebao_flow/devices/schedule_flow_experiment.py`
+   - fixed signature, safe manual과 cap의 중복 상수를 `schedule_linkage.py`와 동시에 변경
+   - 한 `sine_frequency=30`을 공유하는 반대 Mode A/B와 slave `T+5분` image 구성
+   - outer slave role을 Sync-only로 한정하고 content outcome 의미를 재도출
+2. `src/jebao_flow/devices/schedule_linkage.py`
+   - exact fixed constants·allowlist·cap과 exact 5분 boundary offset
+   - `SYNC_ONLY` durable sequence와 recovery allowed-set
+   - fixed operation의 role 적용·capability 확인·monitor `expected_roles`·sample 생성에서만 slave
+     role을 exact `sync_slave`로 사용하고, 일반 Async 경로의 `async_slave` 요구는 그대로 유지
+   - `ScheduleLinkageSample.slave_linkage` literal과 별도 `full_linkage_topology` 조건을 fixed
+     Sync-only에서 함께 확장
+   - W0/W2 content evidence는 durable sample로, mixed-boundary W1은 기존 private raw로 보존
+3. `src/jebao_flow/schedule_flow_experiment_cli.py`
+   - 위 fixed 값, +7분 master boundary와 +5분 slave offset, run minimum lead 380초,
+     post-boundary stability 30초와 정확한 operator 출력
+4. `src/jebao_flow/hardware_test.py`
+   - fixed Sync-only spec에서만 durable sample의 `sync_slave` topology를 허용
+   - 기존 Async topology 검사는 그대로 유지하고 `OWN_SCHEDULE`을 Async 성공 boolean으로
+     승격하지 않음
+5. 위 네 source에 직접 대응하는 기존
+   `tests/unit/test_schedule_flow_experiment.py`,
+   `tests/unit/test_schedule_linkage_transaction.py`,
+   `tests/unit/test_schedule_flow_experiment_cli.py`,
+   `tests/unit/test_hardware_test.py`
+
+`src/jebao_flow/devices/schedule_transaction.py`, `src/jebao_flow/devices/linkage.py`,
+`src/jebao_flow/devices/lan.py`, `src/jebao_flow/schedule_linkage_cli.py`, persistence, 일반
+daemon·MQTT, Home Assistant, physical binding·single-write·journal·rollback write path는 변경하지
+않습니다. 새 범용 CLI, 새 pre-write firmware 가설 gate, fake firmware knob, runtime mixed-window
+PASS gate를 추가하지 않습니다.
+
+새 `ScheduleLinkageSlaveRoleSequence.SYNC_ONLY`는 staged `slave_role_progress`를 만들지 않습니다.
+기존 master-first `linkage_write_intent_device_ids`와 `linked_device_ids`만 write 전후를 증명하며,
+recovery allowed-set은 다음으로 제한합니다.
+
+`SYNC_ONLY`는 `ScheduleLinkageRecord` validator에서 `DIRECT`와 같이 staged progress 없음으로
+취급해 intent-progress 동시 durable 요구를 적용하지 않습니다. `_allowed_recovery_roles()`에서는
+`SYNC_THEN_ASYNC` prefix 판정보다 앞에 전용 분기를 두며, 빈 progress가 두 경로의 기존
+`sync-then-async` raise에 도달하지 않아야 합니다.
+
+- slave intent 전 또는 slave detach 기록 뒤: `{independent}`
+- slave intent가 durable하고 detach 전: `{independent, sync_slave}`
+- 어느 prefix에서도 `async_slave`는 허용하지 않음
+
+W0는 기존 fixed 계약대로 동일 evidence 10 pair·host span 120초·conflict 0을 요구합니다. W1과
+W2는 label 2 pair·host span 30초·conflict 0을 요구합니다. evidence pair는 같은 fresh ordinal,
+8초 acquisition authority, exact identity·roles·TimerON·schedule digest·cap, 그리고 두 frame의
+device-local `NowTime`이 같은 분이라는 조건을 모두 만족해야 합니다. W0의 master는 exact A,
+W1·W2의 master는 같은 pair에서 exact B여야 합니다. pair clock이 다른 분이면 raw·진단만 남기고
+판정에서 제외합니다.
+
+runtime durable content outcome은 W0와 W2가 일치할 때만 다음 named value로 기록합니다.
+
+- slave가 양 창에서 master tuple을 보고: `FULL_MASTER_FOLLOW`
+- slave가 양 창에서 자기 tuple을 보고: `OWN_SCHEDULE`
+- exact manual tuple 유지: `COMMON_MANUAL_FLOW`
+- W2에서 slave A 유지: `A_SLOT_HOLD`
+- 창 불일치·field split·그 밖의 bounded tuple: `UNEXPECTED_EFFECTIVE_STATE`
+- evidence 부족·conflict·decode/transport·restore 미확인: `UNKNOWN`
+
+`PER_SLOT_POWER_VERIFIED`는 Async 성공 신호이므로 이번 실행에서 만들지 않습니다.
+`OWN_SCHEDULE`이어도 legacy `schedule_transition_verified`는 **False**로 기록하고, named outcome과
+stable sample이 Sync content 판정입니다. 어느 outcome도 물리 유량·파형 적용을 증명하지 않습니다.
+
+W1의 보존 raw에는 plan commit이 사전 고정한 다음 timing×content 매핑만 적용합니다. 같은 pair의
+master exact B가 없으면 W1 증거가 아닙니다.
+
+- slave master B `Constant/30/F0|5`: `MASTER_TIMING_MASTER_CONTENT`
+- slave slave B `Sine/40/F30`: `MASTER_TIMING_SLAVE_CONTENT`
+- slave master A `Sine/35/F30`: `SLAVE_TIMING_MASTER_CONTENT`
+- slave slave A `Constant/32/F0|5`: `SLAVE_TIMING_SLAVE_CONTENT`
+- manual `Constant/31/F20`: `MANUAL_ECHO`
+- Mode와 Flow가 서로 다른 owner 후보를 가리킴: `FIELD_SPLIT`
+- 그 밖의 bounded tuple 또는 자격 미달: `UNEXPECTED_EFFECTIVE_STATE` 또는 `UNKNOWN`
+
+단일 Sine F30 때문에 Frequency는 Mode family만 구분하고 owner 축은 Mode·Flow로 판정합니다.
+role-entry mirror가 slave A를 manual DP에 복사했다면 slave A와 manual 반향은 구조적으로 같으므로,
+`SLAVE_TIMING_SLAVE_CONTENT`를 firmware schedule engine과 manual 반향까지 구분한 것으로 쓰지
+않습니다. raw frame은 등급 (a), label은 그 raw에 사전 고정 규칙을 적용한 도출로 분리합니다.
+
+fixed monitor의 기존 fresh-session transport는 변경하지 않습니다. pair마다 paired
+disconnect/connect 뒤 participant별 report-capable capture 1회, acquisition authority 8초,
+다음 acquisition 전 pause 10초, 같은 ordinal retry 0회, 연속 실패 3회 종료와 형제 raw 보존을
+유지합니다. action `0x04`는 explicit reply나 ACK로 부르지 않고, 최종 기록에는 `0x03`/`0x04`,
+pair refresh·connect/auth 횟수와 allow-listed transport exception class를 분리합니다.
+
+첫 hardware write 뒤 조기 ordered recovery 조건은 다음 다섯 가지뿐입니다.
+
+1. physical identity binding 불일치
+2. temporary schedule·native role authority 아래 실제 또는 보고된 Flow가 `41` 초과
+3. 펌프·수조의 구체적 위험 동작
+4. durable journal·rollback 권한·현장 중단 수단 상실
+5. 현장 감시자 또는 사용자의 명시적 비상 정지
+
+bounded unexpected tuple·action `0x04`·단일 read 오류는 write 재전송 사유가 아닙니다. 기존
+ordered restore는 slave detach -> master detach -> safe TimerOFF/independent -> 원 432-byte
+images -> 원 outer controls/TimerON을 유지합니다. 원 slave latent manual Flow 89는 temporary cap과
+섞지 않고 기존 한 guarded outer-control+TimerON frame에서만 복원합니다. 정상 복원 후 원
+AutoFlow에는 temporary cap 41을 적용하지 않습니다.
+
+source commit 전 직접 unit/fault-injection 테스트와 전체 suite, Claude의 read-only COMMIT_OK를
+받습니다. exact commit의 Linux/amd64 image와 revision·signature·cap을 대조하고, device write 0인
+fresh baseline collector로 physical binding·원 controls·두 images를 보존합니다. 실제 첫 write는
+on-site hardware approver가 이 operation을 승인하고 현장에서 감시·중단할 수 있으며 다른
+writer·Observer·recovery supervisor가 없고 attended lease가 하나일 때만 시작합니다. Home
+Assistant는 재시작하거나 조작하지 않습니다.
+
+새 operation id와 fresh boundary로 **한 operation만** 실행합니다. 결과와 무관하게 terminal
+ordered restore, 서로 다른 두 source-attested fresh collector의 원 controls·두 image byte-exact
+검증, append-only `docs/runs/` 기록 커밋이 끝나면 이 해제는 자동 소진되고 §1 동결이 다시
+적용됩니다. 비-terminal intent가 남으면 새 실험·fixed 상수 변경을 금지하고 이 exact source/image의
+기존 attended recovery와 read-only 검증만 허용합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
