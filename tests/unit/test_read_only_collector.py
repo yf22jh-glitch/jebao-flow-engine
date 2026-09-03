@@ -29,6 +29,7 @@ from jebao_flow.protocol.session import (
 from jebao_flow.read_only_collector import (
     ArtifactStoreError,
     CaptureContext,
+    CaptureTransportPolicy,
     CollectorPreflightError,
     DurabilityUnconfirmedError,
     PilotSeriesStore,
@@ -148,6 +149,7 @@ class _Discovery:
 class _Session:
     instances: list[_Session] = []
     raw_by_address: dict[str, bytes | BaseException] = {}
+    action_by_address: dict[str, int] = {}
 
     def __init__(self, address: str) -> None:
         self.address = address
@@ -172,13 +174,14 @@ class _Session:
         result = self.raw_by_address[self.address]
         if isinstance(result, BaseException):
             raise result
+        action = self.action_by_address.get(self.address, STATE_REPLY_ACTION)
         wire_frame = encode_frame(
             GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
-            bytes([STATE_REPLY_ACTION]) + result,
+            bytes([action]) + result,
         )
         return RawStateCapture(
             wire_frame=wire_frame,
-            action=STATE_REPLY_ACTION,
+            action=action,
             status_payload=result,
         )
 
@@ -197,6 +200,7 @@ def _reset_fakes(monkeypatch) -> None:
     raw_value[443:451] = bytes((20, 26, 8, 28, 0, 12, 0, 0))
     raw = bytes(raw_value)
     _Session.raw_by_address = {"first.private": raw, "second.private": raw}
+    _Session.action_by_address = {}
 
     def validate_source_attestation(attestation: object, *, expected_commit: str) -> object:
         assert expected_commit == "a" * 40
@@ -392,6 +396,58 @@ async def test_pair_uses_fresh_discovery_and_session_with_explicit_reply_only() 
         capture.samples[1].read_completed.monotonic_ns
         - capture.samples[0].read_completed.monotonic_ns
     )
+
+
+async def test_reply_or_report_pair_accepts_and_preserves_both_state_actions(
+    tmp_path: Path,
+) -> None:
+    _Session.action_by_address = {
+        "first.private": STATE_REPORT_ACTION,
+        "second.private": STATE_REPLY_ACTION,
+    }
+    capture = await collect_pair(
+        select_capture_pair(_config(), "first", "second"),
+        discovery_factory=lambda: _Discovery(_discovered()),
+        session_factory=_Session,
+        discovery_timeout_seconds=2,
+        transport_policy=CaptureTransportPolicy.REPLY_OR_REPORT,
+        utc_clock=_UtcClock(),
+        monotonic_clock=_MonotonicClock(),
+    )
+
+    assert capture.status == "acquisition_valid"
+    assert capture.transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT
+    assert all(session.accept_reports == [True] for session in _Session.instances)
+    store = RawCaptureStore(_private_root(tmp_path))
+    metadata = store.commit(
+        capture,
+        context=_context(),
+        artifact_id="JFC-report-capable",
+    )
+    manifest = store.verify(metadata.artifact_id)
+    assert manifest["transport_policy"] == "reply_or_report"
+    assert manifest["accepted_actions"] == ["0x03", "0x04"]
+    assert manifest["action_counts"] == {"0x03": 1, "0x04": 1}
+    assert [sample["observed_action"] for sample in manifest["samples"]] == [
+        "0x04",
+        "0x03",
+    ]
+
+
+async def test_explicit_only_rejects_report_returned_by_nonconforming_session() -> None:
+    _Session.action_by_address["first.private"] = STATE_REPORT_ACTION
+    capture = await collect_pair(
+        select_capture_pair(_config(), "first", "second"),
+        discovery_factory=lambda: _Discovery(_discovered()),
+        session_factory=_Session,
+        discovery_timeout_seconds=2,
+        utc_clock=_UtcClock(),
+        monotonic_clock=_MonotonicClock(),
+    )
+
+    assert capture.status == "acquisition_invalid"
+    assert capture.samples[0].failure_code == "state_reply_action_not_explicit"
+    assert capture.samples[0].raw_wire_frame is not None
 
 
 async def test_real_transport_pilot_series_sends_no_control_frame(tmp_path: Path) -> None:
@@ -904,6 +960,142 @@ async def test_pilot_series_precommits_plan_and_preserves_every_ordinal(
     assert _Discovery.calls == calls_before_reentry
 
 
+async def test_report_capable_pilot_binds_policy_and_counts_selected_actions(
+    tmp_path: Path,
+) -> None:
+    root = _private_root(tmp_path)
+    store = PilotSeriesStore(root)
+    targets = select_capture_pair(_config(), "first", "second")
+    _Session.action_by_address = {
+        "first.private": STATE_REPORT_ACTION,
+        "second.private": STATE_REPLY_ACTION,
+    }
+    plan = store.prepare(
+        targets,
+        source_attestation=_TEST_SOURCE_ATTESTATION,
+        planned_pair_count=2,
+        requested_cadence_seconds=0.001,
+        collector_commit_sha="a" * 40,
+        transport_policy=CaptureTransportPolicy.REPLY_OR_REPORT,
+    )
+    plan_claim = store.verify_plan(plan)
+    assert plan_claim["acquisition"]["transport_policy"] == "reply_or_report"
+    assert plan_claim["acquisition"]["accept_reports"] is True
+    assert plan_claim["acquisition"]["accepted_actions"] == ["0x03", "0x04"]
+    assert "required_action" not in plan_claim["acquisition"]
+    assert (
+        plan_claim["validity_predicate"]["predicate_version"]
+        == "local-wavemaker-pro-acquisition-v3"
+    )
+
+    metadata = await store.run(
+        plan,
+        targets,
+        source_attestation=_TEST_SOURCE_ATTESTATION,
+        discovery_factory=lambda: _Discovery(_discovered()),
+        session_factory=_Session,
+        discovery_timeout_seconds=2,
+    )
+
+    assert metadata.action_counts == {"0x03": 2, "0x04": 2}
+    verified = store.verify_completed_series(
+        plan,
+        expected_series_sha256=metadata.series_sha256,
+    )
+    assert verified["transport_policy"] == "reply_or_report"
+    assert verified["action_counts"] == {"0x03": 2, "0x04": 2}
+    sample_claims = [
+        json.loads(
+            (
+                plan.series_directory
+                / "attempts"
+                / f"{ordinal:06d}"
+                / role
+                / "sample.json"
+            ).read_text()
+        )
+        for ordinal in range(2)
+        for role in ("a", "b")
+    ]
+    assert [sample["observed_action"] for sample in sample_claims] == [
+        "0x04",
+        "0x03",
+        "0x04",
+        "0x03",
+    ]
+    assert all(sample["state_summary"]["device_local_time"] for sample in sample_claims)
+    assert all(session.accept_reports == [True] for session in _Session.instances)
+
+
+def test_legacy_explicit_plan_without_named_policy_remains_loadable(
+    tmp_path: Path,
+) -> None:
+    root = _private_root(tmp_path)
+    store = PilotSeriesStore(root)
+    plan = store.prepare(
+        select_capture_pair(_config(), "first", "second"),
+        source_attestation=_TEST_SOURCE_ATTESTATION,
+        planned_pair_count=1,
+        requested_cadence_seconds=1,
+        collector_commit_sha="a" * 40,
+    )
+    plan_path = plan.series_directory / "plan.json"
+    claim = json.loads(plan_path.read_text())
+    claim["acquisition"].pop("transport_policy")
+    claim["acquisition"].pop("accepted_actions")
+    payload = read_only_collector._canonical_json(claim)
+    digest = hashlib.sha256(payload).hexdigest()
+    plan_path.write_bytes(payload)
+    (plan.series_directory / "plan.commit.json").write_bytes(
+        read_only_collector._canonical_json(
+            {
+                "schema_version": 2,
+                "plan_artifact_id": plan.plan_artifact_id,
+                "series_id": plan.series_id,
+                "plan_sha256": digest,
+            }
+        )
+    )
+    legacy_reference = replace(plan, plan_sha256=digest)
+
+    verified = store.verify_plan(legacy_reference)
+
+    assert "transport_policy" not in verified["acquisition"]
+    assert verified["acquisition"]["required_action"] == "0x03"
+
+
+def test_report_capable_plan_rejects_policy_and_validity_mismatch(tmp_path: Path) -> None:
+    root = _private_root(tmp_path)
+    store = PilotSeriesStore(root)
+    plan = store.prepare(
+        select_capture_pair(_config(), "first", "second"),
+        source_attestation=_TEST_SOURCE_ATTESTATION,
+        planned_pair_count=1,
+        requested_cadence_seconds=1,
+        collector_commit_sha="a" * 40,
+        transport_policy=CaptureTransportPolicy.REPLY_OR_REPORT,
+    )
+    plan_path = plan.series_directory / "plan.json"
+    claim = json.loads(plan_path.read_text())
+    claim["acquisition"]["accept_reports"] = False
+    payload = read_only_collector._canonical_json(claim)
+    digest = hashlib.sha256(payload).hexdigest()
+    plan_path.write_bytes(payload)
+    (plan.series_directory / "plan.commit.json").write_bytes(
+        read_only_collector._canonical_json(
+            {
+                "schema_version": 2,
+                "plan_artifact_id": plan.plan_artifact_id,
+                "series_id": plan.series_id,
+                "plan_sha256": digest,
+            }
+        )
+    )
+
+    with pytest.raises(ArtifactStoreError, match="pilot_transport_policy_invalid"):
+        store.verify_plan(replace(plan, plan_sha256=digest))
+
+
 async def test_extract_verified_accepted_pair_returns_immutable_safe_raw_evidence(
     tmp_path: Path,
 ) -> None:
@@ -1144,6 +1336,64 @@ async def test_pilot_series_keeps_first_device_if_second_is_cancelled(tmp_path: 
         "committed_roles": ["a"],
         "pair_record_present": False,
     }
+
+
+async def test_report_capable_abort_counts_committed_trailing_raw_action(
+    tmp_path: Path,
+) -> None:
+    root = _private_root(tmp_path)
+    store = PilotSeriesStore(root)
+    targets = select_capture_pair(_config(), "first", "second")
+    _Session.action_by_address = {"first.private": STATE_REPORT_ACTION}
+    second_read_started = asyncio.Event()
+
+    class BlockingSecondSession(_Session):
+        async def read_raw_state_capture(
+            self,
+            *,
+            accept_reports: bool = True,
+        ) -> RawStateCapture:
+            if self.address == "second.private":
+                self.accept_reports.append(accept_reports)
+                second_read_started.set()
+                await asyncio.Event().wait()
+            return await super().read_raw_state_capture(accept_reports=accept_reports)
+
+    plan = store.prepare(
+        targets,
+        source_attestation=_TEST_SOURCE_ATTESTATION,
+        planned_pair_count=1,
+        requested_cadence_seconds=0.001,
+        collector_commit_sha="a" * 40,
+        transport_policy=CaptureTransportPolicy.REPLY_OR_REPORT,
+    )
+    task = asyncio.create_task(
+        store.run(
+            plan,
+            targets,
+            source_attestation=_TEST_SOURCE_ATTESTATION,
+            discovery_factory=lambda: _Discovery(_discovered()),
+            session_factory=BlockingSecondSession,
+            discovery_timeout_seconds=2,
+        )
+    )
+    await second_read_started.wait()
+    task.cancel()
+
+    with pytest.raises(PilotTerminalError) as raised:
+        await task
+
+    assert raised.value.abort_sha256 is not None
+    aborted = store.verify_partial_series(
+        plan,
+        expected_aborted_sha256=raised.value.abort_sha256,
+    )
+    assert aborted["action_counts"] == {"0x03": 0, "0x04": 1}
+    sample = json.loads(
+        (plan.series_directory / "attempts/000000/a/sample.json").read_text()
+    )
+    assert sample["observed_action"] == "0x04"
+    assert all(session.accept_reports == [True] for session in _Session.instances)
 
 
 async def test_pilot_persists_raw_when_cancelled_during_post_read_identity_check(

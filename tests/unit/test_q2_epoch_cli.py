@@ -100,7 +100,34 @@ def test_parser_exposes_atomic_pair_preparation_without_write_controls() -> None
     )
 
     assert parsed.command == "prepare-pair"
+    assert parsed.transport_policy == "explicit_only"
     assert "write" not in vars(parsed)
+
+
+def test_parser_exposes_report_capable_policy_only_as_named_read_contract() -> None:
+    parsed = build_parser().parse_args(
+        [
+            "prepare",
+            "--collector-commit",
+            SHA_A,
+            "--config",
+            "config",
+            "--first",
+            "a",
+            "--second",
+            "b",
+            "--artifact-root",
+            "artifacts",
+            "--epoch-spec",
+            "epoch",
+            "--operation-manifest",
+            "operation",
+            "--transport-policy",
+            "reply_or_report",
+        ]
+    )
+
+    assert parsed.transport_policy == "reply_or_report"
 
 
 def test_q2_cli_import_graph_does_not_load_hardware_write_or_frozen_modules() -> None:

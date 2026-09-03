@@ -42,6 +42,7 @@ from jebao_flow.q2_epoch import (
     q2_minimum_series_span_ns,
 )
 from jebao_flow.read_only_collector import (
+    CaptureTransportPolicy,
     CollectorError,
     PilotSeriesStore,
     PilotTerminalError,
@@ -76,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_private_pair(prepare)
     prepare.add_argument("--epoch-spec", required=True)
     prepare.add_argument("--operation-manifest", required=True)
+    _add_transport_policy(prepare)
 
     prepare_pair = commands.add_parser(
         "prepare-pair",
@@ -86,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_pair.add_argument("--control-epoch-spec", required=True)
     prepare_pair.add_argument("--async-epoch-spec", required=True)
     prepare_pair.add_argument("--operation-manifest", required=True)
+    _add_transport_policy(prepare_pair)
 
     collect = commands.add_parser("collect", help="run the bound write-free collector plan")
     _add_attestation(collect)
@@ -126,6 +129,14 @@ def _add_private_pair(parser: argparse.ArgumentParser) -> None:
 def _add_manifest_reference(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest-id", required=True)
     parser.add_argument("--manifest-sha256", required=True)
+
+
+def _add_transport_policy(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--transport-policy",
+        choices=tuple(policy.value for policy in CaptureTransportPolicy),
+        default=CaptureTransportPolicy.EXPLICIT_ONLY.value,
+    )
 
 
 def _read_owner_only_json(path: str | Path) -> dict[str, Any]:
@@ -274,6 +285,9 @@ def _prepare(args: argparse.Namespace) -> dict[str, Any]:
         requested_cadence_seconds=cadence,
         collector_commit_sha=args.collector_commit,
         epoch=kind.value,
+        transport_policy=CaptureTransportPolicy(
+            getattr(args, "transport_policy", CaptureTransportPolicy.EXPLICIT_ONLY.value)
+        ),
     )
     manifest = q2_store.prepare(
         collector_store,
@@ -332,6 +346,9 @@ def _prepare_pair(args: argparse.Namespace) -> dict[str, Any]:
             requested_cadence_seconds=cadence,
             collector_commit_sha=args.collector_commit,
             epoch=kind.value,
+            transport_policy=CaptureTransportPolicy(
+                getattr(args, "transport_policy", CaptureTransportPolicy.EXPLICIT_ONLY.value)
+            ),
         )
         manifest = q2_store.prepare(
             collector_store,

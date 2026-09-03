@@ -19,6 +19,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Never, Protocol
 
@@ -46,7 +47,11 @@ from jebao_flow.protocol.schedule_wire import (
     LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
     LocalWavemakerProScheduleSnapshot,
 )
-from jebao_flow.protocol.session import STATE_REPLY_ACTION, RawStateCapture
+from jebao_flow.protocol.session import (
+    STATE_REPLY_ACTION,
+    STATE_REPORT_ACTION,
+    RawStateCapture,
+)
 from jebao_flow.source_attestation import (
     CollectorSourceAttestation,
     SourceAttestationError,
@@ -57,6 +62,8 @@ CAPTURE_SCHEMA_VERSION = 1
 RAW_FORMAT = "gizwits-gagent-wire-frame-v1"
 CAPTURE_KIND = "explicit_state_reply_wire_frame"
 TRANSPORT_ACTION = "0x03"
+REPORT_CAPABLE_CAPTURE_KIND = "state_reply_or_report_wire_frame"
+REPORT_CAPABLE_ACTIONS = ("0x03", "0x04")
 _ARTIFACT_ID_PREFIX = "JFC"
 _PLAN_ID_PREFIX = "JFP"
 _SERIES_ID_PREFIX = "JFS"
@@ -77,6 +84,27 @@ _SUMMARY_FIELDS = (
     "AutoFlow",
     "AutoFreq",
 )
+
+
+class CaptureTransportPolicy(StrEnum):
+    """Precommitted state-frame acceptance policy for one fresh-session read."""
+
+    EXPLICIT_ONLY = "explicit_only"
+    REPLY_OR_REPORT = "reply_or_report"
+
+    @property
+    def accept_reports(self) -> bool:
+        return self is CaptureTransportPolicy.REPLY_OR_REPORT
+
+    @property
+    def accepted_actions(self) -> tuple[int, ...]:
+        if self is CaptureTransportPolicy.REPLY_OR_REPORT:
+            return (STATE_REPLY_ACTION, STATE_REPORT_ACTION)
+        return (STATE_REPLY_ACTION,)
+
+    @property
+    def accepted_action_names(self) -> tuple[str, ...]:
+        return tuple(f"0x{action:02x}" for action in self.accepted_actions)
 
 
 class CollectorError(RuntimeError):
@@ -218,6 +246,7 @@ class DeviceSample:
     failure_code: str | None = None
     failure_class: str | None = None
     failure_phase: str | None = None
+    transport_policy: CaptureTransportPolicy = CaptureTransportPolicy.EXPLICIT_ONLY
 
 
 class SampleCaptureCancelled(asyncio.CancelledError):
@@ -235,6 +264,7 @@ class PairCapture:
     completed: ClockStamp
     samples: tuple[DeviceSample, DeviceSample]
     pair_completion_gap_ns: int | None
+    transport_policy: CaptureTransportPolicy = CaptureTransportPolicy.EXPLICIT_ONLY
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +313,7 @@ class PublicPilotMetadata:
     rejected_pair_count: int
     read_failure_pair_count: int
     expected_identity_bindings_sha256: tuple[str, str]
+    action_counts: dict[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -506,6 +537,36 @@ def _state_summary(
     return summary
 
 
+def _pro_attribute_policy() -> dict[str, Any]:
+    return {
+        "SwitchON": {"type": "boolean"},
+        "TimerON": {"type": "boolean"},
+        "Linkage": {
+            "type": "enum",
+            "allowed": ["independent", "master", "sync_slave", "async_slave"],
+        },
+        "Mode": {"type": "enum", "allowed": list(LOCAL_WAVEMAKER_PRO_MODES)},
+        "Flow": {"type": "integer", "minimum": 0, "maximum": 100},
+        "Frequency": {"type": "integer", "minimum": 0, "maximum": 100},
+        "AutoMode": {
+            "type": "enum",
+            "allowed": list(LOCAL_WAVEMAKER_PRO_MODES),
+        },
+        "AutoFlow": {"type": "integer", "minimum": 0, "maximum": 100},
+        "AutoFreq": {"type": "integer", "minimum": 0, "maximum": 100},
+    }
+
+
+def _state_observation_policy() -> dict[str, Any]:
+    return {
+        "affects_acquisition_outcome": False,
+        "active_faults_empty": True,
+        "schedule_invalid_slots_empty": True,
+        "schedule_parameter_ranges_valid": True,
+        "device_local_time_present": True,
+    }
+
+
 def _capture_validity_policy_v2() -> dict[str, Any]:
     """Return the immutable v2 policy retained for offline verification."""
 
@@ -516,38 +577,39 @@ def _capture_validity_policy_v2() -> dict[str, Any]:
             "wire_frame_storage": "exact_observed_length_no_normalization",
             "status_payload_size_bytes": 452,
             "required_action": TRANSPORT_ACTION,
-            "attributes": {
-                "SwitchON": {"type": "boolean"},
-                "TimerON": {"type": "boolean"},
-                "Linkage": {
-                    "type": "enum",
-                    "allowed": ["independent", "master", "sync_slave", "async_slave"],
-                },
-                "Mode": {"type": "enum", "allowed": list(LOCAL_WAVEMAKER_PRO_MODES)},
-                "Flow": {"type": "integer", "minimum": 0, "maximum": 100},
-                "Frequency": {"type": "integer", "minimum": 0, "maximum": 100},
-                "AutoMode": {
-                    "type": "enum",
-                    "allowed": list(LOCAL_WAVEMAKER_PRO_MODES),
-                },
-                "AutoFlow": {"type": "integer", "minimum": 0, "maximum": 100},
-                "AutoFreq": {"type": "integer", "minimum": 0, "maximum": 100},
-            },
+            "attributes": _pro_attribute_policy(),
             "identity_check": "same_exact_udp_binding_before_and_after_tcp_read",
         },
-        "state_observation_predicate": {
-            "affects_acquisition_outcome": False,
-            "active_faults_empty": True,
-            "schedule_invalid_slots_empty": True,
-            "schedule_parameter_ranges_valid": True,
-            "device_local_time_present": True,
-        },
+        "state_observation_predicate": _state_observation_policy(),
     }
 
 
-def capture_validity_policy() -> dict[str, Any]:
+def _capture_validity_policy_v3() -> dict[str, Any]:
+    """Return the report-capable policy without changing the strict v2 contract."""
+
+    return {
+        "predicate_version": "local-wavemaker-pro-acquisition-v3",
+        "acquisition_predicate": {
+            "serial_payload_size_bytes": 453,
+            "wire_frame_storage": "exact_observed_length_no_normalization",
+            "status_payload_size_bytes": 452,
+            "transport_policy": CaptureTransportPolicy.REPLY_OR_REPORT.value,
+            "accepted_actions": list(REPORT_CAPABLE_ACTIONS),
+            "attributes": _pro_attribute_policy(),
+            "identity_check": "same_exact_udp_binding_before_and_after_tcp_read",
+        },
+        "state_observation_predicate": _state_observation_policy(),
+    }
+
+
+def capture_validity_policy(
+    transport_policy: CaptureTransportPolicy = CaptureTransportPolicy.EXPLICIT_ONLY,
+) -> dict[str, Any]:
     """Return the policy to embed in newly prepared pilot plans."""
 
+    policy = CaptureTransportPolicy(transport_policy)
+    if policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+        return _capture_validity_policy_v3()
     return _capture_validity_policy_v2()
 
 
@@ -556,33 +618,44 @@ def _validate_recorded_capture_policy(policy: object) -> dict[str, Any]:
 
     if not isinstance(policy, dict):
         raise ArtifactStoreError("pilot_validity_policy_invalid")
-    if policy.get("predicate_version") != "local-wavemaker-pro-acquisition-v2":
+    predicate_version = policy.get("predicate_version")
+    if predicate_version not in {
+        "local-wavemaker-pro-acquisition-v2",
+        "local-wavemaker-pro-acquisition-v3",
+    }:
         raise ArtifactStoreError("pilot_validity_policy_unsupported")
-    if policy != _capture_validity_policy_v2():
+    expected_policy = (
+        _capture_validity_policy_v3()
+        if predicate_version == "local-wavemaker-pro-acquisition-v3"
+        else _capture_validity_policy_v2()
+    )
+    if policy != expected_policy:
         raise ArtifactStoreError("pilot_validity_policy_invalid")
     acquisition = policy.get("acquisition_predicate")
     observation = policy.get("state_observation_predicate")
     if not isinstance(acquisition, dict) or not isinstance(observation, dict):
         raise ArtifactStoreError("pilot_validity_policy_invalid")
-    expected_transport = {
+    expected_transport: dict[str, Any] = {
         "serial_payload_size_bytes": 453,
         "wire_frame_storage": "exact_observed_length_no_normalization",
         "status_payload_size_bytes": 452,
-        "required_action": TRANSPORT_ACTION,
         "identity_check": "same_exact_udp_binding_before_and_after_tcp_read",
     }
+    if predicate_version == "local-wavemaker-pro-acquisition-v3":
+        expected_transport.update(
+            {
+                "transport_policy": CaptureTransportPolicy.REPLY_OR_REPORT.value,
+                "accepted_actions": list(REPORT_CAPABLE_ACTIONS),
+            }
+        )
+    else:
+        expected_transport["required_action"] = TRANSPORT_ACTION
     if any(acquisition.get(key) != value for key, value in expected_transport.items()):
         raise ArtifactStoreError("pilot_validity_policy_invalid")
     attributes = acquisition.get("attributes")
     if not isinstance(attributes, dict) or set(attributes) != set(_SUMMARY_FIELDS):
         raise ArtifactStoreError("pilot_validity_policy_invalid")
-    if observation != {
-        "affects_acquisition_outcome": False,
-        "active_faults_empty": True,
-        "schedule_invalid_slots_empty": True,
-        "schedule_parameter_ranges_valid": True,
-        "device_local_time_present": True,
-    }:
+    if observation != _state_observation_policy():
         raise ArtifactStoreError("pilot_validity_policy_invalid")
     return policy
 
@@ -703,10 +776,16 @@ async def collect_device_sample(
     session_factory: SessionFactory,
     discovery_timeout_seconds: float,
     validity_policy: dict[str, Any] | None = None,
+    transport_policy: CaptureTransportPolicy = CaptureTransportPolicy.EXPLICIT_ONLY,
     utc_clock: UtcClock = lambda: datetime.now(UTC),
     monotonic_clock: MonotonicClock = time.monotonic_ns,
 ) -> DeviceSample:
-    """Collect one explicit state payload using a fresh identity check and TCP session."""
+    """Collect one policy-authorized state payload through one fresh TCP session."""
+
+    try:
+        selected_transport = CaptureTransportPolicy(transport_policy)
+    except (TypeError, ValueError) as error:
+        raise CollectorPreflightError("capture_transport_policy_invalid") from error
 
     attempt_started = _stamp(utc_clock, monotonic_clock)
     identity_before_started = _stamp(utc_clock, monotonic_clock)
@@ -748,6 +827,7 @@ async def collect_device_sample(
             failure_code=code or _failure_code(error),
             failure_class=_failure_class(error),
             failure_phase=failure_phase,
+            transport_policy=selected_transport,
         )
 
     try:
@@ -768,7 +848,9 @@ async def collect_device_sample(
         failure_phase = "read"
         read_started = _stamp(utc_clock, monotonic_clock)
         try:
-            raw_capture = await session.read_raw_state_capture(accept_reports=False)
+            raw_capture = await session.read_raw_state_capture(
+                accept_reports=selected_transport.accept_reports
+            )
         finally:
             read_completed = _stamp(utc_clock, monotonic_clock)
         raw_wire_frame = raw_capture.wire_frame
@@ -787,12 +869,18 @@ async def collect_device_sample(
         if endpoint_after.address != endpoint.address:
             raise CollectorError("identity_endpoint_changed_during_read")
         failure_phase = "validate_status"
-        if raw_capture.action != STATE_REPLY_ACTION:
-            raise CollectorError("state_reply_action_not_explicit")
+        if raw_capture.action not in selected_transport.accepted_actions:
+            failure_code = (
+                "state_reply_action_not_explicit"
+                if selected_transport is CaptureTransportPolicy.EXPLICIT_ONLY
+                else "state_action_not_reply_or_report"
+            )
+            raise CollectorError(failure_code)
         summary = _state_summary(
             endpoint.product_key,
             raw_capture.status_payload,
-            validity_policy=validity_policy,
+            validity_policy=validity_policy
+            or capture_validity_policy(selected_transport),
         )
         attempt_completed = _stamp(utc_clock, monotonic_clock)
         sample = DeviceSample(
@@ -815,6 +903,7 @@ async def collect_device_sample(
             raw_wire_frame=raw_wire_frame,
             state_summary=summary,
             state_observation=_state_observation(summary),
+            transport_policy=selected_transport,
         )
     except asyncio.CancelledError as error:
         if session is not None:
@@ -852,6 +941,7 @@ async def collect_pair(
     session_factory: SessionFactory,
     discovery_timeout_seconds: float,
     validity_policy: dict[str, Any] | None = None,
+    transport_policy: CaptureTransportPolicy = CaptureTransportPolicy.EXPLICIT_ONLY,
     utc_clock: UtcClock = lambda: datetime.now(UTC),
     monotonic_clock: MonotonicClock = time.monotonic_ns,
 ) -> PairCapture:
@@ -859,6 +949,10 @@ async def collect_pair(
 
     if discovery_timeout_seconds <= 0:
         raise CollectorPreflightError("discovery_timeout_not_positive")
+    try:
+        selected_transport = CaptureTransportPolicy(transport_policy)
+    except (TypeError, ValueError) as error:
+        raise CollectorPreflightError("capture_transport_policy_invalid") from error
     started = _stamp(utc_clock, monotonic_clock)
     samples = tuple(
         [
@@ -868,6 +962,7 @@ async def collect_pair(
                 session_factory=session_factory,
                 discovery_timeout_seconds=discovery_timeout_seconds,
                 validity_policy=validity_policy,
+                transport_policy=selected_transport,
                 utc_clock=utc_clock,
                 monotonic_clock=monotonic_clock,
             )
@@ -893,6 +988,7 @@ async def collect_pair(
         completed=completed,
         samples=(samples[0], samples[1]),
         pair_completion_gap_ns=pair_gap,
+        transport_policy=selected_transport,
     )
 
 
@@ -995,6 +1091,63 @@ def _state_frame_parts(wire_frame: bytes) -> tuple[int, bytes]:
     return frame.payload[0], frame.payload[1:]
 
 
+def _action_name(action: int) -> str:
+    return f"0x{action:02x}"
+
+
+def _observed_action_name(wire_frame: bytes | None) -> str | None:
+    if wire_frame is None:
+        return None
+    try:
+        action, _status = _state_frame_parts(wire_frame)
+    except (TypeError, ValueError, ProtocolError):
+        return "invalid"
+    return _action_name(action)
+
+
+def _transport_claim(policy: CaptureTransportPolicy) -> dict[str, Any]:
+    claim: dict[str, Any] = {
+        "transport_policy": policy.value,
+        "accept_reports": policy.accept_reports,
+        "accepted_actions": list(policy.accepted_action_names),
+    }
+    if policy is CaptureTransportPolicy.EXPLICIT_ONLY:
+        claim["required_action"] = TRANSPORT_ACTION
+    return claim
+
+
+def capture_transport_policy_from_acquisition(
+    acquisition: object,
+) -> CaptureTransportPolicy:
+    """Validate and return a durable collector transport policy.
+
+    Plans written before the named policy existed are accepted only as the exact historical
+    explicit-only contract. New plans must name the policy and its accepted action set.
+    """
+
+    if not isinstance(acquisition, dict):
+        raise ArtifactStoreError("pilot_transport_policy_invalid")
+    policy_name = acquisition.get("transport_policy")
+    if policy_name is None:
+        if (
+            acquisition.get("accept_reports") is False
+            and acquisition.get("required_action") == TRANSPORT_ACTION
+            and "accepted_actions" not in acquisition
+        ):
+            return CaptureTransportPolicy.EXPLICIT_ONLY
+        raise ArtifactStoreError("pilot_transport_policy_invalid")
+    try:
+        policy = CaptureTransportPolicy(policy_name)
+    except (TypeError, ValueError) as error:
+        raise ArtifactStoreError("pilot_transport_policy_invalid") from error
+    expected = _transport_claim(policy)
+    if any(acquisition.get(key) != value for key, value in expected.items()):
+        raise ArtifactStoreError("pilot_transport_policy_invalid")
+    if policy is CaptureTransportPolicy.REPLY_OR_REPORT and "required_action" in acquisition:
+        raise ArtifactStoreError("pilot_transport_policy_invalid")
+    return policy
+
+
 def _observed_explicit_reply(wire_frame: bytes | None) -> bool | None:
     if wire_frame is None:
         return None
@@ -1018,6 +1171,7 @@ def _failed_predicates(sample: DeviceSample) -> list[str]:
         return []
     mapping = {
         "state_reply_action_not_explicit": "required_action",
+        "state_action_not_reply_or_report": "accepted_actions",
         "identity_endpoint_changed_during_read": "endpoint_unchanged_during_read",
         "identity_binding_mismatch": "expected_binding_before_and_after_read",
         "identity_not_exactly_resolved": "expected_binding_before_and_after_read",
@@ -1259,6 +1413,9 @@ def _sample_manifest(
     )
     value["state_summary"] = sample.state_summary
     value["state_observation"] = sample.state_observation
+    if sample.transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+        value["transport_policy"] = sample.transport_policy.value
+        value["observed_action"] = _observed_action_name(sample.raw_wire_frame)
     return value
 
 
@@ -1292,6 +1449,12 @@ class RawCaptureStore:
         temporary_path = self.root / f".{identifier}.tmp-{secrets.token_hex(8)}"
         if final_path.exists() or final_path.is_symlink():
             raise ArtifactStoreError("artifact_already_exists")
+        try:
+            transport_policy = CaptureTransportPolicy(capture.transport_policy)
+        except (TypeError, ValueError) as error:
+            raise ArtifactStoreError("artifact_transport_policy_invalid") from error
+        if any(sample.transport_policy is not transport_policy for sample in capture.samples):
+            raise ArtifactStoreError("artifact_transport_policy_mismatch")
         temporary_path.mkdir(mode=0o700)
 
         sample_values: list[dict[str, Any]] = []
@@ -1300,7 +1463,12 @@ class RawCaptureStore:
                 raw_name: str | None = None
                 raw_digest: str | None = None
                 if sample.raw_wire_frame is not None:
-                    raw_name = f"{role}.reply.frame.bin"
+                    suffix = (
+                        "reply.frame.bin"
+                        if transport_policy is CaptureTransportPolicy.EXPLICIT_ONLY
+                        else "state.frame.bin"
+                    )
+                    raw_name = f"{role}.{suffix}"
                     raw_digest = hashlib.sha256(sample.raw_wire_frame).hexdigest()
                     _write_exclusive(temporary_path / raw_name, sample.raw_wire_frame)
                 sample_values.append(
@@ -1312,17 +1480,19 @@ class RawCaptureStore:
                     )
                 )
 
-            manifest = {
+            manifest: dict[str, Any] = {
                 "schema_version": CAPTURE_SCHEMA_VERSION,
                 "artifact_id": identifier,
                 "status": capture.status,
-                "capture_kind": CAPTURE_KIND,
+                "capture_kind": (
+                    CAPTURE_KIND
+                    if transport_policy is CaptureTransportPolicy.EXPLICIT_ONLY
+                    else REPORT_CAPABLE_CAPTURE_KIND
+                ),
                 "plan_artifact_id": context.plan_artifact_id,
                 "plan_sha256": context.plan_sha256,
                 "epoch": context.epoch,
                 "sample_index": context.sample_index,
-                "required_action": TRANSPORT_ACTION,
-                "accept_reports_policy": False,
                 "raw_format": RAW_FORMAT,
                 "collection": {
                     "started_utc": _utc_text(capture.started.utc),
@@ -1333,6 +1503,28 @@ class RawCaptureStore:
                 "pair_completion_gap_ns": capture.pair_completion_gap_ns,
                 "samples": sample_values,
             }
+            if transport_policy is CaptureTransportPolicy.EXPLICIT_ONLY:
+                manifest.update(
+                    {
+                        "required_action": TRANSPORT_ACTION,
+                        "accept_reports_policy": False,
+                    }
+                )
+            else:
+                manifest.update(
+                    {
+                        "transport_policy": transport_policy.value,
+                        "accepted_actions": list(transport_policy.accepted_action_names),
+                        "accept_reports_policy": True,
+                        "action_counts": {
+                            action: sum(
+                                sample.get("observed_action") == action
+                                for sample in sample_values
+                            )
+                            for action in REPORT_CAPABLE_ACTIONS
+                        },
+                    }
+                )
             manifest_payload = _canonical_json(manifest)
             manifest_digest = hashlib.sha256(manifest_payload).hexdigest()
             _write_exclusive(temporary_path / "manifest.json", manifest_payload)
@@ -1414,13 +1606,35 @@ class RawCaptureStore:
         }:
             raise ArtifactStoreError("artifact_commit_marker_mismatch")
 
+        if not isinstance(manifest, dict):
+            raise ArtifactStoreError("artifact_manifest_claim_invalid")
+        transport_policy_name = manifest.get("transport_policy")
+        if transport_policy_name is None:
+            transport_policy = CaptureTransportPolicy.EXPLICIT_ONLY
+            transport_claim_valid = (
+                manifest.get("capture_kind") == CAPTURE_KIND
+                and manifest.get("required_action") == TRANSPORT_ACTION
+                and manifest.get("accept_reports_policy") is False
+                and "accepted_actions" not in manifest
+                and "action_counts" not in manifest
+            )
+        else:
+            try:
+                transport_policy = CaptureTransportPolicy(transport_policy_name)
+            except (TypeError, ValueError) as error:
+                raise ArtifactStoreError("artifact_manifest_claim_invalid") from error
+            transport_claim_valid = (
+                transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT
+                and manifest.get("capture_kind") == REPORT_CAPABLE_CAPTURE_KIND
+                and manifest.get("accepted_actions") == list(REPORT_CAPABLE_ACTIONS)
+                and manifest.get("accept_reports_policy") is True
+                and isinstance(manifest.get("action_counts"), dict)
+                and "required_action" not in manifest
+            )
         if (
-            not isinstance(manifest, dict)
-            or manifest.get("schema_version") != CAPTURE_SCHEMA_VERSION
+            manifest.get("schema_version") != CAPTURE_SCHEMA_VERSION
             or manifest.get("artifact_id") != identifier
-            or manifest.get("capture_kind") != CAPTURE_KIND
-            or manifest.get("required_action") != TRANSPORT_ACTION
-            or manifest.get("accept_reports_policy") is not False
+            or not transport_claim_valid
             or manifest.get("raw_format") != RAW_FORMAT
         ):
             raise ArtifactStoreError("artifact_manifest_claim_invalid")
@@ -1454,6 +1668,11 @@ class RawCaptureStore:
                 raise ArtifactStoreError("artifact_manifest_sample_claim_invalid")
             if sample.get("validity_scope") != "acquisition_only_not_q2_boundary":
                 raise ArtifactStoreError("artifact_validity_scope_invalid")
+            if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+                if sample.get("transport_policy") != transport_policy.value:
+                    raise ArtifactStoreError("artifact_action_claim_mismatch")
+            elif "transport_policy" in sample or "observed_action" in sample:
+                raise ArtifactStoreError("artifact_action_claim_invalid")
             sample_statuses.append(status_value)
             binding_key = sample.get("expected_identity_binding_sha256")
             if not _is_sha256(binding_key):
@@ -1522,6 +1741,11 @@ class RawCaptureStore:
                     raise ArtifactStoreError("artifact_valid_sample_missing_raw")
                 if sample.get("explicit_reply_observed") is not None:
                     raise ArtifactStoreError("artifact_reply_observation_without_raw")
+                if (
+                    transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT
+                    and sample.get("observed_action") is not None
+                ):
+                    raise ArtifactStoreError("artifact_action_claim_mismatch")
                 if evidence.get("raw_wire_frame") != {"grade": "a", "available": False}:
                     raise ArtifactStoreError("artifact_evidence_taxonomy_invalid")
                 if sample.get("state_summary") is not None:
@@ -1531,7 +1755,12 @@ class RawCaptureStore:
                 raise ArtifactStoreError("artifact_raw_claim_invalid")
             raw_name = raw.get("path")
             if (
-                raw_name != f"{expected_role}.reply.frame.bin"
+                raw_name
+                != (
+                    f"{expected_role}.reply.frame.bin"
+                    if transport_policy is CaptureTransportPolicy.EXPLICIT_ONLY
+                    else f"{expected_role}.state.frame.bin"
+                )
                 or raw.get("format") != RAW_FORMAT
             ):
                 raise ArtifactStoreError("artifact_raw_path_invalid")
@@ -1550,13 +1779,17 @@ class RawCaptureStore:
             except (TypeError, ValueError, ProtocolError) as error:
                 raise ArtifactStoreError("artifact_raw_frame_invalid") from error
             explicit_reply = action == STATE_REPLY_ACTION
+            observed_action = _action_name(action)
             if sample.get("explicit_reply_observed") is not explicit_reply:
                 raise ArtifactStoreError("artifact_reply_observation_mismatch")
+            if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+                if sample.get("observed_action") != observed_action:
+                    raise ArtifactStoreError("artifact_action_claim_mismatch")
             if evidence.get("raw_wire_frame") != {"grade": "a", "available": True}:
                 raise ArtifactStoreError("artifact_evidence_taxonomy_invalid")
             if status_value == "acquisition_valid":
-                if not explicit_reply:
-                    raise ArtifactStoreError("artifact_raw_action_not_explicit_reply")
+                if action not in transport_policy.accepted_actions:
+                    raise ArtifactStoreError("artifact_raw_action_not_accepted")
                 if (
                     observed_before != binding_key
                     or observed_after != binding_key
@@ -1570,7 +1803,11 @@ class RawCaptureStore:
                 if not isinstance(product_key, str):
                     raise ArtifactStoreError("artifact_product_key_invalid")
                 try:
-                    decoded_summary = _state_summary(product_key, status_payload)
+                    decoded_summary = _state_summary(
+                        product_key,
+                        status_payload,
+                        validity_policy=capture_validity_policy(transport_policy),
+                    )
                 except (CollectorError, KeyError, TypeError, ValueError) as error:
                     raise ArtifactStoreError("artifact_valid_raw_decode_failed") from error
                 if decoded_summary != sample.get("state_summary"):
@@ -1602,6 +1839,15 @@ class RawCaptureStore:
         )
         if manifest.get("status") != expected_status:
             raise ArtifactStoreError("artifact_pair_status_mismatch")
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            expected_action_counts = {
+                action: sum(
+                    sample.get("observed_action") == action for sample in samples
+                )
+                for action in REPORT_CAPABLE_ACTIONS
+            }
+            if manifest.get("action_counts") != expected_action_counts:
+                raise ArtifactStoreError("artifact_action_counts_mismatch")
         pair_gap = manifest.get("pair_completion_gap_ns")
         expected_pair_gap = (
             read_completions[1] - read_completions[0]
@@ -1641,10 +1887,15 @@ class PilotSeriesStore:
         requested_cadence_seconds: float,
         collector_commit_sha: str,
         epoch: str = "pilot",
+        transport_policy: CaptureTransportPolicy = CaptureTransportPolicy.EXPLICIT_ONLY,
         utc_clock: UtcClock = lambda: datetime.now(UTC),
     ) -> PilotPlanReference:
         """Publish an immutable pilot plan before the first discovery or TCP connection."""
 
+        try:
+            selected_transport = CaptureTransportPolicy(transport_policy)
+        except (TypeError, ValueError) as error:
+            raise CollectorPreflightError("pilot_transport_policy_invalid") from error
         if (
             not isinstance(planned_pair_count, int)
             or isinstance(planned_pair_count, bool)
@@ -1691,6 +1942,22 @@ class PilotSeriesStore:
         temporary_path.mkdir(mode=0o700)
         (temporary_path / "attempts").mkdir(mode=0o700)
 
+        acquisition = {
+            "planned_pair_count": planned_pair_count,
+            "planned_ordinals": list(range(planned_pair_count)),
+            "requested_cadence_ns": requested_cadence_ns,
+            "pair_order": ["a", "b"],
+            "retry_policy": "none",
+            "late_sample_policy": "record_and_continue_without_skipping",
+            "fresh_discovery_before_and_after_each_read": True,
+            "fresh_authenticated_session_per_device_sample": True,
+            "reads_per_session": 1,
+            "required_command": "0x0091",
+            "serial_payload_size_bytes": 453,
+            "status_payload_size_bytes": 452,
+            "wire_frame_storage": "exact_observed_length_no_normalization",
+            **_transport_claim(selected_transport),
+        }
         plan = {
             "schema_version": PILOT_PLAN_SCHEMA_VERSION,
             "kind": "readonly_collector_pilot_plan",
@@ -1712,24 +1979,8 @@ class PilotSeriesStore:
                 }
                 for role, target in zip(("a", "b"), targets, strict=True)
             ],
-            "acquisition": {
-                "planned_pair_count": planned_pair_count,
-                "planned_ordinals": list(range(planned_pair_count)),
-                "requested_cadence_ns": requested_cadence_ns,
-                "pair_order": ["a", "b"],
-                "retry_policy": "none",
-                "late_sample_policy": "record_and_continue_without_skipping",
-                "fresh_discovery_before_and_after_each_read": True,
-                "fresh_authenticated_session_per_device_sample": True,
-                "reads_per_session": 1,
-                "accept_reports": False,
-                "required_command": "0x0091",
-                "required_action": TRANSPORT_ACTION,
-                "serial_payload_size_bytes": 453,
-                "status_payload_size_bytes": 452,
-                "wire_frame_storage": "exact_observed_length_no_normalization",
-            },
-            "validity_predicate": capture_validity_policy(),
+            "acquisition": acquisition,
+            "validity_predicate": capture_validity_policy(selected_transport),
             "durability": {
                 "barrier": "os_fsync_file_and_directory",
                 "claim": "kernel_flush_requested_not_power_loss_guarantee",
@@ -1852,9 +2103,7 @@ class PilotSeriesStore:
             or acquisition.get("fresh_discovery_before_and_after_each_read") is not True
             or acquisition.get("fresh_authenticated_session_per_device_sample") is not True
             or acquisition.get("reads_per_session") != 1
-            or acquisition.get("accept_reports") is not False
             or acquisition.get("required_command") != "0x0091"
-            or acquisition.get("required_action") != TRANSPORT_ACTION
             or acquisition.get("serial_payload_size_bytes") != 453
             or acquisition.get("status_payload_size_bytes") != 452
             or acquisition.get("wire_frame_storage")
@@ -1889,7 +2138,10 @@ class PilotSeriesStore:
             or not _is_sha256(collector_runtime_source_digest)
         ):
             raise ArtifactStoreError("pilot_plan_claim_invalid")
-        _validate_recorded_capture_policy(plan.get("validity_predicate"))
+        transport_policy = capture_transport_policy_from_acquisition(acquisition)
+        recorded_validity = _validate_recorded_capture_policy(plan.get("validity_predicate"))
+        if recorded_validity != capture_validity_policy(transport_policy):
+            raise ArtifactStoreError("pilot_plan_transport_validity_mismatch")
         created_utc = plan.get("created_utc")
         if not isinstance(created_utc, str) or not created_utc.endswith("Z"):
             raise ArtifactStoreError("pilot_plan_created_time_invalid")
@@ -2080,6 +2332,9 @@ class PilotSeriesStore:
                 reference,
                 records=records,
                 plan_targets=plan_targets,
+                transport_policy=capture_transport_policy_from_acquisition(
+                    plan["acquisition"]
+                ),
                 series_started=series_started,
                 series_completed=_stamp(utc_clock, monotonic_clock),
             )
@@ -2097,6 +2352,7 @@ class PilotSeriesStore:
         *,
         records: list[dict[str, Any]],
         plan_targets: list[dict[str, Any]],
+        transport_policy: CaptureTransportPolicy,
         series_started: ClockStamp,
         series_completed: ClockStamp,
     ) -> PublicPilotMetadata:
@@ -2125,6 +2381,12 @@ class PilotSeriesStore:
             "counts": counts,
             "records": records,
         }
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            series["transport_policy"] = transport_policy.value
+            series["action_counts"] = {
+                action: sum(record["action_counts"][action] for record in records)
+                for action in REPORT_CAPABLE_ACTIONS
+            }
         series_payload = _canonical_json(series)
         series_digest = hashlib.sha256(series_payload).hexdigest()
         try:
@@ -2166,6 +2428,7 @@ class PilotSeriesStore:
             rejected_pair_count=verified["counts"]["predicate_rejected"],
             read_failure_pair_count=verified["counts"]["read_failure"],
             expected_identity_bindings_sha256=bindings,  # type: ignore[arg-type]
+            action_counts=verified.get("action_counts"),
         )
 
     async def _capture_ordinals(
@@ -2184,6 +2447,7 @@ class PilotSeriesStore:
         monotonic_clock: MonotonicClock,
         sleep: Callable[[float], Awaitable[None]],
     ) -> None:
+        transport_policy = capture_transport_policy_from_acquisition(plan["acquisition"])
         for ordinal in range(reference.planned_pair_count):
             scheduled_ns = schedule_anchor_ns + ordinal * reference.requested_cadence_ns
             remaining_ns = scheduled_ns - monotonic_clock()
@@ -2209,6 +2473,7 @@ class PilotSeriesStore:
                         session_factory=session_factory,
                         discovery_timeout_seconds=discovery_timeout_seconds,
                         validity_policy=plan["validity_predicate"],
+                        transport_policy=transport_policy,
                         utc_clock=utc_clock,
                         monotonic_clock=monotonic_clock,
                     )
@@ -2218,6 +2483,7 @@ class PilotSeriesStore:
                         ordinal=ordinal,
                         role=role,
                         sample=error.sample,
+                        transport_policy=transport_policy,
                     )
                     raise
                 samples.append(sample)
@@ -2227,6 +2493,7 @@ class PilotSeriesStore:
                         ordinal=ordinal,
                         role=role,
                         sample=sample,
+                        transport_policy=transport_policy,
                     )
                 )
             pair_completed = _stamp(utc_clock, monotonic_clock)
@@ -2308,6 +2575,8 @@ class PilotSeriesStore:
     ) -> str:
         """Publish a terminal marker for a prefix-complete interrupted pilot."""
 
+        plan = self.verify_plan(reference)
+        transport_policy = capture_transport_policy_from_acquisition(plan["acquisition"])
         completed_ordinals = [record.get("ordinal") for record in records]
         if completed_ordinals != list(range(len(records))):
             raise ArtifactStoreError("pilot_abort_prefix_invalid") from error
@@ -2343,6 +2612,17 @@ class PilotSeriesStore:
                 "committed_roles": trailing_roles,
                 "pair_record_present": pair_record_present,
             }
+        trailing_verified_samples = (
+            self._verify_trailing_attempt(
+                reference,
+                plan,
+                ordinal=trailing_ordinal,
+                expected_roles=trailing_roles,
+                expected_pair_record_present=pair_record_present,
+            )
+            if trailing_attempt is not None
+            else []
+        )
         counts = {
             outcome: sum(record.get("outcome") == outcome for record in records)
             for outcome in _PAIR_OUTCOMES
@@ -2369,6 +2649,16 @@ class PilotSeriesStore:
             "trailing_attempt": trailing_attempt,
             "residue_inventory": residue_inventory,
         }
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            aborted["transport_policy"] = transport_policy.value
+            aborted["action_counts"] = {
+                action: sum(record["action_counts"][action] for record in records)
+                + sum(
+                    sample.get("observed_action") == action
+                    for sample in trailing_verified_samples
+                )
+                for action in REPORT_CAPABLE_ACTIONS
+            }
         payload = _canonical_json(aborted)
         digest = hashlib.sha256(payload).hexdigest()
         try:
@@ -2445,12 +2735,15 @@ class PilotSeriesStore:
         ordinal: int,
         role: str,
         sample: DeviceSample,
+        transport_policy: CaptureTransportPolicy,
     ) -> dict[str, Any]:
         attempt = reference.series_directory / "attempts" / f"{ordinal:06d}"
         final_path = attempt / role
         temporary_path = attempt / f".{role}.tmp-{secrets.token_hex(8)}"
         if final_path.exists() or final_path.is_symlink():
             raise ArtifactStoreError("pilot_sample_already_exists")
+        if sample.transport_policy is not transport_policy:
+            raise ArtifactStoreError("pilot_sample_transport_policy_mismatch")
         raw_name: str | None = None
         raw_digest: str | None = None
         if sample.raw_wire_frame is not None:
@@ -2486,11 +2779,14 @@ class PilotSeriesStore:
             raise DurabilityUnconfirmedError(
                 "pilot_sample_durability_unconfirmed"
             ) from error
-        return {
+        record = {
             "role": role,
             "outcome": sample_value["outcome"],
             "sample_sha256": sample_digest,
         }
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            record["observed_action"] = sample_value["observed_action"]
+        return record
 
     def _commit_pair_record(
         self,
@@ -2518,6 +2814,13 @@ class PilotSeriesStore:
             "pair_completion_gap_ns": pair_completion_gap_ns,
             "samples": sample_records,
         }
+        if any("observed_action" in sample for sample in sample_records):
+            pair["action_counts"] = {
+                action: sum(
+                    sample.get("observed_action") == action for sample in sample_records
+                )
+                for action in REPORT_CAPABLE_ACTIONS
+            }
         payload = _canonical_json(pair)
         digest = hashlib.sha256(payload).hexdigest()
         try:
@@ -2525,7 +2828,10 @@ class PilotSeriesStore:
             _fsync_directory(attempt)
         except OSError as error:
             raise DurabilityUnconfirmedError("pilot_pair_durability_unconfirmed") from error
-        return {"ordinal": ordinal, "outcome": pair_outcome, "pair_sha256": digest}
+        record = {"ordinal": ordinal, "outcome": pair_outcome, "pair_sha256": digest}
+        if "action_counts" in pair:
+            record["action_counts"] = pair["action_counts"]
+        return record
 
     def verify_completed_series(
         self,
@@ -2534,6 +2840,7 @@ class PilotSeriesStore:
         expected_series_sha256: str,
     ) -> dict[str, Any]:
         plan = self.verify_plan(reference)
+        transport_policy = capture_transport_policy_from_acquisition(plan["acquisition"])
         if not _is_sha256(expected_series_sha256):
             raise ArtifactStoreError("pilot_series_expected_digest_invalid")
         directory = reference.series_directory
@@ -2598,6 +2905,15 @@ class PilotSeriesStore:
             or series.get("q2_boundary_classification") != "not_authorized"
         ):
             raise ArtifactStoreError("pilot_series_claim_invalid")
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            if (
+                series.get("transport_policy") != transport_policy.value
+                or series.get("action_counts")
+                is None
+            ):
+                raise ArtifactStoreError("pilot_series_transport_claim_invalid")
+        elif "transport_policy" in series or "action_counts" in series:
+            raise ArtifactStoreError("pilot_series_transport_claim_invalid")
         series_started_interval = _verified_interval(
             series.get("started"), failure_code="pilot_series_timing_invalid"
         )
@@ -2639,11 +2955,22 @@ class PilotSeriesStore:
             if (
                 record.get("pair_sha256") != hashlib.sha256(pair_payload).hexdigest()
                 or record.get("outcome") != pair["outcome"]
+                or (
+                    transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT
+                    and record.get("action_counts") != pair.get("action_counts")
+                )
             ):
                 raise ArtifactStoreError("pilot_series_record_mismatch")
             recomputed_counts[pair["outcome"]] += 1
         if series.get("counts") != recomputed_counts:
             raise ArtifactStoreError("pilot_series_counts_mismatch")
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            expected_action_counts = {
+                action: sum(record["action_counts"][action] for record in records)
+                for action in REPORT_CAPABLE_ACTIONS
+            }
+            if series.get("action_counts") != expected_action_counts:
+                raise ArtifactStoreError("pilot_series_action_counts_mismatch")
         expected_status = (
             "pilot_completed_all_acquisitions_accepted"
             if recomputed_counts["accepted"] == reference.planned_pair_count
@@ -2779,6 +3106,7 @@ class PilotSeriesStore:
         """Verify a terminal, prefix-complete interrupted series without treating it as Q2."""
 
         plan = self.verify_plan(reference)
+        transport_policy = capture_transport_policy_from_acquisition(plan["acquisition"])
         if not _is_sha256(expected_aborted_sha256):
             raise ArtifactStoreError("pilot_abort_expected_digest_invalid")
         directory = reference.series_directory
@@ -2836,6 +3164,14 @@ class PilotSeriesStore:
             or not isinstance(aborted.get("durability_unknown"), bool)
         ):
             raise ArtifactStoreError("pilot_abort_claim_invalid")
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            if (
+                aborted.get("transport_policy") != transport_policy.value
+                or aborted.get("action_counts") is None
+            ):
+                raise ArtifactStoreError("pilot_abort_transport_claim_invalid")
+        elif "transport_policy" in aborted or "action_counts" in aborted:
+            raise ArtifactStoreError("pilot_abort_transport_claim_invalid")
         _verified_interval(aborted.get("aborted"), failure_code="pilot_abort_timing_invalid")
         records = aborted.get("records")
         completed_ordinals = aborted.get("completed_ordinals")
@@ -2861,13 +3197,17 @@ class PilotSeriesStore:
             if (
                 record.get("pair_sha256") != hashlib.sha256(pair_payload).hexdigest()
                 or record.get("outcome") != pair.get("outcome")
+                or (
+                    transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT
+                    and record.get("action_counts") != pair.get("action_counts")
+                )
             ):
                 raise ArtifactStoreError("pilot_abort_record_mismatch")
             recomputed_counts[pair["outcome"]] += 1
         if aborted.get("counts") != recomputed_counts:
             raise ArtifactStoreError("pilot_abort_counts_mismatch")
-
         trailing = aborted.get("trailing_attempt")
+        trailing_verified_samples: list[dict[str, Any]] = []
         if trailing is not None:
             if (
                 not isinstance(trailing, dict)
@@ -2876,13 +3216,24 @@ class PilotSeriesStore:
                 or not isinstance(trailing.get("pair_record_present"), bool)
             ):
                 raise ArtifactStoreError("pilot_trailing_attempt_claim_invalid")
-            self._verify_trailing_attempt(
+            trailing_verified_samples = self._verify_trailing_attempt(
                 reference,
                 plan,
                 ordinal=len(records),
                 expected_roles=trailing.get("committed_roles"),
                 expected_pair_record_present=trailing["pair_record_present"],
             )
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            expected_action_counts = {
+                action: sum(record["action_counts"][action] for record in records)
+                + sum(
+                    sample.get("observed_action") == action
+                    for sample in trailing_verified_samples
+                )
+                for action in REPORT_CAPABLE_ACTIONS
+            }
+            if aborted.get("action_counts") != expected_action_counts:
+                raise ArtifactStoreError("pilot_abort_action_counts_mismatch")
         residue_inventory = aborted.get("residue_inventory")
         actual_inventory = _pilot_residue_inventory(
             directory,
@@ -2900,7 +3251,7 @@ class PilotSeriesStore:
         ordinal: int,
         expected_roles: object,
         expected_pair_record_present: bool,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         if expected_roles not in ([], ["a"], ["a", "b"]):
             raise ArtifactStoreError("pilot_trailing_roles_invalid")
         attempt = reference.series_directory / "attempts" / f"{ordinal:06d}"
@@ -2952,15 +3303,22 @@ class PilotSeriesStore:
             intent.get("intent_created"), failure_code="pilot_intent_timing_invalid"
         )
         self._verify_intent_schedule(intent, intent_timing)
+        verified_samples: list[dict[str, Any]] = []
         for role in expected_roles:
             target_index = 0 if role == "a" else 1
-            self._verify_series_sample(
-                reference,
-                ordinal=ordinal,
-                role=role,
-                expected_target=plan["ordered_targets"][target_index],
-                validity_policy=plan["validity_predicate"],
+            verified_samples.append(
+                self._verify_series_sample(
+                    reference,
+                    ordinal=ordinal,
+                    role=role,
+                    expected_target=plan["ordered_targets"][target_index],
+                    validity_policy=plan["validity_predicate"],
+                    transport_policy=capture_transport_policy_from_acquisition(
+                        plan["acquisition"]
+                    ),
+                )
             )
+        return verified_samples
 
     def _verify_attempt(
         self,
@@ -2970,6 +3328,7 @@ class PilotSeriesStore:
         ordinal: int,
         include_artifact_payloads: bool = False,
     ) -> dict[str, Any]:
+        transport_policy = capture_transport_policy_from_acquisition(plan["acquisition"])
         attempt = reference.series_directory / "attempts" / f"{ordinal:06d}"
         try:
             metadata = attempt.lstat()
@@ -3036,6 +3395,7 @@ class PilotSeriesStore:
                 role=role,
                 expected_target=planned_target,
                 validity_policy=plan["validity_predicate"],
+                transport_policy=transport_policy,
                 include_artifact_payload=include_artifact_payloads,
             )
             if (
@@ -3043,6 +3403,10 @@ class PilotSeriesStore:
                 or claim.get("role") != role
                 or claim.get("outcome") != verified["outcome"]
                 or claim.get("sample_sha256") != verified["sample_sha256"]
+                or (
+                    transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT
+                    and claim.get("observed_action") != verified["observed_action"]
+                )
             ):
                 raise ArtifactStoreError("pilot_pair_sample_claim_mismatch")
             verified_samples.append(verified)
@@ -3060,6 +3424,17 @@ class PilotSeriesStore:
             or pair.get("pair_completion_gap_ns") != expected_gap
         ):
             raise ArtifactStoreError("pilot_pair_outcome_or_gap_mismatch")
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            expected_action_counts = {
+                action: sum(
+                    item["observed_action"] == action for item in verified_samples
+                )
+                for action in REPORT_CAPABLE_ACTIONS
+            }
+            if pair.get("action_counts") != expected_action_counts:
+                raise ArtifactStoreError("pilot_pair_action_counts_mismatch")
+        elif "action_counts" in pair:
+            raise ArtifactStoreError("pilot_pair_action_counts_invalid")
         if include_artifact_payloads:
             pair = dict(pair)
             pair["_verified_pair_payload"] = pair_payload
@@ -3103,6 +3478,7 @@ class PilotSeriesStore:
         role: str,
         expected_target: dict[str, Any],
         validity_policy: dict[str, Any],
+        transport_policy: CaptureTransportPolicy,
         include_artifact_payload: bool = False,
     ) -> dict[str, Any]:
         directory = reference.series_directory / "attempts" / f"{ordinal:06d}" / role
@@ -3221,11 +3597,13 @@ class PilotSeriesStore:
         raw_valid = False
         decoded_summary: dict[str, Any] | None = None
         explicit_reply: bool | None = None
+        observed_action: str | None = None
         if raw_payload is not None:
             try:
                 action, status_payload = _state_frame_parts(raw_payload)
                 explicit_reply = action == STATE_REPLY_ACTION
-                if explicit_reply:
+                observed_action = _action_name(action)
+                if action in transport_policy.accepted_actions:
                     product_key = sample.get("product_key")
                     if not isinstance(product_key, str):
                         raise ValueError("product key must be a string")
@@ -3258,6 +3636,14 @@ class PilotSeriesStore:
             raise ArtifactStoreError("pilot_sample_status_mismatch")
         if sample.get("explicit_reply_observed") is not explicit_reply:
             raise ArtifactStoreError("pilot_sample_reply_observation_mismatch")
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            if (
+                sample.get("transport_policy") != transport_policy.value
+                or sample.get("observed_action") != observed_action
+            ):
+                raise ArtifactStoreError("pilot_sample_action_claim_mismatch")
+        elif "transport_policy" in sample or "observed_action" in sample:
+            raise ArtifactStoreError("pilot_sample_action_claim_invalid")
         expected_evidence = {
             "raw_wire_frame": {"grade": "a", "available": raw_payload is not None},
             "identity_and_host_timing": {"grade": "b", "available": True},
@@ -3289,6 +3675,8 @@ class PilotSeriesStore:
                 read_timing[1] if read_timing is not None else None
             ),
         }
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT:
+            verified["observed_action"] = observed_action
         if include_artifact_payload:
             verified["_verified_sample_manifest"] = sample
             verified["_verified_sample_payload"] = sample_payload
@@ -3311,6 +3699,7 @@ __all__ = [
     "ArtifactStoreError",
     "CaptureContext",
     "CaptureTarget",
+    "CaptureTransportPolicy",
     "CollectorError",
     "CollectorPreflightError",
     "DeviceSample",
@@ -3330,6 +3719,7 @@ __all__ = [
     "collect_device_sample",
     "collect_pair",
     "capture_validity_policy",
+    "capture_transport_policy_from_acquisition",
     "resolve_exact_endpoint",
     "select_capture_pair",
 ]

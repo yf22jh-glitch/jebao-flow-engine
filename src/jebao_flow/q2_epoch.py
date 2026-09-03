@@ -24,11 +24,14 @@ from jebao_flow.protocol.codec import GizwitsCommand, decode_frame
 from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_PRODUCT_KEY, decode_schedule
 from jebao_flow.protocol.schedule_wire import LocalWavemakerProScheduleSnapshot
-from jebao_flow.protocol.session import STATE_REPLY_ACTION
+from jebao_flow.protocol.session import STATE_REPLY_ACTION, STATE_REPORT_ACTION
 from jebao_flow.read_only_collector import (
+    ArtifactStoreError,
+    CaptureTransportPolicy,
     PilotPlanReference,
     PilotSeriesStore,
     VerifiedPilotPairArtifact,
+    capture_transport_policy_from_acquisition,
 )
 
 Q2_EPOCH_MANIFEST_SCHEMA_VERSION = 1
@@ -38,6 +41,39 @@ _RECEIPT_PREFIX = "Q2R"
 _SHA256_CHARS = frozenset("0123456789abcdef")
 _SAFE_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 _STABILITY_FLOOR_NS = 300_000_000_000
+
+
+def _acquisition_contract(policy: CaptureTransportPolicy) -> dict[str, Any]:
+    contract: dict[str, Any] = {
+        "write_count": 0,
+        "fresh_discovery_before_and_after_each_read": True,
+        "fresh_authenticated_session_per_sample": True,
+        "reads_per_session": 1,
+        "accept_reports": policy.accept_reports,
+        "raw_before_decode": True,
+        "all_ordinals_and_failures_preserved": True,
+        "application_control": "out_of_scope_never_invoked",
+    }
+    if policy is CaptureTransportPolicy.EXPLICIT_ONLY:
+        contract["required_action"] = "0x03"
+    else:
+        contract["transport_policy"] = policy.value
+        contract["accepted_actions"] = ["0x03", "0x04"]
+    return contract
+
+
+def _transport_policy_from_contract(contract: object) -> CaptureTransportPolicy:
+    if not isinstance(contract, dict):
+        raise Q2EpochError("q2_acquisition_contract_invalid")
+    policy = (
+        CaptureTransportPolicy.REPLY_OR_REPORT
+        if contract.get("transport_policy")
+        == CaptureTransportPolicy.REPLY_OR_REPORT.value
+        else CaptureTransportPolicy.EXPLICIT_ONLY
+    )
+    if contract != _acquisition_contract(policy):
+        raise Q2EpochError("q2_acquisition_contract_invalid")
+    return policy
 
 
 class Q2EpochError(RuntimeError):
@@ -522,6 +558,7 @@ class Q2EpochStore:
             raise Q2EpochError("q2_manifest_clock_not_aware")
         created_at = created_at.astimezone(UTC)
         plan = collector_store.verify_plan(collector_plan)
+        transport_policy = capture_transport_policy_from_acquisition(plan["acquisition"])
         if any(
             (collector_plan.series_directory / name).exists()
             for name in (
@@ -668,17 +705,7 @@ class Q2EpochStore:
                 ),
                 "qualification_status": "qualified_and_phase5_restore_staged_before_app_write",
             },
-            "acquisition_contract": {
-                "write_count": 0,
-                "fresh_discovery_before_and_after_each_read": True,
-                "fresh_authenticated_session_per_sample": True,
-                "reads_per_session": 1,
-                "accept_reports": False,
-                "required_action": "0x03",
-                "raw_before_decode": True,
-                "all_ordinals_and_failures_preserved": True,
-                "application_control": "out_of_scope_never_invoked",
-            },
+            "acquisition_contract": _acquisition_contract(transport_policy),
             "judgment_contract": {
                 "consecutive_same_valid_boundaries": 3,
                 "conflicting_valid_boundaries": 0,
@@ -815,6 +842,7 @@ class Q2EpochStore:
         schedule = manifest.get("schedule_expectation")
         thresholds = manifest.get("thresholds")
         exact_restore = manifest.get("exact_restore")
+        acquisition_contract = manifest.get("acquisition_contract")
         if (
             manifest.get("schema_version") != Q2_EPOCH_MANIFEST_SCHEMA_VERSION
             or manifest.get("kind") != "q2_readonly_epoch_manifest"
@@ -834,6 +862,7 @@ class Q2EpochStore:
             or not isinstance(exact_restore, dict)
         ):
             raise Q2EpochError("q2_manifest_claim_invalid")
+        _transport_policy_from_contract(acquisition_contract)
         try:
             threshold_value = Q2Thresholds(**thresholds)
             schedule_value = Q2ScheduleExpectation(
@@ -955,6 +984,7 @@ class Q2EpochStore:
             raise Q2EpochError("q2_thresholds_not_pilot_derived")
         plan = collector_store.verify_plan(reference.collector_plan)
         self._verify_plan_binding(manifest, plan)
+        transport_policy = capture_transport_policy_from_acquisition(plan["acquisition"])
         series = collector_store.verify_completed_series(
             reference.collector_plan,
             expected_series_sha256=expected_series_sha256,
@@ -977,7 +1007,7 @@ class Q2EpochStore:
                 expected_series_sha256=expected_series_sha256,
                 ordinal=ordinal,
             )
-            pairs.append(_decode_pair(artifact))
+            pairs.append(_decode_pair(artifact, transport_policy=transport_policy))
         result = _classify_complete_series(manifest, pairs, acquisition_rejections)
         receipt_id = manifest["receipt_id"]
         payload_value = {
@@ -1033,13 +1063,20 @@ class Q2EpochStore:
             target["expected_identity_binding_sha256"] for target in plan["ordered_targets"]
         ]
         collector = manifest["collector"]
+        try:
+            plan_transport = capture_transport_policy_from_acquisition(plan["acquisition"])
+            manifest_transport = _transport_policy_from_contract(
+                manifest.get("acquisition_contract")
+            )
+        except (KeyError, ArtifactStoreError, Q2EpochError) as error:
+            raise Q2EpochError("q2_collector_plan_binding_invalid") from error
         if (
             bindings != manifest["expected_identity_bindings_sha256"]
             or collector["planned_pair_count"] != plan["acquisition"]["planned_pair_count"]
             or manifest["thresholds"]["requested_cadence_ns"]
             != plan["acquisition"]["requested_cadence_ns"]
             or plan["acquisition"]["retry_policy"] != "none"
-            or plan["acquisition"]["accept_reports"] is not False
+            or plan_transport is not manifest_transport
         ):
             raise Q2EpochError("q2_collector_plan_binding_invalid")
 
@@ -1151,8 +1188,15 @@ class Q2EpochStore:
         return reference, verified
 
 
-def _decode_pair(artifact: VerifiedPilotPairArtifact) -> _DecodedPair:
-    samples = tuple(_decode_sample(sample) for sample in artifact.samples)
+def _decode_pair(
+    artifact: VerifiedPilotPairArtifact,
+    *,
+    transport_policy: CaptureTransportPolicy = CaptureTransportPolicy.EXPLICIT_ONLY,
+) -> _DecodedPair:
+    samples = tuple(
+        _decode_sample(sample, transport_policy=transport_policy)
+        for sample in artifact.samples
+    )
     if [sample.role for sample in samples] != ["a", "b"]:
         raise Q2EpochError("q2_pair_role_order_invalid")
     return _DecodedPair(
@@ -1164,14 +1208,28 @@ def _decode_pair(artifact: VerifiedPilotPairArtifact) -> _DecodedPair:
     )
 
 
-def _decode_sample(sample: Any) -> _DecodedSample:
+def _decode_sample(
+    sample: Any,
+    *,
+    transport_policy: CaptureTransportPolicy = CaptureTransportPolicy.EXPLICIT_ONLY,
+) -> _DecodedSample:
     frame = decode_frame(sample.raw_wire_frame)
+    accepted_actions = (
+        {STATE_REPLY_ACTION, STATE_REPORT_ACTION}
+        if transport_policy is CaptureTransportPolicy.REPLY_OR_REPORT
+        else {STATE_REPLY_ACTION}
+    )
     if (
         frame.command != GizwitsCommand.SERIAL_TRANSMIT_RESPONSE
         or len(frame.payload) != 453
-        or frame.payload[0] != STATE_REPLY_ACTION
+        or frame.payload[0] not in accepted_actions
     ):
-        raise Q2EpochError("q2_explicit_reply_invalid")
+        code = (
+            "q2_explicit_reply_invalid"
+            if transport_policy is CaptureTransportPolicy.EXPLICIT_ONLY
+            else "q2_state_action_invalid"
+        )
+        raise Q2EpochError(code)
     raw = frame.payload[1:]
     schema = get_product_schema(LOCAL_WAVEMAKER_PRO_PRODUCT_KEY)
     values = schema.decode_status(raw)

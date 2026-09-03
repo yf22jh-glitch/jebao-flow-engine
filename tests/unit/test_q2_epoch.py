@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from jebao_flow.protocol.codec import GizwitsCommand, encode_frame
-from jebao_flow.protocol.session import STATE_REPLY_ACTION
+from jebao_flow.protocol.session import STATE_REPLY_ACTION, STATE_REPORT_ACTION
 from jebao_flow.q2_epoch import (
     EpochConclusion,
     ExactRestoreEvidence,
@@ -30,6 +30,7 @@ from jebao_flow.q2_epoch import (
     combine_q2_epoch_receipts,
 )
 from jebao_flow.read_only_collector import (
+    CaptureTransportPolicy,
     PilotPlanReference,
     VerifiedPilotInterval,
     VerifiedPilotRawSample,
@@ -115,6 +116,21 @@ def test_q2_decode_rederives_transport_schedule_role_and_auto_flow_from_raw() ->
     with pytest.raises(Q2EpochError, match="q2_auto_frequency_invalid"):
         _decode_sample(replace(sample, raw_wire_frame=invalid_wire))
 
+    report_wire = encode_frame(
+        GizwitsCommand.SERIAL_TRANSMIT_RESPONSE,
+        bytes([STATE_REPORT_ACTION]) + raw,
+    )
+    report_sample = replace(sample, raw_wire_frame=report_wire)
+    with pytest.raises(Q2EpochError, match="q2_explicit_reply_invalid"):
+        _decode_sample(report_sample)
+    assert (
+        _decode_sample(
+            report_sample,
+            transport_policy=CaptureTransportPolicy.REPLY_OR_REPORT,
+        ).auto_flow
+        == 32
+    )
+
 
 def _private_root(tmp_path: Path, name: str = "q2") -> Path:
     root = tmp_path / name
@@ -138,7 +154,22 @@ def _plan(tmp_path: Path, *, count: int = 286, cadence_ns: int = 20_000_000_000)
     )
 
 
-def _plan_claim(plan: PilotPlanReference) -> dict:
+def _plan_claim(plan: PilotPlanReference, *, report_capable: bool = False) -> dict:
+    acquisition = {
+        "planned_pair_count": plan.planned_pair_count,
+        "requested_cadence_ns": plan.requested_cadence_ns,
+        "retry_policy": "none",
+        "accept_reports": report_capable,
+    }
+    if report_capable:
+        acquisition.update(
+            {
+                "transport_policy": "reply_or_report",
+                "accepted_actions": ["0x03", "0x04"],
+            }
+        )
+    else:
+        acquisition["required_action"] = "0x03"
     return {
         "ordered_targets": [
             {
@@ -152,18 +183,14 @@ def _plan_claim(plan: PilotPlanReference) -> dict:
                 "product_key": "50dbc92221fd4d33ae69a1fedd43b555",
             },
         ],
-        "acquisition": {
-            "planned_pair_count": plan.planned_pair_count,
-            "requested_cadence_ns": plan.requested_cadence_ns,
-            "retry_policy": "none",
-            "accept_reports": False,
-        },
+        "acquisition": acquisition,
     }
 
 
 class _FakeCollectorStore:
-    def __init__(self, plan: PilotPlanReference) -> None:
+    def __init__(self, plan: PilotPlanReference, *, report_capable: bool = False) -> None:
         self.plan = plan
+        self.report_capable = report_capable
         self.references = {
             "JFS-timing-one": replace(
                 plan,
@@ -180,7 +207,12 @@ class _FakeCollectorStore:
         }
 
     def verify_plan(self, reference: PilotPlanReference) -> dict:
-        return _plan_claim(reference)
+        return _plan_claim(
+            reference,
+            report_capable=(
+                self.report_capable and reference.series_id == self.plan.series_id
+            ),
+        )
 
     def load(self, series_id: str) -> PilotPlanReference:
         return self.references[series_id]
@@ -318,6 +350,47 @@ def test_prepare_commits_owner_only_prestarted_manifest_and_detects_tamper(
     path.chmod(0o600)
     with pytest.raises(Q2EpochError, match="q2_manifest_digest_mismatch"):
         store.verify_manifest(reference)
+
+
+def test_prepare_binds_report_capable_collector_without_weakening_strict_contract(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    collector = _FakeCollectorStore(plan, report_capable=True)
+    store = Q2EpochStore(_private_root(tmp_path))
+    reference = store.prepare(
+        collector,  # type: ignore[arg-type]
+        plan,
+        epoch_kind=Q2EpochKind.ASYNC,
+        timing_evidence=(
+            PilotTimingEvidence("JFS-timing-one", SHA_C),
+            PilotTimingEvidence("JFS-timing-two", SHA_D),
+        ),
+        restore_evidence=_restore(),
+        restore_evidence_verifier=_ExactVerifier(),
+        thresholds=_thresholds(plan),
+        schedule=_schedule(),
+        utc_clock=lambda: datetime(2026, 8, 30, tzinfo=UTC),
+    )
+
+    manifest = store.verify_manifest(reference)
+    assert manifest["acquisition_contract"] == {
+        "write_count": 0,
+        "fresh_discovery_before_and_after_each_read": True,
+        "fresh_authenticated_session_per_sample": True,
+        "reads_per_session": 1,
+        "accept_reports": True,
+        "raw_before_decode": True,
+        "all_ordinals_and_failures_preserved": True,
+        "application_control": "out_of_scope_never_invoked",
+        "transport_policy": "reply_or_report",
+        "accepted_actions": ["0x03", "0x04"],
+    }
+    Q2EpochStore._verify_plan_binding(manifest, collector.verify_plan(plan))
+
+    strict_plan = _plan_claim(plan)
+    with pytest.raises(Q2EpochError, match="q2_collector_plan_binding_invalid"):
+        Q2EpochStore._verify_plan_binding(manifest, strict_plan)
 
 
 def test_prepare_uses_one_utc_cutoff_for_archive_verification_and_manifest(

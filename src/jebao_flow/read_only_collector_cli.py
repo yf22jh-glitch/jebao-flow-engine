@@ -20,6 +20,7 @@ from jebao_flow.config import load_config
 from jebao_flow.protocol.discovery import GizwitsDiscovery
 from jebao_flow.protocol.session import DEFAULT_CONTROL_PORT, ReadOnlyGizwitsSession
 from jebao_flow.read_only_collector import (
+    CaptureTransportPolicy,
     CollectorError,
     CollectorPreflightError,
     PilotSeriesStore,
@@ -79,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--discovery-port", type=int, default=12414)
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument(
+        "--transport-policy",
+        choices=tuple(policy.value for policy in CaptureTransportPolicy),
+        default=CaptureTransportPolicy.EXPLICIT_ONLY.value,
+        help="state-frame acceptance policy; exact-restore evidence must use explicit_only",
+    )
     return parser
 
 
@@ -100,6 +107,7 @@ async def _run(args: argparse.Namespace) -> int:
         planned_pair_count=args.samples,
         requested_cadence_seconds=args.cadence_seconds,
         collector_commit_sha=args.collector_commit,
+        transport_policy=CaptureTransportPolicy(args.transport_policy),
     )
 
     def discovery_factory() -> GizwitsDiscovery:

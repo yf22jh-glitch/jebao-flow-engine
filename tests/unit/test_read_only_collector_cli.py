@@ -9,6 +9,7 @@ import pytest
 
 from jebao_flow import read_only_collector_cli
 from jebao_flow.read_only_collector import (
+    CaptureTransportPolicy,
     CollectorPreflightError,
     PilotTerminalError,
     PublicPilotMetadata,
@@ -64,6 +65,7 @@ def test_cli_outputs_only_public_artifact_metadata(monkeypatch, capsys) -> None:
 
         def prepare(self, *_args, **_kwargs):
             assert _kwargs["source_attestation"] is _TEST_SOURCE_ATTESTATION
+            assert _kwargs["transport_policy"] is CaptureTransportPolicy.EXPLICIT_ONLY
             return SimpleNamespace(plan_artifact_id="JFP-public")
 
         async def run(self, *_args, **_kwargs) -> PublicPilotMetadata:
@@ -98,6 +100,14 @@ def test_cli_outputs_only_public_artifact_metadata(monkeypatch, capsys) -> None:
     assert public["q2_boundary_classification"] == "not_authorized"
     assert "/private" not in output.out
     assert output.err == ""
+
+
+def test_cli_exposes_explicit_report_capable_transport_policy() -> None:
+    parsed = read_only_collector_cli.build_parser().parse_args(
+        [*_argv(), "--transport-policy", "reply_or_report"]
+    )
+
+    assert parsed.transport_policy == "reply_or_report"
 
 
 def test_cli_redacts_private_exception_text(monkeypatch, capsys) -> None:
