@@ -115,6 +115,31 @@ editor는 없습니다.
 - slave Flow slider는 role과 별도인 `{Flow: value}` partial write입니다. 이 화면에는 다른
   장비를 지정하거나 두 장비를 handshake하는 별도 pairing command가 없습니다.
 
+#### 2026-09-03 TimerON-first Sync 도달성 정정
+
+같은 세 cached Pro template의 화면 진입부터 optimistic update 이후 side effect까지 다시
+추적했습니다.
+
+- HomeScreen의 Linkage Pressable과 navigator에는 `TimerON`·role 기반 진입 guard나 `disabled`가
+  없습니다. `TimerON && Linkage>0`은 아이콘과 배경색에만 쓰입니다.
+- Linkage 화면의 Slave parent Pressable은 현재 `Linkage`만 읽고, independent·master에서는
+  `{Linkage:2}`만 보냅니다. `TimerON`을 읽거나 다른 key를 합성하지 않습니다.
+- optimistic local merge 뒤 `Linkage=0`을 다시 보내는 `autorun`·reaction도 없습니다. bundle의
+  유일한 relevant reaction은 Mode 변경 시 toast를 숨길 뿐 `sendCmd`를 호출하지 않습니다.
+
+따라서 **먼저 schedule을 저장하고 `TimerON=true`로 만든 뒤 Linkage 화면에서 Slave를 선택하는
+순서는 앱으로 도달 가능**하며, wire payload도 partial `{Linkage:2}` 하나입니다. 2026-09-02
+Sync-gate 실행의 `TimerON arm -> Linkage=2` 순서는 이 앱 경로와 wire-equivalent입니다.
+
+아래에 기록된 `Linkage=0` 합성은 **이미 slave인 상태에서** schedule timer나 manual 확정을 다시
+조작하는 반대 순서에만 적용됩니다. 앱은 slave 상태의 schedule 화면에서 timer를 OFF처럼 표시하고,
+그 toggle을 사용하면 role을 independent로 detach합니다. 그러므로 `TimerON=true && Linkage in
+{2,3}`은 앱에서 만들 수 없는 상태가 아니라, 앱으로 만들 수 있지만 timer UI가 그대로 유지·편집할
+대상으로 취급하지 않는 상태입니다.
+
+이 정정은 검사한 세 `aquariumPumpPro.1` template의 정적 command surface에 한정합니다. 다른
+template/version, native group 화면, firmware 내부 peer discovery를 일반화하지 않습니다.
+
 #### 2026-09-02 schedule 저장과 실행 소유권 call chain
 
 같은 세 cached Pro template에서 role과 schedule 경로를 함께 다시 추적했습니다.

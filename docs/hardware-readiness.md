@@ -417,6 +417,37 @@ mode·frequency 또는 boundary를 다르게 한 최소 Sync 관측으로 runtim
 뒤, 그 결과 위에서 inactive manual `Mode/Frequency` drift와 core Sync 권한을 분리한 ASYNC
 계획·새 승인·별도 단회 해제를 만드는 것입니다. park해도 제품 경로에는 영향이 없습니다.
 
+#### 2026-09-03 Sync runtime schedule 소유권 — plan-only, 재개 결정 대기
+
+앱 command surface를 다시 전수 추적한 결과, `TimerON`을 먼저 arm한 뒤 Linkage 화면에서 Slave를
+선택하는 경로에는 진입 guard가 없고 wire payload는 partial `{Linkage:2}` 하나입니다. pairing,
+master id, schedule 복사·owner reference command도 없습니다. 따라서 2026-09-02 Sync-gate 실행은
+앱에서 도달 가능한 순서와 wire-equivalent였고, 누락된 앱 pairing 단계가 원인이었다고 볼 근거는
+없습니다. 이미 slave인 상태에서 timer를 다시 조작하면 `Linkage=0`이 합성된다는 별도 순서와
+혼동하지 않습니다.
+
+그 실행은 master=`master`, slave=`sync_slave`, 양쪽 `TimerON`, 서로 다른 stored schedule image를
+fresh raw로 확인했지만, 양쪽 A의 Mode·경계가 같고 slave manual과 Auto tuple도 같아 runtime
+schedule 소유권을 구분하지 못했습니다. 앱 코드는 저장 대상만 설명하고 firmware가 어느 image의
+content·timing을 실행하는지는 설명하지 못합니다.
+
+다음 최소 판별안은 [`Native Sync schedule 소유권 최소 단회 계획`](native-sync-schedule-ownership-recheck.md)에
+사전 고정합니다. master와 slave의 A/B Mode·Flow를 반대로 두고 slave 경계를 master보다 5분 늦춰,
+경계 전·후 content와 중간 timing×content 네 조합을 fresh raw로 구분합니다. 앱과 같은 Sync write
+까지만 사용하고 `async_slave` write는 0회이며, 계획 최고 Flow 40과 guarded cap 41을 사용합니다.
+Home Assistant는 재시작하거나 조작하지 않습니다.
+
+§7 보고의 대안은 (1) 이 900초 Sync-only 단회로 content와 timing을 함께 답하기, (2) 같은 write
+수로 W0 content만 읽고 수 분 안에 복원해 노출 시간을 줄이는 대신 timing을 park하기, (3) native
+질문을 계속 park하고 software-independent actuator·그룹 런타임을 진행하기입니다. attempt 05 raw는
+당시 durable schema에 device-local `NowTime`이 없어 timing을 오프라인 복원할 수 없었습니다.
+park해도 제품 경로에는 영향이 없습니다.
+
+이 항목은 **plan-only**입니다. 새 날짜나 질문 이름은 §7 카운터를 초기화하지 않습니다. 현재
+§1 동결과 write 0을 유지하며, repository maintainer의 새 명시적 재개 결정, 별도 단회 해제 커밋,
+exact source/image와 write-free baseline 검토, on-site operation 승인이 있기 전에는 코드 변경이나
+실기를 시작하지 않습니다.
+
 ### 2026-08-28 당시 park 사유
 
 - 실기 13회 중 이 질문(슬롯별 `AutoFlow` 독립 적용)을 **직접 시도한 것은 5회**이고, 그중
