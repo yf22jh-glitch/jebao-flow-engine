@@ -429,3 +429,26 @@ baseline이고 제품의 software-independent actuator/group 트랙에는 영향
 정식 receipt를 얻는 저비용 경로가 산술상 생깁니다. 그러나 그것은 승인 당시 v1 의미를 v2로 소급
 재해석하는 일이므로 의도적으로 사용하지 않습니다. 이 결정의 비용은 fresh Phase 0, 새 v2 manifest,
 새 operation id와 새 on-site 승인입니다.
+
+## 실행 addendum — diagnostic artifact timing eligibility
+
+reviewed park source의 `park-verify`를 device-network-free 격리 복사본에서 실행한 결과, 기존
+diagnostic series는 `disposition_artifact_predates_restore`로 fail-closed했습니다. 마지막 completed
+action은 `2026-09-04T01:44:56.378426Z`, artifact 시작과 완료는 각각
+`01:46:39.219543Z`와 `01:47:01.230524Z`였지만, 두 번째 write-free final-verify reauthorization까지
+반영한 current record의 `updated_at`은 `02:14:16.280108Z`입니다. 구현이 요구하는
+`artifact_started_at > max(last_completed_action.completed_at, record.updated_at)`을 만족하지
+않습니다.
+
+이 결과는 §3 P1이 아니라 fail-closed evidence-eligibility 거부이고, write-free disposition에는
+§2의 첫-write 이전 gate 규칙이 적용되지 않습니다. 거부 뒤 원본 journal SHA는 불변이고 device
+network/write 및 park archive/index/tombstone 생성은 모두 `0`이었습니다. 나머지 digest·state
+결속을 통과한 뒤 timing 조건에서만 닫혔으므로 current manifest가 두 번째 grant까지 포함한 journal을
+정확히 가리킨다는 점도 확인됐습니다.
+
+이번 막힘을 풀기 위해 `record.updated_at` gate를 완화하지 않습니다. 기존 diagnostic artifact는
+overload와 byte-exact restore 근거로 계속 보존하되, repository maintainer가 별도로 승인한
+**explicit-only strict read 1회**를 current journal의 최종 갱신 뒤 새 private series로 수집합니다.
+그 reference만 새 disposition manifest에 결속해 `park-verify`를 다시 수행합니다. 새 capture와 park
+사이에는 exact-restore reauthorization 또는 journal을 갱신하는 다른 attended 상호작용을 허용하지
+않습니다. proxy 의미의 정정 여부는 park 완료 뒤 별도 안건으로 검토합니다.

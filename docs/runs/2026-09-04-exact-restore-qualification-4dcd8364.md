@@ -144,3 +144,45 @@
   자체 계약에 따른 임시 writability probe를 수행했으므로 host store write와 device write를
   구분한다.
 - Home Assistant는 계속 건드리지 않는다.
+
+## 2026-09-04 parked-disposition dry verification addendum
+
+- reviewed source commit `e977a16e4aed115a4b19fd380b15e596c6d51709`의 Linux/amd64 image로
+  current journal과 diagnostic strict series의 격리 복사본만 사용해 `park-verify`를 실행했다.
+  container network는 `none`이었고 원본 hardware-safety volume은 읽기 전용으로만 대조했다:
+  **(c)**.
+- disposition manifest SHA-256
+  `6410822317d17ec9262bfa44a12f71701c193883ea1245dff4ee30346f934936`은 current
+  journal의 operation/baseline/action-plan/authority-chain digest와 diagnostic series reference를
+  모두 통과했지만, `disposition_artifact_predates_restore`에서 fail-closed했다.
+- 거부 결과는 owner-only private artifact
+  `PVR-83bf8652c999d5413e7052f3158f4226`
+  (`6aa92d4bf7ac09359d8d0d9e3de62a8ed5081af101b5fa89c29bfac300fa5a55`)에 보존했다.
+  원본과 복사본 journal SHA-256은 모두
+  `273a7f38638033dd0030a268279bb67b8451b985936051a83f42f605c8486bcf`였고,
+  park archive/index/tombstone 생성은 `0`건이었다. device network와 device write도 `0`이었다:
+  **(b)**.
+- 거부에 사용된 UTC는 다음과 같다.
+  - 마지막 completed action: `2026-09-04T01:44:56.378426Z`
+  - diagnostic artifact 시작: `2026-09-04T01:46:39.219543Z`
+  - diagnostic artifact 완료: `2026-09-04T01:47:01.230524Z`
+  - 두 번째 final-verify reauthorization까지 반영한 current record `updated_at`:
+    `2026-09-04T02:14:16.280108Z`
+- verifier는 artifact 시작이
+  `max(last_completed_action.completed_at, record.updated_at)`보다 늦어야 한다. diagnostic artifact는
+  마지막 device write보다 뒤지만 두 번째 write-free reauthorization보다 앞이어서, `updated_at`이
+  원래 의도한 awaiting-transition 시각의 proxy가 아니라 가장 최근 journal 갱신 시각이 된 현재
+  record에는 적격하지 않다.
+- 이 거부는 잘못된 PASS, device write 또는 journal 손실을 만들지 않은 fail-closed 결과라 §3
+  P1이 아니다. disposition은 write-free라 §2의 첫-write 이전 gate 규칙도 적용 대상이 아니다.
+- 기존 diagnostic artifact는 폐기하지 않고 `20초` policy overload와 byte-exact restore의 근거로
+  계속 보존한다. 다만 disposition eligibility에는 **새 explicit-only strict pair 1회**를
+  repository maintainer의 별도 read-only 접촉 승인 뒤 수집해 결속한다. source gate는 이번 막힘을
+  풀기 위해 바꾸지 않는다.
+- 이 결정은 위 §7의 "새 실기를 시작하지 않는다"를 **이 read-only strict pair 1건에 한해
+  대체**한다. 이는 final-verify의 세 번째 재시도가 아니며 device write가 없는 별도 관측이다.
+  세 번째 final-pair 재시도, current manifest 값 변경, journal 편집·삭제·강제 archive와 recovery
+  supervisor 재기동 금지는 그대로 유효하다.
+- 새 capture 뒤 park 완료 전에는 exact-restore reauthorization이나 journal을 갱신하는 다른 attended
+  상호작용을 끼우지 않는다. `record.updated_at` proxy의 의미를 바로잡는 source 변경은 disposition
+  완료 뒤 별도 안건으로 남긴다.

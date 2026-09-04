@@ -1020,3 +1020,7 @@ qualification은 계속 **NO-GO / BLOCKING**입니다.
 현재 recovery supervisor는 이미 exited입니다. parked tombstone은 기존 non-terminal journal과
 마찬가지로 supervisor에서 `ATTENDED_REQUIRED`이므로 다음 reviewed prepare 전까지 재기동하지
 않습니다. 이 후속은 Home Assistant 조작을 포함하지 않습니다.
+
+park disposition 결속을 위한 explicit-only strict read **1회**는 repository maintainer의 별도
+승인 아래에서만 허용합니다. 이는 앱 live-write나 새 qualification 승인이 아니며, 나머지
+`NO-GO / BLOCKING` 판정과 Home Assistant no-touch는 그대로 유지합니다.
