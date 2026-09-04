@@ -95,6 +95,45 @@ def _timedelta_ns(value: timedelta) -> int:
     return (value.days * 86_400 + value.seconds) * 1_000_000_000 + value.microseconds * 1_000
 
 
+def _is_sha256_text(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_parked_unqualified_tombstone(value: Mapping[str, Any]) -> bool:
+    """Recognize only the exact non-record successor installed by the disposition path."""
+
+    return (
+        set(value)
+        == {
+            "version",
+            "journal_format",
+            "operation_id",
+            "phase",
+            "operation_sha256",
+            "disposition_id",
+            "disposition_sha256",
+            "journal_snapshot_sha256",
+        }
+        and value.get("version") == 2
+        and value.get("journal_format") == 2
+        and value.get("phase") == "parked_unqualified"
+        and isinstance(value.get("operation_id"), str)
+        and isinstance(value.get("disposition_id"), str)
+        and all(
+            _is_sha256_text(value.get(key))
+            for key in (
+                "operation_sha256",
+                "disposition_sha256",
+                "journal_snapshot_sha256",
+            )
+        )
+    )
+
+
 class ExactRestoreErrorCode(StrEnum):
     JOURNAL = "journal"
     AUTHORITY = "authority"
@@ -350,15 +389,14 @@ class ExactRestoreBaseline(BaseModel):
             raise ValueError("baseline logical devices must be distinct")
         if self.devices[0].identity_binding_sha256 == self.devices[1].identity_binding_sha256:
             raise ValueError("baseline physical bindings must be distinct")
-        if any(
-            device.accepted_latent_manual_power is not None for device in self.devices
-        ) and self.corroborating_evidence is None:
+        if (
+            any(device.accepted_latent_manual_power is not None for device in self.devices)
+            and self.corroborating_evidence is None
+        ):
             raise ValueError("accepted latent manual power requires corroborating evidence")
         if self.corroborating_evidence is not None and (
-            self.evidence.plan_artifact_id
-            == self.corroborating_evidence.plan_artifact_id
-            or self.evidence.series_artifact_id
-            == self.corroborating_evidence.series_artifact_id
+            self.evidence.plan_artifact_id == self.corroborating_evidence.plan_artifact_id
+            or self.evidence.series_artifact_id == self.corroborating_evidence.series_artifact_id
             or self.evidence.pair_manifest_sha256
             == self.corroborating_evidence.pair_manifest_sha256
         ):
@@ -959,6 +997,11 @@ class ExactRestoreQualificationReceiptStore(Protocol):
         receipt: ExactRestoreReceipt,
     ) -> Mapping[str, Any]: ...
 
+    def confirm_parked_tombstone(
+        self,
+        tombstone: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
+
 
 class ExactRestoreGuard(Protocol):
     @property
@@ -1270,13 +1313,7 @@ class ExactRestoreController:
             or record.cycle is not ExactRestoreCycle.SENTINEL_QUALIFICATION
         ):
             raise ExactRestorePreflightError(ExactRestoreErrorCode.INVALID_BASELINE)
-        payload = record.model_dump(mode="json")
-        with self._store.claim():
-            try:
-                self._store.create(payload)
-            except BaseException:
-                if not self._store.reload_and_confirm_successor(payload):
-                    raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL) from None
+        self._create_prepared(record)
 
     def create_qualified_final_restore(self, record: ExactRestoreRecord) -> None:
         """Create only a phase-5 record whose immediate parent is a qualified baseline cycle."""
@@ -1290,9 +1327,20 @@ class ExactRestoreController:
             or parent.phase is not ExactRestorePhase.FINAL_VERIFIED
         ):
             raise ExactRestorePreflightError(ExactRestoreErrorCode.INVALID_BASELINE)
+        self._create_prepared(record)
+
+    def _create_prepared(self, record: ExactRestoreRecord) -> None:
+        """Install one prepared record, refusing every parked successor until v2 exists."""
+
         payload = record.model_dump(mode="json")
         with self._store.claim():
             self._require_operation_not_finalized(record.operation_id)
+            existing = self._store.load()
+            if existing is not None and _is_parked_unqualified_tombstone(existing):
+                self._confirm_parked_tombstone(existing)
+                # The split acquisition policy is introduced by the next source commit.  Until
+                # then every successor would retain the v1 final-verification dead end.
+                raise ExactRestorePreflightError(ExactRestoreErrorCode.AUTHORITY)
             try:
                 self._store.create(payload)
             except BaseException:
@@ -1308,6 +1356,7 @@ class ExactRestoreController:
 
         with self._store.claim():
             qualification = self._load()
+            self._require_operation_not_parked(qualification.operation_id)
             if (
                 qualification.cycle is not ExactRestoreCycle.SENTINEL_QUALIFICATION
                 or qualification.phase is not ExactRestorePhase.FINAL_VERIFIED
@@ -1336,6 +1385,7 @@ class ExactRestoreController:
     def arm(self, authority: ExactRestoreAuthority) -> ExactRestoreRecord:
         with self._store.claim():
             record = self._load()
+            self._require_operation_not_parked(record.operation_id)
             if record.phase is not ExactRestorePhase.PREPARED:
                 raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
             self._require_fresh_initial_sentinel_baseline(record)
@@ -1405,6 +1455,7 @@ class ExactRestoreController:
 
         with self._store.claim():
             record = self._load()
+            self._require_operation_not_parked(record.operation_id)
             if record.phase not in {
                 ExactRestorePhase.ARMED,
                 ExactRestorePhase.RESTORING,
@@ -1444,6 +1495,7 @@ class ExactRestoreController:
 
         with self._store.claim():
             record = self._load()
+            self._require_operation_not_parked(record.operation_id)
             if record.phase is not ExactRestorePhase.RECOVERY_REQUIRED:
                 raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
             current = record.authority
@@ -1492,6 +1544,7 @@ class ExactRestoreController:
                 raise ExactRestorePreflightError(ExactRestoreErrorCode.SAFETY_INTERLOCK)
             epoch = self._guard.epoch
             record = self._load()
+            self._require_operation_not_parked(record.operation_id)
             if record.phase not in {
                 ExactRestorePhase.ARMED,
                 ExactRestorePhase.RESTORING,
@@ -1685,6 +1738,7 @@ class ExactRestoreController:
 
         with self._store.claim():
             record = self._load()
+            self._require_operation_not_parked(record.operation_id)
             if record.phase is ExactRestorePhase.FINAL_VERIFIED:
                 return self._receipt_from_final_record(record)
             if record.phase is not ExactRestorePhase.AWAITING_FINAL_VERIFY:
@@ -1784,6 +1838,7 @@ class ExactRestoreController:
     def clear_after_receipt(self, receipt: ExactRestoreReceipt) -> None:
         with self._store.claim():
             record = self._load()
+            self._require_operation_not_parked(record.operation_id)
             if record.phase is not ExactRestorePhase.FINAL_VERIFIED:
                 raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
             try:
@@ -2056,10 +2111,44 @@ class ExactRestoreController:
         payload = self._store.load()
         if payload is None:
             raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+        if _is_parked_unqualified_tombstone(payload):
+            self._confirm_parked_tombstone(payload)
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.AUTHORITY)
         try:
             return ExactRestoreRecord.model_validate(payload)
         except (TypeError, ValueError) as error:
             raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL) from error
+
+    def _confirm_parked_tombstone(self, payload: Mapping[str, Any]) -> None:
+        receipt_store = self._qualification_receipts
+        if receipt_store is None:
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+        try:
+            confirmed = receipt_store.confirm_parked_tombstone(payload)
+        except BaseException as error:
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL) from error
+        if (
+            not isinstance(confirmed, Mapping)
+            or confirmed.get("version") != 2
+            or confirmed.get("outcome") != "parked_unqualified"
+            or confirmed.get("disposition_sha256") != payload.get("disposition_sha256")
+        ):
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+
+    def _require_operation_not_parked(self, operation_id: str) -> None:
+        receipt_store = self._qualification_receipts
+        if receipt_store is None:
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+        try:
+            finalization = receipt_store.load_operation_finalization(operation_id)
+        except BaseException as error:
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL) from error
+        if finalization is None:
+            return
+        if not isinstance(finalization, Mapping):
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+        if finalization.get("version") == 2 and finalization.get("outcome") == "parked_unqualified":
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.AUTHORITY)
 
     def _require_operation_not_finalized(self, operation_id: str) -> None:
         receipt_store = self._qualification_receipts
@@ -2073,8 +2162,8 @@ class ExactRestoreController:
             return
         if not isinstance(finalization, Mapping):
             raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
-        # Any valid durable entry means this operation already reached FINAL_VERIFIED.  It is
-        # never safe to reuse its operation id or any still-live attended grant for a new plan.
+        # Any valid durable terminal entry means this operation reached either FINAL_VERIFIED or
+        # PARKED_UNQUALIFIED.  It is never safe to reuse its operation id or any attended grant.
         raise ExactRestorePreflightError(ExactRestoreErrorCode.AUTHORITY)
 
     def _save_exact(self, record: ExactRestoreRecord) -> None:

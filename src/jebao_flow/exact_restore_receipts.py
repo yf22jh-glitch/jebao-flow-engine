@@ -26,9 +26,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock, get_ident
 from types import TracebackType
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    StringConstraints,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 
 from jebao_flow.exact_restore import ExactRestoreCycle, ExactRestoreReceipt
 from jebao_flow.hardware_safety import (
@@ -43,6 +50,8 @@ _RECEIPT_PREFIX = "exact-restore-receipt-"
 _RECEIPT_SUFFIX = ".json"
 _FINALIZATION_PREFIX = "exact-restore-finalized-"
 _FINALIZATION_SUFFIX = ".json"
+_PARKED_DISPOSITION_PREFIX = "exact-restore-parked-disposition-"
+_PARKED_JOURNAL_PREFIX = "exact-restore-parked-journal-"
 _LOCK_NAME = ".exact-restore-receipts.lock"
 _OPERATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _OPERATION_DIGEST_DOMAIN = b"jebao-flow/exact-restore-operation-finalization/v1\0"
@@ -62,14 +71,32 @@ class ExactRestoreOperationFinalizationConflictError(ExactRestoreReceiptArchiveE
 
 
 class ExactRestoreOperationFinalization(BaseModel):
-    """Privacy-preserving operation-to-receipt binding stored below the safety root."""
+    """Privacy-preserving terminal exclusion for one exact-restore operation.
+
+    Version 1 is the legacy, receipt-backed success shape.  Version 2 is deliberately not a
+    receipt: it binds an unqualified parked disposition and permanently prevents operation-id
+    replay after the live journal path is reused.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 1
     operation_sha256: _Sha256Digest
-    receipt_sha256: _Sha256Digest
+    receipt_sha256: _Sha256Digest | None = None
+    disposition_sha256: _Sha256Digest | None = None
+    outcome: Literal["parked_unqualified"] | None = None
     cycle: ExactRestoreCycle
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_compatible(self, handler: Any) -> dict[str, object]:
+        payload = handler(self)
+        if self.receipt_sha256 is None:
+            payload.pop("receipt_sha256", None)
+        if self.disposition_sha256 is None:
+            payload.pop("disposition_sha256", None)
+        if self.outcome is None:
+            payload.pop("outcome", None)
+        return payload
 
     @model_validator(mode="after")
     def require_supported_cycle(self) -> Self:
@@ -79,6 +106,19 @@ class ExactRestoreOperationFinalization(BaseModel):
             ExactRestoreCycle.BASELINE_RESTORE,
         }:
             raise ValueError("unsupported exact-restore finalization cycle")
+        if self.version == 1:
+            if (
+                self.receipt_sha256 is None
+                or self.disposition_sha256 is not None
+                or self.outcome is not None
+            ):
+                raise ValueError("v1 finalization must be backed only by a success receipt")
+        elif (
+            self.receipt_sha256 is not None
+            or self.disposition_sha256 is None
+            or self.outcome != "parked_unqualified"
+        ):
+            raise ValueError("v2 finalization must bind only a parked disposition")
         return self
 
 
@@ -204,6 +244,18 @@ class ExactRestoreReceiptArchive:
         digest = self._operation_digest(operation_id)
         return self.root / self._finalization_name(digest)
 
+    def path_for_parked_disposition(self, disposition_sha256: str) -> Path:
+        """Return the digest-addressed parked-disposition path."""
+
+        digest = self._validate_digest(disposition_sha256)
+        return self.root / self._parked_disposition_name(digest)
+
+    def path_for_parked_journal_snapshot(self, journal_sha256: str) -> Path:
+        """Return the digest-addressed immutable journal-snapshot path."""
+
+        digest = self._validate_digest(journal_sha256)
+        return self.root / self._parked_journal_name(digest)
+
     def persist_final_verified_receipt(self, receipt: ExactRestoreReceipt) -> None:
         """Durably archive a receipt and its immutable operation finalization index.
 
@@ -279,7 +331,7 @@ class ExactRestoreReceiptArchive:
         self,
         operation_id: str,
     ) -> Mapping[str, object] | None:
-        """Return a valid receipt-backed finalization, ``None`` when absent, or raise on damage."""
+        """Return one valid terminal exclusion, ``None`` when absent, or raise on damage."""
 
         operation_digest = self._operation_digest(operation_id)
         with self._claim():
@@ -291,8 +343,61 @@ class ExactRestoreReceiptArchive:
             )
             if snapshot is None:
                 return None
-            self._require_receipt_backing_finalization(root_descriptor, snapshot.finalization)
+            if snapshot.finalization.version == 1:
+                self._require_receipt_backing_finalization(root_descriptor, snapshot.finalization)
+            else:
+                self._require_parked_backing_finalization(root_descriptor, snapshot.finalization)
             return snapshot.finalization.model_dump(mode="json")
+
+    def confirm_parked_tombstone(
+        self,
+        tombstone: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        """Confirm one live tombstone against its permanent immutable park bundle.
+
+        This method is intentionally usable by the controller without importing the disposition
+        module.  It recognizes only the exact v2 tombstone shape; arbitrary malformed journal
+        mappings remain journal corruption.
+        """
+
+        operation_id = self._validate_parked_tombstone(tombstone)
+        operation_digest = self._operation_digest(operation_id)
+        with self._claim():
+            root_descriptor = self._require_active_claim()
+            snapshot = self._load_finalization_snapshot(
+                root_descriptor,
+                operation_digest,
+                allow_absent=False,
+            )
+            if snapshot is None:  # pragma: no cover - guarded by allow_absent=False
+                raise ExactRestoreReceiptArchiveError(
+                    "parked exact-restore operation finalization is absent"
+                )
+            finalization = snapshot.finalization
+            if (
+                finalization.version != 2
+                or finalization.outcome != "parked_unqualified"
+                or finalization.disposition_sha256 != tombstone.get("disposition_sha256")
+                or tombstone.get("operation_sha256")
+                != hashlib.sha256(operation_id.encode("ascii")).hexdigest()
+            ):
+                raise ExactRestoreReceiptArchiveError(
+                    "parked exact-restore tombstone does not match its finalization"
+                )
+            disposition = self._require_parked_backing_finalization(
+                root_descriptor,
+                finalization,
+            )
+            if (
+                disposition.get("journal_snapshot_sha256")
+                != tombstone.get("journal_snapshot_sha256")
+                or disposition.get("disposition_id") != tombstone.get("disposition_id")
+                or disposition.get("operation_sha256") != tombstone.get("operation_sha256")
+            ):
+                raise ExactRestoreReceiptArchiveError(
+                    "parked exact-restore tombstone does not match its disposition"
+                )
+            return finalization.model_dump(mode="json")
 
     def confirm_operation_finalization(
         self,
@@ -1097,9 +1202,14 @@ class ExactRestoreReceiptArchive:
         root_descriptor: int,
         finalization: ExactRestoreOperationFinalization,
     ) -> _ReceiptSnapshot:
+        receipt_sha256 = finalization.receipt_sha256
+        if finalization.version != 1 or receipt_sha256 is None:
+            raise ExactRestoreReceiptArchiveError(
+                "success finalization does not identify an exact-restore receipt"
+            )
         snapshot = self._load_snapshot(
             root_descriptor,
-            finalization.receipt_sha256,
+            receipt_sha256,
             allow_absent=False,
         )
         if snapshot is None:  # pragma: no cover - guarded by allow_absent=False
@@ -1108,13 +1218,178 @@ class ExactRestoreReceiptArchive:
             )
         if (
             self._operation_digest(snapshot.receipt.operation_id) != finalization.operation_sha256
-            or snapshot.receipt.receipt_sha256 != finalization.receipt_sha256
+            or snapshot.receipt.receipt_sha256 != receipt_sha256
             or snapshot.receipt.cycle is not finalization.cycle
         ):
             raise ExactRestoreReceiptArchiveError(
                 "operation finalization does not match its archived receipt"
             )
         return snapshot
+
+    def _require_parked_backing_finalization(
+        self,
+        root_descriptor: int,
+        finalization: ExactRestoreOperationFinalization,
+    ) -> dict[str, object]:
+        disposition_sha256 = finalization.disposition_sha256
+        if (
+            finalization.version != 2
+            or finalization.outcome != "parked_unqualified"
+            or disposition_sha256 is None
+            or finalization.receipt_sha256 is not None
+        ):
+            raise ExactRestoreReceiptArchiveError(
+                "parked finalization does not identify a parked disposition"
+            )
+        disposition_payload = self._load_digest_blob(
+            root_descriptor,
+            self._parked_disposition_name(disposition_sha256),
+            disposition_sha256,
+        )
+        try:
+            decoded = json.loads(
+                disposition_payload.decode("ascii"),
+                object_pairs_hook=self._unique_object,
+            )
+            if not isinstance(decoded, dict):
+                raise ValueError("parked disposition root is not an object")
+            canonical = (
+                json.dumps(
+                    decoded,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("ascii")
+                + b"\n"
+            )
+        except (
+            json.JSONDecodeError,
+            RecursionError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ) as error:
+            raise ExactRestoreReceiptArchiveError(
+                "cannot decode parked exact-restore disposition"
+            ) from error
+        journal_snapshot_sha256 = decoded.get("journal_snapshot_sha256")
+        authority = decoded.get("disposition_authority")
+        authority_sha256 = decoded.get("disposition_authority_sha256")
+        expected_keys = {
+            "version",
+            "disposition_id",
+            "outcome",
+            "qualification_achieved",
+            "device_network_access",
+            "device_write_count",
+            "reason",
+            "manifest_sha256",
+            "operation_sha256",
+            "operation_finalization_sha256",
+            "cycle",
+            "journal_snapshot_sha256",
+            "baseline_sha256",
+            "action_plan_sha256",
+            "authority_chain_sha256",
+            "completed_action_count",
+            "evidence",
+            "pair_completion_gap_ns",
+            "total_attempt_ns",
+            "disposition_authority",
+            "disposition_authority_sha256",
+            "recorded_at",
+        }
+        try:
+            authority_canonical = (
+                json.dumps(
+                    authority,
+                    allow_nan=False,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("ascii")
+                + b"\n"
+            )
+        except (RecursionError, TypeError, UnicodeError, ValueError) as error:
+            raise ExactRestoreReceiptArchiveError(
+                "parked exact-restore authority is not canonicalizable"
+            ) from error
+        if (
+            canonical != disposition_payload
+            or set(decoded) != expected_keys
+            or decoded.get("version") != 1
+            or decoded.get("outcome") != "parked_unqualified"
+            or decoded.get("qualification_achieved") is not False
+            or decoded.get("device_network_access") is not False
+            or decoded.get("device_write_count") != 0
+            or decoded.get("reason") != "final_verification_policy_overload"
+            or decoded.get("operation_finalization_sha256") != finalization.operation_sha256
+            or decoded.get("cycle") != finalization.cycle.value
+            or not isinstance(journal_snapshot_sha256, str)
+            or _SHA256_PATTERN.fullmatch(journal_snapshot_sha256) is None
+            or not isinstance(authority, dict)
+            or not isinstance(authority_sha256, str)
+            or _SHA256_PATTERN.fullmatch(authority_sha256) is None
+            or not secrets.compare_digest(
+                hashlib.sha256(authority_canonical).hexdigest(),
+                authority_sha256,
+            )
+            or authority.get("intent") != "park_unqualified_without_device_io"
+            or authority.get("manifest_sha256") != decoded.get("manifest_sha256")
+            or authority.get("operation_sha256") != decoded.get("operation_sha256")
+            or authority.get("journal_sha256") != journal_snapshot_sha256
+            or authority.get("evidence_series_sha256")
+            != (
+                decoded.get("evidence", {}).get("series_sha256")
+                if isinstance(decoded.get("evidence"), dict)
+                else None
+            )
+            or authority.get("qualification_achieved") is not False
+            or authority.get("device_network_access") is not False
+            or authority.get("device_write_count") != 0
+        ):
+            raise ExactRestoreReceiptArchiveError(
+                "parked exact-restore disposition does not match its finalization"
+            )
+        self._load_digest_blob(
+            root_descriptor,
+            self._parked_journal_name(journal_snapshot_sha256),
+            journal_snapshot_sha256,
+        )
+        return decoded
+
+    def _load_digest_blob(
+        self,
+        root_descriptor: int,
+        name: str,
+        expected_sha256: str,
+    ) -> bytes:
+        descriptor = self._open_existing(root_descriptor, name, allow_absent=False)
+        if descriptor is None:  # pragma: no cover - guarded by allow_absent=False
+            raise ExactRestoreReceiptArchiveError("parked exact-restore backing is absent")
+        try:
+            before = os.fstat(descriptor)
+            payload = self._read_bounded(descriptor)
+            after = os.fstat(descriptor)
+            self._validate_named_file(root_descriptor, descriptor, name)
+            if self._metadata_generation(before) != self._metadata_generation(
+                after
+            ) or not secrets.compare_digest(
+                hashlib.sha256(payload).hexdigest(),
+                expected_sha256,
+            ):
+                raise ExactRestoreReceiptArchiveError(
+                    "parked exact-restore backing changed or has the wrong digest"
+                )
+            return payload
+        except ExactRestoreReceiptArchiveError:
+            raise
+        except OSError as error:
+            raise ExactRestoreReceiptArchiveError(
+                "cannot read parked exact-restore backing"
+            ) from error
+        finally:
+            os.close(descriptor)
 
     def _decode_receipt(
         self,
@@ -1326,8 +1601,51 @@ class ExactRestoreReceiptArchive:
         return receipt_sha256
 
     @staticmethod
+    def _validate_parked_tombstone(tombstone: Mapping[str, object]) -> str:
+        expected_keys = {
+            "version",
+            "journal_format",
+            "operation_id",
+            "phase",
+            "operation_sha256",
+            "disposition_id",
+            "disposition_sha256",
+            "journal_snapshot_sha256",
+        }
+        operation_id = tombstone.get("operation_id")
+        if (
+            set(tombstone) != expected_keys
+            or tombstone.get("version") != 2
+            or tombstone.get("journal_format") != 2
+            or tombstone.get("phase") != "parked_unqualified"
+            or not isinstance(operation_id, str)
+            or _OPERATION_ID_PATTERN.fullmatch(operation_id) is None
+            or not isinstance(tombstone.get("disposition_id"), str)
+            or not str(tombstone["disposition_id"]).startswith("ERD-")
+            or any(
+                not isinstance(tombstone.get(key), str)
+                or _SHA256_PATTERN.fullmatch(str(tombstone[key])) is None
+                for key in (
+                    "operation_sha256",
+                    "disposition_sha256",
+                    "journal_snapshot_sha256",
+                )
+            )
+        ):
+            raise ExactRestoreReceiptArchiveError("exact-restore parked tombstone is invalid")
+        return operation_id
+
+    @staticmethod
     def _receipt_name(digest: str) -> str:
         return f"{_RECEIPT_PREFIX}{digest}{_RECEIPT_SUFFIX}"
+
+    @staticmethod
+    def _parked_disposition_name(digest: str) -> str:
+        return f"{_PARKED_DISPOSITION_PREFIX}{digest}.json"
+
+    @staticmethod
+    def _parked_journal_name(digest: str) -> str:
+        return f"{_PARKED_JOURNAL_PREFIX}{digest}.json"
 
     @staticmethod
     def _operation_digest(operation_id: str) -> str:

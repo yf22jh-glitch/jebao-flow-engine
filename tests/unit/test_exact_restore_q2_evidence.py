@@ -421,6 +421,50 @@ def test_receipt_without_finalization_is_rejected(tmp_path: Path) -> None:
         verifier.verify_q2_exact_restore_evidence(fake, not_after=NOW)
 
 
+def test_parked_disposition_cannot_be_consumed_as_q2_restore_evidence(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest()
+    _receipts_archive, qualified = _archives(tmp_path)
+    consulted = {"receipt": 0, "confirm": 0}
+
+    class ParkedOnly:
+        def load_operation_finalization(self, operation_id: str):
+            assert operation_id == manifest.sentinel_operation_id
+            return {
+                "version": 2,
+                "operation_sha256": _digest("parked-operation"),
+                "disposition_sha256": _digest("parked-disposition"),
+                "outcome": "parked_unqualified",
+                "cycle": "sentinel_qualification",
+            }
+
+        def load_final_verified_receipt(self, receipt_sha256: str):
+            del receipt_sha256
+            consulted["receipt"] += 1
+            return None
+
+        def confirm_operation_finalization(self, receipt: ExactRestoreReceipt):
+            del receipt
+            consulted["confirm"] += 1
+            raise AssertionError("parked disposition cannot confirm a success receipt")
+
+    verifier = ExactRestoreQ2EvidenceVerifier(
+        manifest,
+        receipt_archive=ParkedOnly(),
+        qualified_archive=qualified,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(ExactRestoreQ2EvidenceError, match="q2_restore_finalization_mismatch"):
+        verifier._load_cycle(
+            manifest.sentinel_operation_id,
+            ExactRestoreCycle.SENTINEL_QUALIFICATION,
+        )
+
+    assert consulted == {"receipt": 0, "confirm": 0}
+
+
 def test_q2_manifest_cutoff_overrides_later_adapter_clock(tmp_path: Path) -> None:
     verifier, bundle = _complete(tmp_path)
     valid = verifier.derive_q2_exact_restore_evidence()
@@ -556,8 +600,7 @@ def test_legacy_bundle_without_new_optional_keys_round_trips_byte_exactly(tmp_pa
 
     assert "corroborating_evidence" not in embedded_baseline
     assert all(
-        "accepted_latent_manual_power" not in device
-        for device in embedded_baseline["devices"]
+        "accepted_latent_manual_power" not in device for device in embedded_baseline["devices"]
     )
     canonical = json.dumps(
         payload,
@@ -573,12 +616,15 @@ def test_legacy_bundle_without_new_optional_keys_round_trips_byte_exactly(tmp_pa
     loaded = archive.load(expected.artifact_id)
 
     assert loaded == expected
-    assert json.dumps(
-        loaded.model_dump(mode="json"),
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("ascii") == canonical
+    assert (
+        json.dumps(
+            loaded.model_dump(mode="json"),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        == canonical
+    )
 
 
 def test_bundle_cannot_expand_manifest_handoff_window(tmp_path: Path) -> None:

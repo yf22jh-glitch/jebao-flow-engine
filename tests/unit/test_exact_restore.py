@@ -328,6 +328,20 @@ class MemoryQualificationReceiptStore:
             raise OSError("simulated operation finalization confirmation failure")
         return finalization
 
+    def confirm_parked_tombstone(self, tombstone: Mapping[str, Any]) -> dict[str, Any]:
+        operation_id = tombstone.get("operation_id")
+        if not isinstance(operation_id, str):
+            raise OSError("simulated parked finalization confirmation failure")
+        finalization = self.load_operation_finalization(operation_id)
+        if (
+            finalization is None
+            or finalization.get("version") != 2
+            or finalization.get("outcome") != "parked_unqualified"
+            or finalization.get("disposition_sha256") != tombstone.get("disposition_sha256")
+        ):
+            raise OSError("simulated parked finalization confirmation failure")
+        return finalization
+
 
 class FakeGuard:
     def __init__(self) -> None:
@@ -819,6 +833,7 @@ def test_arm_rejects_authority_for_a_stale_exact_journal_snapshot() -> None:
         guard,
         observe=harness.observe,
         resolve_device=harness.resolve_device,
+        qualification_receipts=MemoryQualificationReceiptStore(),
         clock=lambda: NOW,
         monotonic_clock=lambda: MONOTONIC_NS,
         boot_identity=lambda: BOOT_A_SHA256,
@@ -1163,8 +1178,7 @@ def test_legacy_optional_fields_preserve_canonical_record_digests_and_round_trip
 
     assert "corroborating_evidence" not in baseline_payload
     assert all(
-        "accepted_latent_manual_power" not in device
-        for device in baseline_payload["devices"]
+        "accepted_latent_manual_power" not in device for device in baseline_payload["devices"]
     )
     assert baseline.baseline_sha256 == (
         "ab6291ea6837afd73efb5d95c35a779bf9762c4153ed5b135c6b30c276625c68"
@@ -1266,8 +1280,7 @@ async def test_recovery_required_uses_separate_authority_and_no_inflight_can_res
     embedded_baseline = legacy_payload["baseline"]
     assert "corroborating_evidence" not in embedded_baseline
     assert all(
-        "accepted_latent_manual_power" not in device
-        for device in embedded_baseline["devices"]
+        "accepted_latent_manual_power" not in device for device in embedded_baseline["devices"]
     )
     store.record = legacy_payload
     latched = ExactRestoreRecord.model_validate(legacy_payload)
@@ -1729,6 +1742,7 @@ def test_preissued_authority_cannot_be_armed_after_monotonic_expiry_with_frozen_
         guard,
         observe=harness.observe,
         resolve_device=harness.resolve_device,
+        qualification_receipts=MemoryQualificationReceiptStore(),
         clock=wall,
         monotonic_clock=monotonic,
         boot_identity=lambda: BOOT_A_SHA256,
@@ -1791,6 +1805,7 @@ async def test_same_boot_controller_restart_uses_original_activation_deadline() 
         restarted_guard,
         observe=harness.observe,
         resolve_device=harness.resolve_device,
+        qualification_receipts=MemoryQualificationReceiptStore(),
         clock=wall,
         monotonic_clock=monotonic,
         boot_identity=lambda: BOOT_A_SHA256,
@@ -1821,6 +1836,7 @@ async def test_boot_change_blocks_all_reads_and_writes_until_reauthorization() -
         changed_boot_guard,
         observe=harness.observe,
         resolve_device=harness.resolve_device,
+        qualification_receipts=MemoryQualificationReceiptStore(),
         clock=wall,
         monotonic_clock=monotonic,
         boot_identity=lambda: BOOT_B_SHA256,
@@ -2345,13 +2361,11 @@ async def test_cleared_operation_cannot_reuse_the_same_live_authority_or_write_p
         operation_id=armed.operation_id,
         now=NOW,
     )
-    controller.create(replayed)
-
     with pytest.raises(ExactRestorePreflightError) as replay:
-        controller.arm(authority)
+        controller.create(replayed)
 
     assert replay.value.code is ExactRestoreErrorCode.AUTHORITY
-    assert ExactRestoreRecord.model_validate(store.load()) == replayed
+    assert store.load() is None
     assert len(harness.writes) == first_write_count
 
 

@@ -26,6 +26,17 @@ from jebao_flow.exact_restore_composition import (
     public_record_status,
     stage_qualified_final_restore,
 )
+from jebao_flow.exact_restore_disposition import (
+    AttendedDispositionIssuer,
+    ExactRestoreDispositionArchive,
+    ExactRestoreDispositionError,
+    ParkedDispositionTombstone,
+    build_parked_disposition_service,
+    load_parked_disposition_manifest,
+    public_park_eligibility,
+    public_parked_disposition,
+    public_parked_tombstone_status,
+)
 from jebao_flow.exact_restore_q2_evidence import (
     ExactRestoreQ2EvidenceError,
     ExactRestoreQ2EvidenceVerifier,
@@ -72,12 +83,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="attended recovery of an inflight phase-5 restore",
     )
     _add_private_inputs(restore_recover)
+
+    park_verify = commands.add_parser(
+        "park-verify",
+        help="verify one parked disposition without device network access",
+    )
+    _add_disposition_inputs(park_verify)
+
+    park = commands.add_parser(
+        "park",
+        help="attended write-free terminal disposition of one unqualified journal",
+    )
+    _add_disposition_inputs(park)
     return parser
 
 
 def _add_private_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", required=True, help="owner-only locked deployment config")
     parser.add_argument("--operation-manifest", required=True, help="owner-only operation manifest")
+
+
+def _add_disposition_inputs(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--disposition-manifest",
+        required=True,
+        help="owner-only parked disposition manifest",
+    )
+    parser.add_argument("--artifact-root", required=True, help="existing private artifact root")
 
 
 def _composition(args: argparse.Namespace) -> ExactRestoreComposition:
@@ -240,8 +272,35 @@ async def _continue_final_restore(
 async def _run(args: argparse.Namespace) -> dict[str, object]:
     if args.command == "status":
         payload = ExactRestoreJournalStore().load()
+        if isinstance(payload, dict):
+            try:
+                ParkedDispositionTombstone.model_validate(payload)
+            except (TypeError, ValueError):
+                pass
+            else:
+                return public_parked_tombstone_status(
+                    payload,
+                    archive=ExactRestoreDispositionArchive(),
+                )
         record = ExactRestoreRecord.model_validate(payload) if payload is not None else None
         return public_record_status(record)
+    if args.command in {"park-verify", "park"}:
+        manifest = load_parked_disposition_manifest(args.disposition_manifest)
+        service = build_parked_disposition_service(
+            manifest,
+            artifact_root=args.artifact_root,
+        )
+        completed = service.load_completed()
+        if completed is not None:
+            return public_parked_disposition(completed)
+        if args.command == "park-verify":
+            return public_park_eligibility(service.verify())
+        resumed = service.resume_if_archived()
+        if resumed is not None:
+            return public_parked_disposition(resumed)
+        eligibility = service.verify()
+        disposition = AttendedDispositionIssuer().confirm_and_park(service, eligibility)
+        return public_parked_disposition(disposition)
     if args.command == "prepare":
         config = load_locked_config(args.config)
         manifest = load_operation_manifest(args.operation_manifest)
@@ -313,6 +372,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ExactRestoreCompositionError as error:
         return _failure(error.code)
     except ExactRestoreQ2EvidenceError as error:
+        return _failure(error.code)
+    except ExactRestoreDispositionError as error:
         return _failure(error.code)
     except ExactRestoreError as error:
         return _failure(error.code.value, diagnostic=error.diagnostic)

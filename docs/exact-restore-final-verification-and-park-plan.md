@@ -62,8 +62,9 @@
   tombstone successor를 설치합니다. journal path를 absent로 만들지 않습니다.
 - `PARKED_UNQUALIFIED`를 `FINAL_VERIFIED`, `ExactRestoreReceipt`, sentinel qualification receipt,
   qualified baseline bundle 또는 restore capability로 소비하지 않습니다.
-- terminal disposition 준비·실행 모듈은 장비 discovery/session/writer를 import·호출·노출하지
-  않습니다. 보존된 artifact를 offline으로 재검증할 뿐입니다.
+- terminal disposition 준비·실행 경로는 장비 discovery/session/writer를 생성·호출·노출하지
+  않습니다. 정본 artifact reader가 inert protocol 상수·ABC·dataclass를 transitive import하는 것은
+  허용하지만, 보존된 artifact를 offline으로 재검증하는 범위를 넘지 않습니다.
 - frozen native schedule/linkage harness를 수정하거나 실행하지 않습니다.
 - Home Assistant를 재시작·reload·disable·설정 변경·service call하지 않습니다.
 
@@ -192,7 +193,8 @@ device_write_count = 0
 version `2` finalization은 `outcome=PARKED_UNQUALIFIED`, operation digest, cycle과 disposition digest를
 담고 `receipt_sha256`을 담지 않습니다. Q2 evidence loader와 `QualifiedBaselineArchive`는 이 결과를
 qualification으로 인식하지 않고 기존 `q2_restore_unfinalized`/receipt-absent 경계에서 닫혀야
-합니다. 반대로 exact-restore의 operation replay 검사는 success finalization과 parked disposition을
+합니다. 구체적인 기존 refusal은 finalization-mismatch를 포함할 수 있으며, 이 결과를 위해 Q2
+production loader의 분기나 성공 의미를 바꾸지 않습니다. 반대로 exact-restore의 operation replay 검사는 success finalization과 parked disposition을
 모두 terminal outcome으로 보고 같은 operation id의 create/arm을 거부해야 합니다.
 
 legacy `ExactRestoreOperationFinalization(version: Literal[1])` decoder는 파일이 존재하는 version `2`
@@ -279,6 +281,16 @@ tombstone을 남기므로, 증거 삭제나 absent journal을 replay 허용 신�
   claim 아래에서 permanent parked-finalization 및 backing snapshot/disposition을 모두 exact reload한
   뒤, **서로 다른 새 operation id**임을 확인하고 `save()` successor로 한 번에 교체해야 합니다. 같은
   operation id, missing/corrupt permanent barrier 또는 일반 `create()` 우회는 모두 거부합니다.
+- park disposition source commit만 설치된 중간 상태에서는 `create`,
+  `create_qualified_final_restore`, `promote_to_baseline_restore`의 세 record 설치 경로가 **모든**
+  tombstone successor를 fail-closed합니다. 이 구간에는 v2 policy를 증명할 record field가 아직 없기
+  때문입니다. timing split commit이 착지한 뒤에만 record의
+  `max_final_acquisition_duration_seconds is not None`을 1차 gate로, composition manifest version `2`를
+  중복 gate로 삼고, 서로 다른 operation id와 permanent finalization/backing archive exact reload를
+  같은 guard 안에서 모두 확인한 sentinel `PREPARED` successor만 엽니다.
+- 이 중간 차단은 §3 P1 대응이 아니라 fail-closed 비용 통제입니다. v1 successor를 허용하면 같은
+  overloaded final verify에서 두 번째 non-terminal journal이 생기지만, 이번 disposition eligibility는
+  첫 operation SHA/journal SHA에 고정돼 그 새 journal을 terminal화할 수 없습니다.
 - future v2 operation이 진행 중이면 그 manifest/policy schema 자체도 구 binary에서 fail-closed하지만,
   이것을 current operation의 영구 replay 장벽 대신 쓰지 않습니다.
 
@@ -312,8 +324,11 @@ maintainer의 이 exact disposition
 향후 Phase 1 승인으로 이월하지 않습니다.
 
 CLI는 private manifest와 existing artifact root만 받고 device config·endpoint를 받지 않습니다.
-import-graph 테스트는 discovery/session/writer/HA/native frozen harness가 terminalizer에서 reachable하지
-않음을 고정합니다.
+import-graph 테스트는 writer·frozen native harness·HA/daemon/MQTT 모듈이 terminalizer에서 reachable하지
+않음을 고정합니다. `PilotSeriesStore` 정본 재검증 때문에 `protocol.discovery`·`protocol.session`·codec은
+허용된 transitive edge입니다. 이 두 protocol 모듈의 top-level은 상수·ABC·dataclass 정의뿐이고,
+collector가 session에서 반입하는 것도 state action 상수와 raw capture dataclass뿐이며 실제
+`ReadOnlyGizwitsSession`이나 writer를 반입하지 않는다는 현재 집합을 고정합니다.
 
 ## 구현 순서와 source scope
 
@@ -360,7 +375,9 @@ current live journal을 load할 수 없게 만들기 전에 disposition을 끝�
 - archive file/index 각 fsync 경계 fault injection에서 증거 없는 journal tombstone mutation이 없음
 - archive 완료 뒤 journal save late error는 exact tombstone successor일 때만 성공으로 수렴
 - 같은 disposition 재호출은 idempotent, 다른 manifest/evidence는 conflict
-- park CLI/import graph에서 device network·write 및 HA call 0
+- park CLI 전체 경로를 socket 생성과 asyncio datagram/connection 생성이 raise하는 OS 경계에서 실행해
+  정상 완료하고, `DiscoveryProvider` 인스턴스화도 raise하도록 한 별도 실행에서 device network·write 및
+  HA call이 모두 0임을 확인
 - 구 binary를 모사해 park index를 전혀 모르는 경로로 tombstone 상태에서 `create`, `arm`, `execute`를
   각각 호출해도 모두 장비 I/O 전에 실패하고 device write가 0회임
 - legacy version `1` finalization decoder가 present version `2` parked entry를 `None`으로 반환하지 않고

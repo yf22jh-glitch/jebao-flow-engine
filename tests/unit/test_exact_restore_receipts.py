@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import json
 import os
 import stat
@@ -12,6 +13,7 @@ import pytest
 from jebao_flow import hardware_safety
 from jebao_flow.exact_restore import ExactRestoreCycle, ExactRestoreReceipt
 from jebao_flow.exact_restore_receipts import (
+    ExactRestoreOperationFinalization,
     ExactRestoreOperationFinalizationConflictError,
     ExactRestoreReceiptArchive,
     ExactRestoreReceiptArchiveClaimError,
@@ -131,6 +133,35 @@ def test_persist_also_creates_private_opaque_finalization_and_confirms_bundle(
         "cycle": receipt.cycle.value,
     }
     assert archive.load_operation_finalization(receipt.operation_id) == confirmation
+
+
+def test_legacy_v1_finalization_keeps_exact_canonical_bytes_and_digest(
+    tmp_path: Path,
+) -> None:
+    archive = _archive(_private_root(tmp_path))
+    finalization = ExactRestoreOperationFinalization(
+        operation_sha256="a" * 64,
+        receipt_sha256="b" * 64,
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
+    )
+    expected = (
+        b'{"cycle":"sentinel_qualification","operation_sha256":"'
+        + b"a" * 64
+        + b'","receipt_sha256":"'
+        + b"b" * 64
+        + b'","version":1}\n'
+    )
+
+    assert finalization.model_dump(mode="json") == {
+        "version": 1,
+        "operation_sha256": "a" * 64,
+        "receipt_sha256": "b" * 64,
+        "cycle": "sentinel_qualification",
+    }
+    assert archive._canonical_finalization(finalization) == expected
+    assert hashlib.sha256(expected).hexdigest() == (
+        "eabf6f5d34dbc42558bce0b608d8fcbf3e324b6a48fe6aebcaa6ee0a569b18e4"
+    )
 
 
 def test_operation_lookup_distinguishes_absent_and_invalid_id(tmp_path: Path) -> None:
