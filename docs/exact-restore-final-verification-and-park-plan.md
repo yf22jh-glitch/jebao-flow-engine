@@ -83,9 +83,14 @@ max_final_acquisition_duration_seconds: float | None = None
   제한합니다.
 - 새 필드는 pair capture 시작부터 완료까지의 전체 소요와 first request부터 last receive까지의
   raw acquisition window를 제한합니다.
-- 새 필드가 `None`인 legacy policy는 acquisition bound에도 기존
-  `max_final_pair_gap_seconds`를 사용합니다. 즉 기존 journal의 fail-closed 동작이 완전히
-  유지되고, source 업데이트만으로 current operation이 갑자기 PASS하지 않습니다.
+- 새 필드가 `None`인 legacy policy는 기존 runtime acquisition 검사 두 곳에서 계속
+  `max_final_pair_gap_seconds`를 사용합니다. legacy composition에는 새 total-attempt 검사를,
+  legacy runtime에는 새 completion-coherence 검사를 추가하지 않습니다. 즉 기존 journal의
+  fail-closed 동작이 완전히 유지되고, source 업데이트만으로 current operation이 갑자기 PASS하지
+  않습니다.
+- **`None` fallback은 version `1`에 이미 존재하는 검사에 값을 공급할 수만 있고, 검사를 새로
+  존재하게 만들 수는 없습니다.** 따라서 fallback은 기존 runtime acquisition 검사 두 곳에만
+  적용되고, admission total-attempt와 runtime completion-coherence는 version `2`에서만 존재합니다.
 - 새 필드가 non-`None`이면 `max_final_pair_gap_seconds <=
   max_final_acquisition_duration_seconds <= max_observation_age_seconds`를 요구합니다.
 - 새 필드가 `None`일 때 그 key 하나만 model-level targeted serializer에서 생략합니다.
@@ -98,31 +103,55 @@ max_final_acquisition_duration_seconds: float | None = None
 - 새 qualification manifest는 version `2`만 사용합니다. 같은 nonce·같은 v1 operation을 새
   의미로 재사용하지 않습니다.
 
-### admission과 runtime의 유사 metric과 보수적 교정
+### admission과 runtime의 동일 raw-read completion metric
 
-`build_verified_baseline()`은 각 primary/corroborating artifact에서 다음을 독립 검증합니다.
+version `2`의 `build_verified_baseline()`은 각 primary/corroborating artifact에서 다음을 독립
+검증합니다. version `1`은 기존 첫 번째 검사만 수행합니다.
 
 1. `pair_completion_gap_ns <= max_final_pair_gap_seconds`
 2. `artifact.attempt.completed_monotonic_ns - artifact.attempt.started_monotonic_ns <=
    effective acquisition duration bound`
 
-runtime `_capture_final_pair()`도 같은 두 **의미**를 검사하지만, admission과 timestamp 경계가
-완전히 같다고 주장하지 않습니다.
+version `2`의 runtime `_capture_final_pair()`도 같은 두 의미를 검사합니다.
 
-1. `max(received_monotonic_ns) - min(received_monotonic_ns)`를 completion coherence bound에 대조
+1. `max(observed_monotonic_ns) - min(observed_monotonic_ns)`를 completion coherence bound에 대조
 2. `completed_monotonic_ns - verification_started_monotonic_ns`와
    `max(received_monotonic_ns) - min(requested_monotonic_ns)`를 acquisition duration bound에 대조
 
-admission의 `pair_completion_gap_ns`는 participant별 identity-after까지 끝난 sample completion
-시점의 차이이고, runtime 값은 raw frame receive 시점의 차이입니다. 보존된 pair에서 전자는
-`11.460858534초`, 후자는 약 `10.5초`라 admission metric이 더 큽니다. 따라서 `20초` coherence
-bound는 더 큰 admission metric을 기준으로 교정하며, 두 값을 byte-identical metric이라고 부르지
-않습니다.
+admission의 `pair_completion_gap_ns`는 두 participant의 `read_completed` 차이입니다.
+`read_completed`는 `read_raw_state_capture()` 직후, identity-after보다 먼저 찍힙니다. runtime의
+`observed_monotonic_ns`도 raw read 직후에 찍히므로 같은 completion-coherence 의미입니다.
+identity-after 뒤의 `received_monotonic_ns`는 전체 acquisition window에만 사용합니다. 보존된
+explicit-only pair의 raw-read completion gap 최대는 `11.681584751초`이고, `20초` coherence
+bound는 그 실측을 기준으로 유지합니다.
 
-runtime completion-coherence 대조는 현재 `_capture_final_pair()`에 없는 **신설 post-write 검증**입니다.
+admission의 total attempt와 runtime의 두 acquisition span은 같은 start-to-finish 계열이지만
+timestamp 경계가 완전히 같은 metric이라고 주장하지 않습니다. 새 `30초` acquisition bound는 보존된
+세 종류 span의 최대 실측 `22.795초`를 모두 덮도록 precommit합니다.
+
+**정정 기록:** source 착수 전 static trace에서 이전 문안이 `read_completed`를 identity-after가 끝난
+sample completion으로 잘못 해석하고 runtime 대응값도 `received_monotonic_ns`로 뒤집어 적은 것을
+찾았습니다. artifact verifier가 보존하는 값과 runtime observer의 실제 stamp 경계에 맞춰 이 자리에서
+정정했으며, 이 정정으로 current v1 operation을 재해석하지 않습니다.
+
+runtime completion-coherence 대조는 현재 `_capture_final_pair()`에 없는 **version `2` 전용 신설
+post-write 검증**입니다. version `1`에는 이 검사를 소급 적용하지 않습니다.
 첫 write 이전 가설 gate가 아니고 composition admission과 runtime 의미를 맞추는 코드 내부 근거가
-있지만, final verify 실패 경로 하나를 늘린다는 사실과 실측 여유(`약 10.5초 < 20초`)를 숨기지
+있지만, final verify 실패 경로 하나를 늘린다는 사실과 실측 여유(`11.681584751초 < 20초`)를 숨기지
 않습니다. 실패하면 receipt를 발급하지 않고 metric별 진단을 남깁니다.
+
+두 version 분기의 근거는 site별로 다릅니다.
+
+- admission total-attempt 검사를 version `1`에 fallback `20초`로 적용하면, gap
+  `11.155~11.682초`로 통과하던 보존 artifact 네 개의 total attempt `21.650~22.795초`가 전부 새로
+  거부됩니다. 따라서 이 검사는 version `2` 전용입니다.
+- runtime completion-coherence는 observation validator의
+  `requested <= observed <= received`와 기존 request-to-receive window 정의 때문에 version `1`에서
+  같은 `20초` bound를 쓸 때는 발화할 수 없습니다. 그래도 legacy 항등성을 이 부등식과 향후 구현
+  불변성에 의존시키지 않고 기존 predicate 집합 자체로 고정하기 위해 version `2` 전용으로 둡니다.
+- legacy 회귀는 같은 실측 형태(gap 약 `11.5초`, total 약 `22.8초`)에 대해 **version `1`
+  admission은 수락하지만 runtime은 기존 acquisition 검사에서 거부하는 비대칭**까지 함께 고정합니다.
+  이 비대칭이 current failure를 만든 기존 의미이며, source 업데이트로 고치거나 재해석하지 않습니다.
 
 `_initial_sentinel_baseline_freshness()`가 `capture_age + max_final_pair_gap_seconds`로 older
 participant를 보수적으로 보정하는 소비처는 **completion gap bound를 그대로 사용**합니다. 이
@@ -132,7 +161,7 @@ field로 옮기지 않습니다. 따라서 기존 필드의 전체 소비처 네
 | 소비처 | 적용 bound |
 |---|---|
 | baseline artifact `pair_completion_gap_ns` | completion coherence |
-| final pair의 participant receive completion 차이 | completion coherence |
+| final pair의 participant raw-read `observed` completion 차이 | completion coherence |
 | first-write baseline age의 older-member padding | completion coherence |
 | final verify 전체 소요와 request-to-receive window | acquisition duration |
 
@@ -146,7 +175,7 @@ endpoint를 출력하지 않습니다.
 current evidence에 근거해 다음 **새** manifest는 completion coherence `20초`, acquisition duration
 `30초`, discovery timeout `5초`를 사용합니다.
 
-- `20초`는 이미 통과한 completion gap `11.155..11.563초`의 coherence 보증을 느슨하게 하지
+- `20초`는 이미 통과한 completion gap `11.155..11.682초`의 coherence 보증을 느슨하게 하지
   않습니다.
 - `30초`는 보존된 최대 total attempt `22.795초`와 고정 discovery 구조를 포함하면서 같은 값을
   completion coherence에 적용하지 않습니다.
@@ -362,9 +391,9 @@ current live journal을 load할 수 없게 만들기 전에 disposition을 끝�
 
 - legacy literal JSON fixture의 canonical bytes/digest/operation id/authority consumption 불변
 - v1 policy가 기존 overloaded behavior를 그대로 유지함
-- v2에서 `11.6초 completion / 22.8초 acquisition / 20초 coherence / 30초 acquisition`이 PASS
+- v2에서 `11.681584751초 completion / 22.8초 acquisition / 20초 coherence / 30초 acquisition`이 PASS
 - completion `>20초`는 total `<30초`여도 FAIL, total `>30초`는 completion `<20초`여도 FAIL
-- primary와 corroborating baseline artifact 모두 두 metric을 독립 통과해야 함
+- v2 primary와 corroborating baseline artifact 모두 두 metric을 독립 통과해야 함
 - timing mismatch diagnostic이 observed/expected 두 metric을 남기고 private 값을 내보내지 않음
 - park eligibility 한 항목이라도 다르면 archive·tombstone mutation 모두 0회
 - parked disposition record가 success receipt나 Q2 qualified evidence로 적재되지 않음
