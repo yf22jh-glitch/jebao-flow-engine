@@ -788,6 +788,28 @@ preserved raw 등급 (a), 발생 원인과 수용 결정은 등급 (c)로 분리
 first write 전 HA의 직접 Jebao connection이 관측되면 에이전트가 이를 끄지 않고 `NO-GO`로
 멈춰 repository maintainer에게 보고합니다.
 
+### 2026-09-04 exact-restore final verifier 후속 범위
+
+repository maintainer는 parked qualification 기록 뒤 “다음 단계 진행하자”고 지시했습니다. 이
+지시는 [`Exact-restore final verification bound split and parked disposition`](docs/exact-restore-final-verification-and-park-plan.md)의
+계획·source·test·offline 검증을 진행하는 승인입니다. 장비 network 접근, 앱 action, Home
+Assistant 조작, current journal terminalization 실행이나 새 qualification hardware write 승인은
+아닙니다.
+
+source 범위는 `exact_restore.py`, `exact_restore_composition.py`, `exact_restore_receipts.py`,
+`exact_restore_cli.py`, 별도 write-free `exact_restore_disposition.py`와 직접 테스트로 한정합니다.
+completion coherence와 acquisition duration 분리, legacy canonical 호환, 성공과 구분되는
+`PARKED_UNQUALIFIED` archive, 잠정 journal tombstone과 영구 version `2` operation-finalization
+replay 차단만 다룹니다. native ASYNC write 하네스,
+`read_only_collector.py`, `q2_epoch.py`, app verifier, HA/daemon/MQTT는 수정하지 않습니다.
+
+current journal은 plan/source review 동안 그대로 보존합니다. terminalization은 reviewed exact image의
+별도 device-network-free command와 repository maintainer의 journal·evidence digest-bound 대면
+challenge가 있어야 하며, success receipt나 qualified bundle을 만들지 않습니다. 그 뒤 새
+qualification은 영구 replay 장벽을 재검증한 reviewed tombstone 교체, fresh baseline·새 operation
+id와 별도의 on-site hardware 승인을 다시 요구합니다. parked tombstone 구간에는 현재 exited인
+recovery supervisor를 재기동하지 않으며 Home Assistant는 계속 건드리지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,

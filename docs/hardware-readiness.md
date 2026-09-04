@@ -994,3 +994,29 @@ inflight=false / error=null`인 비-terminal 상태로 보존했습니다. 세 �
 bound·전체 acquisition-duration bound 분리는 repository maintainer의 별도 계획·검토가
 필요합니다. 그 전까지 선행조건 2와 앱 live-write는 계속 **NO-GO / BLOCKING**입니다.
 Home Assistant는 이 실행에서 건드리지 않았고 이후에도 건드리지 않습니다.
+
+## 2026-09-04 exact-restore final verifier 후속 계획 — PLAN ONLY
+
+후속 source와 current journal 처리 계약은
+[`Exact-restore final verification bound split and parked disposition`](exact-restore-final-verification-and-park-plan.md)
+을 따릅니다. participant completion coherence와 전체 acquisition duration을 별도 bound로 분리하고,
+current journal은 성공 receipt가 아닌 `PARKED_UNQUALIFIED` 불변 disposition이 먼저 보존된 경우에만
+device-network-free로 terminal화합니다. journal tombstone은 다음 reviewed operation 준비까지의
+잠정 장벽이고, 같은 operation id의 version `2` parked-finalization은 journal 재사용 뒤에도 남는
+영구 replay 장벽입니다.
+
+선행조건 2에서 실제 restore action과 실패 시 남는 장비 상태는 이번 실행으로 확인됐습니다. 남은
+미충족 항목은 formal qualification receipt, qualified bundle과 terminal journal입니다. 이미 확인한
+restore data plane을 다시 증명한다는 이유로 current operation을 재시도하지 않습니다.
+
+고정 5초 discovery 창 때문에 report-capable 앱 관측 collector도 pair당 약 22초 cadence입니다.
+계획한 mixed window 5분에는 약 13 pair의 여유가 있어 현재 최소 `qualifying pair >= 1` 계약과
+충돌하지 않지만, 이후 관측창을 좁힐 때는 이 실측을 다시 검토해야 합니다.
+
+이 문단은 장비·앱·HA 또는 journal 변경 권한을 만들지 않습니다. reviewed terminal disposition이
+완료되고 새 Phase 0·v2 manifest·operation별 hardware 승인이 준비되기 전까지 앱 live-write와 새
+qualification은 계속 **NO-GO / BLOCKING**입니다.
+
+현재 recovery supervisor는 이미 exited입니다. parked tombstone은 기존 non-terminal journal과
+마찬가지로 supervisor에서 `ATTENDED_REQUIRED`이므로 다음 reviewed prepare 전까지 재기동하지
+않습니다. 이 후속은 Home Assistant 조작을 포함하지 않습니다.
