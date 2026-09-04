@@ -186,3 +186,33 @@
 - 새 capture 뒤 park 완료 전에는 exact-restore reauthorization이나 journal을 갱신하는 다른 attended
   상호작용을 끼우지 않는다. `record.updated_at` proxy의 의미를 바로잡는 source 변경은 disposition
   완료 뒤 별도 안건으로 남긴다.
+
+### 승인된 fresh strict read와 park eligibility
+
+- repository maintainer가 위 범위의 explicit-only strict read 1회를 별도로 승인했다. 이는
+  final-verify 재시도나 장비 write 승인이 아니다: **(c)**.
+- source-attested fresh series `JFS-9e5d6aa28ea2367742865cbdf98979b8`
+  (`c6559ba7b2e2fed055b40bc1398f2b090e222eed1caa2933d74057fb9f869384`) ordinal `0`은
+  `2026-09-04T05:41:24.021425Z`부터 `05:41:46.512115Z`까지 `1/1` pair를 accepted했다.
+  plan SHA-256은 `a32b7380e642250d48e534da0bdde2c95e6ee4f479eec4a5739967d1d17938bd`이고,
+  action policy는 explicit-only다. 두 identity binding, outer six-field와 432-byte schedule image는
+  current journal baseline과 exact 일치했다: **(a)**.
+- pair total attempt는 `22.490690130초`, participant completion gap은 `11.681584751초`였다:
+  **(b)**. completion gap은 앞선 세 보존 pair의 최대 `11.562926789초`보다
+  `0.118657962초` 큰 새 관측 최대지만, precommitted coherence bound `20초`에는 약 `8.3초`
+  여유가 있다. acquisition 최대는 앞선 `22.795387102초`가 그대로이므로 향후 v2의
+  `20초 / 30초` 두 bound는 바꾸지 않는다.
+- capture 직전과 직후 recovery supervisor는 exited였고 TCP `12416` established connection은
+  `0`이었다. collector는 state read만 수행했고 device write는 `0`이었다. Home Assistant는
+  재시작·reload·disable·설정 변경·service call하지 않았다: **(c)**.
+- 새 evidence reference만 결속한 disposition manifest SHA-256은
+  `1a00a96a6dc41fc737d1bd1f94eea46bc1dff8bcbac071ef055ffcd3e9eeb6a2`다. 이전 manifest와
+  비교해 바뀐 필드는 evidence의 plan artifact id·plan SHA·series artifact id·series SHA뿐이고,
+  operation/journal/baseline/action-plan/authority-chain 결속은 불변이다: **(b)**.
+- device-network-free 격리 복사본의 `park-verify`는
+  `exact_restore_park_disposition_ready / device_network_access=false / device_write_count=0 /
+  qualification_achieved=false`를 반환했다. owner-only 결과 artifact SHA-256은
+  `79d6c8279dfbab34062a87efe2776c0ea09159d785d2b734a968b772e0927260`이다. 원본과
+  복사본 journal SHA는 계속 `273a7f38638033dd0030a268279bb67b8451b985936051a83f42f605c8486bcf`이고,
+  park archive/index/tombstone 생성은 아직 `0`건이다: **(b)**.
+- 이 시점에는 attended park challenge를 아직 발급하지 않았고 live journal도 변경하지 않았다.
