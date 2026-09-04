@@ -66,6 +66,15 @@ class ExactRestoreReceiptArchiveClaimError(ExactRestoreReceiptArchiveError):
     """The immutable receipt namespace could not be claimed by this owner."""
 
 
+class ExactRestoreReceiptArchiveBusyError(ExactRestoreReceiptArchiveClaimError):
+    """Another live holder owns the nonblocking archive lock right now.
+
+    This is the only claim refusal that a plain sequential retry can resolve.  Ownership,
+    nesting, fork and identity-change refusals keep the base class so that they are never
+    reported as transient.
+    """
+
+
 class ExactRestoreOperationFinalizationConflictError(ExactRestoreReceiptArchiveError):
     """An operation id is already bound to a different immutable final receipt."""
 
@@ -686,7 +695,8 @@ class ExactRestoreReceiptArchive:
                         fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         locked = True
                     except BlockingIOError as error:
-                        raise ExactRestoreReceiptArchiveClaimError(
+                        # The only transient claim refusal: a live holder owns the lock.
+                        raise ExactRestoreReceiptArchiveBusyError(
                             "exact-restore receipt archive is claimed by another process"
                         ) from error
                     self._validate_root(root_descriptor)

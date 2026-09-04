@@ -48,6 +48,7 @@ from jebao_flow.exact_restore_receipts import (
     ExactRestoreOperationFinalization,
     ExactRestoreOperationFinalizationConflictError,
     ExactRestoreReceiptArchive,
+    ExactRestoreReceiptArchiveBusyError,
     ExactRestoreReceiptArchiveError,
 )
 from jebao_flow.exact_restore_store import ExactRestoreJournalStore
@@ -107,6 +108,22 @@ class ExactRestoreDispositionError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+_ARCHIVE_CLAIM_UNAVAILABLE = "disposition_archive_claim_unavailable"
+
+
+def _archive_failure(error: BaseException, fallback: str) -> ExactRestoreDispositionError:
+    """Name a live archive-lock holder exactly and keep every other refusal unchanged.
+
+    Every broad archive wrapper translates through here so that one transient claim refusal
+    cannot reach an operator as tombstone corruption.  Ownership, nesting, fork and
+    identity-change claim refusals are deliberately not transient and keep their own code.
+    """
+
+    if isinstance(error, ExactRestoreReceiptArchiveBusyError):
+        return ExactRestoreDispositionError(_ARCHIVE_CLAIM_UNAVAILABLE)
+    return ExactRestoreDispositionError(fallback)
 
 
 class ParkedDispositionEvidenceReference(BaseModel):
@@ -477,7 +494,7 @@ def verify_park_eligibility(
         try:
             finalization_store.confirm_parked_tombstone(tombstone.model_dump(mode="json"))
         except Exception as error:
-            raise ExactRestoreDispositionError("disposition_tombstone_invalid") from error
+            raise _archive_failure(error, "disposition_tombstone_invalid") from error
         raise ExactRestoreDispositionError("disposition_already_parked")
 
     journal_canonical = _canonical_journal(payload)
@@ -515,7 +532,7 @@ def verify_park_eligibility(
     try:
         existing_finalization = finalization_store.load_operation_finalization(record.operation_id)
     except Exception as error:
-        raise ExactRestoreDispositionError("disposition_finalization_unavailable") from error
+        raise _archive_failure(error, "disposition_finalization_unavailable") from error
     if expected_parked_disposition is None:
         if existing_finalization is not None:
             raise ExactRestoreDispositionError("disposition_operation_already_terminal")
@@ -696,7 +713,7 @@ class ExactRestoreDispositionArchive(ExactRestoreReceiptArchive):
         ):
             raise
         except Exception as error:
-            raise ExactRestoreDispositionError("disposition_archive_failed") from error
+            raise _archive_failure(error, "disposition_archive_failed") from error
 
     def load_parked_disposition(self, operation_id: str) -> ParkedDispositionRecord | None:
         operation_digest = _operation_finalization_sha256(operation_id)
@@ -740,7 +757,7 @@ class ExactRestoreDispositionArchive(ExactRestoreReceiptArchive):
         except ExactRestoreDispositionError:
             raise
         except Exception as error:
-            raise ExactRestoreDispositionError("disposition_archive_invalid") from error
+            raise _archive_failure(error, "disposition_archive_invalid") from error
 
     def _persist_blob(
         self,
@@ -1009,7 +1026,7 @@ class ParkedDispositionService:
             try:
                 terminal = self._archive.confirm_parked_tombstone(payload)
             except Exception as error:
-                raise ExactRestoreDispositionError("disposition_tombstone_unconfirmed") from error
+                raise _archive_failure(error, "disposition_tombstone_unconfirmed") from error
             if (
                 terminal.get("version") != 2
                 or terminal.get("outcome") != "parked_unqualified"
@@ -1031,8 +1048,10 @@ class ParkedDispositionService:
         try:
             self._archive.confirm_parked_tombstone(tombstone.model_dump(mode="json"))
             disposition = self._archive.load_parked_disposition(tombstone.operation_id)
+        except ExactRestoreDispositionError:
+            raise
         except Exception as error:
-            raise ExactRestoreDispositionError("disposition_tombstone_invalid") from error
+            raise _archive_failure(error, "disposition_tombstone_invalid") from error
         if (
             disposition is None
             or disposition.disposition_id != tombstone.disposition_id
@@ -1278,8 +1297,10 @@ def public_parked_tombstone_status(
         selected_archive = archive or ExactRestoreDispositionArchive()
         selected_archive.confirm_parked_tombstone(tombstone.model_dump(mode="json"))
         disposition = selected_archive.load_parked_disposition(tombstone.operation_id)
+    except ExactRestoreDispositionError:
+        raise
     except Exception as error:
-        raise ExactRestoreDispositionError("disposition_tombstone_invalid") from error
+        raise _archive_failure(error, "disposition_tombstone_invalid") from error
     if (
         disposition is None
         or disposition.disposition_id != tombstone.disposition_id

@@ -802,6 +802,74 @@ def test_attended_park_authority_uses_a_distinct_exact_challenge(tmp_path: Path)
     assert authority.intent == "park_unqualified_without_device_io"
 
 
+def test_live_lock_holder_is_reported_as_retryable_not_tombstone_corruption(
+    tmp_path: Path,
+) -> None:
+    """A concurrent archive holder must never surface as tombstone invalidity."""
+
+    case = _case(tmp_path)
+    case.service.park(case.authority)
+    payload = case.journal.load()
+    assert isinstance(payload, dict)
+    holder = ExactRestoreDispositionArchive._for_test(case.archive.root)
+
+    with holder._claim():
+        with pytest.raises(ExactRestoreDispositionError) as rejected:
+            public_parked_tombstone_status(payload, archive=case.archive)
+        assert rejected.value.code == "disposition_archive_claim_unavailable"
+
+        with pytest.raises(ExactRestoreDispositionError) as loading:
+            case.archive.load_parked_disposition(case.manifest.operation_id)
+        assert loading.value.code == "disposition_archive_claim_unavailable"
+
+    released = public_parked_tombstone_status(payload, archive=case.archive)
+    assert released["phase"] == "parked_unqualified"
+    assert released["qualification_achieved"] is False
+
+
+def test_translated_archive_refusal_survives_the_outer_tombstone_wrapper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Contention between a successful confirm and the following load keeps its own code."""
+
+    case = _case(tmp_path)
+    case.service.park(case.authority)
+    payload = case.journal.load()
+    assert isinstance(payload, dict)
+
+    def _contended_load(_self: object, _operation_id: str) -> None:
+        raise ExactRestoreDispositionError("disposition_archive_claim_unavailable")
+
+    monkeypatch.setattr(
+        ExactRestoreDispositionArchive,
+        "load_parked_disposition",
+        _contended_load,
+    )
+
+    with pytest.raises(ExactRestoreDispositionError) as status_refusal:
+        public_parked_tombstone_status(payload, archive=case.archive)
+    assert status_refusal.value.code == "disposition_archive_claim_unavailable"
+
+    with pytest.raises(ExactRestoreDispositionError) as park_refusal:
+        case.service.park(case.authority)
+    assert park_refusal.value.code == "disposition_archive_claim_unavailable"
+
+
+def test_real_tombstone_mismatch_still_closes_as_tombstone_invalid(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    case.service.park(case.authority)
+    payload = case.journal.load()
+    assert isinstance(payload, dict)
+    forged = dict(payload)
+    forged["disposition_sha256"] = "f" * 64
+
+    with pytest.raises(ExactRestoreDispositionError) as rejected:
+        public_parked_tombstone_status(forged, archive=case.archive)
+
+    assert rejected.value.code == "disposition_tombstone_invalid"
+
+
 def test_disposition_import_graph_has_only_reviewed_protocol_edges() -> None:
     script = """
 import json, sys

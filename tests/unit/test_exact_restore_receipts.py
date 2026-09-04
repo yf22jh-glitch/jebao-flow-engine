@@ -16,6 +16,7 @@ from jebao_flow.exact_restore_receipts import (
     ExactRestoreOperationFinalization,
     ExactRestoreOperationFinalizationConflictError,
     ExactRestoreReceiptArchive,
+    ExactRestoreReceiptArchiveBusyError,
     ExactRestoreReceiptArchiveClaimError,
     ExactRestoreReceiptArchiveError,
 )
@@ -765,6 +766,38 @@ def test_archive_instance_is_process_bound(
 
     with pytest.raises(ExactRestoreReceiptArchiveClaimError, match="forked process"):
         archive.load_final_verified_receipt("0" * 64)
+
+
+def test_only_a_live_lock_holder_is_reported_as_transiently_busy(tmp_path: Path) -> None:
+    """A sequential retry can resolve a live holder; nesting and forks never can."""
+
+    root = _private_root(tmp_path)
+    owner = _archive(root)
+    contender = _archive(root)
+
+    with owner._claim():
+        with pytest.raises(ExactRestoreReceiptArchiveBusyError, match="another process"):
+            contender.load_final_verified_receipt("0" * 64)
+        with pytest.raises(ExactRestoreReceiptArchiveClaimError, match="already active") as nested:
+            with owner._claim():
+                raise AssertionError("nested receipt archive claim was acquired")
+        assert not isinstance(nested.value, ExactRestoreReceiptArchiveBusyError)
+
+    assert contender.load_final_verified_receipt("0" * 64) is None
+
+
+def test_forked_instance_is_not_reported_as_transiently_busy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _archive(_private_root(tmp_path))
+    original_pid = os.getpid()
+    monkeypatch.setattr(os, "getpid", lambda: original_pid + 1)
+
+    with pytest.raises(ExactRestoreReceiptArchiveClaimError, match="forked process") as forked:
+        archive.load_final_verified_receipt("0" * 64)
+
+    assert not isinstance(forked.value, ExactRestoreReceiptArchiveBusyError)
 
 
 def test_archive_import_graph_excludes_devices_persistence_and_frozen_harness() -> None:
