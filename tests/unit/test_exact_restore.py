@@ -162,6 +162,7 @@ def _baseline(
     master_accepted_latent_manual_power: int | None = None,
     slave_accepted_latent_manual_power: int | None = None,
     corroborating_evidence: ExactRestoreEvidenceReference | None = None,
+    max_final_acquisition_duration_seconds: float | None = None,
 ) -> ExactRestoreBaseline:
     return ExactRestoreBaseline(
         devices=(
@@ -190,6 +191,7 @@ def _baseline(
         verification_policy=ExactRestoreVerificationPolicy(
             max_observation_age_seconds=30,
             max_final_pair_gap_seconds=20,
+            max_final_acquisition_duration_seconds=(max_final_acquisition_duration_seconds),
         ),
         captured_at=NOW,
     )
@@ -465,6 +467,7 @@ class RestoreHarness:
         self.observed_roles: list[ExactRestoreRole] = []
         self.observation_count = 0
         self.before_observe: Callable[[ExactRestoreRole, int], None] | None = None
+        self.after_observe: Callable[[ExactRestoreRole, int], None] | None = None
         self.observation_wall_offset = timedelta(0)
         self.observation_monotonic_offset_ns = 0
         self.next_write_behavior: str | None = None
@@ -520,7 +523,7 @@ class RestoreHarness:
         )
         acquired_at = self.clock() + self.observation_wall_offset
         acquired_monotonic_ns = self.monotonic_clock() + self.observation_monotonic_offset_ns
-        return ExactRestoreObservation(
+        observation = ExactRestoreObservation(
             role=role,
             identity_binding_sha256=binding,
             outer=self.outers[role],
@@ -533,6 +536,9 @@ class RestoreHarness:
             observed_monotonic_ns=acquired_monotonic_ns,
             received_monotonic_ns=acquired_monotonic_ns,
         )
+        if self.after_observe is not None:
+            self.after_observe(role, self.observation_count)
+        return observation
 
     def resolve_device(
         self,
@@ -750,11 +756,12 @@ def _promoted_record(
 def _prepared(
     *,
     cycle: ExactRestoreCycle = ExactRestoreCycle.BASELINE_RESTORE,
+    baseline: ExactRestoreBaseline | None = None,
 ) -> ExactRestoreRecord:
     if cycle is ExactRestoreCycle.BASELINE_RESTORE:
-        return _promoted_record()
+        return _promoted_record(baseline=baseline)
     return prepare_exact_restore_record(
-        _baseline(),
+        baseline or _baseline(),
         _safe_targets(),
         cycle=cycle,
         operation_id=f"operation-{cycle.value}",
@@ -765,6 +772,7 @@ def _prepared(
 def _armed_controller(
     *,
     cycle: ExactRestoreCycle = ExactRestoreCycle.BASELINE_RESTORE,
+    baseline: ExactRestoreBaseline | None = None,
     clock: Callable[[], datetime] = lambda: NOW,
     monotonic_clock: Callable[[], int] = lambda: MONOTONIC_NS,
     boot_identity: Callable[[], str] = lambda: BOOT_A_SHA256,
@@ -775,7 +783,7 @@ def _armed_controller(
     RestoreHarness,
     ExactRestoreRecord,
 ]:
-    prepared = _prepared(cycle=cycle)
+    prepared = _prepared(cycle=cycle, baseline=baseline)
     store = MemoryStore()
     guard = FakeGuard()
     qualification_store = MemoryQualificationReceiptStore()
@@ -807,6 +815,42 @@ def _armed_controller(
         )
     )
     return controller, store, guard, harness, armed
+
+
+def _configure_final_pair_timing(
+    store: MemoryStore,
+    harness: RestoreHarness,
+    wall: MutableClock,
+    monotonic: MutableMonotonicClock,
+    *,
+    master_offset_ns: int,
+    slave_offset_ns: int,
+    completion_offset_ns: int | None = None,
+) -> None:
+    offsets = {
+        ExactRestoreRole.MASTER: master_offset_ns,
+        ExactRestoreRole.SLAVE: slave_offset_ns,
+    }
+
+    def before_observe(role: ExactRestoreRole, _count: int) -> None:
+        assert store.record is not None
+        if store.record["phase"] != ExactRestorePhase.AWAITING_FINAL_VERIFY.value:
+            return
+        offset_ns = offsets[role]
+        wall.value = NOW + timedelta(microseconds=offset_ns // 1_000)
+        monotonic.value = MONOTONIC_NS + offset_ns
+
+    def after_observe(role: ExactRestoreRole, _count: int) -> None:
+        if role is not ExactRestoreRole.SLAVE or completion_offset_ns is None:
+            return
+        assert store.record is not None
+        if store.record["phase"] != ExactRestorePhase.AWAITING_FINAL_VERIFY.value:
+            return
+        wall.value = NOW + timedelta(microseconds=completion_offset_ns // 1_000)
+        monotonic.value = MONOTONIC_NS + completion_offset_ns
+
+    harness.before_observe = before_observe
+    harness.after_observe = after_observe
 
 
 def test_baseline_plan_is_exact_six_action_atomic_order() -> None:
@@ -1164,6 +1208,33 @@ def test_accepted_latent_manual_power_requires_independent_corroborating_evidenc
         )
 
 
+def test_split_final_acquisition_policy_requires_nested_bounds() -> None:
+    split = ExactRestoreVerificationPolicy(
+        max_observation_age_seconds=60,
+        max_final_pair_gap_seconds=20,
+        max_final_acquisition_duration_seconds=30,
+    )
+    legacy = ExactRestoreVerificationPolicy(
+        max_observation_age_seconds=60,
+        max_final_pair_gap_seconds=20,
+    )
+
+    assert split.effective_final_acquisition_duration_seconds == 30
+    assert legacy.effective_final_acquisition_duration_seconds == 20
+    with pytest.raises(ValueError, match="shorter than the pair gap"):
+        ExactRestoreVerificationPolicy(
+            max_observation_age_seconds=60,
+            max_final_pair_gap_seconds=20,
+            max_final_acquisition_duration_seconds=19,
+        )
+    with pytest.raises(ValueError, match="exceed the observation age"):
+        ExactRestoreVerificationPolicy(
+            max_observation_age_seconds=29,
+            max_final_pair_gap_seconds=20,
+            max_final_acquisition_duration_seconds=30,
+        )
+
+
 def test_legacy_optional_fields_preserve_canonical_record_digests_and_round_trip() -> None:
     baseline = _baseline()
     record = prepare_exact_restore_record(
@@ -1179,6 +1250,10 @@ def test_legacy_optional_fields_preserve_canonical_record_digests_and_round_trip
     assert "corroborating_evidence" not in baseline_payload
     assert all(
         "accepted_latent_manual_power" not in device for device in baseline_payload["devices"]
+    )
+    assert "max_final_acquisition_duration_seconds" not in baseline_payload["verification_policy"]
+    assert baseline.verification_policy.policy_sha256 == (
+        "d5fc156ee858817935ba7dd8a83e7e37e3789f2d785e8166f9a0d962de948f19"
     )
     assert baseline.baseline_sha256 == (
         "ab6291ea6837afd73efb5d95c35a779bf9762c4153ed5b135c6b30c276625c68"
@@ -2167,6 +2242,121 @@ async def test_final_pair_outside_manifest_window_cannot_mint_a_receipt() -> Non
     assert retained.phase is ExactRestorePhase.AWAITING_FINAL_VERIFY
     assert retained.final_evidence is None
     assert guard.trip_count == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_runtime_keeps_the_overloaded_total_bound() -> None:
+    wall = MutableClock()
+    monotonic = MutableMonotonicClock()
+    controller, store, _guard, harness, _armed = _armed_controller(
+        clock=wall,
+        monotonic_clock=monotonic,
+    )
+    _configure_final_pair_timing(
+        store,
+        harness,
+        wall,
+        monotonic,
+        master_offset_ns=10_000_000_000,
+        slave_offset_ns=21_681_584_751,
+    )
+
+    with pytest.raises(ExactRestoreRecoveryRequired) as rejected:
+        await controller.execute()
+
+    assert rejected.value.code is ExactRestoreErrorCode.VERIFY_MISMATCH
+    assert rejected.value.diagnostic == {
+        "predicate": "acquisition_duration_exceeded",
+        "observed_ns": 21_681_584_751,
+        "maximum_completion_coherence_ns": 20_000_000_000,
+        "maximum_acquisition_duration_ns": 20_000_000_000,
+        "maximum_observation_age_ns": 30_000_000_000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_split_runtime_accepts_measured_coherence_and_acquisition_spans() -> None:
+    wall = MutableClock()
+    monotonic = MutableMonotonicClock()
+    controller, store, _guard, harness, _armed = _armed_controller(
+        baseline=_baseline(max_final_acquisition_duration_seconds=30),
+        clock=wall,
+        monotonic_clock=monotonic,
+    )
+    _configure_final_pair_timing(
+        store,
+        harness,
+        wall,
+        monotonic,
+        master_offset_ns=10_000_000_000,
+        slave_offset_ns=21_681_584_751,
+    )
+
+    completed = await controller.execute()
+
+    assert completed.phase is ExactRestorePhase.FINAL_VERIFIED
+    assert completed.final_evidence is not None
+
+
+@pytest.mark.asyncio
+async def test_split_runtime_rejects_completion_coherence_against_pair_bound() -> None:
+    wall = MutableClock()
+    monotonic = MutableMonotonicClock()
+    controller, store, _guard, harness, _armed = _armed_controller(
+        baseline=_baseline(max_final_acquisition_duration_seconds=30),
+        clock=wall,
+        monotonic_clock=monotonic,
+    )
+    _configure_final_pair_timing(
+        store,
+        harness,
+        wall,
+        monotonic,
+        master_offset_ns=1_000_000_000,
+        slave_offset_ns=22_000_000_000,
+    )
+
+    with pytest.raises(ExactRestoreRecoveryRequired) as rejected:
+        await controller.execute()
+
+    assert rejected.value.diagnostic == {
+        "predicate": "completion_coherence_exceeded",
+        "observed_ns": 21_000_000_000,
+        "maximum_completion_coherence_ns": 20_000_000_000,
+        "maximum_acquisition_duration_ns": 30_000_000_000,
+        "maximum_observation_age_ns": 30_000_000_000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_split_runtime_rejects_total_acquisition_against_new_bound() -> None:
+    wall = MutableClock()
+    monotonic = MutableMonotonicClock()
+    controller, store, _guard, harness, _armed = _armed_controller(
+        baseline=_baseline(max_final_acquisition_duration_seconds=30),
+        clock=wall,
+        monotonic_clock=monotonic,
+    )
+    _configure_final_pair_timing(
+        store,
+        harness,
+        wall,
+        monotonic,
+        master_offset_ns=10_000_000_000,
+        slave_offset_ns=21_000_000_000,
+        completion_offset_ns=31_000_000_000,
+    )
+
+    with pytest.raises(ExactRestoreRecoveryRequired) as rejected:
+        await controller.execute()
+
+    assert rejected.value.diagnostic == {
+        "predicate": "acquisition_duration_exceeded",
+        "observed_ns": 31_000_000_000,
+        "maximum_completion_coherence_ns": 20_000_000_000,
+        "maximum_acquisition_duration_ns": 30_000_000_000,
+        "maximum_observation_age_ns": 30_000_000_000,
+    }
 
 
 @pytest.mark.parametrize("offset_ns", [-100_000_000, 100_000_000])

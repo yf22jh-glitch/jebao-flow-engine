@@ -92,8 +92,14 @@ _MAX_PRIVATE_FILE_BYTES = 1024 * 1024
 class ExactRestoreCompositionError(RuntimeError):
     """Privacy-safe production composition refusal."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        diagnostic: Mapping[str, object] | None = None,
+    ) -> None:
         self.code = code
+        self.diagnostic = dict(diagnostic or {})
         super().__init__(code)
 
 
@@ -145,7 +151,7 @@ class ExactRestoreOperationManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 1
     operation_nonce: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
     evidence: ExactRestoreArtifactReference
     corroborating_evidence: ExactRestoreArtifactReference | None = None
@@ -173,6 +179,11 @@ class ExactRestoreOperationManifest(BaseModel):
             self.verification_policy.max_observation_age_seconds
         ):
             raise ValueError("identity age cannot exceed the observation age")
+        acquisition = self.verification_policy.max_final_acquisition_duration_seconds
+        if self.version == 1 and acquisition is not None:
+            raise ValueError("version 1 cannot opt in to split final acquisition timing")
+        if self.version == 2 and acquisition is None:
+            raise ValueError("version 2 requires split final acquisition timing")
         if any(
             item.accepted_latent_manual_power is not None for item in self.devices
         ) and self.corroborating_evidence is None:
@@ -461,7 +472,37 @@ def _build_verified_baseline_capture(
     if artifact.pair_completion_gap_ns > int(
         manifest.verification_policy.max_final_pair_gap_seconds * 1_000_000_000
     ):
-        raise ExactRestoreCompositionError("baseline_pair_gap_exceeded")
+        raise ExactRestoreCompositionError(
+            "baseline_pair_gap_exceeded",
+            diagnostic={
+                "predicate": "completion_coherence_exceeded",
+                "observed_ns": artifact.pair_completion_gap_ns,
+                "maximum_completion_coherence_ns": int(
+                    manifest.verification_policy.max_final_pair_gap_seconds * 1_000_000_000
+                ),
+                "maximum_acquisition_duration_ns": int(
+                    manifest.verification_policy.effective_final_acquisition_duration_seconds
+                    * 1_000_000_000
+                ),
+            },
+        )
+    acquisition = manifest.verification_policy.max_final_acquisition_duration_seconds
+    if acquisition is not None:
+        total_attempt_ns = (
+            artifact.attempt.completed_monotonic_ns - artifact.attempt.started_monotonic_ns
+        )
+        if total_attempt_ns > int(acquisition * 1_000_000_000):
+            raise ExactRestoreCompositionError(
+                "baseline_acquisition_duration_exceeded",
+                diagnostic={
+                    "predicate": "acquisition_duration_exceeded",
+                    "observed_ns": total_attempt_ns,
+                    "maximum_completion_coherence_ns": int(
+                        manifest.verification_policy.max_final_pair_gap_seconds * 1_000_000_000
+                    ),
+                    "maximum_acquisition_duration_ns": int(acquisition * 1_000_000_000),
+                },
+            )
 
     sample_completion_times = tuple(
         _parse_utc(sample.read.completed_utc) for sample in artifact.samples
@@ -959,7 +1000,7 @@ def prepare_operation(
             raise
         except Exception as error:
             raise ExactRestoreCompositionError("operation_finalization_unavailable") from error
-        controller.create(record)
+        controller.create(record, manifest_version=manifest.version)
     return record
 
 
@@ -992,7 +1033,10 @@ def stage_qualified_final_restore(
         require_cross_workflow_quiescent()
         if composition.store.load() is not None:
             raise ExactRestoreCompositionError("exact_restore_journal_not_empty")
-        composition.controller.create_qualified_final_restore(staged)
+        composition.controller.create_qualified_final_restore(
+            staged,
+            manifest_version=composition.manifest.version,
+        )
     confirmed = load_bound_record(composition)
     if confirmed != staged:
         raise ExactRestoreCompositionError("final_restore_stage_unconfirmed")

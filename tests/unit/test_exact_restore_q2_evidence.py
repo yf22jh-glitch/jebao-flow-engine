@@ -602,6 +602,7 @@ def test_legacy_bundle_without_new_optional_keys_round_trips_byte_exactly(tmp_pa
     assert all(
         "accepted_latent_manual_power" not in device for device in embedded_baseline["devices"]
     )
+    assert "max_final_acquisition_duration_seconds" not in embedded_baseline["verification_policy"]
     canonical = json.dumps(
         payload,
         ensure_ascii=True,

@@ -163,6 +163,38 @@ def test_failure_reports_privacy_safe_baseline_age_diagnostic(
     assert payload["diagnostic"]["conservative_age_ms"] == 31_000
 
 
+def test_composition_timing_refusal_preserves_privacy_safe_diagnostic(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import jebao_flow.exact_restore_cli as module
+
+    async def refuse(_args: object) -> object:
+        raise ExactRestoreCompositionError(
+            "baseline_acquisition_duration_exceeded",
+            diagnostic={
+                "predicate": "acquisition_duration_exceeded",
+                "observed_ns": 31_000_000_000,
+                "maximum_completion_coherence_ns": 20_000_000_000,
+                "maximum_acquisition_duration_ns": 30_000_000_000,
+            },
+        )
+
+    monkeypatch.setattr(module, "_run", refuse)
+
+    assert module.main(["status"]) == 2
+    assert json.loads(capsys.readouterr().err) == {
+        "code": "baseline_acquisition_duration_exceeded",
+        "diagnostic": {
+            "predicate": "acquisition_duration_exceeded",
+            "observed_ns": 31_000_000_000,
+            "maximum_completion_coherence_ns": 20_000_000_000,
+            "maximum_acquisition_duration_ns": 30_000_000_000,
+        },
+        "status": "exact_restore_refused",
+    }
+
+
 def test_cli_import_keeps_write_transport_unloaded_until_attended_composition() -> None:
     script = """
 import json, sys

@@ -500,15 +500,16 @@ def test_archive_failure_never_mutates_live_journal(
 
 
 @pytest.mark.asyncio
-async def test_all_record_installation_paths_refuse_v1_successors_until_v2(
+async def test_only_a_distinct_manifest_bound_v2_sentinel_can_replace_a_tombstone(
     tmp_path: Path,
 ) -> None:
     case = _case(tmp_path)
     case.service.park(case.authority)
     harness = RestoreHarness(case.record.baseline, case.journal)  # type: ignore[arg-type]
+    guard = FakeGuard()
     controller = ExactRestoreController(
         case.journal,
-        FakeGuard(),
+        guard,
         observe=harness.observe,
         resolve_device=harness.resolve_device,
         qualification_receipts=case.archive,
@@ -530,20 +531,92 @@ async def test_all_record_installation_paths_refuse_v1_successors_until_v2(
         operation_id="different-reviewed-final-operation",
         now=NOW + timedelta(minutes=2),
     )
+    split_policy = case.record.baseline.verification_policy.model_copy(
+        update={"max_final_acquisition_duration_seconds": 30.0}
+    )
+    split_baseline = case.record.baseline.model_copy(update={"verification_policy": split_policy})
+    split_successor = prepare_exact_restore_record(
+        split_baseline,
+        case.record.safe_targets,
+        operation_id="different-reviewed-v2-operation",
+        now=NOW + timedelta(minutes=2),
+    )
+    same_operation_split_successor = prepare_exact_restore_record(
+        split_baseline,
+        case.record.safe_targets,
+        operation_id=case.record.operation_id,
+        now=NOW + timedelta(minutes=2),
+    )
 
     calls = (
         lambda: controller.create(successor),
+        lambda: controller.create(split_successor, manifest_version=1),
+        lambda: controller.create(same_operation_split_successor, manifest_version=2),
         lambda: controller.create_qualified_final_restore(staged),
         lambda: controller.promote_to_baseline_restore(
             operation_id="different-reviewed-promoted-operation"
         ),
     )
-    for call in calls:
-        with pytest.raises(ExactRestorePreflightError) as rejected:
-            call()
-        assert rejected.value.code is ExactRestoreErrorCode.AUTHORITY
+    with pytest.raises(ExactRestorePreflightError) as outside_lease:
+        controller.create(split_successor, manifest_version=2)
+    assert outside_lease.value.code is ExactRestoreErrorCode.AUTHORITY
 
-    assert ParkedDispositionTombstone.model_validate(case.journal.load())
+    with guard.lease():
+        guard.clear()
+        for call in calls:
+            with pytest.raises(ExactRestorePreflightError) as rejected:
+                call()
+            assert rejected.value.code is ExactRestoreErrorCode.AUTHORITY
+
+        assert ParkedDispositionTombstone.model_validate(case.journal.load())
+        controller.create(split_successor, manifest_version=2)
+
+    assert ExactRestoreRecord.model_validate(case.journal.load()) == split_successor
+    assert case.archive.load_operation_finalization(case.record.operation_id) is not None
+    assert harness.writes == []
+
+
+def test_v2_tombstone_successor_requires_exact_permanent_backing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _case(tmp_path)
+    case.service.park(case.authority)
+    original_tombstone = ParkedDispositionTombstone.model_validate(case.journal.load())
+    guard = FakeGuard()
+    harness = RestoreHarness(case.record.baseline, case.journal)  # type: ignore[arg-type]
+    controller = ExactRestoreController(
+        case.journal,
+        guard,
+        observe=harness.observe,
+        resolve_device=harness.resolve_device,
+        qualification_receipts=case.archive,
+        clock=lambda: NOW + timedelta(minutes=2),
+        monotonic_clock=lambda: 50_000_000_000,
+        boot_identity=lambda: BOOT_A_SHA256,
+    )
+    split_policy = case.record.baseline.verification_policy.model_copy(
+        update={"max_final_acquisition_duration_seconds": 30.0}
+    )
+    split_baseline = case.record.baseline.model_copy(update={"verification_policy": split_policy})
+    successor = prepare_exact_restore_record(
+        split_baseline,
+        case.record.safe_targets,
+        operation_id="different-reviewed-v2-operation",
+        now=NOW + timedelta(minutes=2),
+    )
+
+    def fail_confirmation(_payload: object) -> object:
+        raise OSError("simulated missing parked backing")
+
+    monkeypatch.setattr(case.archive, "confirm_parked_tombstone", fail_confirmation)
+    with guard.lease():
+        guard.clear()
+        with pytest.raises(ExactRestorePreflightError) as rejected:
+            controller.create(successor, manifest_version=2)
+
+    assert rejected.value.code is ExactRestoreErrorCode.JOURNAL
+    assert ParkedDispositionTombstone.model_validate(case.journal.load()) == original_tombstone
     assert harness.writes == []
 
 

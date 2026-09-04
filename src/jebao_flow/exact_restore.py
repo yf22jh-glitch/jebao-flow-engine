@@ -275,16 +275,61 @@ class ExactRestoreVerificationPolicy(BaseModel):
 
     max_observation_age_seconds: float = Field(gt=0)
     max_final_pair_gap_seconds: float = Field(gt=0)
+    max_final_acquisition_duration_seconds: float | None = Field(default=None, gt=0)
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_compatible(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        if self.max_final_acquisition_duration_seconds is None:
+            payload.pop("max_final_acquisition_duration_seconds", None)
+        return payload
 
     @model_validator(mode="after")
     def validate_pair_within_age(self) -> Self:
         if self.max_final_pair_gap_seconds > self.max_observation_age_seconds:
             raise ValueError("final pair gap cannot exceed the observation age bound")
+        acquisition = self.max_final_acquisition_duration_seconds
+        if acquisition is not None:
+            if self.max_final_pair_gap_seconds > acquisition:
+                raise ValueError("final acquisition duration cannot be shorter than the pair gap")
+            if acquisition > self.max_observation_age_seconds:
+                raise ValueError(
+                    "final acquisition duration cannot exceed the observation age bound"
+                )
         return self
+
+    @property
+    def effective_final_acquisition_duration_seconds(self) -> float:
+        value = self.max_final_acquisition_duration_seconds
+        return self.max_final_pair_gap_seconds if value is None else value
 
     @property
     def policy_sha256(self) -> str:
         return _sha256_json(self.model_dump(mode="json"))
+
+
+def _final_verification_mismatch(
+    policy: ExactRestoreVerificationPolicy,
+    predicate: str,
+    *,
+    observed_ns: int | None = None,
+) -> ExactRestoreRecoveryRequired:
+    """Build one privacy-safe refusal that identifies the failed verification predicate."""
+
+    diagnostic: dict[str, Any] = {
+        "predicate": predicate,
+        "maximum_completion_coherence_ns": int(policy.max_final_pair_gap_seconds * 1_000_000_000),
+        "maximum_acquisition_duration_ns": int(
+            policy.effective_final_acquisition_duration_seconds * 1_000_000_000
+        ),
+        "maximum_observation_age_ns": int(policy.max_observation_age_seconds * 1_000_000_000),
+    }
+    if observed_ns is not None:
+        diagnostic["observed_ns"] = observed_ns
+    return ExactRestoreRecoveryRequired(
+        ExactRestoreErrorCode.VERIFY_MISMATCH,
+        diagnostic=diagnostic,
+    )
 
 
 class ExactRestoreDeviceBaseline(BaseModel):
@@ -1307,15 +1352,25 @@ class ExactRestoreController:
         self._monotonic_clock = monotonic_clock
         self._boot_identity = boot_identity
 
-    def create(self, record: ExactRestoreRecord) -> None:
+    def create(
+        self,
+        record: ExactRestoreRecord,
+        *,
+        manifest_version: Literal[1, 2] | None = None,
+    ) -> None:
         if (
             record.phase is not ExactRestorePhase.PREPARED
             or record.cycle is not ExactRestoreCycle.SENTINEL_QUALIFICATION
         ):
             raise ExactRestorePreflightError(ExactRestoreErrorCode.INVALID_BASELINE)
-        self._create_prepared(record)
+        self._create_prepared(record, manifest_version=manifest_version)
 
-    def create_qualified_final_restore(self, record: ExactRestoreRecord) -> None:
+    def create_qualified_final_restore(
+        self,
+        record: ExactRestoreRecord,
+        *,
+        manifest_version: Literal[1, 2] | None = None,
+    ) -> None:
         """Create only a phase-5 record whose immediate parent is a qualified baseline cycle."""
 
         parent = record.qualification_final_record
@@ -1327,10 +1382,15 @@ class ExactRestoreController:
             or parent.phase is not ExactRestorePhase.FINAL_VERIFIED
         ):
             raise ExactRestorePreflightError(ExactRestoreErrorCode.INVALID_BASELINE)
-        self._create_prepared(record)
+        self._create_prepared(record, manifest_version=manifest_version)
 
-    def _create_prepared(self, record: ExactRestoreRecord) -> None:
-        """Install one prepared record, refusing every parked successor until v2 exists."""
+    def _create_prepared(
+        self,
+        record: ExactRestoreRecord,
+        *,
+        manifest_version: Literal[1, 2] | None,
+    ) -> None:
+        """Install one prepared record or one fully bound v2 successor to a park tombstone."""
 
         payload = record.model_dump(mode="json")
         with self._store.claim():
@@ -1338,9 +1398,24 @@ class ExactRestoreController:
             existing = self._store.load()
             if existing is not None and _is_parked_unqualified_tombstone(existing):
                 self._confirm_parked_tombstone(existing)
-                # The split acquisition policy is introduced by the next source commit.  Until
-                # then every successor would retain the v1 final-verification dead end.
-                raise ExactRestorePreflightError(ExactRestoreErrorCode.AUTHORITY)
+                if (
+                    record.cycle is not ExactRestoreCycle.SENTINEL_QUALIFICATION
+                    or record.phase is not ExactRestorePhase.PREPARED
+                    or record.baseline.verification_policy.max_final_acquisition_duration_seconds
+                    is None
+                    or manifest_version != 2
+                    or record.operation_id == existing.get("operation_id")
+                    or not self._guard.permitted
+                ):
+                    raise ExactRestorePreflightError(ExactRestoreErrorCode.AUTHORITY)
+                self._save_exact(record)
+                try:
+                    confirmed = self._store.reload_and_confirm_successor(payload)
+                except BaseException as error:
+                    raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL) from error
+                if not confirmed:
+                    raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+                return
             try:
                 self._store.create(payload)
             except BaseException:
@@ -1784,24 +1859,69 @@ class ExactRestoreController:
         max_pair_ns = int(policy.max_final_pair_gap_seconds * 1_000_000_000)
         for observation in ordered:
             baseline = record.baseline.for_role(observation.role)
-            if (
-                observation.requested_at < record.updated_at
-                or observation.received_at > completed_at
-                or observation.received_monotonic_ns > completed_monotonic_ns
-                or completed_monotonic_ns - observation.observed_monotonic_ns > max_age_ns
-                or not self._matches_baseline(baseline, observation)
-            ):
-                raise ExactRestoreRecoveryRequired(ExactRestoreErrorCode.VERIFY_MISMATCH)
+            if observation.requested_at < record.updated_at:
+                raise _final_verification_mismatch(policy, "observation_predates_record")
+            if observation.received_at > completed_at:
+                raise _final_verification_mismatch(
+                    policy,
+                    "observation_after_verification_completion",
+                )
+            if observation.received_monotonic_ns > completed_monotonic_ns:
+                raise _final_verification_mismatch(
+                    policy,
+                    "observation_monotonic_after_verification_completion",
+                    observed_ns=(observation.received_monotonic_ns - completed_monotonic_ns),
+                )
+            observation_age_ns = completed_monotonic_ns - observation.observed_monotonic_ns
+            if observation_age_ns > max_age_ns:
+                raise _final_verification_mismatch(
+                    policy,
+                    "observation_age_exceeded",
+                    observed_ns=observation_age_ns,
+                )
+            if not self._matches_baseline(baseline, observation):
+                raise _final_verification_mismatch(policy, "baseline_exact_mismatch")
+        if completed_at < verification_started_at:
+            raise _final_verification_mismatch(
+                policy,
+                "verification_wall_clock_regression",
+                observed_ns=_timedelta_ns(completed_at - verification_started_at),
+            )
+        if completed_monotonic_ns < verification_started_monotonic_ns:
+            raise _final_verification_mismatch(
+                policy,
+                "verification_monotonic_clock_regression",
+                observed_ns=completed_monotonic_ns - verification_started_monotonic_ns,
+            )
+        if policy.max_final_acquisition_duration_seconds is not None:
+            completion_coherence_ns = max(item.observed_monotonic_ns for item in ordered) - min(
+                item.observed_monotonic_ns for item in ordered
+            )
+            if completion_coherence_ns > max_pair_ns:
+                raise _final_verification_mismatch(
+                    policy,
+                    "completion_coherence_exceeded",
+                    observed_ns=completion_coherence_ns,
+                )
+        max_acquisition_ns = int(
+            policy.effective_final_acquisition_duration_seconds * 1_000_000_000
+        )
+        total_duration_ns = completed_monotonic_ns - verification_started_monotonic_ns
+        if total_duration_ns > max_acquisition_ns:
+            raise _final_verification_mismatch(
+                policy,
+                "acquisition_duration_exceeded",
+                observed_ns=total_duration_ns,
+            )
         verification_window_ns = max(item.received_monotonic_ns for item in ordered) - min(
             item.requested_monotonic_ns for item in ordered
         )
-        if (
-            completed_at < verification_started_at
-            or completed_monotonic_ns < verification_started_monotonic_ns
-            or completed_monotonic_ns - verification_started_monotonic_ns > max_pair_ns
-            or verification_window_ns > max_pair_ns
-        ):
-            raise ExactRestoreRecoveryRequired(ExactRestoreErrorCode.VERIFY_MISMATCH)
+        if verification_window_ns > max_acquisition_ns:
+            raise _final_verification_mismatch(
+                policy,
+                "acquisition_window_exceeded",
+                observed_ns=verification_window_ns,
+            )
         receipt = ExactRestoreReceipt(
             operation_id=record.operation_id,
             cycle=record.cycle,

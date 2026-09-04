@@ -158,6 +158,21 @@ def _corroborated_manifest() -> ExactRestoreOperationManifest:
     return ExactRestoreOperationManifest.model_validate(_corroborated_manifest_dict())
 
 
+def _split_manifest_dict(*, corroborated: bool = False) -> dict[str, object]:
+    payload = _corroborated_manifest_dict() if corroborated else _manifest_dict()
+    payload["version"] = 2
+    policy = payload["verification_policy"]
+    assert isinstance(policy, dict)
+    policy["max_final_acquisition_duration_seconds"] = 30
+    return payload
+
+
+def _split_manifest(*, corroborated: bool = False) -> ExactRestoreOperationManifest:
+    return ExactRestoreOperationManifest.model_validate(
+        _split_manifest_dict(corroborated=corroborated)
+    )
+
+
 def _wire(*, flow: int, schedule_flow: int) -> bytes:
     raw = bytearray(LOCAL_WAVEMAKER_PRO_RAW_STATUS_SIZE)
     raw[0] = 0b00000011  # ON, TimerON, independent, no fault bits.
@@ -185,6 +200,18 @@ def _interval(start: datetime, milliseconds: int) -> VerifiedPilotInterval:
         completed_utc=completed.isoformat().replace("+00:00", "Z"),
         started_monotonic_ns=1_000_000_000,
         completed_monotonic_ns=1_000_000_000 + milliseconds * 1_000_000,
+    )
+
+
+def _attempt(total_ns: int) -> VerifiedPilotInterval:
+    started = NOW - timedelta(seconds=25)
+    return VerifiedPilotInterval(
+        started_utc=started.isoformat().replace("+00:00", "Z"),
+        completed_utc=(started + timedelta(microseconds=total_ns // 1_000))
+        .isoformat()
+        .replace("+00:00", "Z"),
+        started_monotonic_ns=1_000_000_000,
+        completed_monotonic_ns=1_000_000_000 + total_ns,
     )
 
 
@@ -255,6 +282,7 @@ def test_legacy_manifest_serialization_preserves_digest_operation_ids_and_round_
 
     assert "corroborating_evidence" not in payload
     assert all("accepted_latent_manual_power" not in device for device in payload["devices"])
+    assert "max_final_acquisition_duration_seconds" not in payload["verification_policy"]
     assert manifest.manifest_sha256 == (
         "0030516a478d64935fe3bd0e5d52155b6928ebeaaddab21703a6e1cc71f07361"
     )
@@ -268,6 +296,25 @@ def test_legacy_manifest_serialization_preserves_digest_operation_ids_and_round_
         "er-final-b23421f8558d76b3b75876129c81ae0c868ab4e8b81eda3faebdb43c857bd532"
     )
     assert ExactRestoreOperationManifest.model_validate(payload) == manifest
+
+
+def test_manifest_version_exactly_gates_split_final_acquisition_timing() -> None:
+    legacy_with_split = _manifest_dict()
+    legacy_policy = legacy_with_split["verification_policy"]
+    assert isinstance(legacy_policy, dict)
+    legacy_policy["max_final_acquisition_duration_seconds"] = 30
+    with pytest.raises(ValueError, match="version 1 cannot opt in"):
+        ExactRestoreOperationManifest.model_validate(legacy_with_split)
+
+    split_without_bound = _manifest_dict()
+    split_without_bound["version"] = 2
+    with pytest.raises(ValueError, match="version 2 requires"):
+        ExactRestoreOperationManifest.model_validate(split_without_bound)
+
+    split = _split_manifest()
+    assert split.version == 2
+    assert split.verification_policy.max_final_acquisition_duration_seconds == 30
+    assert split.manifest_sha256 != _manifest().manifest_sha256
 
 
 def test_exact_latent_manual_power_requires_distinct_manifest_corroboration() -> None:
@@ -566,6 +613,85 @@ def test_corroborating_pair_independently_enforces_pair_gap_and_observation_age(
         )
 
 
+def test_legacy_admission_keeps_gap_only_for_a_long_preserved_attempt() -> None:
+    config = _config()
+    manifest = _manifest()
+    artifact = replace(
+        _artifact(config),
+        attempt=_attempt(22_795_387_102),
+        pair_completion_gap_ns=11_681_584_751,
+    )
+
+    baseline = build_verified_baseline(
+        manifest,
+        select_operation_targets(config, manifest),
+        artifact,
+        now=NOW,
+    )
+
+    assert baseline.verification_policy.max_final_acquisition_duration_seconds is None
+
+
+def test_split_admission_accepts_measured_gap_and_total_attempt() -> None:
+    config = _config()
+    manifest = _split_manifest()
+    artifact = replace(
+        _artifact(config),
+        attempt=_attempt(22_795_387_102),
+        pair_completion_gap_ns=11_681_584_751,
+    )
+
+    baseline = build_verified_baseline(
+        manifest,
+        select_operation_targets(config, manifest),
+        artifact,
+        now=NOW,
+    )
+
+    assert baseline.verification_policy.max_final_acquisition_duration_seconds == 30
+
+
+@pytest.mark.parametrize("failing_evidence", ["primary", "corroborating"])
+def test_split_admission_independently_rejects_each_long_attempt(
+    failing_evidence: str,
+) -> None:
+    config = _config()
+    manifest = _split_manifest(corroborated=True)
+    primary = replace(
+        _artifact(config),
+        attempt=_attempt(22_795_387_102),
+        pair_completion_gap_ns=11_681_584_751,
+    )
+    corroborating = replace(
+        _corroborating_artifact(config),
+        attempt=_attempt(22_490_690_130),
+        pair_completion_gap_ns=11_562_926_789,
+    )
+    if failing_evidence == "primary":
+        primary = replace(primary, attempt=_attempt(31_000_000_000))
+    else:
+        corroborating = replace(corroborating, attempt=_attempt(31_000_000_000))
+
+    with pytest.raises(
+        ExactRestoreCompositionError,
+        match="baseline_acquisition_duration_exceeded",
+    ) as rejected:
+        build_verified_baseline(
+            manifest,
+            select_operation_targets(config, manifest),
+            primary,
+            corroborating,
+            now=NOW,
+        )
+
+    assert rejected.value.diagnostic == {
+        "predicate": "acquisition_duration_exceeded",
+        "observed_ns": 31_000_000_000,
+        "maximum_completion_coherence_ns": 20_000_000_000,
+        "maximum_acquisition_duration_ns": 30_000_000_000,
+    }
+
+
 def test_verified_pair_fails_closed_on_expiry_pair_gap_and_binding() -> None:
     config = _config()
     manifest = _manifest()
@@ -576,8 +702,17 @@ def test_verified_pair_fails_closed_on_expiry_pair_gap_and_binding() -> None:
         build_verified_baseline(manifest, targets, artifact, now=NOW + timedelta(minutes=2))
 
     too_wide = replace(artifact, pair_completion_gap_ns=21_000_000_000)
-    with pytest.raises(ExactRestoreCompositionError, match="baseline_pair_gap_exceeded"):
+    with pytest.raises(
+        ExactRestoreCompositionError,
+        match="baseline_pair_gap_exceeded",
+    ) as rejected:
         build_verified_baseline(manifest, targets, too_wide, now=NOW)
+    assert rejected.value.diagnostic == {
+        "predicate": "completion_coherence_exceeded",
+        "observed_ns": 21_000_000_000,
+        "maximum_completion_coherence_ns": 20_000_000_000,
+        "maximum_acquisition_duration_ns": 20_000_000_000,
+    }
 
     wrong_sample = replace(artifact.samples[0], identity_binding_sha256="f" * 64)
     wrong_pair = replace(artifact, samples=(wrong_sample, artifact.samples[1]))

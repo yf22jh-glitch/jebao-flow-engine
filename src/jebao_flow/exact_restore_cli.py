@@ -370,7 +370,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (KeyboardInterrupt, asyncio.CancelledError):
         return _failure("operator_interrupt", exit_code=130)
     except ExactRestoreCompositionError as error:
-        return _failure(error.code)
+        return _failure(error.code, diagnostic=error.diagnostic)
     except ExactRestoreQ2EvidenceError as error:
         return _failure(error.code)
     except ExactRestoreDispositionError as error:
