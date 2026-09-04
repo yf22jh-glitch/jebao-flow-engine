@@ -974,3 +974,23 @@ outer controls와 schedule bytes의 exact 일치를 확인한 뒤에만 restore 
 **Home Assistant는 재시작하거나 조작하지 않습니다.** read-only preflight에서 HA의 Jebao TCP
 connection이 보이면 에이전트가 integration을 끄지 않고 이 operation을 `NO-GO`로 중단해
 보고합니다. 앱과 collector도 동시에 실행하지 않습니다.
+
+## 2026-09-04 standalone exact-restore qualification — data plane 확인 / receipt BLOCKING
+
+[실행 기록](runs/2026-09-04-exact-restore-qualification-4dcd8364.md)의 attended sentinel
+qualification에서 8개 action은 exactly-once `written_verified`로 완료됐고, 독립 strict raw는
+두 Pro의 outer controls와 432-byte schedule image가 Phase 0 baseline과 byte-exact함을 확인했습니다.
+따라서 standalone restore의 실제 write·원복 data plane은 확인됐습니다.
+
+그러나 terminal receipt는 발급되지 않았습니다. `max_final_pair_gap_seconds=20`은 baseline
+admission에서 participant completion gap(`11.2..11.6초`)에 적용되는 반면 runtime final
+verification에서는 전체 acquisition window(`21.7..22.8초`)에도 적용됩니다. discovery의 고정
+5초 청취창을 identity-before/after × 두 participant에 순차 사용하므로 이번 구성은 admission을
+통과해도 final verification에서 구조적으로 `verify_mismatch`가 됩니다.
+
+두 번의 실제 final-pair 실패 뒤 current journal은 `awaiting_final_verify / 8-of-8 /
+inflight=false / error=null`인 비-terminal 상태로 보존했습니다. 세 번째 재시도, current manifest
+값 변경, journal 편집·삭제를 하지 않습니다. 이 journal의 terminal화와 completion coherence
+bound·전체 acquisition-duration bound 분리는 repository maintainer의 별도 계획·검토가
+필요합니다. 그 전까지 선행조건 2와 앱 live-write는 계속 **NO-GO / BLOCKING**입니다.
+Home Assistant는 이 실행에서 건드리지 않았고 이후에도 건드리지 않습니다.
