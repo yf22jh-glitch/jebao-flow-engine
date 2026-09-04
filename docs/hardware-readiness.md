@@ -1024,3 +1024,23 @@ qualification은 계속 **NO-GO / BLOCKING**입니다.
 park disposition 결속을 위한 explicit-only strict read **1회**는 repository maintainer의 별도
 승인 아래에서만 허용합니다. 이는 앱 live-write나 새 qualification 승인이 아니며, 나머지
 `NO-GO / BLOCKING` 판정과 Home Assistant no-touch는 그대로 유지합니다.
+
+## 2026-09-04 parked disposition 완료 — journal terminal / receipt BLOCKING 유지
+
+[같은 실행 기록](runs/2026-09-04-exact-restore-qualification-4dcd8364.md)의 reviewed
+write-free park가 완료됐습니다. 원본 non-terminal journal bytes는 immutable snapshot SHA-256으로
+보존됐고, live journal path에는 `PARKED_UNQUALIFIED` tombstone이 설치됐습니다. operation별 version
+`2` finalization은 성공 receipt 없이 permanent replay barrier로 남습니다. 실제 archive를 읽은
+current controller는 같은 operation을 거부했고, 구 source image에서 runtime으로 확인한 범위는
+`status`의 record parse 거부입니다. legacy write entry의 장비 I/O 이전 fail-closed는 단위 테스트로
+확인했습니다. supervisor presence parser는 tombstone을 `ATTENDED_REQUIRED`로 읽었습니다.
+
+따라서 앞 문단의 `awaiting_final_verify` live record는 더 이상 현재 상태가 아니며, current
+operation의 journal terminalization은 완료됐습니다. 그러나 formal sentinel receipt와 qualified
+bundle은 생성되지 않았으므로 선행조건 2 전체가 충족된 것은 아닙니다. 앱 live-write와 새
+qualification은 계속 **NO-GO / BLOCKING**입니다.
+
+다음 허용 순서는 timing policy의 completion-coherence/acquisition-duration 분리 source와 회귀검증,
+영구 barrier 재검증, fresh Phase 0, 새 v2 manifest, 별도 operation 승인입니다. reviewed v2 prepare가
+tombstone을 정당하게 교체하기 전에는 recovery supervisor를 재기동하지 않습니다. park 뒤 추가
+장비 read는 수행하지 않았고 Home Assistant no-touch도 유지합니다.

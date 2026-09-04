@@ -452,3 +452,27 @@ overload와 byte-exact restore 근거로 계속 보존하되, repository maintai
 그 reference만 새 disposition manifest에 결속해 `park-verify`를 다시 수행합니다. 새 capture와 park
 사이에는 exact-restore reauthorization 또는 journal을 갱신하는 다른 attended 상호작용을 허용하지
 않습니다. proxy 의미의 정정 여부는 park 완료 뒤 별도 안건으로 검토합니다.
+
+## 실행 addendum — parked disposition 완료
+
+fresh explicit-only pair와 새 evidence reference로 `park-verify`를 통과한 뒤 repository maintainer가
+이 exact manifest에 결속된 write-free challenge를 승인했고, 작업 B의 disposition 실행이
+완료됐습니다. durable 결과는 `PARKED_UNQUALIFIED`, `qualification_achieved=false`, device network와
+device write `0`입니다. original journal canonical bytes는 immutable snapshot으로 보존됐고,
+live path의 tombstone과 operation별 version `2` parked-finalization이 각각 잠정·영구 barrier로
+설치됐습니다.
+
+fresh status, archive↔tombstone 교차검증, supervisor presence parse와 실제 archive를 사용한
+controller 거부를 독립 확인했습니다. 구 source image의 runtime 확인 범위는 `status`의 record parse
+거부이고, legacy write entry의 장비 I/O 이전 fail-closed는 단위 테스트 범위입니다. disposition은
+success receipt가 아니며 Q2 qualified evidence로 소비될 수 없습니다. 상세 opaque id·digest와 UTC span은
+[실행 기록](runs/2026-09-04-exact-restore-qualification-4dcd8364.md)에만 둡니다.
+
+동시 postcondition 확인 중 nonblocking archive claim 경합이 한 idempotent call을
+`disposition_tombstone_invalid`로 닫았고, 순차 재호출은 동일 disposition으로 성공했습니다. 이는
+변형이나 §3 P1이 아닌 fail-closed 결과지만 오류 코드가 실제 claim 경합을 오도합니다.
+`record.updated_at` proxy 의미와 함께 작업 B 완료 뒤 별도 진단 안건으로 남깁니다.
+
+이 addendum으로 작업 B와 실행 경계 1~6은 완료됐습니다. 다음은 작업 A의 별도 source commit이며,
+current v1 operation을 새 의미로 재개하지 않습니다. fresh Phase 0과 새 v2 operation은 작업 A의
+source/image review와 permanent barrier exact reload가 끝난 뒤에만 준비합니다.

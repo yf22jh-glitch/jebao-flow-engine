@@ -216,3 +216,67 @@
   복사본 journal SHA는 계속 `273a7f38638033dd0030a268279bb67b8451b985936051a83f42f605c8486bcf`이고,
   park archive/index/tombstone 생성은 아직 `0`건이다: **(b)**.
 - 이 시점에는 attended park challenge를 아직 발급하지 않았고 live journal도 변경하지 않았다.
+
+### Attended parked disposition 실행과 terminal barrier 확인
+
+- repository maintainer는 manifest SHA-256
+  `1a00a96a6dc41fc737d1bd1f94eea46bc1dff8bcbac071ef055ffcd3e9eeb6a2`에 결속된
+  write-free park challenge를 검토하고, 이 current operation을 qualification 성공으로 만들지 않는
+  `PARKED_UNQUALIFIED` disposition만 승인했다. 승인 문자열 자체는 기록하지 않는다: **(c)**.
+- reviewed Linux/amd64 image를 `--network none`으로 실행한 park 결과는 다음과 같다: **(b)**.
+  - disposition id: `ERD-26abc5aa31d509a3ddb49f497114e8fd`
+  - disposition SHA-256:
+    `712a725ada86796f112631fdbcfb251350d92f470a4ff076cee5083a9758497f`
+  - original journal snapshot SHA-256:
+    `273a7f38638033dd0030a268279bb67b8451b985936051a83f42f605c8486bcf`
+  - operation SHA-256:
+    `4dcd8364b272644ac883faca9494c7884b045e387970e9a38601df6d5bf4baa0`
+  - outcome/claim: `parked_unqualified`, `qualification_achieved=false`,
+    `device_network_access=false`, `device_write_count=0`
+- original journal의 canonical bytes는 위 digest로 immutable snapshot에 보존됐다. live journal path에는
+  성공 record가 아니라 SHA-256
+  `f899c8117106cd5286d764d5c6663246bb7fe7e9a426c7186d86990dba829301`인 tombstone이
+  설치됐다. tombstone은 owner 일치, regular file, mode `0600`, link count `1`이었고,
+  `ExactRestoreRecord` validation은 거부했지만 parked-disposition loader와 archive↔tombstone exact
+  교차검증은 통과했다: **(b)**.
+- operation-digest finalization은 version `2`, outcome `parked_unqualified`이며
+  `receipt_sha256`을 갖지 않는다. 실제 archive를 다시 읽은 controller의
+  `_require_operation_not_parked()`는 같은 operation을 `AUTHORITY`로 거부했고, 그 확인 전후 live
+  tombstone digest는 불변이었다: **(b)**.
+- 구 source image에서 실제 실행한 `status`는 tombstone을 재개 가능한 record로 읽지 못했다:
+  **(c)**. 구 image의 `create`·`arm`·`execute`는 이번 runtime에서 실행하지 않았고, legacy shape의
+  write entry가 장비 I/O 전에 fail-closed하는 성질은 단위 테스트에서만 확인했다.
+- stopped recovery supervisor image의 configured user는 실행 시 uid/gid `100:101`로 해석됐고,
+  tombstone owner와 일치했다. 실제 tombstone은 supervisor의
+  `_ExactRestoreArtifactPresence`로 parse됐으므로, supervisor가 다시 scan한다면 corruption
+  `ERROR`가 아니라 설계된 `ATTENDED_REQUIRED`로 닫힌다. 이 확인을 위해 supervisor를 기동하지
+  않았다: **(b)**.
+- postcondition을 서로 다른 fresh process에서 확인하던 중 status, archive audit와 idempotent park를
+  동시에 실행해 nonblocking archive claim이 경합했다. status와 archive audit은 통과했고 한
+  idempotent call은 `disposition_tombstone_invalid`로 fail-closed했다. 모든 동시 process가 끝난 뒤
+  순차 재호출은 exit `0`으로 위와 동일한 disposition id/SHA를 반환했다. 파일·장비 변형은 없었다:
+  **(b)**. source trace상 실제 조건은 archive claim 획득 실패이고 tombstone corruption이 아니므로,
+  표시된 오류 코드는 오도하는 저심각도 진단 결함이다. claim 보호가 계획 밖 동시 부하에서도 상태를
+  보존한 실측이기도 하며 §3 P1은 아니다.
+- park 직후 recovery supervisor는 계속 exited였고 TCP `12416` established connection은 `0`이었다.
+  park 뒤 별도 장비 read는 수행하지 않았다. Home Assistant는 재시작·reload·disable·설정 변경·service
+  call하지 않았다: **(c)**.
+
+### 이 disposition으로 새로 확정된 사실과 남은 조건
+
+- failed qualification의 8개 action과 원본 journal 증거는 삭제되지 않았고, current operation은
+  immutable disposition과 operation별 영구 replay barrier로 terminal화됐다. 같은 operation id의
+  success receipt와 재실행은 구조적으로 차단된다.
+- **qualification이 성공한 것은 아니다.** sentinel receipt와 qualified bundle은 여전히 없으므로
+  앱 주도 live-write의 restore 선행조건은 계속 `NO-GO / BLOCKING`이다. protocol-reported baseline
+  밖의 물리 유량·파형·위상도 주장하지 않는다.
+- 다음 단계는 source 의미를 사후에 current v1 operation에 소급하지 않고, participant completion
+  coherence와 전체 acquisition duration을 분리하는 reviewed v2 source commit이다. 그 뒤 fresh
+  Phase 0, 서로 다른 operation id의 v2 manifest와 별도 on-site 승인이 있어야 새 qualification을
+  준비할 수 있다.
+- `record.updated_at`을 awaiting transition proxy로 쓴 eligibility 의미와 archive claim 경합을
+  `disposition_tombstone_invalid`로 표시하는 진단은 park 완료 뒤의 별도 source 안건으로 남긴다.
+  이번 성공을 만들기 위해 두 규칙을 사후 변경하지 않는다.
+- recovery supervisor는 reviewed v2 prepare가 permanent barrier와 backing archive를 exact reload한
+  뒤 tombstone을 정당한 successor로 교체할 때까지 exited로 둔다. 새 앱 action, 새 qualification,
+  journal 편집·삭제·강제 archive와 Home Assistant 조작은 계속 금지한다.
