@@ -1044,3 +1044,18 @@ qualification은 계속 **NO-GO / BLOCKING**입니다.
 영구 barrier 재검증, fresh Phase 0, 새 v2 manifest, 별도 operation 승인입니다. reviewed v2 prepare가
 tombstone을 정당하게 교체하기 전에는 recovery supervisor를 재기동하지 않습니다. park 뒤 추가
 장비 read는 수행하지 않았고 Home Assistant no-touch도 유지합니다.
+
+## 2026-09-05 timing split source 완료 — 남은 순서 갱신
+
+작업 A의 timing split source가 commit `47866e57909bfd21000f3f41988ce177bb7c6c55`로 landed했습니다.
+version `1`의 admission·runtime 의미는 그대로 유지되고, version `2`에서만 raw-read completion
+coherence와 전체 acquisition duration을 별도 bound로 검사합니다. legacy policy canonical digest와
+변경 전부터 있던 baseline digest 단언이 모두 수정 없이 통과했고, 표적 test `152 passed`, 전체 unit
+`1834 passed`, 변경 파일 ruff lint 통과를 network-none 컨테이너에서 확인했습니다. 상세는
+[계획 문서](exact-restore-final-verification-and-park-plan.md)의 작업 A addendum에 있습니다.
+
+따라서 앞 문단이 적은 "다음 허용 순서"의 첫 항목인 timing policy 분리 source와 회귀검증은
+완료됐습니다. 남은 순서는 영구 barrier 재검증, fresh Phase 0, 새 v2 manifest, 별도 operation
+승인입니다. 이 source commit은 hardware 승인이 아니므로 앱 live-write와 새 qualification은 계속
+**NO-GO / BLOCKING**입니다. reviewed v2 prepare가 tombstone을 정당하게 교체하기 전에는 recovery
+supervisor를 재기동하지 않고, Home Assistant no-touch도 유지합니다.

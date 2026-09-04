@@ -505,3 +505,52 @@ success receipt가 아니며 Q2 qualified evidence로 소비될 수 없습니다
 이 addendum으로 작업 B와 실행 경계 1~6은 완료됐습니다. 다음은 작업 A의 별도 source commit이며,
 current v1 operation을 새 의미로 재개하지 않습니다. fresh Phase 0과 새 v2 operation은 작업 A의
 source/image review와 permanent barrier exact reload가 끝난 뒤에만 준비합니다.
+
+## 실행 addendum — 작업 A 완료
+
+작업 A(timing split)의 source commit이 `47866e57909bfd21000f3f41988ce177bb7c6c55`로 landed했습니다.
+부모는 `4dcb9df93ac42c5ea03dccdbef81fbb78f1532aa`, staged binary diff SHA-256은
+`073b8fc92db54f7df4bd3d705263dbc6daf2ef1bf2a0c2139dbc106bf589e13b`이며 8개 파일 `+636/-41`입니다.
+커밋된 트리의 diff digest는 검토·시험한 트리와 동일합니다: **(b)**.
+
+착지한 내용은 이 계획의 네 행 그대로입니다. version `1`의 admission은 pair-gap 검사만, runtime은
+기존 total/window 검사만 유지하고, version `2`에서만 admission이 total attempt를, runtime이
+raw-read completion coherence를 추가로 검사합니다. `None` fallback은 기존 runtime acquisition 검사
+두 곳에만 값을 공급합니다. coherence는 admission `read_completed`와 runtime
+`observed_monotonic_ns`에, acquisition은 `completed - verification_started`와
+`max(received) - min(requested)`에 결속했습니다. `_initial_sentinel_baseline_freshness()`의 padding은
+무변경입니다. tombstone successor는 policy non-`None`, manifest version `2`, 서로 다른 operation id,
+permanent parked-finalization과 backing archive exact confirm을 한 guard 안에서 모두 만족할 때만
+열립니다.
+
+legacy canonical identity는 두 가지로 확인했습니다: **(b)**.
+
+- legacy policy의 canonical JSON은
+  `{"max_final_pair_gap_seconds":20.0,"max_observation_age_seconds":30.0}`이고 그 SHA-256은
+  `d5fc156ee858817935ba7dd8a83e7e37e3789f2d785e8166f9a0d962de948f19`입니다. 새 key는 나타나지 않으며
+  이 값은 프로젝트 코드 없이 재계산할 수 있습니다.
+- 변경 전부터 하드코딩돼 있던 `baseline_sha256`
+  `ab6291ea6837afd73efb5d95c35a779bf9762c4153ed5b135c6b30c276625c68` 단언이 수정 없이 통과합니다.
+  baseline이 policy를 내포하므로 직렬화가 1바이트라도 달라지면 이 기존 단언이 먼저 깨집니다.
+
+Linux/amd64 network-none 컨테이너에서 표적 5개 test file `152 passed`, 전체 unit `1834 passed`,
+변경 8파일 ruff lint 통과를 확인했습니다. 실행 전 컨테이너의 소스·테스트 8파일이 worktree와 바이트
+동일함을 대조했습니다: **(c)**.
+
+integration은 첫 전체 실행에서 frozen `test_linkage_restore_transport.py`의 staged-report 개수
+단언이 실패했지만, 같은 test 단독 3회 통과, HEAD 소스에서도 통과, 전체 재실행에서 `16 passed`로
+재현되지 않았습니다. 에뮬레이션 부하에 의존하는 flake이며 이 커밋과 무관합니다. frozen test를
+수정하거나 하드닝하지 않았습니다: **(c)**.
+
+`ruff format --check`은 `exact_restore_composition.py`를 지적하지만 같은 config에서 변경 전 버전도
+실패하고 저장소 전체 `73/201` 파일이 실패합니다. 강제 게이트가 아닌 기존 부채이고 지적된 hunk가
+전부 이 커밋이 건드리지 않은 줄이므로 무관한 재포맷을 넣지 않았습니다: **(c)**.
+
+이 addendum으로 실행 경계 1~6과 두 source commit이 모두 완료됐습니다. 남은 것은 실행 경계 7이며,
+permanent version `2` barrier 재검증 뒤 fresh Phase 0, 새 v2 manifest와 별도 Phase 1 hardware 승인이
+있어야 시작합니다. 이 커밋만으로 장비·앱·Home Assistant·private journal 조작 권한이 생기지 않습니다.
+
+작업 B 완료 뒤로 미뤄 둔 두 진단 안건은 이제 착수 가능한 별도 안건입니다. `record.updated_at`을
+awaiting-transition proxy로 쓰는 eligibility 의미와, archive claim 경합을
+`disposition_tombstone_invalid`로 표시하는 오도가 그것입니다. 작업 A에서는 의도적으로 건드리지
+않았고, 각각 자체 계획과 검토를 거쳐야 합니다.
