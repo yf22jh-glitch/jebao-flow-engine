@@ -171,3 +171,39 @@ source 범위: `src/jebao_flow/exact_restore_disposition.py`,
 이 계획과 두 source commit은 **repository 변경만**입니다. 실행 경계 7(permanent barrier 재검증,
 fresh Phase 0, 새 v2 manifest, 별도 Phase 1 hardware 승인)은 이 계획의 범위가 아니며, 앱 live-write와
 새 qualification은 계속 **NO-GO / BLOCKING**입니다.
+
+## 실행 addendum — 두 안건 완료
+
+두 commit이 계획한 순서대로 착지했습니다: **(b)**.
+
+- 진단 분리: `ccc2e6aa44f46c1fd806fa4265c48f84c1e836a7`, 4파일 `+140/-8`, diff SHA-256
+  `2732fd728e128a3b0d72a094c70e227d4492dbd0839e295b8a5ff11017137f11`
+- eligibility 불변식: `bdfaf5c3987a2974f8c8fe8279225fe1cdb66811`, 2파일 `+89/-3`, diff SHA-256
+  `4e98abd997eb34517a0b0978be869ae90b1b1ce6d9970269515a7e1dbbe0e77b`
+
+안건 2는 `ExactRestoreReceiptArchiveBusyError`를 `ExactRestoreReceiptArchiveClaimError`의 subtype으로
+두고 `LOCK_NB`의 `BlockingIOError` **한 지점에서만** 올립니다. 나머지 아홉 claim 지점은 base 타입과
+기존 코드를 유지합니다. disposition 쪽은 `_archive_failure()` 하나로 중앙 번역하고 일곱 wrapper가
+그것을 거치므로, 어떤 public 경계에서도 live lock holder는 `disposition_archive_claim_unavailable`로
+수렴합니다. `load_parked_disposition()`을 함께 감싸던 두 wrapper에는 pass-through를 넣어 내부에서 이미
+번역된 거부가 tombstone 무효로 재라벨되지 않게 했습니다. 자동 retry는 넣지 않았습니다.
+
+**관측 가능한 부수 변화**: 그 pass-through 때문에 `load_parked_disposition()`의 고유 코드(예:
+`disposition_archive_binding_mismatch`)가 `status`와 idempotent park 경계에서 그대로 드러납니다.
+전에는 `disposition_tombstone_invalid`로 덮였습니다. 더 정확하고 여전히 fail-closed입니다.
+
+안건 1은 gate를 `artifact_started_at > last_completed_at`으로 바꿨습니다. 근거는 계획에 적은 대로
+상류가 이미 완전한 verified prefix와 `inflight`·`error_code`·`final_evidence` 부재를 강제한다는 것이고,
+회귀에서 **계획보다 강한 사실**이 드러났습니다: `AWAITING_FINAL_VERIFY` record는 애초에 짧은 prefix로
+**표현될 수 없습니다**(record validator가 "final verification requires the complete action prefix"로
+거부). 따라서 완화가 의존하는 성질은 disposition gate가 아니라 record model이 지키고 있고, 새 회귀는
+그 사실을 model 수준에서 단언합니다: **(b)**.
+
+Linux/amd64 network-none에서 전체 unit suite가 두 commit 뒤 각각 `1839 passed`와 `1844 passed`였고
+변경 파일 ruff lint는 모두 통과했습니다. 실행 전 컨테이너 파일이 worktree와 바이트 동일함을
+대조했습니다: **(c)**.
+
+이 계획은 이것으로 완료됐습니다. 실행 경계 7(permanent barrier 재검증, fresh Phase 0, 새 v2 manifest,
+별도 Phase 1 hardware 승인)은 여전히 이 계획의 범위가 아니고, 앱 live-write와 새 qualification은 계속
+**NO-GO / BLOCKING**입니다. 두 commit 어느 것도 장비·앱·Home Assistant·private journal·archive를
+건드리지 않았습니다.
