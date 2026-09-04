@@ -582,9 +582,17 @@ def verify_park_eligibility(
         or total_attempt_ns < 0
     ):
         raise ExactRestoreDispositionError("disposition_overload_evidence_missing")
+    # The eligibility this gate needs is "no device write happened at or after the artifact
+    # started".  The checks above already establish that: the completed prefix is exactly the
+    # deterministic plan, every outcome is WRITTEN_VERIFIED, and inflight/error/final evidence are
+    # all absent, so a write can neither be pending nor have been dropped from the record.  The
+    # last verified completion is therefore the write boundary, and it is stamped after the
+    # post-write observation, which makes it conservative against the wire send.  ``updated_at``
+    # is not that boundary: it also moves for write-free journal touches such as an attended
+    # reauthorization, and it never moves for a write outside this journal at all.
     last_completed_at = record.completed_actions[-1].completed_at
     artifact_started_at = _parse_utc(artifact.attempt.started_utc)
-    if artifact_started_at <= max(last_completed_at, record.updated_at):
+    if artifact_started_at <= last_completed_at:
         raise ExactRestoreDispositionError("disposition_artifact_predates_restore")
 
     for role, expected_sample_role, sample in zip(

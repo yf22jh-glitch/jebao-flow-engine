@@ -9,7 +9,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -216,12 +216,20 @@ def _authority_for(manifest: ParkedDispositionManifest) -> ParkedDispositionAuth
     )
 
 
-def _case(tmp_path: Path) -> SimpleNamespace:
+def _case(
+    tmp_path: Path,
+    *,
+    record_payload_update: dict[str, Any] | None = None,
+) -> SimpleNamespace:
     safety_root = tmp_path / "hardware-safety"
     safety_root.mkdir(mode=0o700, parents=True)
     journal = ExactRestoreJournalStore._for_test(safety_root / "exact-restore.json")
     archive = ExactRestoreDispositionArchive._for_test(safety_root)
     record, artifact = _awaiting_record_and_artifact()
+    if record_payload_update is not None:
+        payload = record.model_dump(mode="json")
+        payload.update(record_payload_update)
+        record = ExactRestoreRecord.model_validate(payload)
     with journal.claim():
         journal.create(record.model_dump(mode="json"))
     journal_sha256 = hashlib.sha256(journal.path.read_bytes()).hexdigest()
@@ -868,6 +876,76 @@ def test_real_tombstone_mismatch_still_closes_as_tombstone_invalid(tmp_path: Pat
         public_parked_tombstone_status(forged, archive=case.archive)
 
     assert rejected.value.code == "disposition_tombstone_invalid"
+
+
+def _parse_artifact_start(artifact: VerifiedPilotPairArtifact) -> Any:
+    return datetime.fromisoformat(artifact.attempt.started_utc.replace("Z", "+00:00"))
+
+
+def _completed_at(record_payload: dict[str, Any], moment: object) -> list[dict[str, Any]]:
+    actions = [dict(item) for item in record_payload["completed_actions"]]
+    for item in actions:
+        item["completed_at"] = moment
+    return actions
+
+
+def test_write_free_journal_update_after_the_artifact_stays_eligible(tmp_path: Path) -> None:
+    """An attended reauthorization moves updated_at without writing to any device."""
+
+    later = (NOW + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+    case = _case(tmp_path, record_payload_update={"updated_at": later})
+    assert case.record.updated_at > _parse_artifact_start(case.artifact)
+
+    disposition = case.service.park(case.authority)
+
+    assert disposition.qualification_achieved is False
+    assert ParkedDispositionTombstone.model_validate(case.journal.load())
+
+
+def test_artifact_at_or_before_the_last_write_is_still_refused(tmp_path: Path) -> None:
+    base = _awaiting_record_and_artifact()[0].model_dump(mode="json")
+    same = (NOW + timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
+    case = _case(
+        tmp_path,
+        record_payload_update={
+            "completed_actions": _completed_at(base, same),
+            "updated_at": same,
+        },
+    )
+
+    with pytest.raises(ExactRestoreDispositionError) as rejected:
+        case.service.park(case.authority)
+
+    assert rejected.value.code == "disposition_artifact_predates_restore"
+    assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
+
+
+@pytest.mark.parametrize("kept", [7, 0])
+def test_awaiting_record_cannot_exist_with_an_incomplete_action_prefix(kept: int) -> None:
+    """The relaxed artifact gate relies on a complete prefix, enforced one layer deeper.
+
+    A journal awaiting final verification cannot even be represented with a short prefix, so
+    the disposition path can never see one.
+    """
+
+    payload = _awaiting_record_and_artifact()[0].model_dump(mode="json")
+    payload["completed_actions"] = payload["completed_actions"][:kept]
+
+    with pytest.raises(ValidationError, match="complete action prefix"):
+        ExactRestoreRecord.model_validate(payload)
+
+
+def test_action_without_written_verified_outcome_is_refused(tmp_path: Path) -> None:
+    base = _awaiting_record_and_artifact()[0].model_dump(mode="json")
+    actions = [dict(item) for item in base["completed_actions"]]
+    actions[-1]["outcome"] = ExactRestoreActionOutcome.ALREADY_SATISFIED.value
+
+    case = _case(tmp_path, record_payload_update={"completed_actions": actions})
+
+    with pytest.raises(ExactRestoreDispositionError) as rejected:
+        case.service.park(case.authority)
+
+    assert rejected.value.code == "disposition_journal_ineligible"
 
 
 def test_disposition_import_graph_has_only_reviewed_protocol_edges() -> None:
