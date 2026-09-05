@@ -364,3 +364,11 @@ eligibility 이후에도 유지됩니다.
 이 source 착지는 hardware 승인이 아닙니다. v2 qualification 4~6단계는 계속 **NO-GO**이며 fresh
 Phase 0, 새 v2 manifest, 별도 on-site 승인이 선행 조건입니다. 두 commit을 만드는 동안 장비·앱·
 Home Assistant 접촉은 `0`이었고 private journal·archive·recovery supervisor도 건드리지 않았습니다.
+
+### 독립 재실행 확인
+
+위 결과는 한쪽 실행이 아닙니다. 교차검토 측이 같은 network-none reviewed image에서 전체 unit
+suite를 독립 재실행해 `1888 passed, 0 failed`로 같은 수치를 얻었고, 표적 회귀 `386 passed`,
+변경 파일 ruff lint·format 통과, host와 container 간 파일 바이트 일치도 함께 확인했습니다. 두
+commit의 diff digest 역시 양쪽에서 독립 계산해 일치했습니다: **(b)**. 그 재실행에서도 장비·앱·
+Home Assistant·private state 접촉은 `0`입니다.
