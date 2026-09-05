@@ -1132,7 +1132,7 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 | **A** | private state read + 고정 root를 여는 것만으로 발생하는 **일시 host-store writability probe**. durable semantic mutation `0`, device write `0`. **이 축은 0단계에 한정되지 않고 전체 승인 sequence 동안의 모든 expected fixed-root open에 수반되는 probe를 포괄합니다** — 아래 참조 | repository maintainer |
 | **B1** | 1단계 Phase 0의 device **read**, 그리고 그 operation이 **반드시 남기는** owner-only collector plan·series·raw artifact의 **durable host write**. Phase 0은 읽기만 하는 단계가 아닙니다 | repository maintainer |
 | **B2** | **7·8단계의 최초 실행과, 아래 재개표로 승인된 continuation에서** controller가 계약상 수행하는 모든 device read — 각 action 이전의 fresh read, already-satisfied 분기의 두 번째 read, write 이후의 explicit verification·reconciliation 관측, 그리고 마지막 final pair capture. 여기에 딸린 discovery·identity 트래픽을 포함합니다. 재개용 B2는 **이름만 같은 별도 권한이 아니라 같은 축**이며, 재개할 때마다 그 범위로 다시 확인·승인합니다 | repository maintainer |
-| **B3** | 실패 후 park을 선택했을 때에 한해, 마지막 completion 뒤의 새 strict artifact 수집(device read)과 그 collector durable write | repository maintainer |
+| **B3** | 실패 후 park을 선택했을 때에 한해, 마지막 completion 뒤의 새 strict artifact 수집(device read)과 그 collector durable write. **범위는 아래 park 소절의 표로 유한하게 고정됩니다** — 수량·retry·timeout이 정해지지 않은 open-ended device contact가 아닙니다 | repository maintainer |
 | **C** | **host-state mutation** — 아래 "승인 C의 범위" 전체 | repository maintainer |
 | **D** | 두 cycle의 bounded device **write** (7·8단계). 현장 감시와 즉시 물리 차단 포함 | on-site hardware approver |
 
@@ -1541,7 +1541,23 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
 
 1. **먼저 중단하고 원인을 분석합니다.** 자동·즉시 재시도는 `0`회입니다.
 2. park을 선택했다면, **마지막 completion보다 뒤에** 새 explicit-only strict artifact를
-   수집합니다. device read이므로 **승인 B3**(새 device read + collector durable write)가 필요합니다.
+   수집합니다. device read이므로 **승인 B3**가 필요하며, 그 범위는 다음으로 **유한하게
+   고정**합니다.
+
+   | 항목 | 값 |
+   |---|---|
+   | series 수 | `1` |
+   | predeclared pair 수 | `1` — disposition은 accepted pair reference를 하나만 소비합니다 |
+   | transport policy | `explicit_only` |
+   | discovery/control timeout | `5초` |
+   | cadence | 수집기가 값을 요구하므로 `30초`로 두되, pair가 하나이므로 **pair 사이를 벌리는
+     효과는 없습니다** |
+   | retry | **`0`** |
+   | 성공 조건 | **`1/1` accepted.** 아니면 **park `NO-GO`** |
+
+   invalid pair가 나오면 **같은 B3 안에서 다시 잡지 않습니다.** 중단·보고한 뒤 **새 B3 승인**을
+   받아야 다시 수집할 수 있습니다. (수집기가 pair 수 `1`을 거부한다면 그 사실은 **장비 접촉 이전
+   plan 단계에서** 드러납니다. 그 경우에만 `2`로 올리고 올린 사실과 이유를 기록합니다.)
 3. 그 artifact와 **좌초한 journal의 exact digest**에 결속된 **새 v2 disposition manifest
    candidate**를 만들고, 위 eligibility 조건 전부를 **offline에서 재검증**합니다. 이 시점의
    candidate는 메모리에만 둡니다. **기존 Phase 0 artifact와 기존 disposition manifest 재사용은
