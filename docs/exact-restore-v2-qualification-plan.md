@@ -1663,19 +1663,45 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
    받아야 다시 수집할 수 있습니다. (수집기가 pair 수 `1`을 거부한다면 그 사실은 **장비 접촉 이전
    plan 단계에서** 드러납니다. 그 경우에만 `2`로 올리고 올린 사실과 이유를 기록합니다.)
 3. 그 artifact와 **좌초한 journal의 exact digest**에 결속된 **새 v2 disposition manifest
-   candidate**를 만들고, 위 eligibility 조건 전부를 **offline에서 재검증**합니다. 이 시점의
-   candidate는 메모리에만 둡니다. **기존 Phase 0 artifact와 기존 disposition manifest 재사용은
-   `0`입니다.**
-4. **별도 park host-state mutation 승인**을 받습니다. qualification용으로 받은 승인 C가 이것을
+   candidate**를 만듭니다. 이 시점의 candidate는 **메모리에만** 둡니다. **기존 Phase 0 artifact와
+   기존 disposition manifest 재사용은 `0`입니다.**
+
+   **필드를 생략하면 안 됩니다.** manifest를 만들어 주는 CLI는 없고 park 명령은 owner-only 파일을
+   **읽기만** 합니다. 그리고 **`reason`의 기본값이 legacy `final_verification_policy_overload`**
+   이므로, `version: 2`에서 `reason`을 빼면 validator가 거부합니다. v2의 exact shape는 다음입니다.
+
+   | 필드 | 값 |
+   |---|---|
+   | `version` | `2` |
+   | `operation_id` · `operation_sha256` | 좌초한 live record의 값 |
+   | `journal_sha256` | 좌초한 journal의 canonical digest |
+   | `cycle` | live record의 cycle |
+   | `baseline_sha256` · `action_plan_sha256` · `authority_chain_sha256` | live record의 값 |
+   | `completed_action_count` | live record의 completed prefix 길이 |
+   | `evidence` | 2번에서 수집한 accepted artifact의 다섯 필드(plan artifact id·plan digest·series artifact id·series digest·accepted pair ordinal) |
+   | `maximum_pair_completion_gap_seconds` | journal policy의 `max_final_pair_gap_seconds` **exact 값** |
+   | `predecessor_depth` | embedded chain의 **exact depth**(sentinel `0` / baseline `1` / phase-5 `2`) |
+   | `completed_action_outcomes` | live completed prefix의 **순서 그대로의 outcome vector** |
+   | `reason` | **`final_verification_unresolved`** — 생략 금지 |
+   | `outcome` | `parked_unqualified` |
+   | `qualification_achieved` · `device_network_access` | `false` |
+   | `device_write_count` | `0` |
+
+   **v2에는 `required_action_outcome`과 `minimum_total_attempt_seconds`가 없습니다.** 둘은 v1
+   overload 전용이며, v2에 넣으면 거부됩니다.
+
+4. candidate의 **canonical dump → validate identity와 digest 일치**를 먼저 확인하고, 그 다음
+   위 eligibility 조건 전부를 **offline에서 재검증**합니다.
+5. **별도 park host-state mutation 승인**을 받습니다. qualification용으로 받은 승인 C가 이것을
    포괄한다고 보지 않습니다. 범위는 **owner-only disposition manifest의 persist와 exact reload**,
    그리고 park archive·journal snapshot·v2 finalization·tombstone mutation입니다.
-5. 그 승인 아래에서 **disposition manifest를 owner-only 경로에 persist하고 exact reload**합니다.
+6. 그 승인 아래에서 **disposition manifest를 owner-only 경로에 persist하고 exact reload**합니다.
    park CLI는 그 파일을 입력으로 요구하므로 이 단계 없이는 park을 실행할 수 없습니다.
-6. **network-none으로 `park-verify`를 실행**합니다. 실패하면 **consent 요청 `0`, archive·index·
+7. **network-none으로 `park-verify`를 실행**합니다. 실패하면 **consent 요청 `0`, archive·index·
    tombstone mutation `0`**으로 중단·보고합니다.
-7. **별도의 attended write-free park consent**를 받습니다. park의 device write는 `0`이므로 이것은
+8. **별도의 attended write-free park consent**를 받습니다. park의 device write는 `0`이므로 이것은
    승인 D가 아닙니다.
-8. **network-none으로 park을 실행**합니다.
+9. **network-none으로 park을 실행**합니다.
 
 ---
 
