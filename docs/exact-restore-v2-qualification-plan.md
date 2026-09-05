@@ -1678,8 +1678,16 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
    | 성공 조건 | **`1/1` accepted.** 아니면 **park `NO-GO`** |
 
    invalid pair가 나오면 **같은 B3 안에서 다시 잡지 않습니다.** 중단·보고한 뒤 **새 B3 승인**을
-   받아야 다시 수집할 수 있습니다. (수집기가 pair 수 `1`을 거부한다면 그 사실은 **장비 접촉 이전
-   plan 단계에서** 드러납니다. 그 경우에만 `2`로 올리고 올린 사실과 이유를 기록합니다.)
+   받아야 다시 수집할 수 있습니다.
+
+   **pair 수 `1`이 거부되면 값을 올리지 않습니다.** reviewed source는 `1` 이상을 명시적으로
+   허용하므로, attested image에서 `1`이라는 이유로 거부되는 정상 경로는 없습니다. 그 거부가
+   실제로 나온다면 stale하거나 잘못된 image·import 경로, 다른 plan·preflight 문제, 또는 새로운
+   source 동작 중 하나이며 **원인 확인 대상**입니다. **park `NO-GO` · 장비 접촉 `0` · 보고**로
+   닫고 **값은 바꾸지 않습니다.** 검증이 거부한 직후 입력을 바꿔 통과시키는 것은
+   `AGENTS.md` §0이 막으려는 폐루프이고, `1 × 1` 승인은 `2` pair를 함축하지도 않습니다. 정말 다른
+   값이 필요하다는 새 source 사실이 확인되면 **계획 정정과 검토를 거쳐 새 B3 승인**을 받은 뒤에만
+   실행합니다.
 3. 그 artifact와 **좌초한 journal의 exact digest**에 결속된 **새 v2 disposition manifest
    candidate**를 만듭니다. 이 시점의 candidate는 **메모리에만** 둡니다. **기존 Phase 0 artifact와
    기존 disposition manifest 재사용은 `0`입니다.**
