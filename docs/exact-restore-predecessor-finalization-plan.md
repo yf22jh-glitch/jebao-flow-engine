@@ -279,3 +279,46 @@ exact-restore 계열 **332 passed / 0 failed**, 전체 unit **1855 passed / 1 fa
 
 blocker 1(receipts decoder의 하드코딩된 사유·key 집합)과 blocker 2(baseline cycle의 정상
 `ALREADY_SATISFIED` skip)는 그대로이며, 재설계된 disposition 일반화가 다음 작업입니다.
+
+## 실행 addendum 3 — 앞 표의 정정과 증명 출처 구분
+
+**addendum 2의 9/9 표를 대체합니다.** 그 표는 각 항목에 테스트가 존재한다는 사실만 적었고 **무엇이
+무엇을 증명하는지 구분하지 않아 실제보다 강하게 읽혔습니다.** peer 감사가 다섯 지점을 지적했고, 제가
+직접 확인한 결과 모두 사실이었습니다. 보강은 `9a77601`(test 전용 `+199/-7`, diff SHA-256
+`53be52fbc08bbbc5f0b775f46239af93705a2a34798e09632d27724c82d89213`)에 있고 source `e0ca527`은 그대로입니다.
+
+증명 출처를 세 가지로 구분합니다 — **직접**(이 계약을 겨냥한 테스트), **하위 계층**(production
+archive의 기존 테스트), **위임**(호출 관계로 상속).
+
+| # | 항목 | 증명 출처 | 비고 |
+|---|---|---|---|
+| 1 | receipt blob 이전 crash | 직접(fake) | controller seam |
+| 2 | blob 후 index 전 orphan → 재시도 복구 | **직접(production archive)** + 하위 계층 | `os.link`를 finalization 이름에만 표적 주입해 실제 blob→index 순서를 promotion 경로로 통과. fsync 세부는 `test_exact_restore_receipts.py`의 기존 테스트와 합성 |
+| 3 | finalization 후 save 전 crash | 직접(fake) | controller seam |
+| 4 | successor 교체 후 ACK 유실 | 직접(fake) | controller seam |
+| 5 | 부재·손상·불일치 → device I/O `0` | 직접 | 세 경우 모두, write·observe·resolve **세 카운터**로 |
+| 6 | 같은 sentinel id replay 거부 | 직접 | `create`와 `arm` **둘 다**, 세 카운터 `0` |
+| 7 | 조기 predecessor bundle의 멱등 | 직접(bytes 동일성) | clear 전후 receipt·finalization **바이트 동일** 단언 |
+| 8 | sentinel-only archive → Q2 FAIL | **직접(실 verifier·실 archive)** + 위임 | `q2_restore_unfinalized`로 코드 고정, App `_prepare`가 같은 거부를 전파하고 collector plan을 만들지 않음을 별도 고정 |
+| 9 | lock order | 직접(한 방향) | **controller의 archive 접근이 journal claim 안**임을 단언. promotion과 **baseline arm 경계**를 모두 창 안에 포함. 역방향 부재는 증명하지 않음 |
+
+### 문언을 좁힌 것
+
+- 항목 9는 "journal→archive 단방향 검증"이 아니라 **"controller의 archive 접근이 journal claim 안에
+  있다"**입니다. 단위 테스트가 역방향의 부재를 증명하지는 않습니다.
+- 항목 1·3·4는 **in-memory double 기반의 controller seam 증명**입니다. production의 durable filesystem
+  ordering은 항목 2의 통합 테스트와 `test_exact_restore_receipts.py`의 기존 fsync·멱등 테스트가
+  담당하며, **fake만으로 durability를 증명했다고 적지 않습니다.**
+
+### addendum 2에서 부정확했던 서술
+
+- "#5 기존 2개 + `observation_count` 단언 추가"는 `ccff2b5` 기준으로 부정확했습니다. 그 시점에 mismatch
+  테스트에는 `observation_count`가 없었고 resolve는 카운터 자체가 없었습니다. `9a77601`에서 세 카운터로
+  통일했습니다.
+- "9항목 전부 이행"은 항목별 강도를 구분하지 않은 과대기록이었습니다. 위 표가 정확한 상태입니다.
+
+### 검증
+
+exact-restore와 app-async 계열 **358 passed / 0 failed**, 변경 3파일 ruff lint 통과: **(c)**. 전체 unit
+suite에는 frozen linkage 영역의 flaky 실패가 실행마다 다른 집합으로 나타나며 이 변경과 무관합니다 —
+HEAD 소스로도 재현되고 frozen test는 손대지 않았습니다.
