@@ -1447,6 +1447,7 @@ class ExactRestoreController:
             except (TypeError, ValueError) as error:
                 raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL) from error
             self._require_operation_not_finalized(promoted.operation_id)
+            self._persist_predecessor_success(qualification_receipt)
             self._save_exact(promoted)
             promoted_payload = promoted.model_dump(mode="json")
             try:
@@ -1475,6 +1476,12 @@ class ExactRestoreController:
                 qualification_receipt_sha256 = qualification_receipt.receipt_sha256
                 if qualification_receipt_sha256 != record.qualification_receipt_sha256:
                     raise ExactRestorePreflightError(ExactRestoreErrorCode.AUTHORITY)
+                # The embedded record can be self-consistent while the archive holds nothing, so
+                # an unbarriered predecessor must never reach a device write through this arm.
+                self._confirm_archived_success(
+                    qualification_receipt,
+                    code=ExactRestoreErrorCode.AUTHORITY,
+                )
             else:
                 qualification_receipt_sha256 = None
             self._validate_authority(
@@ -2254,6 +2261,40 @@ class ExactRestoreController:
             or confirmed.get("disposition_sha256") != payload.get("disposition_sha256")
         ):
             raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+
+    def _confirm_archived_success(
+        self,
+        receipt: ExactRestoreReceipt,
+        *,
+        code: ExactRestoreErrorCode,
+    ) -> None:
+        """Prove the archive already holds this exact finished receipt and its finalization."""
+
+        receipt_store = self._qualification_receipts
+        if receipt_store is None:
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+        try:
+            receipt_store.confirm_operation_finalization(receipt)
+        except BaseException as error:
+            raise ExactRestorePreflightError(code) from error
+
+    def _persist_predecessor_success(self, receipt: ExactRestoreReceipt) -> None:
+        """Bind a finished predecessor before the journal stops describing it.
+
+        A sentinel cycle that reached FINAL_VERIFIED has already completed its verified writes.
+        Once promotion replaces the live record, nothing else in the journal names that operation,
+        so its permanent replay barrier has to exist before the replacement rather than only after
+        the whole two-cycle flow finishes.
+        """
+
+        receipt_store = self._qualification_receipts
+        if receipt_store is None:
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+        try:
+            receipt_store.persist_final_verified_receipt(receipt)
+        except BaseException as error:
+            raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL) from error
+        self._confirm_archived_success(receipt, code=ExactRestoreErrorCode.JOURNAL)
 
     def _require_operation_not_parked(self, operation_id: str) -> None:
         receipt_store = self._qualification_receipts

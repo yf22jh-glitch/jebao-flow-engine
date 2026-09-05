@@ -43,6 +43,7 @@ from jebao_flow.exact_restore import (
     OuterControlSnapshot,
     RestorePowerPolicy,
     SafeManualTarget,
+    _receipt_from_final_verified_record,
     prepare_exact_restore_record,
     prepare_qualified_final_restore_record,
     system_boot_identity_sha256,
@@ -769,6 +770,18 @@ def _prepared(
     )
 
 
+def _receipt_store_with_predecessor(
+    record: ExactRestoreRecord,
+) -> MemoryQualificationReceiptStore:
+    """Mirror the promotion step that archives a finished predecessor before a successor arms."""
+
+    store = MemoryQualificationReceiptStore()
+    parent = record.qualification_final_record
+    if parent is not None:
+        store.persist_final_verified_receipt(_receipt_from_final_verified_record(parent))
+    return store
+
+
 def _armed_controller(
     *,
     cycle: ExactRestoreCycle = ExactRestoreCycle.BASELINE_RESTORE,
@@ -786,7 +799,7 @@ def _armed_controller(
     prepared = _prepared(cycle=cycle, baseline=baseline)
     store = MemoryStore()
     guard = FakeGuard()
-    qualification_store = MemoryQualificationReceiptStore()
+    qualification_store = _receipt_store_with_predecessor(prepared)
     harness = RestoreHarness(
         prepared.baseline,
         store,
@@ -977,7 +990,7 @@ def test_baseline_restore_arm_remains_available_after_original_capture_ages() ->
         guard,
         observe=harness.observe,
         resolve_device=harness.resolve_device,
-        qualification_receipts=MemoryQualificationReceiptStore(),
+        qualification_receipts=_receipt_store_with_predecessor(prepared),
         clock=lambda: current,
         monotonic_clock=lambda: MONOTONIC_NS,
         boot_identity=lambda: BOOT_A_SHA256,
@@ -2844,7 +2857,7 @@ async def test_qualified_baseline_can_stage_and_complete_one_distinct_phase5_res
         final_guard,
         observe=final_harness.observe,
         resolve_device=final_harness.resolve_device,
-        qualification_receipts=MemoryQualificationReceiptStore(),
+        qualification_receipts=_receipt_store_with_predecessor(staged),
         clock=lambda: NOW + timedelta(seconds=1),
         monotonic_clock=lambda: MONOTONIC_NS,
         boot_identity=lambda: BOOT_A_SHA256,
@@ -2902,3 +2915,102 @@ print(json.dumps(sorted(name for name in frozen if name in sys.modules)))
     )
 
     assert json.loads(result.stdout) == []
+
+
+@pytest.mark.asyncio
+async def test_promotion_archives_the_predecessor_before_replacing_the_journal() -> None:
+    """A finished sentinel gets its permanent barrier while the journal still names it."""
+
+    controller, store, _guard, _harness, _armed = _armed_controller(
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION
+    )
+    qualified = await controller.execute()
+    assert qualified.phase is ExactRestorePhase.FINAL_VERIFIED
+    archive = controller._qualification_receipts
+    assert isinstance(archive, MemoryQualificationReceiptStore)
+    assert archive.load_operation_finalization(qualified.operation_id) is None
+
+    promoted = controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    sentinel_receipt = _receipt_from_final_verified_record(qualified)
+    finalization = archive.load_operation_finalization(qualified.operation_id)
+    assert finalization is not None
+    assert finalization["receipt_sha256"] == sentinel_receipt.receipt_sha256
+    assert archive.load_final_verified_receipt(sentinel_receipt.receipt_sha256) is not None
+    assert promoted.cycle is ExactRestoreCycle.BASELINE_RESTORE
+    # The replay surface the barrier closes: the journal no longer names the sentinel operation.
+    assert store.record is not None
+    assert store.record["operation_id"] == "distinct-baseline-operation"
+
+
+@pytest.mark.asyncio
+async def test_promotion_does_not_replace_the_journal_when_the_barrier_is_unconfirmed() -> None:
+    controller, store, _guard, _harness, _armed = _armed_controller(
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION
+    )
+    qualified = await controller.execute()
+    archive = controller._qualification_receipts
+    assert isinstance(archive, MemoryQualificationReceiptStore)
+    archive.fail_finalization_confirm = True
+    before = copy.deepcopy(store.record)
+
+    with pytest.raises(ExactRestorePreflightError) as refused:
+        controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    assert refused.value.code is ExactRestoreErrorCode.JOURNAL
+    assert store.record == before
+    assert ExactRestoreRecord.model_validate(store.record).operation_id == qualified.operation_id
+
+
+def test_baseline_arm_refuses_an_unarchived_predecessor_before_any_device_io() -> None:
+    prepared = _prepared(cycle=ExactRestoreCycle.BASELINE_RESTORE)
+    store = MemoryStore()
+    store.record = prepared.model_dump(mode="json")
+    harness = RestoreHarness(prepared.baseline, store)
+    controller = ExactRestoreController(
+        store,
+        FakeGuard(),
+        observe=harness.observe,
+        resolve_device=harness.resolve_device,
+        # Nothing was ever archived for the embedded predecessor.
+        qualification_receipts=MemoryQualificationReceiptStore(),
+        clock=lambda: NOW,
+        monotonic_clock=lambda: MONOTONIC_NS,
+        boot_identity=lambda: BOOT_A_SHA256,
+    )
+
+    with pytest.raises(ExactRestorePreflightError) as refused:
+        controller.arm(_authority(prepared))
+
+    assert refused.value.code is ExactRestoreErrorCode.AUTHORITY
+    assert harness.writes == []
+    assert ExactRestoreRecord.model_validate(store.record).phase is ExactRestorePhase.PREPARED
+
+
+def test_baseline_arm_refuses_a_predecessor_bound_to_a_different_receipt() -> None:
+    prepared = _prepared(cycle=ExactRestoreCycle.BASELINE_RESTORE)
+    store = MemoryStore()
+    store.record = prepared.model_dump(mode="json")
+    harness = RestoreHarness(prepared.baseline, store)
+    archive = _receipt_store_with_predecessor(prepared)
+    parent = prepared.qualification_final_record
+    assert parent is not None
+    # Keep the operation but bind it to a receipt digest the embedded record does not carry.
+    finalization = archive.finalizations[parent.operation_id]
+    finalization["receipt_sha256"] = _digest("some-other-receipt")
+    controller = ExactRestoreController(
+        store,
+        FakeGuard(),
+        observe=harness.observe,
+        resolve_device=harness.resolve_device,
+        qualification_receipts=archive,
+        clock=lambda: NOW,
+        monotonic_clock=lambda: MONOTONIC_NS,
+        boot_identity=lambda: BOOT_A_SHA256,
+    )
+
+    with pytest.raises(ExactRestorePreflightError) as refused:
+        controller.arm(_authority(prepared))
+
+    assert refused.value.code is ExactRestoreErrorCode.AUTHORITY
+    assert harness.writes == []
