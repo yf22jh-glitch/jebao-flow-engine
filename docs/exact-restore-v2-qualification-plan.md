@@ -1279,9 +1279,15 @@ read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 �
    소비하는데 **코드에는 그 구간의 bound가 없습니다.** 그래야 `720 = 60 + 300 + 300 + 60`이 실제
    검사 시점과 맞습니다.
 
-   cap을 넘겼다면 **token `0` · 중단 · 보고**하고, **live state를 exact reload해 어디서 넘겼는지
-   기록**합니다. 그 다음은 상태에 따라 갈립니다.
-   - 아직 **tombstone**이면 durable 변경이 없으므로 새 승인 **B1**으로 재수집이 가능합니다.
+   cap을 넘겼다면 **token `0` · 중단 · 보고**하고, **live journal과 manifest 경로를 모두 exact
+   reload해** 어디까지 진행됐는지 기록합니다. cap의 시작점이 persist보다 앞이므로 **manifest가
+   이미 durable하게 저장돼 있을 수 있습니다** — journal semantic mutation이 `0`인 것과 host durable
+   mutation이 `0`인 것은 다릅니다. 다음 두 가지로 갈립니다.
+   - **journal이 아직 tombstone**이면 journal·tombstone은 불변이므로 새 승인 **B1**으로 재수집이
+     가능합니다. 다만 **방금 저장된 manifest는 stale candidate로 보존하고 재사용은 `0`**입니다.
+     fresh artifact와 **새 `operation_nonce`**로 새 candidate를 만들고, **새 승인 C** 아래에서 새
+     owner-only manifest를 persist합니다. 기존 경로를 덮어야 한다면 **그 overwrite까지 명시 승인**
+     대상입니다.
    - 이미 **`PREPARED`**면 **recapture·clear·재prepare 모두 불가**입니다 — 실패표의 dead-end 행
      그대로입니다.
 
@@ -1501,8 +1507,13 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
 
 - **capture 직전** 앱·Home Assistant·장비 TCP connection·모든 code writer 부재를 다시 확인합니다.
 - **capture부터 park 완료까지** device contact와 write는 `0`이고 단일 제어권을 유지합니다.
-- 그 사이에 **어떤 접촉이나 지연, 또는 의심이 생기면 그 artifact 재사용은 `0`**입니다. 새 승인
-  B3부터 다시 시작합니다.
+- 그 사이에 **상태 불변에 의심을 만드는 사건**이 하나라도 생기면 그 artifact 재사용은 `0`이며 새
+  승인 B3부터 다시 시작합니다. 해당하는 것은 **device contact 또는 write, 다른 writer의 등장,
+  단일 제어권 상실, 예기치 않은 pause·interruption, power·reboot** 등입니다.
+- **연속적으로 진행되는 정상 처리 시간 자체는 금지 대상이 아닙니다.** artifact → candidate →
+  host 승인 → persist·exact reload → `park-verify` → consent → park 에는 필연적으로 시간이
+  흐릅니다. 코드에 artifact age 상한이 없다는 사실은 그대로 두되, 근거 없는 숫자 상한을 새로
+  만들지도 않습니다. 구분 기준은 **경과 시간이 아니라 위에 열거한 사건의 유무**입니다.
 
 #### 순서와 승인
 
