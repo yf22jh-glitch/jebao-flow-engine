@@ -1393,6 +1393,10 @@ write)를 받습니다. 셋은 서로를
    **0단계의 두 config 값 — `runtime.dry_run` 이 `true`, 모든 configured device의
    `control.allow_hardware_writes` 가 `false` — 을 값으로 다시 보는 것이 포함**됩니다. digest만
    맞추고 값을 건너뛰지 않습니다.
+
+   **하나라도 어긋나면 manifest persist `0` · `prepare` `0` · tombstone 불변 · `NO-GO`**입니다.
+   기록하고 보고하며, **그 자리에서 파일이나 값을 고쳐 계속하지 않습니다.** 이후의 새 시도는 위
+   "시도 예산"을 따릅니다.
 2. **예산을 다시 계산합니다.** 4단계에서 충분했더라도 5단계의 승인 상의가 길어졌다면 지금은
    부족할 수 있습니다. `now < captured_at + 1060초`이고 first-wire 잔여가 `≥ 720초`인지 **다시
    계산해 표시**합니다. **하나라도 실패하면 manifest save `0`, `prepare` `0`, tombstone 불변으로
@@ -1632,10 +1636,34 @@ receipt·bundle digest, 두 cycle의 실측 coherence/acquisition span, 선행�
   파라미터 형식을 그대로 따릅니다.
 
 **실패해도 같은 새 파일에** 어느 분기로 갔는지와 durable state를 남깁니다. token·private root·
-host·container 이름은 기록하지 않습니다. 계획과 실행을 나중에 대조할 수 있도록 다음도 함께 남깁니다 —
-**각 cycle의 실제 action outcome vector**(write / `ALREADY_SATISFIED` skip /
-`VERIFIED_AFTER_UNCERTAIN`), **device read·write 횟수를 B1 / B2 /(발생했다면) B3로 구분해**,
-**여섯 승인 각각의 실제 범위**, 그리고 **실패 분기에 진입했는지와 어느 행이었는지**.
+host·container 이름은 기록하지 않습니다. 계획과 실행을 나중에 대조할 수 있도록 다음도 함께
+남깁니다 — **각 cycle의 실제 action outcome vector**(write / `ALREADY_SATISFIED` skip /
+`VERIFIED_AFTER_UNCERTAIN`), **앞서 열거한 실제 승인 축·attended grant·park 승인·consent 각각의
+실제 범위**(발생하지 않은 것은 미발생으로), 그리고 **실패 분기에 진입했는지와 어느 행이었는지**.
+
+**device read·write 계수는 B1 / B2 /(발생했다면) B3로 구분해 적되, 모든 값이 exact fact인 것은
+아닙니다.**
+
+- **B1·B3** — artifact가 남으므로 **exact count**입니다.
+- **B2 read** — action당 기본 `2`회이지만, 첫 read가 만족으로 보이고 두 번째가 drift를 보여 write로
+  가면 `3`회입니다. **첫 read는 journal에 보존되지 않으므로 completed outcome만으로 그 분기를
+  사후 복원할 수 없습니다.** 보존된 계수가 있으면 exact로 적고 등급을 붙이며, 없으면 **계약상
+  min/max 또는 관측 가능한 call count로 좁혀 (c)**로 적습니다. **추측한 수를 exact로 쓰지
+  않습니다.**
+- **write** — controller의 **write invocation·attempt 수와 outcome vector**를 기록합니다.
+  `VERIFIED_AFTER_UNCERTAIN`은 이름 그대로 **실제 wire 적용 여부가 불확실**하므로 물리 write
+  확정으로 세지 않습니다.
+
+**기록은 run 파일에서 끝나지 않습니다.** `AGENTS.md` §8의 완료 정의는 `docs/hardware-readiness.md`의
+해당 "현재 판정" 행 갱신까지 포함합니다.
+
+- 새 run 파일을 commit하고 `docs/runs/README.md` 색인에 링크합니다.
+- **성공 시** — receipt 두 개, qualified bundle, staged phase-5 record, Q2 산출물을 **exact confirm한
+  범위에 맞춰** standalone exact-restore 선행조건 행을 갱신합니다. **이것이 앱 live-write나 새 Q2
+  operation의 GO를 자동으로 만들지 않습니다.**
+- **qualification은 성공했으나 10단계만 실패하거나 부분 설치**라면 **exact-restore receipt 선행조건과
+  Q2 preparation 상태를 분리해** 적습니다. 한 덩어리로 올리면 부분 실패에서 과대판정이 됩니다.
+- **실패 시** — 기존 `NO-GO` / `BLOCKING`을 그대로 유지하고 새 run 링크만 추가합니다.
 
 ---
 
@@ -1654,6 +1682,7 @@ host·container 이름은 기록하지 않습니다. 계획과 실행을 나중�
 | **sentinel(depth `0`)** `PREPARED`/`ARMED`, 첫 possible write 이전, **challenge 실패·만료** | 먼저 **"단일 제어권 구간"의 판정을 통과해야 합니다** — 그 구간이 연속으로 유지됐음을 exact evidence로 확인할 수 없으면 continuation도 재발급도 없습니다. **host command 실패 자체가 continuation 권한을 만들지 않습니다.** 통과했다면 최초 1회에 한해, **재발급 시점 first-wire 잔여가 `720초` 이상이면 같은 record에서 1회 재발급** 가능합니다. 그 `720초`는 다시 `60` transition + `300` challenge + `300` authority + `60` margin이므로, **재발급 precommit 직후부터 새 challenge 표시까지에도 같은 `60초` cap이 적용됩니다.** 잔여가 부족하거나 이미 1회 재발급했다면 **dead-end**이므로 중단·보고합니다 |
 | **baseline(depth `1`)** — 그리고 이 경계를 phase-5(depth `2`)까지 볼 경우 그쪽도 — `PREPARED`/`ARMED`, **challenge 실패·만료** | **capture-age `720초`를 적용하지 않습니다.** freshness 게이트는 sentinel cycle 전용이므로 여기에 그 예산을 걸면 코드에 없는 gate로 유효한 재발급을 dead-end로 오판합니다. 첫 실패에서 중단·보고하고 자동 재시도 `0` 뒤, **A+B2+C+D와 새 precommit을 재승인**하면 같은 record에서 1회 재발급이 가능합니다 |
 | **sentinel(depth `0`)** `PREPARED`/`ARMED`, **`BASELINE_EXPIRED`** | **사용할 수 있는 attended entry가 없습니다.** park·recover·clear·재prepare 모두 불가하며 그대로 두고 중단·보고합니다. 이 만료는 **sentinel cycle에만** 발생합니다 |
+| 모든 cycle, **config lock mismatch** (`runtime.dry_run` 이 `true`가 아니거나 어떤 device의 `control.allow_hardware_writes` 가 `false`가 아님) | **이 계획에는 same-record continuation entry가 없습니다.** 값을 고쳐 재발급하는 우회를 만들지 않기 위함입니다. token `0` · `NO-GO` · 기록 · 보고로 닫습니다. process·TCP 실패는 이 행이 아니라 "단일 제어권 구간" 분기가 맡습니다 |
 | 모든 cycle, **digest mismatch** | **사용할 수 있는 attended entry가 없습니다.** cycle별 offline 검토값과 어긋난 것이므로 cycle과 무관하게 중단·보고하며 park·recover·clear·재prepare 모두 불가입니다 |
 | `AWAITING_FINAL_VERIFY`, prefix 완전, inflight·error·final evidence 없음 | **park 가능하지만 manifest만으로는 안 됩니다.** 아래 "park을 선택했을 때"를 그대로 따릅니다 |
 | `FINAL_VERIFIED`, archive·ACK 문제 | **cycle과 depth에 맞는 기존 idempotent continuation을 같은 command family로 재개합니다. 임의의 `clear`를 호출하지 않습니다** — 아래 세 경로 참조. 셋 다 **새 device/restore attended grant는 필요하지 않지만 host mutation 승인 범위는 필요합니다** |
