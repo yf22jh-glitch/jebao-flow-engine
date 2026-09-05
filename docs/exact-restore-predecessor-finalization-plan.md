@@ -1,6 +1,6 @@
 # Exact-restore predecessor success finalization invariant
 
-상태: **PLAN ONLY / DEVICE NETWORK 0 / JOURNAL CHANGE 0 / ARCHIVE CHANGE 0 / HA CHANGE 0**
+상태: **착지 완료 (commit `8856b13`) / DEVICE NETWORK 0 / JOURNAL CHANGE 0 / ARCHIVE CHANGE 0 / HA CHANGE 0** — 말미의 실행 addendum을 보십시오.
 
 작성일: 2026-09-05
 
@@ -152,3 +152,55 @@ archive 쪽은 기존 `persist_final_verified_receipt()`·`confirm_operation_fin
 이 계획과 그 source commit은 **repository 변경만**입니다. v2 qualification의 4~6단계는 이것과 재설계된
 disposition 일반화가 **모두** 착지하고 그 문서의 정정·preflight가 닫힌 뒤에만 승인 대상이 됩니다. 앱
 live-write와 새 qualification은 계속 **NO-GO / BLOCKING**입니다.
+
+## 실행 addendum — 착지
+
+착지 사실은 다음과 같습니다: **(b)**.
+
+- commit `8856b13`, 2파일 `+156/-3`, diff SHA-256
+  `36f8910e96543c857617d314f99eb0ea6cc8093592ebcac767d1424a626d20f5`
+
+두 경계가 계약대로 들어갔습니다. 경계 1은 `promote_to_baseline_restore()`에서
+`_require_operation_not_finalized(promoted.operation_id)` 직후, `_save_exact(promoted)` **직전**에
+`_persist_predecessor_success(qualification_receipt)`를 호출합니다. receipt는 그 자리에서 이미 도출돼
+있어 추가 load가 없습니다. 경계 2는 `arm()`의 baseline 분기에서 embedded receipt digest 대조 **직후**
+`_confirm_archived_success(...)`를 호출합니다. 두 helper 모두 receipt store가 없으면 `JOURNAL`로
+닫습니다.
+
+### 세 계층 확인 결과
+
+범위 산정이 세 번 틀렸던 전례 때문에 구현 전에 세 계층을 각각 확인했습니다: **(c)**.
+
+- **archive 시점**: `persist_final_verified_receipt()`가 receipt blob과 finalization index의 순서·fsync를
+  내부에서 처리하고, 기존 항목이 있으면 `_require_exact_finalization_snapshot()`으로 exact 재확인하므로
+  멱등입니다. 따라서 나중 `clear_after_receipt()`가 sentinel을 다시 저장해도 충돌하지 않습니다.
+- **실행 시점**: `promote_to_baseline_restore()`가 이미 journal claim을 보유하고 receipt를 도출한
+  상태이며, `_require_operation_not_finalized()`는 promoted(baseline) id를 검사하므로 sentinel id의 조기
+  finalization과 의미가 섞이지 않습니다. `_require_operation_not_parked()`는 version `2` parked만
+  거부하므로 version `1` success와 충돌하지 않습니다.
+- **저장 시점 decoder**: version `1` 경로의 `_require_receipt_backing_finalization()`은 backing receipt
+  존재만 요구하고 사유를 하드코딩하지 않습니다. 하드코딩은 version `2` parked 경로에만 있었고, 이
+  변경은 그 경로를 지나지 않습니다.
+
+### 회귀
+
+- promotion이 predecessor를 archive한 뒤에야 journal을 교체함
+- archive confirm이 실패하면 **journal을 교체하지 않고** 원래 sentinel record가 그대로 남음
+- baseline `arm`이 archive 부재에서 `AUTHORITY`로 닫히고 **device write `0`**
+- baseline `arm`이 archive가 다른 receipt에 결속돼 있을 때도 닫히고 device write `0`
+
+기존 baseline fixture는 promotion을 건너뛰고 record를 직접 설치했으므로, 그 단계를 반영하도록
+`_receipt_store_with_predecessor()`로 공통화했습니다. 이것은 테스트를 통과시키려는 우회가 아니라
+**실제 흐름과 fixture의 어긋남을 이 변경이 드러낸 것**입니다.
+
+전체 unit suite `1848 passed`, 변경 파일 ruff lint 통과. 실행 전 컨테이너 파일이 worktree와 바이트
+동일함을 대조했고 import 경로도 `/work/src`로 확인했습니다: **(c)**.
+
+### 남은 것
+
+blocker 1(receipts decoder의 하드코딩된 사유·key 집합)과 blocker 2(baseline cycle의 정상
+`ALREADY_SATISFIED` skip)는 그대로입니다. 재설계된 disposition 일반화가 다음 작업이며, 거기서
+`bdfaf5c`의 완화 근거도 새 outcome 집합에 대해 재도출해야 합니다. v2 qualification 4~6단계는 계속
+승인 대상이 아닙니다.
+
+**이 구현은 독립 교차검증을 받지 못했습니다.**
