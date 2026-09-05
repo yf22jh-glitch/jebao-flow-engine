@@ -526,3 +526,175 @@ baseline restore cycle의 "exact 6-action plan, 최대 6 write"는 이미 같은
 hardware는 계속 **NO-GO**입니다. 이 절은 승인 경계를 넓히지 않으며, 0단계(private state read),
 1단계(device read), 4~6단계(device write)의 분리도 그대로입니다. 이 정정을 쓰는 동안 장비·앱·
 Home Assistant·private journal·archive·recovery supervisor 접촉은 `0`입니다.
+
+---
+
+## 2026-09-05 addendum 정정 (3차) — 교차검토 R6~R11
+
+앞 두 addendum을 고치지 않고 여기서 대체합니다. 이 절 끝에 **운영자가 앞뒤를 합성하지 않아도
+되도록 최종 실행 checklist를 한 곳에 모았습니다.**
+
+### R6 — age 산술의 timestamp가 게이트가 쓰는 것과 달랐습니다
+
+2차 addendum은 `1244.134초` 요구와 `555.866초` 여유를 적었습니다. **그 숫자를 철회합니다.**
+게이트가 쓰는 `captured_at`은 제가 대입한 값이 아닙니다.
+
+- artifact별 `captured_at` = **채택된 pair의 두 read completion 중 max**입니다. series 전체의 종료
+  시각이 아닙니다.
+- baseline의 `captured_at` = `min(primary, corroborating)`입니다.
+
+즉 제가 넣은 `01:21:10.832179Z`(primary series 수집 종료)은 채택 pair의 raw-read completion보다
+뒤일 수 있어 capture age를 **작게** 보이게 합니다. 반대편에서는 첫 action의 completion이 실제
+first wire보다 뒤이므로 age를 **크게** 보이게 합니다. 두 오차의 순효과는 보존된 산출물을 읽지
+않고는 확정할 수 없고, **이 작업은 private 산출물을 읽지 않았습니다.**
+
+저장소 안의 값만으로 안전하게 말할 수 있는 것은 **보수적 봉투**뿐입니다.
+
+- `captured_at ≥ primary series 시작 01:20:19.165612Z`
+- `first wire ≤ 첫 action completion 01:41:34.966170Z` (그 action은 `written_verified`이므로
+  wire는 completion보다 앞섭니다)
+- 따라서 이전 run의 실제 게이트 요구 `≤ (01:41:34.966170 − 01:20:19.165612) + 20 =`
+  **`1295.800558초`**
+- `1800`의 **증명 가능한 최소 여유** = **`504.199442초` (약 `8분 24초`)**
+
+`1800` 결론은 유지됩니다. 바뀌는 것은 근거의 정직성입니다 — 이것은 "실제 요구와 여유"가 아니라
+**"요구의 상한과 여유의 하한"**입니다. 실제 `captured_at`과 first-wire 시각은 보존 산출물에서
+읽지 않았습니다. 앞선 commit 본문의 `1244.134` / `555.866`도 이 봉투로 대체합니다.
+
+### R7 — 표 E와 acquisition `30`의 관계가 여전히 틀렸습니다
+
+2차 addendum은 E를 "약 5초 + local overhead이고 acquisition `30`이 더 좁아 비구속"이라고
+고쳤습니다. 앞부분은 맞고 **뒷부분이 틀립니다.** action별 `_fresh()`는
+`received − observed ≤ max_observation_age`만 검사합니다. `max_final_acquisition_duration`은
+baseline admission과 final pair capture에만 적용되고 이 site에는 **적용되지 않습니다.**
+
+정확한 문언은 이렇습니다 — **"보존 실측상 약 `5초` + local overhead로 `1800`보다 매우 작다.
+network·identity 경로가 정상 종료하는 관측이며, `30초` acquisition 게이트가 이 site를 직접
+구속하지는 않는다."** 표의 F는 순서 부등식상 final total `≤ 30`이 `completed − observed`도
+덮으므로 그대로 둡니다.
+
+### R8 — offline 도출은 production store와 명시적으로 격리해야 합니다
+
+R5의 "network-none offline 도출"을 그대로 읽으면 production `prepare` 경로나 CLI를 부를 수
+있습니다. **그러면 고정 journal의 tombstone이 즉시 교체됩니다.** 도출은 순수 경로로 한정합니다.
+
+- `build_verified_baseline`과 계획 수립 함수 같은 **결정론적 순수 경로만** 사용하고, 고정
+  journal·archive·guard에는 접근하지 않습니다. 필요하면 완전히 격리된 복사본에서 수행합니다.
+- **두 write plan을 모두 미리 도출·검토합니다** — sentinel 8-action과 baseline 6-action.
+  baseline plan은 promotion 뒤에야 live에 나타나므로 그때 처음 보면 늦습니다.
+
+대조 실패의 경계도 공개합니다. live `prepare` 뒤 sentinel의 `action_plan_sha256`이 offline
+검토값과 다르거나, promotion 뒤 baseline digest가 다르면 **`PREPARED` journal이 남고 이는 Work B
+park 대상이 아닙니다**(R2와 같은 dead-end). 따라서 mismatch 시 **token을 제시하지 않고 즉시
+중단·보고하며, clear·편집·재prepare를 시도하지 않습니다.** 이 상황 자체를 줄이기 위해 `prepare`
+직전에 source·config·manifest·artifact digest를 exact로 재확인합니다.
+
+### R9 — Phase 0 device-read 범위를 숫자로 고정합니다
+
+"primary와 corroborating 두 series"만으로는 승인 범위가 되지 않습니다. 다음을 고정합니다.
+
+| 항목 | 값 | 근거 |
+|---|---|---|
+| series 수 | `2` (primary, corroborating) | 서로 다른 plan·series의 독립 확증 |
+| series당 predeclared pair 수 | `2` | 이전 run과 동일하며 채택 여지를 남기는 최소값 |
+| transport policy | `explicit_only` | exact-restore 증거의 유일한 허용 정책 |
+| discovery/control timeout | `5초` | manifest의 identity age와 정합 |
+| cadence | manifest에 고정한 단일 값 | 수집기가 사전 선언 없이는 실행하지 않음 |
+| 채택 ordinal | **마지막**(pair 수 `2`이면 ordinal `1`) | 아래 참조 |
+| retry | **`0`** | 수집기는 각 ordinal을 한 번만 잡고 invalid read를 재시도가 아니라 증거로 남깁니다 |
+| 실패 조건 | 두 series 중 하나라도 `2/2` accepted가 아니면 **`NO-GO`, 재수집** | 완화 금지 |
+
+**채택 ordinal을 마지막으로 두는 이유**는 예산 때문입니다. artifact의 `captured_at`은 채택된 pair
+두 read completion의 max이므로, 늦은 ordinal을 채택할수록 `captured_at`이 늦어지고 first-wire
+예산이 그만큼 늘어납니다. baseline의 `captured_at`은 두 series의 min이므로, **두 series를 서로
+가깝게 수집하고 양쪽 모두 늦은 ordinal을 채택**하는 것이 예산 측면에서 최선입니다. 이전 run도
+각 series에서 ordinal `1`을 채택했습니다.
+
+### R10 — "충분한 여유"를 숫자로 고정합니다
+
+사람의 즉석 판단에 남기면 R2의 dead-end를 그대로 재현합니다. 다음을 고정합니다.
+
+**`prepare` 시점의 최소 잔여 first-wire 예산 = `720초` (12분).**
+
+도출 근거입니다.
+
+- attended challenge의 최대 허용 수명 `300초` — 낭독과 입력이 이 안에 끝나야 합니다.
+- 발급된 authority의 수명 `300초` — `arm` 이후 `execute`가 첫 write에 이 안에 도달해야 합니다.
+- 첫 action 직전의 fresh read 비용 — discovery `5초`와 identity-after `5초`의 고정 창에
+  connect·authenticate·read가 더해집니다. 보수적으로 `60초`를 둡니다.
+- 합 `660초`에 여유를 더해 `720초`로 올립니다.
+
+따라서 **`prepare`는 `captured_at + 1060초`(약 `17분 40초`)보다 늦게 시작하지 않습니다.**
+`captured_at + 1780초`가 first-wire deadline이고 거기서 `720초`를 뺀 값입니다. Phase 0 직후 이 두
+시각을 계산해 표시하고, 남은 예산이 `720초` 미만이면 **tombstone을 건드리지 않고 Phase 0부터
+재수집합니다.**
+
+**challenge 재발급은 최대 `1회`**입니다. 재발급 뒤에도 잔여 예산이 `720초` 이상일 때만
+계속하고, 아니면 중단하고 재수집합니다. 이전 run에서 challenge가 한 번 만료됐으므로 이것은
+가상의 경우가 아니며, 무제한 재발급을 허용하면 예산이 조용히 소모되어 dead-end로 갑니다.
+
+이 숫자들은 maintainer 확인 대상이지만 **비어 있지는 않습니다.** hardware 승인 전에 maintainer가
+다른 값을 정하면 그 값과 근거로 이 절을 대체합니다.
+
+### R11 — 0단계는 순수 read가 아닙니다
+
+앞 addendum은 0단계를 "private state read"라고 적었습니다. 정확하지 않습니다. production journal
+store·receipt archive·guard가 고정 root를 열 때 `_probe_hardware_safety_root()`가 `0600`
+`.write-probe.<hex>` 파일을 **생성·기록·fsync·검증**합니다. 즉 host store에 일시적 write가
+발생합니다.
+
+승인 경계 문구를 다음으로 고칩니다 — **"private state read + 정상적인 일시 host-store writability
+probe. durable journal·archive의 semantic mutation은 `0`, device write는 `0`."** 이전 run 기록도
+같은 구분을 했습니다.
+
+### 비차단 두 건
+
+- **G는 D를 만족하면 자동으로 충족되는 수학적 관계가 아닙니다.** 앞 addendum의 "자동으로 넉넉히
+  만족시킨다"는 표현을 정정합니다. 정확히는 **절차적 precommit**입니다 — phase-5 staging 직후
+  device-network `0` 상태에서 곧바로 Q2/App manifest를 만들기로 미리 약속하기 때문에 `1800`이
+  충분한 것입니다. 이때 control과 ASYNC 두 Q2 manifest를 **함께** 만들고 cutoff를 고정합니다.
+- addendum 이전 본문은 역사로 남아 있으므로 아래에 최종 순서를 한 곳에 모읍니다.
+
+### 최종 실행 checklist — 이 절만 보고 실행할 수 있어야 합니다
+
+승인은 세 경계로 나뉘며 서로를 함축하지 않습니다: **0단계**(private read + 일시 probe),
+**1단계**(device read), **4~6단계**(device write).
+
+1. **0단계** — permanent barrier·tombstone·archive 교차확인, `_require_operation_not_parked()`
+   거부 확인, supervisor exited, Home Assistant 미연결, 앱 완전 종료, 모든 code writer 부재,
+   미완 journal·intent·latch 부재, UID/GID와 store owner·mode 정합, 실제 import된 `jebao_flow`의
+   경로·bytes attestation. **별도 승인 필요.**
+2. **1단계** — fresh Phase 0. series `2`개, 각 predeclared pair `2`, `explicit_only`, timeout
+   `5초`, retry `0`, 채택 ordinal은 마지막. 두 series 모두 `2/2` accepted가 아니면 `NO-GO`.
+   각 series가 coherence `≤20초`·total acquisition `≤30초`를 통과해야 합니다. **별도 승인 필요.**
+3. **2단계** — v2 manifest. `version: 2`, `max_final_pair_gap_seconds: 20`,
+   `max_final_acquisition_duration_seconds: 30`, `max_observation_age_seconds: 1800`,
+   discovery/control timeout `5초`, identity age `5초`, 역할별 accepted latent manual `30`·`89`,
+   configured `30..100` step `1`, attended maximum `60`·`89`, safe fallback
+   `Constant / Flow 30 / Frequency 20`. 세 operation id는 manifest digest에서 파생되므로 별도로
+   적지 않습니다. **sentinel slot은 적지 않습니다.**
+4. **offline 도출** — 순수 경로로 sentinel 8-action과 baseline 6-action plan을 도출하고 slot·
+   target digest·두 `action_plan_sha256`을 검토합니다. 고정 journal·archive·guard 접근 `0`.
+5. **예산 계산** — `captured_at + 1780초`(first-wire deadline)와 `captured_at + 1060초`
+   (`prepare` 최종 시각)를 계산해 표시합니다. 잔여 예산 `< 720초`이면 tombstone을 건드리지 않고
+   1단계로 돌아갑니다.
+6. **승인자 대기 완료** — 검토와 상의는 여기까지입니다. `prepare` 이후에는 넣지 않습니다.
+7. **3단계** — `prepare` 직전 source·config·manifest·artifact digest exact 재확인, 그 다음
+   `prepare`. live `action_plan_sha256`을 4번의 offline 값과 대조. 불일치면 **token 없이 중단·
+   보고**, clear·편집·재prepare 금지.
+8. **4~6단계** — challenge → arm → execute를 **즉시 연속으로**. challenge 재발급 최대 `1회`이며
+   그 뒤에도 잔여 예산 `≥ 720초`일 때만 계속. sentinel은 **8-action plan, 최대 8 device writes**.
+   promotion 뒤 baseline digest를 offline 값과 대조하고, 그 cycle은 **새 attended grant**를 받습니다.
+   baseline은 **6-action plan, 최대 6 device writes**. phase-5 staging은 device write `0`.
+   **on-site 승인·감시·즉시 물리 차단 필요.**
+9. **직후** — device-network `0` 상태에서 control과 ASYNC 두 Q2 manifest를 함께 만들고 cutoff를
+   고정합니다. baseline receipt 완료로부터 `1800초` 안입니다.
+10. **7단계** — receipt·bundle digest, 두 cycle의 실측 coherence/acquisition span, 선행조건 2의
+    상태 변화를 append-only로 기록합니다.
+
+**실패 시**: 원인 분석 → 새 disposition manifest → 별도 attended park. 자동 재시도 `0`회.
+`BASELINE_EXPIRED`나 digest mismatch로 `PREPARED`/`ARMED`가 남으면 **clear·편집·재prepare 없이
+maintainer 보고 후 중단**합니다.
+
+hardware는 이 절 이후로도 **NO-GO**입니다. 이 정정을 쓰는 동안 장비·앱·Home Assistant·private
+journal·archive·recovery supervisor 접촉은 `0`입니다.
