@@ -1131,7 +1131,7 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 |---|---|---|
 | **A** | private state read + 고정 root를 여는 것만으로 발생하는 **일시 host-store writability probe**. durable semantic mutation `0`, device write `0`. **이 축은 0단계에 한정되지 않고 전체 승인 sequence 동안의 모든 expected fixed-root open에 수반되는 probe를 포괄합니다** — 아래 참조 | repository maintainer |
 | **B1** | 1단계 Phase 0의 device **read**, 그리고 그 operation이 **반드시 남기는** owner-only collector plan·series·raw artifact의 **durable host write**. Phase 0은 읽기만 하는 단계가 아닙니다 | repository maintainer |
-| **B2** | **7·8단계의 최초 실행과, 아래 재개표로 승인된 continuation에서** controller가 계약상 수행하는 모든 device read — 각 action 이전의 fresh read, already-satisfied 분기의 두 번째 read, write 이후의 explicit verification·reconciliation 관측, 그리고 마지막 final pair capture. 여기에 딸린 discovery·identity 트래픽을 포함합니다. 재개용 B2는 **이름만 같은 별도 권한이 아니라 같은 축**이며, 재개할 때마다 그 범위로 다시 확인·승인합니다 | repository maintainer |
+| **B2** | **7·8단계의 최초 실행과, 아래 재개표로 승인된 continuation에서** controller가 계약상 수행하는 모든 device read — 각 action 이전의 fresh read, already-satisfied 분기의 두 번째 read, write 이후의 explicit verification·reconciliation 관측, 그리고 마지막 final pair capture. 여기에 딸린 discovery·identity 트래픽을 포함합니다. 재개용 B2는 **이름만 같은 별도 권한이 아니라 같은 축**이며, 재개할 때마다 그 범위로 다시 확인·승인합니다. **수량 상한은 아래 "B2의 상한"으로 유한하게 고정됩니다** | repository maintainer |
 | **B3** | 실패 후 park을 선택했을 때에 한해, 마지막 completion 뒤의 새 strict artifact 수집(device read)과 그 collector durable write. **범위는 아래 park 소절의 표로 유한하게 고정됩니다** — 수량·retry·timeout이 정해지지 않은 open-ended device contact가 아닙니다 | repository maintainer |
 | **C** | **host-state mutation** — 아래 "승인 C의 범위" 전체 | repository maintainer |
 | **D** | 두 cycle의 bounded device **write** (7·8단계). 현장 감시와 즉시 물리 차단 포함 | on-site hardware approver |
@@ -1158,10 +1158,30 @@ write set 전체**입니다. 최소한 다음을 포함합니다.
   묻어 두지 않고 별도로 승인합니다
 - **그 clear 직후의 phase-5 successor 설치**와, clear와 설치 사이의 **journal 부재 구간**. 그 구간에서
   중단되면 재개는 기존 idempotent 경계를 따르며 새로 prepare하지 않습니다
-- 직후의 control·ASYNC 두 Q2 manifest
+- 직후의 `prepare-pair`가 설치하는 **네 개의 durable object** — control·ASYNC 각각의 **collector
+  plan(빈 series 디렉터리 포함)**과 **Q2 manifest**입니다. manifest 둘만이 아닙니다.
+- 그 명령이 읽는 **owner-only epoch spec 두 개** — 이미 존재하면 exact read와 검토만이지만,
+  새로 만들거나 덮어써야 한다면 그 persist·overwrite가 **C의 범위**입니다
 
 **예상 밖 경로나 이 범위 밖의 파일 write가 관측되면 즉시 중단·보고합니다.** C는 candidate와 두
 action plan과 digest를 **보고 난 뒤에** 받으며, 그 전의 포괄 승인으로 쓰지 않습니다.
+
+### B2의 상한 — 승인 범위는 유한합니다
+
+controller loop는 유한하므로 B2도 수량으로 닫을 수 있습니다. **loop 밖의 retry는 `0`입니다.**
+
+- **action 하나당 최대 `3`회** full-state observation — 실행 전 fresh read `1`, 이미 만족된 것으로
+  보이면 skip 판정을 위한 두 번째 fresh read `1`, 그 두 번째가 drift를 보여 write로 가면 write
+  이후 fresh read `1`.
+- **cycle마다 final pair `2`회**(역할별 `1`회).
+- 따라서 sentinel은 최대 `8 × 3 + 2 = 26`회, baseline은 최대 `6 × 3 + 2 = 20`회, **두 cycle 합
+  최대 `46`회**입니다.
+- 각 full-state observation은 **discovery-before + fresh authenticated single read +
+  discovery-after**입니다.
+- 여기에 더해 **write마다 connected identity 확인이 `1`회**이므로 identity refresh는 최대
+  `8 + 6 = 14`회입니다.
+
+실패 continuation의 B2는 **남은 action과 pair 범위로 같은 산식을 다시 계산해** 그 값으로 승인합니다.
 
 ### 승인 A의 probe는 0단계에만 있지 않습니다
 
@@ -1367,7 +1387,9 @@ daemon·다른 one-shot/qualifier process는 부재여야 하고, **기존 devic
 **모든** writer process 부재가 맞습니다. 예외는 challenge가 떠 있는 이 시점에만 적용됩니다.)
 
 **exact 8-action plan, 최대 8 device writes** — 장비가 이미 그 상태이면 action이 skip될 수 있으므로
-`8`은 상한이지 확정값이 아닙니다.
+`8`은 상한이지 확정값이 아닙니다. **device read는 승인 B2의 상한 안**입니다 — 이 cycle에서 최대
+`8 × 3 + 2 = 26`회 full-state observation과 최대 `8`회 identity refresh이며, **controller loop 밖의
+retry는 `0`**입니다.
 
 on-site approver가 받아야 하는 문장:
 
@@ -1398,6 +1420,8 @@ Phase 0부터 첫 wire까지 device drift를 막는 것은 **코드 predicate가
 않습니다.** 이 검사들도 두 번째 challenge의 `300초` 안에 끝나야 합니다.
 
 **exact 6-action plan, 최대 6 device writes**(정상 경로는 write `4` + `ALREADY_SATISFIED` skip `2`).
+**device read는 승인 B2의 상한 안**입니다 — 이 cycle에서 최대 `6 × 3 + 2 = 20`회 full-state
+observation과 최대 `6`회 identity refresh이며, **loop 밖 retry는 `0`**입니다.
 이 cycle은 sentinel과 **다른 operation id, 다른 attended grant**이며, 두 번째 challenge가 첫
 승인의 범위를 암묵적으로 넓히지 않습니다. 현장 승인 문구에 **두 exact action plan이 모두 명시**돼야
 합니다.
@@ -1409,11 +1433,33 @@ qualified bundle의 불변 timestamp에 결속된 journal write입니다. **이 
 이어서 수행합니다 — bundle persist, receipt 결속 clear, journal 부재 구간, phase-5 successor
 설치가 한 흐름입니다.
 
-## 10단계 — 두 Q2 manifest · 장비 접촉 `0` · host write는 **승인 C**
+## 10단계 — `prepare-pair` · 장비 접촉 `0` · host write는 **승인 C**
 
-phase-5 staging 직후 device-network `0` 상태에서 **control과 ASYNC 두 Q2 manifest를 함께** 만들고
-cutoff를 고정합니다. **baseline receipt 완료로부터 `1800초` 안**이어야 합니다. 이것이 `1800`이
-충분하다는 근거이며, 수학적 함의가 아니라 **절차적 precommit**입니다.
+phase-5 staging 직후 device-network `0` 상태에서 실행하며, **baseline receipt 완료로부터 `1800초`
+안**이어야 합니다. 이것이 `1800`이 충분하다는 근거이며 수학적 함의가 아니라 **절차적
+precommit**입니다.
+
+**이 명령은 manifest 두 개만 쓰지 않습니다.** 두 epoch 각각에 대해 collector plan(빈 series
+디렉터리 포함)을 설치한 뒤 Q2 manifest를 설치하므로, **collector plan `2` + Q2 manifest `2` = 네
+개의 durable object**가 생깁니다.
+
+**입력 — owner-only epoch spec 두 개가 필수입니다.** 없으면 명령이 실행되지 않습니다.
+
+- 두 spec은 **`epoch_kind`만 다르고**(`independent_control` / `async`) **나머지 모든 필드가
+  동일**해야 합니다. 코드가 양쪽을 먼저 검증한 뒤에야 쓰기를 시작하므로, 불일치는 durable write
+  이전에 닫힙니다.
+- 실행 **이전에** 두 spec을 exact로 검증하고 그 equality와 transport policy(`explicit_only`)를
+  **precommit**합니다.
+- spec이 이미 존재하면 exact read와 검토로 충분합니다. **새로 만들거나 덮어써야 한다면 그
+  persist·overwrite는 승인 C의 범위**이며 명시 대상입니다.
+
+**성공 뒤** 네 durable object를 모두 exact reload하고, **두 manifest가 같은 staged phase-5
+record와 같은 operation digest에 결속됐는지** 확인합니다.
+
+**부분 설치 — 이 loop는 pair 단위로 원자적이지 않습니다.** control 쪽 plan·manifest가 설치된 뒤
+async 쪽에서 실패할 수 있습니다. 그 경우 **자동 retry `0`, 삭제 `0`, overwrite `0`**입니다. 네
+경로를 exact reload해 무엇이 설치됐는지 기록하고 **중단·보고**하며, 다음 처리는 **새 승인 C와
+별도 판단**으로 결정합니다.
 
 ## 11단계 — 기록
 
