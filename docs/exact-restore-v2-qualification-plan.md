@@ -698,3 +698,74 @@ maintainer 보고 후 중단**합니다.
 
 hardware는 이 절 이후로도 **NO-GO**입니다. 이 정정을 쓰는 동안 장비·앱·Home Assistant·private
 journal·archive·recovery supervisor 접촉은 `0`입니다.
+
+---
+
+## 2026-09-05 addendum 정정 (4차) — 교차검토 R12~R13
+
+앞 절들을 고치지 않고 여기서 대체합니다. 두 건 모두 제가 **코드가 실제로 하는 일보다 강하게**
+쓴 것입니다.
+
+### R12 — nonce 정정이 반대 방향으로 과했습니다
+
+1차 addendum은 "현재 코드는 nonce가 아니라 manifest 전체의 SHA-256에서 파생한다"고 썼습니다.
+preimage에 대해서는 맞지만, 그렇게만 읽으면 **새 nonce를 만들라는 요구가 사라집니다.** 실제로는
+`ExactRestoreOperationManifest`에 `operation_nonce`(32 hex)가 **필수 필드로 남아 있고**
+`manifest_sha256`에 포함됩니다.
+
+정확한 문언으로 대체합니다 — **"세 operation id는 nonce 하나만으로 파생되지 않는다. 새
+`operation_nonce`를 포함한 full manifest digest에 cycle label을 붙여 파생한다. fresh artifact,
+policy, nonce 중 어느 하나라도 바뀌면 세 id가 모두 바뀐다."**
+
+**2단계의 새 nonce 생성 요구는 그대로 유지됩니다.** 본문 2단계가 요구한 그대로입니다. §3 P1은
+아니지만 manifest completeness 오류였고, 그대로 뒀다면 새 manifest에서 nonce를 이월해도 된다고
+읽힐 수 있었습니다.
+
+### R13 — sentinel drift가 fail-closed한다는 서술은 source와 반대입니다
+
+1차 addendum은 "실행 시점에도 같은 함수로 slot과 기대 image를 다시 계산해 계획에 기록된 값과
+대조하므로, 장비가 그사이 drift했다면 다른 slot에 쓰는 대신 fail-closed합니다"라고 썼습니다.
+**틀렸습니다.** 그 재계산의 입력은 현재 장비 상태가 아니라 **record에 박제된 baseline의 schedule
+image**입니다. 즉 이것은 immutable plan의 **내부 일관성 검사**이지 device drift 검사가 아닙니다.
+
+wire 직전 경로를 다시 읽으면 이렇습니다.
+
+- pre-write `_fresh()`는 identity binding이 baseline과 같은지, 시간 창이 유효한지를 봅니다.
+  schedule 내용의 drift는 여기서 걸리지 않습니다.
+- `_action_satisfied()`는 "이미 목표 상태인가"만 판정합니다. 아니면 skip하지 않고 write합니다.
+- 그 write는 **baseline에서 파생된 planned image 전체**를 씁니다.
+
+따라서 Phase 0 이후 제3자가 schedule을 바꿔 놓았다면, 그 변경은 fail-closed로 막히는 것이 아니라
+**baseline 파생 image로 덮일 수 있습니다.**
+
+**새 gate를 만들라는 뜻이 아닙니다.** 이 저장소는 §2에서 pre-write gate를 더 추가하지 않기로
+했고, 그 방향을 지킵니다. 바꾸는 것은 문언입니다.
+
+- slot과 target은 **fresh baseline에서 결정**되고, wire 직전에는 immutable action이 **그
+  baseline 파생 target과 일치하는지만** 재검증됩니다.
+- Phase 0부터 첫 wire까지의 device drift를 막는 것은 **코드 predicate가 아니라 운영 전제**입니다 —
+  앱·Home Assistant·모든 writer의 부재와 단일 제어권. 0단계 preflight가 이것을 확인하는 이유가
+  바로 여기 있고, R10의 예산 상한도 이 창을 짧게 유지하려는 것입니다.
+
+### R13 (계속) — 승인 설명의 범위도 좁힙니다
+
+"active schedule과 출력은 바뀌지 않는다"는 문장을 **sentinel schedule write 자체로 한정**합니다.
+cycle 전체는 그렇지 않습니다. sentinel 앞의 safe fallback 두 action이 outer control frame을
+`TimerOFF + independent + Constant / Flow 30 / Frequency 20`으로 **의도적으로 바꿉니다.** 출력이
+바뀌는 것은 이 계획이 감수하기로 한 것이지 일어나지 않는 일이 아닙니다.
+
+on-site approver가 받아야 하는 문장으로 대체합니다.
+
+> 이 cycle은 먼저 두 장비를 bounded safe fallback(`TimerOFF + independent + Constant / Flow 30 /
+> Frequency 20`)으로 바꿔 **출력 상태를 실제로 변경**합니다. 그 다음 sentinel write는 이번 fresh
+> capture에서 결정된, **사용되지 않는 한 slot의 표현만** `ZERO ↔ EE`로 바꾸며 active schedule
+> 항목은 건드리지 않습니다. 마지막 두 쌍의 action이 원래 schedule과 원래 outer control을
+> 되돌립니다. 실패가 남길 수 있는 dwell 상태는 그 safe fallback이거나 부분 복원 상태입니다.
+
+앞 절의 최종 checklist 8번에 있는 승인 문구도 이 문장으로 읽습니다.
+
+### 이 정정으로 달라지지 않는 것
+
+hardware는 계속 **NO-GO**입니다. R13은 새 코드 gate를 요구하지 않으며, 이 절은 어떤 승인도
+넓히지 않습니다. 이 정정을 쓰는 동안 장비·앱·Home Assistant·private journal·archive·recovery
+supervisor 접촉은 `0`입니다.
