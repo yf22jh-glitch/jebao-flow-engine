@@ -1321,6 +1321,9 @@ read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 �
    reload해** 어디까지 진행됐는지 기록합니다. cap의 시작점이 persist보다 앞이므로 **manifest가
    이미 durable하게 저장돼 있을 수 있습니다** — journal semantic mutation이 `0`인 것과 host durable
    mutation이 `0`인 것은 다릅니다. 다음 두 가지로 갈립니다.
+   기록할 것은 **cycle·depth·phase, 첫 challenge가 실제로 표시됐는지, 그리고 challenge 실패
+   횟수**입니다. 그 다음은 상태에 따라 갈립니다.
+
    - **journal이 아직 tombstone**이면 journal·tombstone은 불변이므로 재개가 가능합니다. 다만
      **1단계로 돌아가야 합니다** — 새 승인 **B1**으로 fresh artifact를 다시 수집하고, 새
      `operation_nonce`로 새 candidate와 두 plan을 만든 뒤, **5단계의 B2·C·D를 전부 다시
@@ -1328,8 +1331,20 @@ read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 �
      이전 exact candidate를 보고 받은 B2·C·D는 **더 이상 같은 대상에 대한 승인이 아닙니다.**
      **방금 저장된 manifest는 stale candidate로 보존하고 재사용은 `0`**이며, 새 C가 새 persist와
      **필요하다면 기존 경로의 overwrite까지** 포함해야 합니다.
-   - 이미 **`PREPARED`**면 **recapture·clear·재prepare 모두 불가**입니다 — 실패표의 dead-end 행
-     그대로입니다.
+   - 이미 **`PREPARED`**면 **recapture·clear·재prepare는 불가**입니다. 그러나 **그 자체로
+     dead-end는 아닙니다.** `60초` cap은 이 문서가 둔 **운영 상한**이지 코드에 있는 terminal
+     state가 아닙니다. cap을 `1초` 넘겼다는 이유로 이미 교체된 journal을 영구 좌초시키는 것은
+     cap을 둔 목적과 반대입니다. **같은 record에 대한 continuation은 아래 실패표가 정하는 규칙을
+     그대로 따릅니다.**
+     - **sentinel(depth `0`)** — 첫 challenge가 표시됐다면 그것을 **첫 challenge 실패로 닫고**,
+       다음은 **재발급 1회**로 계수합니다. 새 precommit과 **A+B2+C+D 재승인** 뒤, **실제 재발급
+       시점에 first-wire 잔여 `≥ 720초`**이고 **재발급에도 같은 `60초` cap**을 적용해 진행합니다.
+       challenge가 표시되기 전에 command나 TTY가 실패했더라도, live `PREPARED`를 exact reload한
+       뒤의 같은 record continuation은 여전히 존재합니다.
+     - **baseline(depth `1`)** — 실패표대로 **capture-age `720초`를 적용하지 않고** 해당
+       continuation 규칙을 따릅니다.
+     - **dead-end는** 잔여가 부족하거나, 재발급 1회를 이미 소진했거나, digest mismatch이거나,
+       `BASELINE_EXPIRED`일 때**뿐**입니다.
 
 **live `action_plan_sha256`은 어디서 읽는가** — `prepare`의 public status는 이 digest를 내보내지
 않습니다(phase·cycle·action count 등만 있습니다). 그것을 표시하는 표면은 **attended challenge
