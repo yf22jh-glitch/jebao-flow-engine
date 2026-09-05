@@ -1270,15 +1270,43 @@ summary**이며, 거기에 `baseline_sha256`·`action_plan_sha256`·`journal_con
 표면이라 source 변경이 필요 없기 때문입니다. 승인 A 아래에서 canonical live journal을 read-only로
 model-validate해 같은 값을 얻는 방법도 가능하지만, 그 경우 사용한 exact 방법을 기록에 남깁니다.
 
+## 7~9단계는 **하나의 `qualify` 실행**입니다
+
+7·8·9단계는 별도 명령이 아닙니다. **동일한 reviewed·attested `qualify` process 한 번**이 sentinel
+`FINAL_VERIFIED` → predecessor barrier 기록 → baseline promotion → 두 번째 challenge와 grant →
+baseline `FINAL_VERIFIED` → bundle persist → receipt 결속 clear → phase-5 successor staging까지
+이어서 수행합니다. **sentinel만 끝내는 외부 entry는 없습니다.** 두 cycle 사이에 process를
+종료하거나 다른 command를 시작하지 않습니다 — 그렇게 하면 `PREPARED`/`FINAL_VERIFIED` 중간
+경계를 만들게 됩니다.
+
+운영자가 개입하는 지점은 **두 attended challenge에서 token을 보류하고 있는 동안**뿐입니다. 아래
+7·8단계의 검사는 모두 그 두 pause 안에서 수행합니다.
+
 ## 7단계 — sentinel cycle · **승인 D**
 
-**arm 직전에 장비 TCP connection과 writer 존재를 다시 확인합니다.** 하나라도 보이면 integration을
-끄거나 밀어붙이지 않고 **token 미입력 · `NO-GO` · 보고**로 닫습니다.
+**token 직전 순서를 이대로 지킵니다.** challenge를 띄운 뒤 approver가 검토하는 동안에도 다른
+writer가 붙을 수 있으므로, 확인은 challenge **이전이 아니라 token 직전**에 해야 합니다.
 
-challenge → **digest 대조** → token → arm → execute를 **즉시 연속**으로 진행합니다. challenge
-summary가 표시한 `action_plan_sha256`을 3단계 offline sentinel plan 값과 대조하고, **일치하기
-전에는 token을 입력하지 않습니다.** 불일치하면 token 미입력으로 중단·보고하며 clear·편집·
-재prepare를 시도하지 않습니다.
+1. challenge summary를 표시합니다. **아직 token은 입력하지 않습니다.**
+2. summary의 `action_plan_sha256`을 3단계 offline **sentinel** plan 값과 대조합니다.
+3. **token을 계속 보류한 상태에서** 장비 TCP connection 부재와 앱·Home Assistant·daemon·다른
+   one-shot/qualifier process 부재를 **다시 확인**합니다.
+4. 둘 중 하나라도 실패하면 **token 미입력 · `NO-GO` · 보고**입니다. integration을 끄거나 밀어붙이지
+   않으며, clear·편집·재prepare도 하지 않습니다.
+5. **둘 다 통과했을 때만** token → arm → execute를 즉시 연속으로 진행합니다.
+
+이 검사들은 challenge 안에서 이뤄지므로 **전체가 challenge의 `300초` 제한 안에 끝나야 합니다.**
+challenge 이전에 같은 확인을 추가로 해도 되지만, 그것이 **token 직전 확인을 대체하지는
+않습니다.**
+
+**writer 부재 검사의 예외는 정확히 하나입니다** — 이 시점에는 challenge를 발급한 바로 그
+`qualify` process가 살아 있고 write-capable entry를 갖고 있습니다. 따라서 **현재 challenge를
+발급한 단 하나의 reviewed·attested exact-restore process만 expected writer로 허용**하고, 그 PID·
+command·source digest가 0단계 attestation과 이어지는 동일 process인지 확인합니다. 그런 process가
+둘 이상이거나 식별 불가능하면 **token `0` · `NO-GO`**입니다. 그 하나를 제외한 앱·Home Assistant·
+daemon·다른 one-shot/qualifier process는 부재여야 하고, **기존 device TCP connection은 `0`**이며,
+현재 qualifier도 token 이전에는 device TCP connection이 `0`이어야 합니다. (0단계에서는 예외 없이
+**모든** writer process 부재가 맞습니다. 예외는 challenge가 떠 있는 이 시점에만 적용됩니다.)
 
 **exact 8-action plan, 최대 8 device writes** — 장비가 이미 그 상태이면 action이 skip될 수 있으므로
 `8`은 상한이지 확정값이 아닙니다.
@@ -1298,12 +1326,18 @@ Phase 0부터 첫 wire까지 device drift를 막는 것은 **코드 predicate가
 
 ## 8단계 — baseline restore cycle · **승인 D (별도 grant)**
 
-promotion 뒤 **두 번째 challenge summary가 표시하는** `action_plan_sha256`을 3단계 offline baseline
-plan 값과 대조합니다. 여기서도 **일치하기 전에는 token을 입력하지 않습니다.** 불일치면 token
-미제시, 중단·보고, clear·편집·재prepare 금지입니다.
+같은 `qualify` 실행이 promotion을 마치고 **두 번째 challenge**를 띄웁니다. 7단계와 **동일한 순서**를
+그대로 반복합니다.
 
-**baseline arm 직전에도 TCP connection과 writer 부재를 다시 확인합니다.** sentinel arm에서 한 번,
-여기서 한 번, **두 번 모두 필요합니다.**
+1. 두 번째 challenge summary 표시, **token 보류**.
+2. summary의 `action_plan_sha256`을 3단계 offline **baseline** plan 값과 대조.
+3. **token 보류 상태에서** 장비 TCP connection과 writer 부재를 **다시 확인**(예외는 7단계와 같이
+   현재 challenge를 발급한 그 하나의 qualifier process뿐).
+4. 하나라도 실패하면 **token 미입력 · `NO-GO` · 보고**. clear·편집·재prepare 금지.
+5. 둘 다 통과했을 때만 token → arm → execute.
+
+**sentinel arm에서 한 번, 여기서 한 번 — 두 번 모두 필요하며, 두 번째가 첫 번째로 대체되지
+않습니다.** 이 검사들도 두 번째 challenge의 `300초` 안에 끝나야 합니다.
 
 **exact 6-action plan, 최대 6 device writes**(정상 경로는 write `4` + `ALREADY_SATISFIED` skip `2`).
 이 cycle은 sentinel과 **다른 operation id, 다른 attended grant**이며, 두 번째 challenge가 첫
@@ -1312,7 +1346,10 @@ plan 값과 대조합니다. 여기서도 **일치하기 전에는 token을 입�
 
 ## 9단계 — phase-5 staging · device write `0` · host write는 **승인 C**
 
-qualified bundle의 불변 timestamp에 결속된 journal write입니다.
+qualified bundle의 불변 timestamp에 결속된 journal write입니다. **이 단계는 운영자가 따로
+실행하는 것이 아니라**, baseline cycle이 성공한 뒤 **같은 `qualify` 실행**이 승인 C의 범위 안에서
+이어서 수행합니다 — bundle persist, receipt 결속 clear, journal 부재 구간, phase-5 successor
+설치가 한 흐름입니다.
 
 ## 10단계 — 두 Q2 manifest · 장비 접촉 `0` · host write는 **승인 C**
 
