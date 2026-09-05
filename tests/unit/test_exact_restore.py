@@ -292,12 +292,16 @@ class MemoryQualificationReceiptStore:
         self.receipts: dict[str, dict[str, Any]] = {}
         self.finalizations: dict[str, dict[str, Any]] = {}
         self.fail_persist = False
+        self.fail_after_receipt_blob = False
         self.fail_finalization_confirm = False
 
     def persist_final_verified_receipt(self, receipt: ExactRestoreReceipt) -> None:
         if self.fail_persist:
             raise OSError("simulated receipt archive fsync failure")
         self.receipts[receipt.receipt_sha256] = copy.deepcopy(receipt.model_dump(mode="json"))
+        if self.fail_after_receipt_blob:
+            self.fail_after_receipt_blob = False
+            raise OSError("simulated crash between receipt blob and finalization index")
         finalization = {
             "version": 1,
             "operation_sha256": _digest(f"operation:{receipt.operation_id}"),
@@ -3096,3 +3100,146 @@ async def test_phase5_arm_refuses_when_only_the_immediate_baseline_is_archived()
     assert final_harness.writes == []
     assert final_harness.observation_count == 0
     assert archive.load_final_verified_receipt(sentinel_receipt.receipt_sha256) is None
+
+
+async def _sentinel_ready_to_promote() -> tuple[
+    ExactRestoreController,
+    MemoryStore,
+    MemoryQualificationReceiptStore,
+    ExactRestoreRecord,
+]:
+    controller, store, _guard, _harness, _armed = _armed_controller(
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION
+    )
+    qualified = await controller.execute()
+    archive = controller._qualification_receipts
+    assert isinstance(archive, MemoryQualificationReceiptStore)
+    assert qualified.phase is ExactRestorePhase.FINAL_VERIFIED
+    return controller, store, archive, qualified
+
+
+@pytest.mark.asyncio
+async def test_promotion_crash_before_the_receipt_blob_keeps_the_finalized_journal() -> None:
+    controller, store, archive, qualified = await _sentinel_ready_to_promote()
+    archive.fail_persist = True
+    before = copy.deepcopy(store.record)
+
+    with pytest.raises(ExactRestorePreflightError) as refused:
+        controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    assert refused.value.code is ExactRestoreErrorCode.JOURNAL
+    assert store.record == before
+    assert archive.receipts == {}
+    assert archive.load_operation_finalization(qualified.operation_id) is None
+
+
+@pytest.mark.asyncio
+async def test_promotion_receipt_orphan_is_repaired_idempotently_by_retry() -> None:
+    controller, store, archive, qualified = await _sentinel_ready_to_promote()
+    archive.fail_after_receipt_blob = True
+    receipt = _receipt_from_final_verified_record(qualified)
+
+    with pytest.raises(ExactRestorePreflightError):
+        controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    # An inert orphan: the blob exists, the authoritative index does not.
+    assert archive.load_final_verified_receipt(receipt.receipt_sha256) is not None
+    assert archive.load_operation_finalization(qualified.operation_id) is None
+    assert ExactRestoreRecord.model_validate(store.record).operation_id == qualified.operation_id
+
+    promoted = controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    finalization = archive.load_operation_finalization(qualified.operation_id)
+    assert finalization is not None
+    assert finalization["receipt_sha256"] == receipt.receipt_sha256
+    assert promoted.cycle is ExactRestoreCycle.BASELINE_RESTORE
+
+
+@pytest.mark.asyncio
+async def test_promotion_crash_after_the_barrier_keeps_it_and_allows_retry() -> None:
+    controller, store, archive, qualified = await _sentinel_ready_to_promote()
+    store.fail_before_save = True
+    receipt = _receipt_from_final_verified_record(qualified)
+
+    with pytest.raises(ExactRestorePreflightError) as refused:
+        controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    assert refused.value.code is ExactRestoreErrorCode.JOURNAL
+    # The barrier is already durable and the journal still names the sentinel.
+    assert archive.load_operation_finalization(qualified.operation_id) is not None
+    assert ExactRestoreRecord.model_validate(store.record).operation_id == qualified.operation_id
+
+    promoted = controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    assert promoted.cycle is ExactRestoreCycle.BASELINE_RESTORE
+    assert archive.load_operation_finalization(qualified.operation_id) is not None
+    assert archive.load_final_verified_receipt(receipt.receipt_sha256) is not None
+
+
+@pytest.mark.asyncio
+async def test_promotion_converges_when_only_the_save_acknowledgement_is_lost() -> None:
+    controller, store, archive, qualified = await _sentinel_ready_to_promote()
+
+    def _lose_acknowledgement(_payload: dict[str, Any]) -> None:
+        store.on_save = None
+        raise OSError("simulated fsync acknowledgement loss after replacement")
+
+    store.on_save = _lose_acknowledgement
+
+    promoted = controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    # Only the exactly reloaded successor is accepted, and the barrier survives.
+    assert ExactRestoreRecord.model_validate(store.record) == promoted
+    assert archive.load_operation_finalization(qualified.operation_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_promoted_sentinel_operation_cannot_be_recreated() -> None:
+    controller, _store, _archive, qualified = await _sentinel_ready_to_promote()
+    controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    replay = prepare_exact_restore_record(
+        qualified.baseline,
+        qualified.safe_targets,
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
+        operation_id=qualified.operation_id,
+        now=NOW + timedelta(seconds=2),
+    )
+
+    with pytest.raises(ExactRestorePreflightError) as refused:
+        controller.create(replay)
+
+    assert refused.value.code is ExactRestoreErrorCode.AUTHORITY
+
+
+@pytest.mark.asyncio
+async def test_archive_is_only_touched_while_the_journal_claim_is_held() -> None:
+    """Lock order stays journal then archive, never the other way round."""
+
+    controller, store, _guard, _harness, _armed = _armed_controller(
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION
+    )
+    inner = controller._qualification_receipts
+    assert isinstance(inner, MemoryQualificationReceiptStore)
+    observed: list[str] = []
+
+    class _OrderingArchive:
+        def __getattr__(self, name: str) -> Any:
+            attribute = getattr(inner, name)
+            if not callable(attribute):
+                return attribute
+
+            def _checked(*args: Any, **kwargs: Any) -> Any:
+                assert store.claimed, f"{name} reached the archive without the journal claim"
+                observed.append(name)
+                return attribute(*args, **kwargs)
+
+            return _checked
+
+    controller._qualification_receipts = _OrderingArchive()  # type: ignore[assignment]
+    qualified = await controller.execute()
+    controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    assert "persist_final_verified_receipt" in observed
+    assert "confirm_operation_finalization" in observed
+    assert qualified.phase is ExactRestorePhase.FINAL_VERIFIED

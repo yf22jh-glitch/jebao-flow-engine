@@ -525,6 +525,24 @@ def test_future_completion_cannot_authorize_earlier_q2_manifest(tmp_path: Path) 
         verifier.derive_q2_exact_restore_evidence()
 
 
+def test_only_the_sentinel_archived_never_yields_q2_evidence(tmp_path: Path) -> None:
+    """A predecessor barrier installed early must not on its own look like a qualification."""
+
+    manifest = _manifest()
+    receipts, qualified = _archives(tmp_path)
+    sentinel, _baseline = _receipts(manifest)
+    receipts.persist_final_verified_receipt(sentinel)
+    verifier = ExactRestoreQ2EvidenceVerifier(
+        manifest,
+        receipt_archive=receipts,
+        qualified_archive=qualified,
+        clock=lambda: NOW + timedelta(minutes=1),
+    )
+
+    with pytest.raises(ExactRestoreQ2EvidenceError):
+        verifier.derive_q2_exact_restore_evidence()
+
+
 def test_mismatched_qualification_chain_fails_before_bundle_claim(tmp_path: Path) -> None:
     manifest = _manifest()
     receipts, qualified = _archives(tmp_path)
