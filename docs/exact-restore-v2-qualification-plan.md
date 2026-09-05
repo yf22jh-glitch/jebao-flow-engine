@@ -1219,8 +1219,11 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
 
 ## 3단계 — offline plan 도출 · 장비 접촉 `0` · **고정 store 접촉 `0`**
 
-순수 경로(baseline 합성과 계획 수립 함수)만 사용하고 고정 journal·archive·guard에는 접근하지
-않습니다. 필요하면 완전히 격리된 복사본에서 수행합니다.
+승인 B 아래 이미 보존된 raw artifact를 **read-only로 읽고**, 순수 경로(baseline 합성과 계획 수립
+함수)를 **현재 reviewed image·process 안에서** 실행합니다. 고정 journal·archive·guard에는 접근하지
+않으며, **새 persistent scratch·복사본 write는 `0`**입니다 — 2단계와 같은 이유입니다. 복사본이
+꼭 필요하다면 그 생성 자체가 별도 host-write 승인 범위이므로, 여기서는 memory·process only가
+최소이자 기본입니다.
 
 **두 write plan을 모두 도출합니다** — sentinel 8-action과 baseline 6-action. 검토 항목은:
 
@@ -1258,16 +1261,27 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
    predicate가 여기입니다** — `prepare` 뒤에는 recapture·clear·재prepare가 모두 불가능합니다.
 3. 승인 C 아래에서 manifest를 owner-only 경로에 **persist하고 exact reload**합니다.
 4. **별도의 행위로** tombstone → `PREPARED` prepare를 실행합니다(독립 명시 승인 항목).
-5. live `action_plan_sha256`을 3단계 offline 값과 **대조**합니다. **불일치하면 token을 제시하지
-   않고 즉시 중단·보고하며, clear·편집·재prepare를 시도하지 않습니다.**
+
+**live `action_plan_sha256`은 어디서 읽는가** — `prepare`의 public status는 이 digest를 내보내지
+않습니다(phase·cycle·action count 등만 있습니다). 그것을 표시하는 표면은 **attended challenge
+summary**이며, 거기에 `baseline_sha256`·`action_plan_sha256`·`journal_context_sha256`·
+`authority_chain_sha256`이 함께 출력됩니다. 따라서 대조는 challenge가 **발급된 뒤, token을 입력하기
+전에** 이뤄집니다. 순서는 7·8단계에 그대로 반영돼 있습니다. 이 경로를 쓰는 이유는 기존 진단
+표면이라 source 변경이 필요 없기 때문입니다. 승인 A 아래에서 canonical live journal을 read-only로
+model-validate해 같은 값을 얻는 방법도 가능하지만, 그 경우 사용한 exact 방법을 기록에 남깁니다.
 
 ## 7단계 — sentinel cycle · **승인 D**
 
 **arm 직전에 장비 TCP connection과 writer 존재를 다시 확인합니다.** 하나라도 보이면 integration을
 끄거나 밀어붙이지 않고 **token 미입력 · `NO-GO` · 보고**로 닫습니다.
 
-challenge → arm → execute를 **즉시 연속**으로 진행합니다. **exact 8-action plan, 최대 8 device
-writes** — 장비가 이미 그 상태이면 action이 skip될 수 있으므로 `8`은 상한이지 확정값이 아닙니다.
+challenge → **digest 대조** → token → arm → execute를 **즉시 연속**으로 진행합니다. challenge
+summary가 표시한 `action_plan_sha256`을 3단계 offline sentinel plan 값과 대조하고, **일치하기
+전에는 token을 입력하지 않습니다.** 불일치하면 token 미입력으로 중단·보고하며 clear·편집·
+재prepare를 시도하지 않습니다.
+
+**exact 8-action plan, 최대 8 device writes** — 장비가 이미 그 상태이면 action이 skip될 수 있으므로
+`8`은 상한이지 확정값이 아닙니다.
 
 on-site approver가 받아야 하는 문장:
 
@@ -1284,8 +1298,9 @@ Phase 0부터 첫 wire까지 device drift를 막는 것은 **코드 predicate가
 
 ## 8단계 — baseline restore cycle · **승인 D (별도 grant)**
 
-promotion 뒤 baseline `action_plan_sha256`을 3단계 offline 값과 대조합니다. 불일치면 6단계와 같은
-경계입니다 — token 미제시, 중단·보고, clear·편집 금지.
+promotion 뒤 **두 번째 challenge summary가 표시하는** `action_plan_sha256`을 3단계 offline baseline
+plan 값과 대조합니다. 여기서도 **일치하기 전에는 token을 입력하지 않습니다.** 불일치면 token
+미제시, 중단·보고, clear·편집·재prepare 금지입니다.
 
 **baseline arm 직전에도 TCP connection과 writer 부재를 다시 확인합니다.** sentinel arm에서 한 번,
 여기서 한 번, **두 번 모두 필요합니다.**
@@ -1329,7 +1344,7 @@ append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있�
 | `ARMED`, authority 만료 | fresh baseline 예산이 남아 있으면 reauthorize로 진행 가능합니다. 다만 `BASELINE_EXPIRED`라면 reauthorize로 해결되지 않는 **dead-end**입니다 |
 | `PREPARED`/`ARMED`, **challenge 실패·만료** | 최초 1회에 한해, **재발급 시점 잔여가 `720초` 이상이면 같은 record에서 1회 재발급** 가능합니다. 잔여가 부족하거나 이미 1회 재발급했다면 **dead-end**이므로 중단·보고합니다 |
 | `PREPARED`/`ARMED`, **`BASELINE_EXPIRED` 또는 digest mismatch** | **사용할 수 있는 attended entry가 없습니다.** park·recover·clear·재prepare 모두 불가하며 그대로 두고 중단·보고합니다 |
-| `AWAITING_FINAL_VERIFY`, prefix 완전, inflight·error·final evidence 없음 | **park 가능.** 그 journal digest에 결속된 **새 disposition manifest**를 만들고(기존 manifest 재사용 불가) **별도 attended park 승인**을 받습니다 |
+| `AWAITING_FINAL_VERIFY`, prefix 완전, inflight·error·final evidence 없음 | **park 가능하지만 manifest만으로는 안 됩니다.** 아래 "park을 선택했을 때"를 그대로 따릅니다 |
 | `FINAL_VERIFIED`, archive·ACK 문제 | 기존 idempotent finalization·clear 경계로 처리합니다. **새 device/restore attended grant는 필요하지 않습니다** |
 
 **모든 분기에 공통인 것은 여기까지입니다 — 첫 실패 즉시 중단·보고, 자동·즉시 재시도 `0`회.**
@@ -1342,6 +1357,24 @@ append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있�
 `prepare` 이후에는 **재수집으로 돌아갈 수 없습니다.** challenge는 `PREPARED` 설치 뒤에 발급되므로
 그 시점에는 tombstone이 이미 교체됐고, 새 Phase 0을 얻어도 live record에 막히며 park 대상도
 아닙니다. 위 표의 challenge 행이 그 유일한 예외이며, 그것도 조건부 1회입니다.
+
+### park을 선택했을 때 — 새 artifact와 새 승인이 필요합니다
+
+park eligibility는 manifest가 가리키는 accepted pair를 **다시 읽어** 그 attempt 시작이 **완료된
+action들의 최대 completion보다 뒤**일 것을 요구합니다. **1단계의 Phase 0 artifact는 write보다
+앞서므로 반드시 거부됩니다.** 새 journal manifest만 만들어서는 park할 수 없습니다. 실제로 필요한
+것은 다음입니다.
+
+1. **먼저 중단하고 원인을 분석합니다.** 자동·즉시 재시도는 `0`회입니다.
+2. park을 선택했다면, **마지막 completion보다 뒤에** 새 explicit-only strict artifact를
+   수집합니다. 이것은 device read이므로 **새 승인 B**와 그에 딸린 collector durable write가
+   필요합니다.
+3. 그 artifact와 **좌초한 journal의 exact digest**에 결속된 **새 v2 disposition manifest**를
+   만듭니다. **기존 Phase 0 artifact와 기존 disposition manifest 재사용은 `0`입니다.**
+4. park archive·snapshot·v2 finalization·tombstone mutation을 위한 **별도 host-state mutation
+   승인**을 받습니다. qualification용으로 받은 승인 C가 이것을 포괄한다고 보지 않습니다.
+5. **별도의 attended write-free park consent**를 받습니다. park의 device write는 `0`이므로 이것은
+   승인 D가 아닙니다.
 
 ---
 
