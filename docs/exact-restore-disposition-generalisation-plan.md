@@ -1,8 +1,64 @@
 # Exact-restore parked disposition generalisation
 
-상태: **PLAN ONLY / DEVICE NETWORK 0 / JOURNAL CHANGE 0 / ARCHIVE CHANGE 0 / HA CHANGE 0**
+상태: **철회됨 (WITHDRAWN) — 재설계 필요.** 아래 "철회 사유" 절을 먼저 보십시오.
+이 문서의 범위 산정은 **세 번 틀렸고**, 그중 둘은 §3 P1 경로입니다. 이 계획으로 source를 구현하지
+마십시오.
 
-작성일: 2026-09-05
+원래 상태: PLAN ONLY / DEVICE NETWORK 0 / JOURNAL CHANGE 0 / ARCHIVE CHANGE 0 / HA CHANGE 0
+
+작성일: 2026-09-05 · 철회일: 2026-09-05
+
+## 철회 사유 — peer 교차검증이 찾은 세 결함
+
+이 계획은 "sentinel 전제는 다섯 지점뿐이고 하류는 이미 범용"이라고 산정했습니다. **셋 다
+틀렸습니다.** 아래 사실은 모두 코드로 확인했습니다.
+
+1. **receipts decoder가 사유와 key 집합을 하드코딩합니다 — §3 durable journal/recovery P1.**
+   `_require_parked_backing_finalization`이 `set(decoded) != expected_keys`와
+   `reason != "final_verification_policy_overload"`를 강제합니다. disposition 모듈만 고쳐 새 사유를
+   저장하면 blob과 version `2` finalization이 **설치된 뒤** 이 검사에서 실패하고, live journal은 남은 채
+   finalization slot만 점유됩니다. 이후 `load_operation_finalization()`이 그 항목에서 예외를 던지고
+   `_require_operation_not_parked()`가 그것을 `JOURNAL`로 바꾸므로 **모든 controller mutator가
+   막힙니다.**
+2. **baseline restore cycle은 정상 경로에서 전 action이 `WRITTEN_VERIFIED`가 아닙니다.**
+   `execute()`는 `_action_satisfied()`면 write 없이 `ALREADY_SATISFIED`로 완료합니다. sentinel final
+   pair 뒤 장비가 exact baseline이므로 baseline cycle의 restore schedule 2개는 정상적으로 skip되고,
+   정상 기대는 6 action 중 **write 4 + skip 2**입니다. manifest의 `required_action_outcome`과
+   eligibility의 전-outcome 요구가 그런 journal을 거부하므로, cycle·개수·사유만 넓혀도 **정상적으로
+   좌초한 baseline journal은 park되지 않습니다.**
+3. **baseline 좌초 시 embedded sentinel operation에 영구 장벽이 없습니다 — §3 duplicate-write P1.**
+   `finalize()`는 receipt를 **반환만** 하고, sentinel과 baseline의 receipt·finalization은 두 cycle이
+   모두 끝난 뒤 `clear_after_receipt()`에서야 함께 persist됩니다. 따라서 baseline cycle이
+   `AWAITING_FINAL_VERIFY`로 좌초하면, **이미 8회 device write를 마친** embedded sentinel operation id는
+   영구 finalization을 하나도 갖지 못합니다. baseline operation만 park하면 그 sentinel id가 tombstone
+   교체 뒤 재생성·재arm 가능한 replay 표면으로 남습니다.
+
+### 재설계에서 고려할 대안 (결정 사항 아님)
+
+3번을 park 경로에서 보상하는 대신 **원인에서 없애는** 방법이 있습니다: sentinel cycle이
+`FINAL_VERIFIED`에 도달한 **그 시점에** sentinel receipt와 version `1` success finalization을 즉시
+persist하고, `clear_after_receipt()`는 이미 설치된 것에 대해 idempotent하게 두는 것입니다.
+
+정적으로 확인한 범위에서는 충돌이 없어 보입니다 — `promote_to_baseline_restore()`와 `arm()`의
+`_require_operation_not_finalized()`는 **baseline** operation id를 검사하므로 sentinel id의 조기
+finalization과 부딪히지 않습니다. 8회 verified write를 끝내고 `FINAL_VERIFIED`에 도달한 operation이
+**뒤 cycle의 성공에 조건부로만** 영구 장벽을 갖는 현재 구조 자체가 약해 보이기도 합니다.
+
+다만 이것은 park 경로가 아니라 **qualify 경로**를 바꾸는 것이라 위험 등급이 다르고, 별도 계획과
+교차검증이 필요합니다. 여기서는 재설계 시 반드시 검토할 항목으로만 남깁니다.
+
+### 이 철회가 바꾸지 않는 것
+
+이미 착지한 것들은 그대로 유효합니다 — timing split(`47866e57`), claim 진단 분리(`ccc2e6a`),
+eligibility 불변식(`bdfaf5c`), 그리고 설치된 tombstone과 permanent barrier. 다만 `bdfaf5c`의 근거가
+**"전 outcome이 `WRITTEN_VERIFIED`"**에 의존하므로, 위 2번으로 outcome 집합을 넓힐 때 그 근거를 새
+집합에 대해 **다시 도출**해야 합니다.
+
+v2 qualification 계획의 4~6단계는 계속 승인 대상이 아닙니다.
+
+---
+
+아래는 철회된 초판 본문입니다. 사실 오류가 포함돼 있으므로 위 철회 사유와 함께만 읽으십시오.
 
 선행: [`Exact-restore version 2 qualification and app-observation unblock`](exact-restore-v2-qualification-plan.md)
 
@@ -22,11 +78,15 @@
 그리고 v1 overload가 아닌 사유로 좌초했을 때도, 증거 손실이나 qualification 오판 없이 종결할 수
 있는가?
 
-## 현재 무엇이 좁은가 — 확인한 다섯 지점
+> **정정 (2026-09-05, peer 검토)**: 이 절의 초판은 "하류는 이미 범용이므로 좁은 것은 입력 manifest와
+> eligibility뿐"이라고 적었습니다. **그 판단은 틀렸고, 두 가지가 빠져 있었습니다** — 아래 "초판이
+> 놓친 것" 절을 함께 보십시오. 이 계획의 범위는 그만큼 넓어집니다.
 
-하류는 **이미 범용입니다**. `ParkedDispositionRecord.cycle`은 `ExactRestoreCycle`,
-`completed_action_count`는 `int(ge=0)`이고, receipts의 version `2` finalization은 validator가 두 cycle을
-모두 허용합니다. 좁은 것은 **입력 manifest와 eligibility뿐**입니다.
+## 현재 무엇이 좁은가 — 입력 쪽 다섯 지점
+
+`ParkedDispositionRecord.cycle`은 `ExactRestoreCycle`, `completed_action_count`는 `int(ge=0)`이고,
+receipts의 version `2` finalization validator는 두 cycle을 모두 허용합니다. 그 범위에서는 좁지
+않습니다. 그러나 그것만으로 하류가 범용이라고 결론지은 것이 오류였습니다.
 
 | # | 위치 | 현재 | 문제 |
 |---|---|---|---|
@@ -44,6 +104,54 @@ overload 전용 증거도 따로 있습니다 — manifest의 `maximum_pair_comp
 `minimum_total_attempt_seconds`, 그리고 eligibility가 그 둘로 거는 두 검사입니다. 이것은 "이 operation은
 gap이 bound 이내인데 total이 bound를 넘어서 실패했다"는 **overload 고유의 주장**을 결속하는 것이므로,
 다른 사유에는 의미가 없습니다.
+
+## 초판이 놓친 것 — 범위를 넓히는 두 가지
+
+### (가) receipts의 parked backing decoder가 사유와 key 집합을 하드코딩합니다 — **§3 P1 경로**
+
+`exact_restore_receipts.py`의 `_require_parked_backing_finalization`이 저장된 disposition blob을
+검사할 때 `set(decoded) != expected_keys`로 **정확한 key 집합**을 요구하고
+`decoded.get("reason") != "final_verification_policy_overload"`로 **사유 문자열을 하드코딩**합니다.
+
+따라서 새 사유의 record를 `exact_restore_disposition.py`만 고쳐 저장하면, blob과 version `2`
+finalization이 **이미 설치된 뒤** 이 confirmation에서 실패합니다. 그 상태는:
+
+- live journal은 그대로 `awaiting_final_verify`로 남고
+- 그 operation의 finalization slot은 **점유**되며
+- 이후 `load_operation_finalization()`이 v2 항목에 대해 이 decoder를 거치므로 **예외**가 나고,
+  `_require_operation_not_parked()`의 `except BaseException`이 그것을 `JOURNAL`로 바꿔
+  **모든 controller mutator가 막힙니다**
+
+즉 journal을 전진시킬 수도 recovery할 수도 없는 상태가 됩니다. **§3의 durable journal/recovery
+손실 경로**이며, 이 계획에서 가장 위험한 항목입니다.
+
+**따라서 `src/jebao_flow/exact_restore_receipts.py`는 필수 범위입니다.** 그리고 순서를 고쳐야
+합니다 — 현재는 blob 2개 → finalization index → reload 검증인데, **disposition blob의 shape
+자기검사를 index 설치 이전으로** 옮겨야 위 상태가 만들어질 수 없습니다. index가 backing 없이
+존재하지 않게 하려던 기존 순서의 목적은 그대로 유지됩니다.
+
+### (나) baseline restore cycle은 정상 경로에서 전 action이 `WRITTEN_VERIFIED`가 아닙니다
+
+`execute()`는 `_action_satisfied()`가 참이면 **write 없이** `ALREADY_SATISFIED`로 완료합니다. sentinel
+cycle의 final pair 뒤 장비는 exact baseline이므로, 이어지는 baseline restore cycle에서 safe fallback
+2개는 write(outer를 안전값으로 이동), **restore schedule 2개는 schedule이 이미 baseline이라 정상적으로
+skip**, restore outer 2개는 write입니다. 즉 정상 기대는 **6 action 중 write 4회와 skip 2회**입니다.
+
+그런데 manifest의 `required_action_outcome: Literal["written_verified"]`와 eligibility의 전 outcome
+`WRITTEN_VERIFIED` 요구가 그런 journal을 거부합니다. **cycle·개수·사유만 넓혀도 정상적으로 좌초한
+baseline restore journal은 여전히 park되지 않습니다.** outcome taxonomy와 그 결속, 그리고 저장
+bytes 호환까지 이 계획에 포함해야 합니다.
+
+`VERIFIED_AFTER_UNCERTAIN`을 허용할지는 별도 판단이 필요합니다. 그것은 "write가 있었을 수 있고
+사후 읽기로 확인됐다"는 뜻이라 `ALREADY_SATISFIED`(write 없음)와 성질이 다릅니다.
+
+### (다) 이 변경이 방금 착지한 eligibility 완화와 간섭합니다
+
+commit `bdfaf5c`의 근거는 **"전 outcome이 `WRITTEN_VERIFIED`이므로 write가 미결일 수도 누락될 수도
+없다"**였습니다. outcome 집합을 넓히면 그 문장이 그대로 성립하지 않으므로, 완화의 근거를 새 집합에
+대해 **다시 도출**해야 합니다. 예비 판단으로는 `ALREADY_SATISFIED`는 write가 없었다는 뜻이라 오히려
+더 강하고, `VERIFIED_AFTER_UNCERTAIN`도 완료 시각이 사후 관측 뒤에 찍히므로 write 경계는 유지되지만,
+**이 도출을 구현 전에 명시적으로 다시 쓰고 회귀로 고정해야 합니다.**
 
 ## 변경
 
