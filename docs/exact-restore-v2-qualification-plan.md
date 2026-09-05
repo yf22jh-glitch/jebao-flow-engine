@@ -1503,8 +1503,11 @@ schedule은 거부되지 않고 덮입니다. 그 구간에서 금지된 사건�
 
 1. 두 번째 challenge summary 표시, **token 보류**.
 2. summary의 `action_plan_sha256`을 3단계 offline **baseline** plan 값과 대조.
-3. **token 보류 상태에서** 장비 TCP connection과 writer 부재를 **다시 확인**(예외는 7단계와 같이
-   현재 challenge를 발급한 그 하나의 qualifier process뿐).
+3. **token 보류 상태에서** 장비 TCP connection과 writer 부재, 그리고 **`runtime.dry_run` 이
+   `true`이고 모든 configured device의 `control.allow_hardware_writes` 가 `false`인지**를 **값으로
+   다시 확인**(writer 예외는 7단계와 같이 현재 challenge를 발급한 그 하나의 qualifier process뿐).
+   첫 token 이후에도 config는 바뀔 수 있고, 이 두 값은 일반 daemon·write 경로가 되돌아오는 것을
+   막는 방어입니다. 하나라도 다르면 **token `0` · `NO-GO`**입니다.
 4. 하나라도 실패하면 **token 미입력 · `NO-GO` · 보고**. clear·편집·재prepare 금지.
 5. 둘 다 통과했을 때만 token → arm → execute.
 
@@ -1544,13 +1547,34 @@ precommit**입니다.
   이전에 닫힙니다.
 - 실행 **이전에** 두 spec을 exact로 검증하고 그 equality와 transport policy(`explicit_only`)를
   **precommit**합니다.
-- **5단계에서 승인된 그 exact spec bytes와 digest만 사용합니다.** 여기서 값을 새로 정하거나
-  바꾸지 않습니다.
-- spec이 이미 존재하면 exact read와 검토로 충분합니다. **새로 만들거나 덮어써야 한다면 그
-  persist·overwrite는 승인 C의 범위**이며 명시 대상입니다.
+**순서를 이대로 지킵니다.** CLI는 owner-only 파일 두 개를 **읽기만** 하므로, 5단계의 candidate가
+메모리에만 있었다면 그대로는 실행할 입력이 없습니다.
+
+1. **5단계에서 승인된 canonical bytes와 digest를 다시 대조**합니다. 여기서 값을 새로 정하거나
+   바꾸지 않습니다.
+2. 해당 경로에 **파일이 이미 있으면 exact read로 bytes 동일성을 확인**합니다. 없으면 **승인 C
+   아래에서 owner-only로 persist·fsync·exact reload**합니다. 기존 파일을 덮어야 한다면 **그 exact
+   target과 overwrite를 별도로 명시 승인**받습니다.
+3. **두 파일의 bytes와 digest가 5단계 승인값과 같을 때에만** `network-none`으로 `prepare-pair`를
+   실행합니다.
+4. 그 사이에 값이 달라졌다면 **write `0` · `NO-GO`**입니다.
 
 **성공 뒤** 네 durable object를 모두 exact reload하고, **두 manifest가 같은 staged phase-5
 record와 같은 operation digest에 결속됐는지** 확인합니다.
+
+**실행 직전에 inventory를 잡습니다.** 두 store는 series·manifest id를 **새로 생성**하고,
+`prepare-pair`는 두 epoch loop를 **모두 마친 뒤에야** 결과를 돌려줍니다. 따라서 control 쪽이 설치된
+뒤 async 쪽에서 실패하면 **방금 생긴 control id를 운영자가 받지 못합니다.** 사전 상태 없이는 어느
+경로가 새 것인지 식별할 수 없습니다.
+
+- 실행 **직전에** 승인 A 아래에서 artifact root의 **privacy-safe exact inventory**를 잡아, 이미
+  존재하는 object 집합과 그 digest를 기록합니다.
+- 실패 시 **before/after inventory 차이**로 새로 생긴 final·temporary entry를 식별하고, 각각을
+  **exact read와 model validation**으로 확인합니다. OSError 경계에서는 숨은 temporary directory가
+  남을 수 있으므로 그것도 차이에 포함됩니다.
+- **삭제·rename·retry는 `0`**입니다. 보존하고 보고합니다.
+- 기록에는 **private 절대경로를 남기지 않습니다** — opaque id 또는 relative logical name과 digest만
+  남깁니다.
 
 **부분 설치 — 이 loop는 pair 단위로 원자적이지 않습니다.** control 쪽 plan·manifest가 설치된 뒤
 async 쪽에서 실패할 수 있습니다. 그 경우 **자동 retry `0`, 삭제 `0`, overwrite `0`**입니다. 네
@@ -1559,8 +1583,20 @@ async 쪽에서 실패할 수 있습니다. 그 경우 **자동 retry `0`, 삭�
 
 ## 11단계 — 기록
 
+**이 operation은 새 실기이므로 새 run 파일을 씁니다.** fresh B1 device read, 새 `operation_nonce`와
+세 개의 새 operation id, 최대 `14`회 device write를 갖는 별개의 실행입니다. 이미 terminal park된
+`2026-09-04` run의 continuation이 **아닙니다.** `AGENTS.md` §4의 "실기 1회 = `docs/runs/` 파일
+1개"에 따라 **새 run id로 새 파일을 만들고, 기존 `2026-09-04` 파일은 수정하지 않습니다.**
+
 receipt·bundle digest, 두 cycle의 실측 coherence/acquisition span, 선행조건 2의 상태 변화를
-append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있도록 다음도 함께 남깁니다 —
+그 새 파일에 append-only로 기록하며, 증거 등급을 나눕니다.
+
+- **(a)** B1 raw artifact의 opaque id·digest·UTC span·identity binding SHA
+- **(b)** 실제 파일로 확인한 journal·receipt·finalization·bundle과 Q2 산출물
+- **(c)** 승인, process·TCP 관측, 현장 관측
+
+**실패해도 같은 새 파일에** 어느 분기로 갔는지와 durable state를 남깁니다. token·private root·
+host·container 이름은 기록하지 않습니다. 계획과 실행을 나중에 대조할 수 있도록 다음도 함께 남깁니다 —
 **각 cycle의 실제 action outcome vector**(write / `ALREADY_SATISFIED` skip /
 `VERIFIED_AFTER_UNCERTAIN`), **device read·write 횟수를 B1 / B2 /(발생했다면) B3로 구분해**,
 **여섯 승인 각각의 실제 범위**, 그리고 **실패 분기에 진입했는지와 어느 행이었는지**.
