@@ -1404,6 +1404,30 @@ append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있�
 그 시점에는 tombstone이 이미 교체됐고, 새 Phase 0을 얻어도 live record에 막히며 park 대상도
 아닙니다. 위 표의 challenge 행이 그 유일한 예외이며, 그것도 조건부 1회입니다.
 
+### 재개 경로의 승인 결속 — "reauthorize"는 세 축을 대신하지 않습니다
+
+R42로 성공 경로의 device read에 승인 축(B2)을 붙였습니다. **실패 재개 경로도 같은 read와 남은
+write를 수행합니다.** 위 표가 그것을 "attended reauthorize" 또는 "recover"라고만 부르면, 성공
+경로에서 닫은 무승인 접촉이 실패 경로로 그대로 남습니다. attended grant는 **B2·C·D를 함축하지
+않습니다.**
+
+| 재개 경로 | 다시 확인·승인해야 하는 축 |
+|---|---|
+| `RESTORING` resume (inflight 유무 무관) | **B2**(재개 범위의 device read) + **C**(host journal transition) + **D**(남은 bounded write와 현장 감시·즉시 차단) |
+| `RECOVERY_REQUIRED` → `recover` 후 continuation | **B2 + C + D** |
+| `ARMED` reauthorize 후 execute | **B2 + C + D** |
+| `AWAITING_FINAL_VERIFY`에서 **final verification 수동 재시도**를 선택 | **B2 + C**(authority·journal 갱신) + attended grant. **device write `0`이므로 D는 불필요합니다** |
+| `AWAITING_FINAL_VERIFY`에서 **park**을 선택 | **B3** + 별도 park host-state 승인 + attended write-free park consent (위 park 소절) |
+| `FINAL_VERIFIED` continuation | device I/O `0`이므로 **host mutation 승인만**. B2·D·restore grant 모두 불필요 |
+| dead-end (`PREPARED`/`ARMED`의 `BASELINE_EXPIRED`·digest mismatch) | **승인 경로 자체가 없습니다.** 중단·보고 |
+
+순서는 어느 경로든 같습니다 — **원인 분석 → 새 precommit → 해당 축들을 다시 확인·승인 →
+그 다음에 attended grant 발급**입니다. **이전 grant나 "reauthorize"라는 단어가 이 순서를 건너뛰게
+하지 않습니다.**
+
+`AWAITING_FINAL_VERIFY`에서 재시도와 park 중 무엇을 고를지는 **원인 분석 결과에 따라 결정**하며,
+기본값으로 어느 한쪽을 고르지 않습니다.
+
 ### `FINAL_VERIFIED`의 세 경로 — `clear`가 정답인 것은 둘뿐입니다
 
 `FINAL_VERIFIED`는 한 상태가 아닙니다. 어느 cycle이 끝난 것인지에 따라 이어지는 행위가 다르고,
