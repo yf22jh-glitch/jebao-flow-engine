@@ -1119,8 +1119,11 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 > 6차 addendum의 대체 지시, R20·R21 보강, R24·R25 정정은 모두 **이 절에 이미 반영돼 있습니다.**
 > 운영자는 다른 절을 참조하거나 치환을 합성할 필요가 없으며, 그렇게 해서도 안 됩니다.
 >
-> 이 문서는 **PLAN ONLY**입니다. 아래 네 승인이 각각 명시적으로 이뤄지기 전에는 어떤 단계도
-> 실행하지 않습니다. hardware는 **NO-GO**입니다.
+> 이 문서는 **PLAN ONLY**입니다. **각 단계는 아래 표가 그 단계에 요구하는 승인 축을 실행 전에
+> 명시적으로 받아야 하며, 어느 축도 다른 축을 함축하지 않습니다.** 승인은 한 번에 모아 받는 것이
+> 아니라 단계에 맞춰 나뉩니다 — A는 0단계 전에, B1은 1단계 전에, **B2·C·D는 exact candidate와 두
+> action plan을 본 뒤 5단계에서**, 그리고 **B3와 park host·park consent는 실패 후 park을 실제로
+> 선택한 경우에만** 요구합니다. hardware는 **NO-GO**입니다.
 
 ## 승인 축 — 여섯이며 서로를 함축하지 않습니다
 
@@ -1270,6 +1273,10 @@ read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 �
    predicate가 여기입니다** — `prepare` 뒤에는 recapture·clear·재prepare가 모두 불가능합니다.
 3. 승인 C 아래에서 manifest를 owner-only 경로에 **persist하고 exact reload**합니다.
 4. **별도의 행위로** tombstone → `PREPARED` prepare를 실행합니다(독립 명시 승인 항목).
+5. **`prepare` 완료부터 첫 challenge 표시까지 `60초`를 넘기지 않습니다.** 이 구간에는 코드 bound가
+   없습니다. 늦어지면 `PREPARED` 상태에서 baseline freshness가 먼저 만료되어 R14의 dead-end가
+   그대로 재현됩니다. 넘겼다면 **token 없이 중단·보고**하며, 이미 `PREPARED`이므로
+   recapture·clear·재prepare는 불가능합니다 — 실패표의 dead-end 행 그대로입니다.
 
 **live `action_plan_sha256`은 어디서 읽는가** — `prepare`의 public status는 이 digest를 내보내지
 않습니다(phase·cycle·action count 등만 있습니다). 그것을 표시하는 표면은 **attended challenge
@@ -1284,9 +1291,13 @@ model-validate해 같은 값을 얻는 방법도 가능하지만, 그 경우 사
 7·8·9단계는 별도 명령이 아닙니다. **동일한 reviewed·attested `qualify` process 한 번**이 sentinel
 `FINAL_VERIFIED` → predecessor barrier 기록 → baseline promotion → 두 번째 challenge와 grant →
 baseline `FINAL_VERIFIED` → bundle persist → receipt 결속 clear → phase-5 successor staging까지
-이어서 수행합니다. **sentinel만 끝내는 외부 entry는 없습니다.** 두 cycle 사이에 process를
-종료하거나 다른 command를 시작하지 않습니다 — 그렇게 하면 `PREPARED`/`FINAL_VERIFIED` 중간
-경계를 만들게 됩니다.
+이어서 수행합니다. **sentinel만 끝내는 외부 entry는 없습니다.** 두 cycle 사이에 이 process를
+종료하거나 **다른 exact-restore·device-touch command를 시작하지 않습니다** — 그렇게 하면
+`PREPARED`/`FINAL_VERIFIED` 중간 경계를 만들게 됩니다.
+
+**승인 A 범위의 read-only host inspection은 예외이며, 오히려 필수입니다.** 아래 7·8단계가 token
+직전에 요구하는 TCP connection·process 확인이 바로 그것이고, 그것까지 금지하면 이 문서가 요구하는
+검사를 수행할 수 없습니다. 금지 대상은 장비를 건드리거나 journal을 바꾸는 command입니다.
 
 운영자가 개입하는 지점은 **두 attended challenge에서 token을 보류하고 있는 동안**뿐입니다. 아래
 7·8단계의 검사는 모두 그 두 pause 안에서 수행합니다.
@@ -1310,9 +1321,14 @@ challenge 이전에 같은 확인을 추가로 해도 되지만, 그것이 **tok
 
 **writer 부재 검사의 예외는 정확히 하나입니다** — 이 시점에는 challenge를 발급한 바로 그
 `qualify` process가 살아 있고 write-capable entry를 갖고 있습니다. 따라서 **현재 challenge를
-발급한 단 하나의 reviewed·attested exact-restore process만 expected writer로 허용**하고, 그 PID·
-command·source digest가 0단계 attestation과 이어지는 동일 process인지 확인합니다. 그런 process가
-둘 이상이거나 식별 불가능하면 **token `0` · `NO-GO`**입니다. 그 하나를 제외한 앱·Home Assistant·
+발급한 단 하나의 reviewed·attested exact-restore process만 expected writer로 허용**합니다.
+
+식별 방법을 정확히 나눕니다. 0단계에는 qualifier PID가 **존재할 수 없습니다** — 그 단계는 예외
+없이 모든 writer process 부재를 요구하기 때문입니다. 따라서 PID를 0단계와 대조할 수 없습니다.
+0단계가 attestation하는 것은 **reviewed source·image·config와 command shape**이고, token 시점의
+그 하나뿐인 qualifier가 거기에 **exact match**하는지를 봅니다. **PID 동일성은 첫 challenge부터
+두 번째 challenge까지의 단일 invocation 안에서만** 요구합니다(위 "하나의 `qualify` 실행").
+조건에 맞는 process가 둘 이상이거나 식별 불가능하면 **token `0` · `NO-GO`**입니다. 그 하나를 제외한 앱·Home Assistant·
 daemon·다른 one-shot/qualifier process는 부재여야 하고, **기존 device TCP connection은 `0`**이며,
 현재 qualifier도 token 이전에는 device TCP connection이 `0`이어야 합니다. (0단계에서는 예외 없이
 **모든** writer process 부재가 맞습니다. 예외는 challenge가 떠 있는 이 시점에만 적용됩니다.)
@@ -1507,9 +1523,20 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
   bundle의 handoff 유효기간을 겸용합니다. 저장소 값만으로 말할 수 있는 것은 보수적 봉투뿐입니다 —
   이전 run의 게이트 요구는 **`≤ 1295.800558초`**, `1800`의 **증명 가능한 최소 여유는
   `504.199442초`**입니다. 실제 `captured_at`과 first-wire 시각은 보존 산출물에서 읽지 않았습니다.
-- **최소 잔여 `720초`** — attended challenge 최대 수명 `300초` + 발급된 authority 수명 `300초` +
-  첫 action 직전 fresh read 보수값 `60초`(discovery `5초`와 identity-after `5초`의 고정 창 포함)
-  = `660초`에 여유를 더한 값입니다.
+- **최소 잔여 `720초`** — 다음 네 항의 합입니다.
+  - **`60초`** — `prepare` 완료부터 첫 challenge 표시까지의 **command transition 상한**. 이 구간에는
+    코드 bound가 없으므로 6단계의 **운영 predicate**로 둡니다.
+  - **`300초`** — attended challenge의 최대 수명. digest 대조와 writer 재확인이 그 안에 들어갑니다.
+  - **`300초`** — 발급된 authority의 수명. token 이후 controller가 하는 일은 — 여러 번의 fresh
+    read를 포함해 — **이 안에 들어갑니다.** 따로 더하지 않습니다.
+  - **`60초`** — 잔여 margin.
+
+  초안은 "첫 action 직전 fresh read 보수값 `60초`"를 따로 더했습니다. **그렇게 쓰면 안 됩니다.**
+  한 번의 관측은 discovery-before, connect, 두 번의 authenticate 교환, raw read, discovery-after를
+  포함하고, 첫 wire 전에 safe fallback 두 action이 skip되면 fresh 관측이 최대 다섯 번까지 올 수
+  있습니다. **"한 fresh read = `60초`"는 코드에서 증명되지 않습니다.** authority `300초`가 그
+  구간을 이미 덮으므로 별도 합산이 필요 없고, 그 자리에는 대신 bound가 없던 command transition
+  구간이 들어갑니다.
 - **채택 ordinal을 마지막으로** — artifact의 `captured_at`이 채택 pair에서 나오므로, 늦은 ordinal이
   `captured_at`을 늦추고 first-wire 예산을 늘립니다. baseline은 두 series의 min이므로 **두 series를
   가깝게 수집하고 양쪽 모두 늦은 ordinal을 채택**하는 것이 최선입니다.
