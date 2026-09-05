@@ -204,3 +204,78 @@ blocker 1(receipts decoder의 하드코딩된 사유·key 집합)과 blocker 2(b
 승인 대상이 아닙니다.
 
 **이 구현은 독립 교차검증을 받지 못했습니다.**
+
+## 실행 addendum 2 — 교차검증 재개, P1 발견, 계약 이행 완료
+
+**앞 addendum의 "이 구현은 독립 교차검증을 받지 못했습니다"를 대체합니다.** peer의 예산이 복구돼
+착지본을 독립 검토했고, 그 결과 **실제 §3 duplicate-write P1이 발견됐습니다.** 이 절이 그 경위와
+최종 상태의 정확한 기록입니다.
+
+### 발견된 P1 — immediate parent만 확인한 것
+
+`prepare_qualified_final_restore_record()`는 phase-5 record의 `qualification_final_record`에 **baseline
+final record**를 넣고, 그 baseline record 안에 다시 sentinel이 중첩됩니다. 첫 구현(`8856b13`)의
+`arm()` 검사는 **직속 부모 하나만** archive와 대조했으므로, phase-5 record에서는 baseline만 확인되고
+**중첩된 sentinel은 확인되지 않았습니다.**
+
+따라서 baseline은 archive됐지만 nested sentinel은 archive되지 않은 상태가 public API로 구성 가능했고,
+그 상태에서 phase-5 device write에 도달한 뒤 journal이 정리되면 그 sentinel operation id는 영구 장벽
+없이 남아 **이미 수행된 8회 write가 중복될 수 있었습니다.**
+
+**그리고 첫 구현에 함께 넣은 fixture가 이 경로를 녹색으로 고정하고 있었습니다.**
+`_receipt_store_with_predecessor()`가 직속 부모 한 단계만 archive했고, 기존 phase-5 테스트가 그
+상태에서 6 writes를 정상으로 단언했습니다. 전이적 확인으로 바꾸자마자 그 테스트가 즉시 실패한 것이
+구멍의 존재를 증명했습니다: **(b)**.
+
+### 수정 — `e0ca527`
+
+diff SHA-256 `87d8f25d0f69a868eaf13f847c00e40c4a593b95476cac94e9b486e61a73f1e3`, 2파일 `+127/-11`.
+peer가 같은 바이트를 독립 실행해 `tests/unit/test_exact_restore.py` **90 passed**를 확인했고
+**SOURCE_COMMIT_GO**를 냈습니다: **(b)**.
+
+- `arm()`이 embedded provenance **chain 전체**를 archive와 exact 대조합니다.
+- 설치 경계는 `_create_prepared()`의 공통 journal-claim 지점에 두어 `create`와
+  `create_qualified_final_restore` 양쪽을 한 곳에서 닫습니다. sentinel record는 chain이 비어 있어
+  no-op입니다.
+- `clear_after_receipt()`가 1단계 insert 대신 oldest→current 순서로 **전 chain**을 persist합니다.
+- 배치는 tombstone 분기가 return한 **직후·설치 직전**입니다. 그보다 앞에 두면 parked operation의 거부
+  코드가 `AUTHORITY`에서 `INVALID_BASELINE`으로 바뀌어 기존 계약을 깨뜨립니다. 구현 중 이 순서 결함을
+  두 번 만들었고 두 번 다 회귀가 잡았습니다.
+
+### 9항목 계약의 실제 이행 — `ccff2b5`
+
+첫 착지 시점에는 **9항목 중 2개만** 이행돼 있었습니다. 그 사실을 스스로 보고한 뒤 나머지를
+작성했습니다. diff SHA-256 `abd8c3865e8829e8fbcdb5f1d9f40217befd6c457eb3e7fb1ee173d43581339b`,
+test 전용 `+165/-0`.
+
+| # | 항목 | 이행 |
+|---|---|---|
+| 1 | receipt blob 이전 crash | ✓ `fail_persist` 주입 |
+| 2 | blob 후 index 전 orphan → 재시도 멱등 복구 | ✓ fake에 분리 주입점 추가 |
+| 3 | finalization 후 promotion save 전 crash | ✓ `fail_before_save` |
+| 4 | successor 교체 후 fsync ACK 유실 | ✓ `on_save`에서 사후 raise, exact reload만 수락 |
+| 5 | arm 부재·손상·불일치 → device I/O `0` | ✓ (기존 2개 + `observation_count` 단언 추가) |
+| 6 | promotion 뒤 같은 sentinel id replay 거부 | ✓ |
+| 7 | `clear_after_receipt()` 멱등 | ✓ 전 chain 흐름과 phase-5 end-to-end로 |
+| 8 | sentinel만 archived → Q2 FAIL | ✓ Q2 verifier에 전용 회귀 |
+| 9 | lock order journal→archive | ✓ archive 호출마다 journal claim 보유 단언 |
+
+여기에 nested-chain 회귀 둘이 더해집니다 — baseline만 archive된 상태에서 staging은
+`INVALID_BASELINE`·arm은 `AUTHORITY`로 거부되고 write와 observation이 모두 `0`, 그리고 clear 뒤 세
+operation의 finalization이 모두 존재하며 같은 sentinel id의 `create`가 거부됨.
+
+### 검증
+
+exact-restore 계열 **332 passed / 0 failed**, 전체 unit **1855 passed / 1 failed**, 변경 파일 ruff lint
+통과: **(c)**. 유일한 실패는 frozen linkage 영역(`test_linkage_transaction.py`)이고 이 변경과
+무관합니다 — HEAD 소스로 되돌려도 실패하며 **실행마다 실패 집합이 달라집니다**(같은 조건에서 5개→4개,
+이름도 상이). frozen test는 수정하거나 하드닝하지 않았습니다.
+
+### 남은 비차단 관찰
+
+`execute()` 자체는 chain을 재확인하지 않습니다. 현재는 live state가 tombstone이고 `create`·`arm`이
+강제하며 archive가 no-clobber·fsync라 migration P1이 아니라는 데 peer와 판단이 일치합니다. 다만 이
+안전은 **현재 상태에 의존**하므로, 이후 상태가 달라지면 다시 볼 항목으로 남깁니다.
+
+blocker 1(receipts decoder의 하드코딩된 사유·key 집합)과 blocker 2(baseline cycle의 정상
+`ALREADY_SATISFIED` skip)는 그대로이며, 재설계된 disposition 일반화가 다음 작업입니다.
