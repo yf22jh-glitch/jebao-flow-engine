@@ -42,6 +42,7 @@ from jebao_flow.exact_restore_disposition import (
     ParkedDispositionAuthority,
     ParkedDispositionEvidenceReference,
     ParkedDispositionManifest,
+    ParkedDispositionReason,
     ParkedDispositionService,
     ParkedDispositionTombstone,
     load_parked_disposition_manifest,
@@ -67,6 +68,7 @@ from tests.unit.test_exact_restore import (
     RestoreHarness,
     _armed_controller,
     _authority,
+    _promoted_record,
     _safe_targets,
 )
 from tests.unit.test_exact_restore_composition import (
@@ -76,6 +78,9 @@ from tests.unit.test_exact_restore_composition import (
 )
 from tests.unit.test_exact_restore_composition import (
     _manifest as _restore_manifest,
+)
+from tests.unit.test_exact_restore_composition import (
+    _split_manifest as _split_restore_manifest,
 )
 
 
@@ -999,3 +1004,696 @@ print(json.dumps(sorted(name for name in sys.modules if name.startswith('jebao_f
         "jebao_flow.safety.limits",
         "jebao_flow.source_attestation",
     }
+
+
+def _v2_manifest_kwargs(record: ExactRestoreRecord, artifact: object) -> dict[str, Any]:
+    return {
+        "version": 2,
+        "reason": ParkedDispositionReason.FINAL_VERIFICATION_UNRESOLVED,
+        "required_action_outcome": None,
+        "minimum_total_attempt_seconds": None,
+        "predecessor_depth": 0,
+        "completed_action_outcomes": tuple(item.outcome for item in record.completed_actions),
+    }
+
+
+def test_version_one_manifest_keeps_its_exact_legacy_shape() -> None:
+    """Widening the model must not add a key or move a digest for an existing park."""
+
+    record, artifact = _awaiting_record_and_artifact()
+    manifest = _manifest_for(record, artifact, "a" * 64)
+    payload = manifest.model_dump(mode="json")
+
+    assert sorted(payload) == [
+        "action_plan_sha256",
+        "authority_chain_sha256",
+        "baseline_sha256",
+        "completed_action_count",
+        "cycle",
+        "device_network_access",
+        "device_write_count",
+        "evidence",
+        "journal_sha256",
+        "maximum_pair_completion_gap_seconds",
+        "minimum_total_attempt_seconds",
+        "operation_id",
+        "operation_sha256",
+        "outcome",
+        "qualification_achieved",
+        "reason",
+        "required_action_outcome",
+        "version",
+    ]
+    assert manifest.manifest_sha256 == (
+        "1e6b0a060c5431b0273819577d13468d523eb33db51d52989aebee19b91403b3"
+    )
+
+
+def test_version_two_manifest_must_be_a_generic_unresolved_park() -> None:
+    record, artifact = _awaiting_record_and_artifact()
+    base = _manifest_for(record, artifact, "a" * 64).model_dump(mode="json")
+    base.update(_v2_manifest_kwargs(record, artifact))
+
+    # A version 2 park has no durable failure frame, so it may not claim the overload reason
+    # nor carry the overload evidence bound.
+    with pytest.raises(ValidationError, match="generic unresolved park"):
+        ParkedDispositionManifest.model_validate(
+            {**base, "reason": ParkedDispositionReason.FINAL_VERIFICATION_POLICY_OVERLOAD}
+        )
+    with pytest.raises(ValidationError, match="generic unresolved park"):
+        ParkedDispositionManifest.model_validate({**base, "minimum_total_attempt_seconds": 20})
+    with pytest.raises(ValidationError, match="generic unresolved park"):
+        ParkedDispositionManifest.model_validate(
+            {**base, "required_action_outcome": "written_verified"}
+        )
+
+    assert ParkedDispositionManifest.model_validate(base).version == 2
+
+
+def test_version_two_manifest_rejects_unsupported_and_mismatched_shapes() -> None:
+    record, artifact = _awaiting_record_and_artifact()
+    base = _manifest_for(record, artifact, "a" * 64).model_dump(mode="json")
+    base.update(_v2_manifest_kwargs(record, artifact))
+    outcomes = list(base["completed_action_outcomes"])
+
+    # The closed set is enforced by the field type itself, which is stronger than a validator:
+    # a future enum value cannot even be parsed into the vector.
+    with pytest.raises(ValidationError, match="already_satisfied"):
+        ParkedDispositionManifest.model_validate(
+            {**base, "completed_action_outcomes": [*outcomes[:-1], "some_future_outcome"]}
+        )
+    with pytest.raises(ValidationError, match="outcome vector length"):
+        ParkedDispositionManifest.model_validate(
+            {**base, "completed_action_outcomes": outcomes[:-1]}
+        )
+    with pytest.raises(ValidationError, match="deterministic plan"):
+        ParkedDispositionManifest.model_validate({**base, "completed_action_count": 6})
+    with pytest.raises(ValidationError, match="predecessor depth"):
+        ParkedDispositionManifest.model_validate({**base, "predecessor_depth": 1})
+
+
+def test_version_one_manifest_rejects_version_two_only_fields() -> None:
+    record, artifact = _awaiting_record_and_artifact()
+    base = _manifest_for(record, artifact, "a" * 64).model_dump(mode="json")
+
+    with pytest.raises(ValidationError, match="original overload park"):
+        ParkedDispositionManifest.model_validate({**base, "predecessor_depth": 0})
+    with pytest.raises(ValidationError, match="original overload park"):
+        ParkedDispositionManifest.model_validate(
+            {**base, "completed_action_outcomes": ["written_verified"] * 8}
+        )
+
+
+def test_artifact_between_a_regressed_and_an_earlier_completion_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A clock that goes backwards must not let pre-write evidence terminalize the journal.
+
+    Completion stamps are not monotonic across the prefix, so the last index can be earlier than
+    a preceding write's completion.  The gate has to use the maximum, not `[-1]`.
+    """
+
+    base = _awaiting_record_and_artifact()[0].model_dump(mode="json")
+    actions = [dict(item) for item in base["completed_actions"]]
+    # The artifact starts at NOW+2s.  Put an earlier action's completion after it and let the
+    # clock regress for the final action, so only the maximum catches the ordering.
+    actions[-2]["completed_at"] = (NOW + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+    actions[-1]["completed_at"] = (NOW + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    case = _case(
+        tmp_path,
+        record_payload_update={
+            "completed_actions": actions,
+            "updated_at": (NOW + timedelta(seconds=5)).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    last_index_completion = case.record.completed_actions[-1].completed_at
+    maximum_completion = max(item.completed_at for item in case.record.completed_actions)
+    artifact_started = datetime.fromisoformat(
+        case.artifact.attempt.started_utc.replace("Z", "+00:00")
+    )
+    assert last_index_completion < artifact_started < maximum_completion
+
+    with pytest.raises(ExactRestoreDispositionError) as rejected:
+        case.service.park(case.authority)
+
+    assert rejected.value.code == "disposition_artifact_predates_restore"
+    assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
+
+
+# ---------------------------------------------------------------------------
+# Version 2 end-to-end: the same park has to work for every cycle the engine can
+# actually strand, not only the sentinel qualification the original park was cut for.
+# ---------------------------------------------------------------------------
+
+
+def _split_baseline_and_artifact() -> tuple[Any, VerifiedPilotPairArtifact]:
+    """Build a split-policy baseline from the same artifact the version 1 fixture uses."""
+
+    restore_manifest = _split_restore_manifest()
+    config = _config()
+    artifact = _artifact(config)
+    baseline = build_verified_baseline(
+        restore_manifest,
+        select_operation_targets(config, restore_manifest),
+        artifact,
+        now=NOW,
+    )
+    attempt_started = NOW + timedelta(seconds=2)
+    attempt = VerifiedPilotInterval(
+        started_utc=attempt_started.isoformat().replace("+00:00", "Z"),
+        completed_utc=(attempt_started + timedelta(seconds=22)).isoformat().replace("+00:00", "Z"),
+        started_monotonic_ns=10_000_000_000,
+        completed_monotonic_ns=32_000_000_000,
+    )
+    return baseline, replace(artifact, attempt=attempt)
+
+
+async def _v2_prepared(baseline: Any, *, depth: int) -> ExactRestoreRecord:
+    """Return a prepared record whose embedded predecessor depth is exactly `depth`."""
+
+    if depth == 0:
+        return prepare_exact_restore_record(
+            baseline,
+            _safe_targets(),
+            cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
+            operation_id="operation-parked-sentinel-v2",
+            now=NOW,
+        )
+    if depth == 1:
+        return _promoted_record(baseline=baseline, operation_id="operation-parked-baseline-v2")
+    controller, _store, _guard, _harness, _armed = _armed_controller(
+        cycle=ExactRestoreCycle.BASELINE_RESTORE,
+        baseline=baseline,
+    )
+    qualified = await controller.execute()
+    return prepare_qualified_final_restore_record(
+        qualified,
+        operation_id="operation-parked-final-v2",
+        now=NOW,
+    )
+
+
+def _awaiting_from(
+    prepared: ExactRestoreRecord,
+    *,
+    outcomes: tuple[ExactRestoreActionOutcome, ...] | None = None,
+) -> ExactRestoreRecord:
+    authority = _authority(
+        prepared,
+        now=NOW,
+        monotonic_now=1_000_000_000,
+        boot_identity_sha256=BOOT_A_SHA256,
+    )
+    activation = ExactRestoreAuthorityActivation(
+        authority_sha256=authority.authority_sha256,
+        boot_identity_sha256=authority.boot_identity_sha256,
+        accepted_wall=authority.issued_at,
+        accepted_monotonic_ns=authority.issued_monotonic_ns,
+        deadline_monotonic_ns=authority.deadline_monotonic_ns,
+    )
+    vector = outcomes or tuple(ExactRestoreActionOutcome.WRITTEN_VERIFIED for _ in prepared.actions)
+    assert len(vector) == len(prepared.actions)
+    completed_at = NOW + timedelta(seconds=1)
+    completed = tuple(
+        ExactRestoreActionResult(
+            index=action.index,
+            action_id=action.action_id,
+            outcome=outcome,
+            pre_state_sha256=_digest(f"pre-{prepared.operation_id}-{action.index}"),
+            post_state_sha256=_digest(f"post-{prepared.operation_id}-{action.index}"),
+            completed_at=completed_at,
+        )
+        for action, outcome in zip(prepared.actions, vector, strict=True)
+    )
+    payload = prepared.model_dump(mode="json")
+    payload.update(
+        phase=ExactRestorePhase.AWAITING_FINAL_VERIFY.value,
+        authority=authority.model_dump(mode="json"),
+        authority_activation=activation.model_dump(mode="json"),
+        completed_actions=[item.model_dump(mode="json") for item in completed],
+        updated_at=completed_at,
+    )
+    return ExactRestoreRecord.model_validate(payload)
+
+
+def _v2_manifest_for(
+    record: ExactRestoreRecord,
+    artifact: VerifiedPilotPairArtifact,
+    journal_sha256: str,
+) -> ParkedDispositionManifest:
+    policy = record.baseline.verification_policy
+    return ParkedDispositionManifest(
+        version=2,
+        operation_id=record.operation_id,
+        operation_sha256=hashlib.sha256(record.operation_id.encode("ascii")).hexdigest(),
+        journal_sha256=journal_sha256,
+        cycle=record.cycle,
+        baseline_sha256=record.baseline_sha256,
+        action_plan_sha256=record.action_plan_sha256,
+        authority_chain_sha256=record.authority_chain_sha256,
+        completed_action_count=len(record.completed_actions),
+        required_action_outcome=None,
+        evidence=ParkedDispositionEvidenceReference(
+            plan_artifact_id=artifact.plan_artifact_id,
+            plan_sha256=artifact.plan_sha256,
+            series_artifact_id=artifact.series_id,
+            series_sha256=artifact.series_sha256,
+            accepted_pair_ordinal=artifact.ordinal,
+        ),
+        maximum_pair_completion_gap_seconds=policy.max_final_pair_gap_seconds,
+        predecessor_depth=_embedded_depth(record),
+        completed_action_outcomes=tuple(item.outcome for item in record.completed_actions),
+        reason=ParkedDispositionReason.FINAL_VERIFICATION_UNRESOLVED,
+    )
+
+
+def _embedded_depth(record: ExactRestoreRecord) -> int:
+    depth = 0
+    parent = record.qualification_final_record
+    while parent is not None:
+        depth += 1
+        parent = parent.qualification_final_record
+    return depth
+
+
+def _archive_predecessor_chain(archive: Any, record: ExactRestoreRecord) -> None:
+    """Mirror the promotion step that binds a finished predecessor before its successor runs."""
+
+    ancestors = []
+    parent = record.qualification_final_record
+    while parent is not None:
+        ancestors.append(parent)
+        parent = parent.qualification_final_record
+    for ancestor in reversed(ancestors):
+        archive.persist_final_verified_receipt(_receipt_from_final_verified_record(ancestor))
+
+
+async def _v2_case(
+    tmp_path: Path,
+    *,
+    depth: int,
+    outcomes: tuple[ExactRestoreActionOutcome, ...] | None = None,
+    archive_predecessors: bool = True,
+) -> SimpleNamespace:
+    safety_root = tmp_path / "hardware-safety"
+    safety_root.mkdir(mode=0o700, parents=True)
+    journal = ExactRestoreJournalStore._for_test(safety_root / "exact-restore.json")
+    archive = ExactRestoreDispositionArchive._for_test(safety_root)
+    baseline, artifact = _split_baseline_and_artifact()
+    record = _awaiting_from(await _v2_prepared(baseline, depth=depth), outcomes=outcomes)
+    assert _embedded_depth(record) == depth
+    if archive_predecessors:
+        _archive_predecessor_chain(archive, record)
+    with journal.claim():
+        journal.create(record.model_dump(mode="json"))
+    journal_sha256 = hashlib.sha256(journal.path.read_bytes()).hexdigest()
+    manifest = _v2_manifest_for(record, artifact, journal_sha256)
+    collector = _CollectorStore(artifact)
+    guard = FakeGuard()
+    service = ParkedDispositionService(
+        manifest,
+        journal_store=journal,
+        collector_store=collector,
+        archive=archive,
+        guard=guard,  # type: ignore[arg-type]
+        wall_clock=lambda: NOW + timedelta(minutes=1, seconds=1),
+        monotonic_clock=lambda: 41_000_000_000,
+        boot_identity=lambda: BOOT_A_SHA256,
+    )
+    return SimpleNamespace(
+        archive=archive,
+        artifact=artifact,
+        authority=_authority_for(manifest),
+        collector=collector,
+        guard=guard,
+        journal=journal,
+        manifest=manifest,
+        record=record,
+        safety_root=safety_root,
+        service=service,
+    )
+
+
+@pytest.mark.parametrize(
+    ("depth", "expected_cycle", "expected_actions"),
+    [
+        (0, ExactRestoreCycle.SENTINEL_QUALIFICATION, 8),
+        (1, ExactRestoreCycle.BASELINE_RESTORE, 6),
+        (2, ExactRestoreCycle.BASELINE_RESTORE, 6),
+    ],
+)
+async def test_version_two_park_covers_every_strandable_cycle_depth(
+    tmp_path: Path,
+    depth: int,
+    expected_cycle: ExactRestoreCycle,
+    expected_actions: int,
+) -> None:
+    """Sentinel, baseline restore and phase-5 staged restore all park through one path.
+
+    Phase 5 shares `BASELINE_RESTORE` with the baseline cycle, so the depth is what tells them
+    apart.  All three must reach a terminal park with a permanent version 2 finalization.
+    """
+
+    case = await _v2_case(tmp_path, depth=depth)
+    assert case.record.cycle is expected_cycle
+    assert len(case.record.completed_actions) == expected_actions
+
+    disposition = case.service.park(case.authority)
+
+    assert disposition.version == 2
+    assert disposition.cycle is expected_cycle
+    assert disposition.predecessor_depth == depth
+    assert disposition.reason is ParkedDispositionReason.FINAL_VERIFICATION_UNRESOLVED
+    assert disposition.completed_action_count == expected_actions
+    tombstone = ParkedDispositionTombstone.model_validate(case.journal.load())
+    assert tombstone.disposition_sha256 == disposition.disposition_sha256
+    finalization = case.archive.load_operation_finalization(case.record.operation_id)
+    assert finalization is not None
+    assert finalization["version"] == 2
+    assert finalization["outcome"] == "parked_unqualified"
+    assert finalization["cycle"] == expected_cycle.value
+    assert finalization["disposition_sha256"] == disposition.disposition_sha256
+
+
+async def test_version_two_park_accepts_the_baseline_cycles_real_skip_vector(
+    tmp_path: Path,
+) -> None:
+    """A baseline restore legitimately skips actions the device already satisfies.
+
+    The version 1 rule demanded every action be `written_verified`, which would have refused the
+    ordinary baseline distribution outright.  The ordered vector has to carry it instead.
+    """
+
+    outcomes = (
+        ExactRestoreActionOutcome.WRITTEN_VERIFIED,
+        ExactRestoreActionOutcome.WRITTEN_VERIFIED,
+        ExactRestoreActionOutcome.ALREADY_SATISFIED,
+        ExactRestoreActionOutcome.ALREADY_SATISFIED,
+        ExactRestoreActionOutcome.VERIFIED_AFTER_UNCERTAIN,
+        ExactRestoreActionOutcome.WRITTEN_VERIFIED,
+    )
+    case = await _v2_case(tmp_path, depth=1, outcomes=outcomes)
+
+    disposition = case.service.park(case.authority)
+
+    assert disposition.completed_action_outcomes == outcomes
+    assert case.archive.load_operation_finalization(case.record.operation_id) is not None
+    status = public_parked_tombstone_status(case.journal.load(), archive=case.archive)
+    assert status["parked_cycle"] == ExactRestoreCycle.BASELINE_RESTORE.value
+    assert status["predecessor_depth"] == 1
+    assert status["reason"] == ParkedDispositionReason.FINAL_VERIFICATION_UNRESOLVED.value
+    assert status["past_action_outcomes"] == [outcome.value for outcome in outcomes]
+
+
+def _rebuilt(manifest: ParkedDispositionManifest, **changes: Any) -> ParkedDispositionManifest:
+    """Round-trip a manifest with one dimension changed.
+
+    The serializer drops the optional keys it holds as `None`, and re-validating a dump would
+    silently restore their defaults, so absent keys are pinned back to `None` explicitly.
+    """
+
+    payload = manifest.model_dump(mode="json")
+    for key in (
+        "required_action_outcome",
+        "minimum_total_attempt_seconds",
+        "predecessor_depth",
+        "completed_action_outcomes",
+    ):
+        payload.setdefault(key, None)
+    payload.update(changes)
+    return ParkedDispositionManifest.model_validate(payload)
+
+
+async def test_version_two_manifest_must_match_the_journal_it_names(tmp_path: Path) -> None:
+    """Every declared dimension is bound to the journal, not merely self-consistent.
+
+    A manifest that validates on its own but describes a different journal has to be refused;
+    otherwise an owner could park one operation under another operation's description.
+    """
+
+    case = await _v2_case(tmp_path, depth=1)
+    mismatches = {
+        "depth": _rebuilt(case.manifest, predecessor_depth=2),
+        "gap_bound": _rebuilt(case.manifest, maximum_pair_completion_gap_seconds=19.0),
+        "outcomes": _rebuilt(
+            case.manifest,
+            completed_action_outcomes=[
+                ExactRestoreActionOutcome.ALREADY_SATISFIED.value,
+                *[outcome.value for outcome in (case.manifest.completed_action_outcomes or ())[1:]],
+            ],
+        ),
+    }
+    for label, manifest in mismatches.items():
+        service = ParkedDispositionService(
+            manifest,
+            journal_store=case.journal,
+            collector_store=case.collector,
+            archive=case.archive,
+            guard=case.guard,  # type: ignore[arg-type]
+            wall_clock=lambda: NOW + timedelta(minutes=1, seconds=1),
+            monotonic_clock=lambda: 41_000_000_000,
+            boot_identity=lambda: BOOT_A_SHA256,
+        )
+        with pytest.raises(ExactRestoreDispositionError) as rejected:
+            service.park(_authority_for(manifest))
+        assert rejected.value.code == "disposition_journal_ineligible", label
+
+    assert case.archive.load_operation_finalization(case.record.operation_id) is None
+    assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
+
+
+async def test_manifest_version_is_bound_to_the_journals_own_policy(tmp_path: Path) -> None:
+    """The disposition version follows the journal's policy shape and cannot be chosen freely.
+
+    A split-policy journal is a version 2 park and a legacy-policy journal is a version 1 park.
+    Crossing them would let a generic park claim overload evidence it never had, or an overload
+    park hide a baseline cycle's skips behind the retired all-written rule.
+    """
+
+    split_case = await _v2_case(tmp_path / "split", depth=0)
+    legacy_case = _case(tmp_path / "legacy")
+
+    version_one_over_split = _rebuilt(
+        split_case.manifest,
+        version=1,
+        required_action_outcome="written_verified",
+        minimum_total_attempt_seconds=20,
+        predecessor_depth=None,
+        completed_action_outcomes=None,
+        reason=ParkedDispositionReason.FINAL_VERIFICATION_POLICY_OVERLOAD.value,
+    )
+    version_two_over_legacy = _rebuilt(
+        legacy_case.manifest,
+        version=2,
+        required_action_outcome=None,
+        minimum_total_attempt_seconds=None,
+        predecessor_depth=0,
+        completed_action_outcomes=[
+            item.outcome.value for item in legacy_case.record.completed_actions
+        ],
+        reason=ParkedDispositionReason.FINAL_VERIFICATION_UNRESOLVED.value,
+    )
+
+    for case, manifest in (
+        (split_case, version_one_over_split),
+        (legacy_case, version_two_over_legacy),
+    ):
+        service = ParkedDispositionService(
+            manifest,
+            journal_store=case.journal,
+            collector_store=case.collector,
+            archive=case.archive,
+            guard=case.guard,  # type: ignore[arg-type]
+            wall_clock=lambda: NOW + timedelta(minutes=1, seconds=1),
+            monotonic_clock=lambda: 41_000_000_000,
+            boot_identity=lambda: BOOT_A_SHA256,
+        )
+        with pytest.raises(ExactRestoreDispositionError) as rejected:
+            service.park(_authority_for(manifest))
+        assert rejected.value.code == "disposition_journal_ineligible"
+        assert case.archive.load_operation_finalization(case.record.operation_id) is None
+        assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
+
+
+async def test_cycle_and_count_and_depth_cannot_disagree_inside_one_manifest(
+    tmp_path: Path,
+) -> None:
+    """The cycle fixes the action count and the admissible depths at construction time."""
+
+    case = await _v2_case(tmp_path, depth=1)
+    with pytest.raises(ValidationError):
+        _rebuilt(case.manifest, cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION.value)
+    with pytest.raises(ValidationError):
+        _rebuilt(case.manifest, predecessor_depth=0)
+    with pytest.raises(ValidationError):
+        _rebuilt(case.manifest, completed_action_count=8)
+
+    sentinel_case = await _v2_case(tmp_path / "sentinel", depth=0)
+    with pytest.raises(ValidationError):
+        _rebuilt(sentinel_case.manifest, predecessor_depth=1)
+
+
+async def test_park_refuses_an_unbarriered_predecessor_before_asking_for_consent(
+    tmp_path: Path,
+) -> None:
+    """A baseline park whose sentinel never got its permanent success barrier must not proceed.
+
+    Parking on top of an unbarriered ancestor would leave that ancestor replayable, which is the
+    duplicate-write hazard the predecessor finalization exists to close.
+    """
+
+    case = await _v2_case(tmp_path, depth=1, archive_predecessors=False)
+
+    with pytest.raises(ExactRestoreDispositionError) as rejected:
+        case.service.park(case.authority)
+
+    assert rejected.value.code == "disposition_predecessor_unbarriered"
+    assert case.archive.load_operation_finalization(case.record.operation_id) is None
+    assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
+
+
+async def test_install_claim_repeats_the_predecessor_check_it_does_not_delegate_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decisive chain check lives inside the claim that installs the index.
+
+    With the public dry check disabled the park must still refuse, proving the inner gate is a
+    real barrier rather than a restatement of the pre-consent one.
+    """
+
+    case = await _v2_case(tmp_path, depth=2, archive_predecessors=False)
+    monkeypatch.setattr(
+        "jebao_flow.exact_restore_disposition._require_public_predecessor_chain",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(ExactRestoreDispositionError) as rejected:
+        case.service.park(case.authority)
+
+    assert rejected.value.code == "disposition_predecessor_unbarriered"
+    assert case.archive.load_operation_finalization(case.record.operation_id) is None
+    assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
+
+
+async def test_undecodable_candidate_is_refused_before_the_index_can_name_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidate the final loader would refuse must never occupy the finalization index.
+
+    If the index were installed first, the live journal would be terminalized against a blob no
+    reader can decode, and the operation would be stranded with no way back.
+    """
+
+    case = await _v2_case(tmp_path, depth=1)
+    calls: list[int] = []
+
+    def refuse_binding(*_args: Any, **_kwargs: Any) -> None:
+        calls.append(1)
+        raise ExactRestoreDispositionError("disposition_archive_binding_mismatch")
+
+    monkeypatch.setattr(
+        "jebao_flow.exact_restore_disposition._require_disposition_binds_journal",
+        refuse_binding,
+    )
+
+    with pytest.raises(ExactRestoreDispositionError) as rejected:
+        case.service.park(case.authority)
+
+    assert rejected.value.code == "disposition_archive_binding_mismatch"
+    # The read-back decoder ran on the stored bytes before the index was reached.
+    assert calls == [1]
+    assert case.archive.load_operation_finalization(case.record.operation_id) is None
+    assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
+
+
+def test_version_one_stored_disposition_keeps_its_exact_legacy_bytes(tmp_path: Path) -> None:
+    """The blob a version 1 park writes must stay byte-identical to what shipped before.
+
+    Widening the model added four optional fields.  If any of them serialized as an explicit null
+    the stored bytes would change, the archive's exact-key decoder would refuse them, and every
+    already-parked operation would become unreadable.  The digest below was recomputed from the
+    unwidened sources and must not move.
+    """
+
+    case = _case(tmp_path)
+    disposition = case.service.park(case.authority)
+    payload = disposition.model_dump(mode="json")
+
+    assert set(payload) == {
+        "action_plan_sha256",
+        "authority_chain_sha256",
+        "baseline_sha256",
+        "completed_action_count",
+        "cycle",
+        "device_network_access",
+        "device_write_count",
+        "disposition_authority",
+        "disposition_authority_sha256",
+        "disposition_id",
+        "evidence",
+        "journal_snapshot_sha256",
+        "manifest_sha256",
+        "operation_finalization_sha256",
+        "operation_sha256",
+        "outcome",
+        "pair_completion_gap_ns",
+        "qualification_achieved",
+        "reason",
+        "recorded_at",
+        "total_attempt_ns",
+        "version",
+    }
+    assert payload["version"] == 1
+    assert payload["reason"] == "final_verification_policy_overload"
+    assert disposition.disposition_sha256 == (
+        "0552d597dccb0c83d60de1e49f81bd89074912bea9b3557cb32d3fb072309905"
+    )
+    assert case.archive.load_parked_disposition(case.record.operation_id) == disposition
+
+
+async def test_version_two_stored_disposition_adds_exactly_three_keys(tmp_path: Path) -> None:
+    """A version 2 blob is the legacy shape plus the three fields the generic park needs."""
+
+    case = await _v2_case(tmp_path, depth=2)
+    disposition = case.service.park(case.authority)
+    payload = disposition.model_dump(mode="json")
+    legacy = _case(tmp_path / "legacy")
+    legacy_payload = legacy.service.park(legacy.authority).model_dump(mode="json")
+
+    assert set(payload) - set(legacy_payload) == {
+        "completed_action_outcomes",
+        "maximum_pair_completion_gap_seconds",
+        "predecessor_depth",
+    }
+    assert set(legacy_payload) - set(payload) == set()
+    assert case.archive.load_parked_disposition(case.record.operation_id) == disposition
+
+
+async def test_version_two_park_reaches_no_network_and_writes_no_device(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generalised park keeps the original park's read-only guarantee for every cycle."""
+
+    case = await _v2_case(tmp_path, depth=2)
+
+    def forbidden(*_args: object, **_kwargs: object) -> Any:
+        raise AssertionError("network or discovery construction reached")
+
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(asyncio.BaseEventLoop, "create_connection", forbidden)
+    monkeypatch.setattr(asyncio.BaseEventLoop, "create_datagram_endpoint", forbidden)
+
+    eligibility = case.service.verify()
+    disposition = case.service.park(case.authority)
+
+    assert eligibility.record == case.record
+    assert disposition.device_network_access is False
+    assert disposition.device_write_count == 0
+    assert disposition.qualification_achieved is False
+    assert case.service.resume_if_archived() == disposition
+    # Release the socket ban before this test's event loop is torn down; the loop closes its own
+    # self-pipe with a unix socketpair, which is not the traffic this test forbids.
+    monkeypatch.undo()

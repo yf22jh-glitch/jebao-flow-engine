@@ -1,4 +1,4 @@
-"""Write-free terminal disposition for one failed exact-restore qualification.
+"""Write-free terminal disposition for one failed exact-restore final verification.
 
 The canonical preserved-artifact reader brings in inert protocol constants, ABCs, and data
 classes transitively.  This module does not construct discovery/session objects or import a
@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol, Self
 
@@ -28,6 +29,7 @@ from pydantic import (
     StringConstraints,
     ValidationError,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -39,6 +41,7 @@ from jebao_flow.exact_restore import (
     ExactScheduleImage,
     OperationId,
     OuterControlSnapshot,
+    _receipt_from_final_verified_record,
     system_boot_identity_sha256,
     system_boottime_ns,
 )
@@ -126,6 +129,96 @@ def _archive_failure(error: BaseException, fallback: str) -> ExactRestoreDisposi
     return ExactRestoreDispositionError(fallback)
 
 
+class ParkedDispositionReason(StrEnum):
+    """Why a journal is parked without a qualification receipt.
+
+    Widening this set never changes how an already-stored value serialises, so an installed
+    disposition keeps its canonical bytes and digest.
+    """
+
+    FINAL_VERIFICATION_POLICY_OVERLOAD = "final_verification_policy_overload"
+    FINAL_VERIFICATION_UNRESOLVED = "final_verification_unresolved"
+
+
+# Both cycles share safe fallback, restore schedule and restore outer for each of the two roles.
+# Only the sentinel cycle adds the two qualify-sentinel writes.  A regression pins this against
+# the deterministic plan builder so the table cannot drift from the real action counts.
+_CYCLE_ACTION_COUNTS: dict[ExactRestoreCycle, int] = {
+    ExactRestoreCycle.SENTINEL_QUALIFICATION: 8,
+    ExactRestoreCycle.BASELINE_RESTORE: 6,
+}
+
+# A phase-5 record carries the same cycle as the baseline restore it descends from, so the cycle
+# alone cannot tell them apart.  Embedded predecessor depth does: sentinel 0, baseline 1, phase-5 2.
+_MAXIMUM_PREDECESSOR_DEPTH = 2
+
+# Closed set.  A future outcome value must fail rather than be accepted by a stale disposition.
+_ALLOWED_ACTION_OUTCOMES: frozenset[ExactRestoreActionOutcome] = frozenset(
+    {
+        ExactRestoreActionOutcome.ALREADY_SATISFIED,
+        ExactRestoreActionOutcome.WRITTEN_VERIFIED,
+        ExactRestoreActionOutcome.VERIFIED_AFTER_UNCERTAIN,
+    }
+)
+
+
+def _outcomes_match_manifest(
+    record: ExactRestoreRecord,
+    manifest: ParkedDispositionManifest,
+) -> bool:
+    """Bind every completed outcome to what the manifest declares for this version.
+
+    Version 1 asserts one required outcome for the whole prefix.  Version 2 declares the ordered
+    vector, because a baseline cycle legitimately skips actions the device already satisfies.
+    """
+
+    outcomes = tuple(item.outcome for item in record.completed_actions)
+    if any(outcome not in _ALLOWED_ACTION_OUTCOMES for outcome in outcomes):
+        return False
+    if manifest.version == 1:
+        return all(outcome is ExactRestoreActionOutcome.WRITTEN_VERIFIED for outcome in outcomes)
+    return outcomes == tuple(manifest.completed_action_outcomes or ())
+
+
+def _version_binding_holds(
+    record: ExactRestoreRecord,
+    manifest: ParkedDispositionManifest,
+) -> bool:
+    """Tie the disposition version to the journal's own policy and predecessor shape."""
+
+    split = record.baseline.verification_policy.max_final_acquisition_duration_seconds
+    if manifest.version == 1:
+        if split is not None:
+            return False
+    elif split is None:
+        return False
+    if manifest.maximum_pair_completion_gap_seconds != (
+        record.baseline.verification_policy.max_final_pair_gap_seconds
+    ):
+        return False
+    depth = _predecessor_depth(record)
+    if not _depth_matches_cycle(record.cycle, depth):
+        return False
+    return manifest.version == 1 or manifest.predecessor_depth == depth
+
+
+def _depth_matches_cycle(cycle: ExactRestoreCycle, depth: int) -> bool:
+    """A sentinel has no predecessor; a baseline restore and a phase-5 restore have one or two."""
+
+    if cycle is ExactRestoreCycle.SENTINEL_QUALIFICATION:
+        return depth == 0
+    return depth in (1, 2)
+
+
+def _predecessor_depth(record: ExactRestoreRecord) -> int:
+    depth = 0
+    parent = record.qualification_final_record
+    while parent is not None:
+        depth += 1
+        parent = parent.qualification_final_record
+    return depth
+
+
 class ParkedDispositionEvidenceReference(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -141,30 +234,85 @@ class ParkedDispositionManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 1
     operation_id: OperationId
     operation_sha256: Sha256Digest
     journal_sha256: Sha256Digest
-    cycle: Literal[ExactRestoreCycle.SENTINEL_QUALIFICATION]
+    cycle: ExactRestoreCycle = ExactRestoreCycle.SENTINEL_QUALIFICATION
     baseline_sha256: Sha256Digest
     action_plan_sha256: Sha256Digest
     authority_chain_sha256: Sha256Digest
-    completed_action_count: Literal[8] = 8
-    required_action_outcome: Literal["written_verified"] = "written_verified"
+    completed_action_count: int = Field(default=8, ge=1)
+    # Version 1 asserts a single required outcome; version 2 carries the ordered vector
+    # instead, because a baseline cycle legitimately skips actions it already satisfies.
+    required_action_outcome: Literal["written_verified"] | None = "written_verified"
     evidence: ParkedDispositionEvidenceReference
+    # A policy bound, not an observation.  Every variant carries it and binds it to the journal.
     maximum_pair_completion_gap_seconds: float = Field(gt=0)
-    minimum_total_attempt_seconds: float = Field(gt=0)
+    # Overload evidence only; a generic version 2 disposition makes no such claim.
+    minimum_total_attempt_seconds: float | None = Field(default=None, gt=0)
+    predecessor_depth: int | None = Field(default=None, ge=0, le=_MAXIMUM_PREDECESSOR_DEPTH)
+    completed_action_outcomes: tuple[ExactRestoreActionOutcome, ...] | None = None
     outcome: Literal["parked_unqualified"] = "parked_unqualified"
     qualification_achieved: Literal[False] = False
     device_network_access: Literal[False] = False
     device_write_count: Literal[0] = 0
-    reason: Literal["final_verification_policy_overload"] = "final_verification_policy_overload"
+    reason: ParkedDispositionReason = ParkedDispositionReason.FINAL_VERIFICATION_POLICY_OVERLOAD
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_compatible(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        for key in (
+            "required_action_outcome",
+            "minimum_total_attempt_seconds",
+            "predecessor_depth",
+            "completed_action_outcomes",
+        ):
+            if getattr(self, key) is None:
+                payload.pop(key, None)
+        return payload
 
     @model_validator(mode="after")
     def validate_exact_operation(self) -> Self:
         if self.operation_sha256 != _operation_public_sha256(self.operation_id):
             raise ValueError("operation digest does not match operation id")
-        if self.minimum_total_attempt_seconds < self.maximum_pair_completion_gap_seconds:
+        if self.completed_action_count != _CYCLE_ACTION_COUNTS[self.cycle]:
+            raise ValueError("completed action count does not match the cycle's deterministic plan")
+        if self.version == 1:
+            # Version 1 describes exactly the original overload park and nothing else.
+            if (
+                self.cycle is not ExactRestoreCycle.SENTINEL_QUALIFICATION
+                or self.reason is not ParkedDispositionReason.FINAL_VERIFICATION_POLICY_OVERLOAD
+                or self.required_action_outcome != "written_verified"
+                or self.minimum_total_attempt_seconds is None
+                or self.predecessor_depth is not None
+                or self.completed_action_outcomes is not None
+            ):
+                raise ValueError("version 1 disposition must describe the original overload park")
+        else:
+            # Version 2 has no durable failure frame to justify an overload claim, so it stays
+            # generic and never carries the overload evidence bound.
+            if (
+                self.reason is not ParkedDispositionReason.FINAL_VERIFICATION_UNRESOLVED
+                or self.minimum_total_attempt_seconds is not None
+                or self.required_action_outcome is not None
+            ):
+                raise ValueError("version 2 disposition must be a generic unresolved park")
+            if self.predecessor_depth is None or self.completed_action_outcomes is None:
+                raise ValueError("version 2 disposition must declare depth and outcome vector")
+            if len(self.completed_action_outcomes) != self.completed_action_count:
+                raise ValueError("outcome vector length must match the completed action count")
+            if any(
+                outcome not in _ALLOWED_ACTION_OUTCOMES
+                for outcome in self.completed_action_outcomes
+            ):
+                raise ValueError("outcome vector contains an unsupported action outcome")
+            if not _depth_matches_cycle(self.cycle, self.predecessor_depth):
+                raise ValueError("predecessor depth does not match the declared cycle")
+        if (
+            self.minimum_total_attempt_seconds is not None
+            and self.minimum_total_attempt_seconds < self.maximum_pair_completion_gap_seconds
+        ):
             raise ValueError("overload total must not be below the completion-gap bound")
         return self
 
@@ -225,13 +373,13 @@ class ParkedDispositionRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: Literal[1] = 1
+    version: Literal[1, 2] = 1
     disposition_id: DispositionId
     outcome: Literal["parked_unqualified"] = "parked_unqualified"
     qualification_achieved: Literal[False] = False
     device_network_access: Literal[False] = False
     device_write_count: Literal[0] = 0
-    reason: Literal["final_verification_policy_overload"]
+    reason: ParkedDispositionReason
     manifest_sha256: Sha256Digest
     operation_sha256: Sha256Digest
     operation_finalization_sha256: Sha256Digest
@@ -242,11 +390,64 @@ class ParkedDispositionRecord(BaseModel):
     authority_chain_sha256: Sha256Digest
     completed_action_count: int = Field(ge=0)
     evidence: ParkedDispositionEvidenceReference
+    # Observations.  The approved bound is the separate field below, kept apart on purpose.
     pair_completion_gap_ns: int = Field(ge=0)
     total_attempt_ns: int = Field(ge=0)
+    # Version 2 stores the approved bound so an archived reload can re-check the binding without
+    # the manifest.  Version 1 records predate this and cannot be re-checked after the fact.
+    maximum_pair_completion_gap_seconds: float | None = Field(default=None, gt=0)
+    predecessor_depth: int | None = Field(default=None, ge=0, le=_MAXIMUM_PREDECESSOR_DEPTH)
+    completed_action_outcomes: tuple[ExactRestoreActionOutcome, ...] | None = None
     disposition_authority: ParkedDispositionAuthority
     disposition_authority_sha256: Sha256Digest
     recorded_at: datetime
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_compatible(self, handler: Any) -> dict[str, Any]:
+        payload = handler(self)
+        for key in (
+            "maximum_pair_completion_gap_seconds",
+            "predecessor_depth",
+            "completed_action_outcomes",
+        ):
+            if getattr(self, key) is None:
+                payload.pop(key, None)
+        return payload
+
+    @model_validator(mode="after")
+    def validate_version_shape(self) -> Self:
+        if self.completed_action_count != _CYCLE_ACTION_COUNTS[self.cycle]:
+            raise ValueError("completed action count does not match the cycle's deterministic plan")
+        version_two_fields = (
+            self.maximum_pair_completion_gap_seconds,
+            self.predecessor_depth,
+            self.completed_action_outcomes,
+        )
+        if self.version == 1:
+            if (
+                self.cycle is not ExactRestoreCycle.SENTINEL_QUALIFICATION
+                or self.reason is not ParkedDispositionReason.FINAL_VERIFICATION_POLICY_OVERLOAD
+                or any(value is not None for value in version_two_fields)
+            ):
+                raise ValueError("version 1 record must describe the original overload park")
+        else:
+            if self.reason is not ParkedDispositionReason.FINAL_VERIFICATION_UNRESOLVED:
+                raise ValueError("version 2 record must be a generic unresolved park")
+            if any(value is None for value in version_two_fields):
+                raise ValueError("version 2 record must carry bound, depth and outcome vector")
+            outcomes = self.completed_action_outcomes or ()
+            if len(outcomes) != self.completed_action_count:
+                raise ValueError("outcome vector length must match the completed action count")
+            if any(outcome not in _ALLOWED_ACTION_OUTCOMES for outcome in outcomes):
+                raise ValueError("outcome vector contains an unsupported action outcome")
+            if self.predecessor_depth is None or not _depth_matches_cycle(
+                self.cycle, self.predecessor_depth
+            ):
+                raise ValueError("predecessor depth does not match the declared cycle")
+            bound = self.maximum_pair_completion_gap_seconds
+            if bound is not None and self.pair_completion_gap_ns > int(bound * 1_000_000_000):
+                raise ValueError("observed completion gap exceeds the approved bound")
+        return self
 
     @field_validator("recorded_at")
     @classmethod
@@ -510,8 +711,8 @@ def verify_park_eligibility(
     if (
         record.operation_id != manifest.operation_id
         or _operation_public_sha256(record.operation_id) != manifest.operation_sha256
-        or record.cycle is not ExactRestoreCycle.SENTINEL_QUALIFICATION
         or record.cycle is not manifest.cycle
+        or not _version_binding_holds(record, manifest)
         or record.phase.value != "awaiting_final_verify"
         or record.baseline_sha256 != manifest.baseline_sha256
         or record.action_plan_sha256 != manifest.action_plan_sha256
@@ -520,10 +721,7 @@ def verify_park_eligibility(
         or len(record.completed_actions) != manifest.completed_action_count
         or tuple(item.index for item in record.completed_actions)
         != tuple(range(manifest.completed_action_count))
-        or any(
-            item.outcome is not ExactRestoreActionOutcome.WRITTEN_VERIFIED
-            for item in record.completed_actions
-        )
+        or not _outcomes_match_manifest(record, manifest)
         or record.inflight is not None
         or record.error_code is not None
         or record.final_evidence is not None
@@ -564,6 +762,10 @@ def verify_park_eligibility(
         raise
     except Exception as error:
         raise ExactRestoreDispositionError("disposition_artifact_invalid") from error
+    # Dry verification confirms the same chain through the public surface.  The decisive check
+    # stays in the protected path that installs the index under one claim; this one exists so a
+    # `park-verify` refuses an unbarriered ancestor before anyone is asked to authorize a park.
+    _require_public_predecessor_chain(record, finalization_store)
     if (
         artifact.plan_artifact_id != evidence.plan_artifact_id
         or artifact.plan_sha256 != evidence.plan_sha256
@@ -577,9 +779,15 @@ def verify_park_eligibility(
     total_attempt_ns = (
         artifact.attempt.completed_monotonic_ns - artifact.attempt.started_monotonic_ns
     )
-    if (
-        total_attempt_ns <= int(manifest.minimum_total_attempt_seconds * 1_000_000_000)
-        or total_attempt_ns < 0
+    # Keep the local span sanity check for every version even though the canonical collector
+    # already validates it; losing a boundary-local defence buys nothing.
+    if total_attempt_ns < 0:
+        raise ExactRestoreDispositionError("disposition_artifact_mismatch")
+    # The total bound binds the overload claim only.  A generic park makes no such claim and
+    # the manifest validator forbids it from carrying the bound at all.
+    minimum_total_seconds = manifest.minimum_total_attempt_seconds
+    if minimum_total_seconds is not None and total_attempt_ns <= int(
+        minimum_total_seconds * 1_000_000_000
     ):
         raise ExactRestoreDispositionError("disposition_overload_evidence_missing")
     # The eligibility this gate needs is "no device write happened at or after the artifact
@@ -590,7 +798,15 @@ def verify_park_eligibility(
     # post-write observation, which makes it conservative against the wire send.  ``updated_at``
     # is not that boundary: it also moves for write-free journal touches such as an attended
     # reauthorization, and it never moves for a write outside this journal at all.
-    last_completed_at = record.completed_actions[-1].completed_at
+    # Every allowed outcome stamps its completion after that action's own device contact:
+    # already-satisfied after the observation that found it satisfied, written-verified after the
+    # post-write verification, and verified-after-uncertain after the fresh reconciliation that
+    # follows a possible write without resending it.  So a completion is always a safe lower
+    # bound for that action.  What is not safe is taking the last index: `_complete()` stamps from
+    # the wall clock without comparing to the previous completion and no validator enforces
+    # monotonicity across the prefix, so a clock that goes backwards can leave `[-1]` earlier than
+    # a preceding write's completion.  The conservative boundary is therefore the maximum.
+    last_completed_at = max(item.completed_at for item in record.completed_actions)
     artifact_started_at = _parse_utc(artifact.attempt.started_utc)
     if artifact_started_at <= last_completed_at:
         raise ExactRestoreDispositionError("disposition_artifact_predates_restore")
@@ -691,6 +907,18 @@ class ExactRestoreDispositionArchive(ExactRestoreReceiptArchive):
                     digest=disposition_sha256,
                     payload=disposition_canonical,
                 )
+                # Both checks happen here, inside the claim that installs the index and before
+                # that index exists.  Validating only after the index is installed lets an
+                # incompatible candidate occupy the slot and strand the live journal, and
+                # confirming the predecessor chain under a separate claim leaves a window between
+                # the check and the install.
+                self._require_decodable_candidate(
+                    root_descriptor,
+                    finalization=finalization,
+                    disposition=disposition,
+                    journal_canonical=journal_canonical,
+                )
+                self._require_archived_predecessor_chain(root_descriptor, journal_canonical)
                 installed = self._persist_finalization_under_claim(
                     root_descriptor,
                     finalization,
@@ -723,6 +951,71 @@ class ExactRestoreDispositionArchive(ExactRestoreReceiptArchive):
         except Exception as error:
             raise _archive_failure(error, "disposition_archive_failed") from error
 
+    def _require_decodable_candidate(
+        self,
+        root_descriptor: int,
+        *,
+        finalization: ExactRestoreOperationFinalization,
+        disposition: ParkedDispositionRecord,
+        journal_canonical: bytes,
+    ) -> None:
+        """Reject a candidate the final loader would refuse, before any index can name it.
+
+        This has to run the real archive decoder, not only the model binding.  The exact key set
+        and reason rules live in the receipt archive, so validating the blob through them here is
+        what stops an incompatible candidate from occupying the index and stranding the journal.
+        """
+
+        del disposition
+        try:
+            journal_record = ExactRestoreRecord.model_validate_json(journal_canonical)
+        except (TypeError, ValidationError, ValueError) as error:
+            raise ExactRestoreDispositionError("disposition_archive_binding_mismatch") from error
+        # Read back and decode what was actually written, through the archive's own exact-key and
+        # reason rules.  Binding the in-memory object instead would leave the stored bytes
+        # unchecked until after the index already named them.
+        decoded = self._require_parked_backing_finalization(root_descriptor, finalization)
+        try:
+            stored = ParkedDispositionRecord.model_validate(decoded)
+        except (TypeError, ValidationError, ValueError) as error:
+            raise ExactRestoreDispositionError("disposition_archive_binding_mismatch") from error
+        _require_disposition_binds_journal(stored, journal_record)
+
+    def _require_archived_predecessor_chain(
+        self,
+        root_descriptor: int,
+        journal_canonical: bytes,
+    ) -> None:
+        """Confirm every finished ancestor still holds its permanent barrier, oldest first."""
+
+        try:
+            journal_record = ExactRestoreRecord.model_validate_json(journal_canonical)
+        except (TypeError, ValidationError, ValueError) as error:
+            raise ExactRestoreDispositionError("disposition_archive_binding_mismatch") from error
+        ancestors: list[ExactRestoreRecord] = []
+        parent = journal_record.qualification_final_record
+        while parent is not None:
+            ancestors.append(parent)
+            parent = parent.qualification_final_record
+        for ancestor in reversed(ancestors):
+            try:
+                receipt = _receipt_from_final_verified_record(ancestor)
+            except (TypeError, ValueError) as error:
+                raise ExactRestoreDispositionError("disposition_predecessor_unbarriered") from error
+            snapshot = self._load_finalization_snapshot(
+                root_descriptor,
+                self._operation_digest(ancestor.operation_id),
+                allow_absent=True,
+            )
+            if (
+                snapshot is None
+                or snapshot.finalization.version != 1
+                or snapshot.finalization.receipt_sha256 != receipt.receipt_sha256
+                or snapshot.finalization.cycle is not receipt.cycle
+            ):
+                raise ExactRestoreDispositionError("disposition_predecessor_unbarriered")
+            self._require_receipt_backing_finalization(root_descriptor, snapshot.finalization)
+
     def load_parked_disposition(self, operation_id: str) -> ParkedDispositionRecord | None:
         operation_digest = _operation_finalization_sha256(operation_id)
         try:
@@ -751,16 +1044,13 @@ class ExactRestoreDispositionArchive(ExactRestoreReceiptArchive):
                 journal_record = ExactRestoreRecord.model_validate(journal_decoded)
                 if (
                     journal_record.operation_id != operation_id
-                    or disposition.operation_sha256 != _operation_public_sha256(operation_id)
                     or disposition.operation_finalization_sha256 != operation_digest
                     or disposition.journal_snapshot_sha256
                     != hashlib.sha256(journal_payload).hexdigest()
-                    or disposition.baseline_sha256 != journal_record.baseline_sha256
-                    or disposition.action_plan_sha256 != journal_record.action_plan_sha256
-                    or disposition.authority_chain_sha256 != journal_record.authority_chain_sha256
-                    or disposition.completed_action_count != len(journal_record.completed_actions)
                 ):
                     raise ExactRestoreDispositionError("disposition_archive_binding_mismatch")
+                # Same rule the pre-index validator applied, so the two gates cannot drift.
+                _require_disposition_binds_journal(disposition, journal_record)
                 return disposition
         except ExactRestoreDispositionError:
             raise
@@ -874,6 +1164,82 @@ def _disposition_id(manifest: ParkedDispositionManifest) -> str:
     return f"ERD-{digest[:32]}"
 
 
+def _require_public_predecessor_chain(
+    record: ExactRestoreRecord,
+    finalization_store: ExactRestoreReceiptArchive,
+) -> None:
+    """Confirm each finished ancestor still holds a version 1 success barrier, oldest first."""
+
+    ancestors: list[ExactRestoreRecord] = []
+    parent = record.qualification_final_record
+    while parent is not None:
+        ancestors.append(parent)
+        parent = parent.qualification_final_record
+    for ancestor in reversed(ancestors):
+        try:
+            receipt = _receipt_from_final_verified_record(ancestor)
+            finalization = finalization_store.load_operation_finalization(ancestor.operation_id)
+        except ExactRestoreDispositionError:
+            raise
+        except Exception as error:
+            raise _archive_failure(error, "disposition_predecessor_unbarriered") from error
+        if (
+            not isinstance(finalization, Mapping)
+            or finalization.get("version") != 1
+            or finalization.get("receipt_sha256") != receipt.receipt_sha256
+            or finalization.get("cycle") != receipt.cycle.value
+        ):
+            raise ExactRestoreDispositionError("disposition_predecessor_unbarriered")
+
+
+def _require_disposition_binds_journal(
+    disposition: ParkedDispositionRecord,
+    journal_record: ExactRestoreRecord,
+) -> None:
+    """One cross-binding rule shared by the pre-index validator and the final loader.
+
+    Keeping a single implementation is the point: a second copy would drift and let a candidate
+    pass one gate while failing the other.
+    """
+
+    policy = journal_record.baseline.verification_policy
+    split = policy.max_final_acquisition_duration_seconds
+    depth = _predecessor_depth(journal_record)
+    outcomes = tuple(item.outcome for item in journal_record.completed_actions)
+    if (
+        disposition.operation_sha256 != _operation_public_sha256(journal_record.operation_id)
+        or disposition.operation_finalization_sha256
+        != _operation_finalization_sha256(journal_record.operation_id)
+        or disposition.cycle is not journal_record.cycle
+        or disposition.baseline_sha256 != journal_record.baseline_sha256
+        or disposition.action_plan_sha256 != journal_record.action_plan_sha256
+        or disposition.authority_chain_sha256 != journal_record.authority_chain_sha256
+        or disposition.completed_action_count != len(journal_record.completed_actions)
+        or disposition.completed_action_count != _CYCLE_ACTION_COUNTS[journal_record.cycle]
+        or not _depth_matches_cycle(journal_record.cycle, depth)
+        or any(outcome not in _ALLOWED_ACTION_OUTCOMES for outcome in outcomes)
+    ):
+        raise ExactRestoreDispositionError("disposition_archive_binding_mismatch")
+    if disposition.version == 1:
+        if split is not None or any(
+            outcome is not ExactRestoreActionOutcome.WRITTEN_VERIFIED for outcome in outcomes
+        ):
+            raise ExactRestoreDispositionError("disposition_archive_binding_mismatch")
+        return
+    bound = disposition.maximum_pair_completion_gap_seconds
+    if (
+        split is None
+        or disposition.predecessor_depth != depth
+        or disposition.completed_action_outcomes != outcomes
+        or bound is None
+        or bound != policy.max_final_pair_gap_seconds
+        # The stored observation must sit inside the stored bound, or a schema-valid candidate
+        # could claim an over-large gap and still take the index.
+        or disposition.pair_completion_gap_ns > int(bound * 1_000_000_000)
+    ):
+        raise ExactRestoreDispositionError("disposition_archive_binding_mismatch")
+
+
 def _build_disposition(
     eligibility: VerifiedParkEligibility,
     authority: ParkedDispositionAuthority,
@@ -882,6 +1248,7 @@ def _build_disposition(
 ) -> ParkedDispositionRecord:
     manifest = eligibility.manifest
     return ParkedDispositionRecord(
+        version=manifest.version,
         disposition_id=_disposition_id(manifest),
         reason=manifest.reason,
         manifest_sha256=manifest.manifest_sha256,
@@ -896,6 +1263,17 @@ def _build_disposition(
         evidence=manifest.evidence,
         pair_completion_gap_ns=eligibility.artifact.pair_completion_gap_ns,
         total_attempt_ns=eligibility.total_attempt_ns,
+        maximum_pair_completion_gap_seconds=(
+            None if manifest.version == 1 else manifest.maximum_pair_completion_gap_seconds
+        ),
+        predecessor_depth=(
+            None if manifest.version == 1 else _predecessor_depth(eligibility.record)
+        ),
+        completed_action_outcomes=(
+            None
+            if manifest.version == 1
+            else tuple(item.outcome for item in eligibility.record.completed_actions)
+        ),
         disposition_authority=authority,
         disposition_authority_sha256=authority.authority_sha256,
         recorded_at=recorded_at,
@@ -1178,16 +1556,31 @@ class AttendedDispositionIssuer:
             + nonce
         ).hexdigest()
         challenge = f"AUTHORIZE-PARK-{challenge_digest[:20].upper()}"
+        outcomes = tuple(item.outcome for item in eligibility.record.completed_actions)
+        outcome_counts = ", ".join(
+            f"{outcome.value}={sum(1 for item in outcomes if item is outcome)}"
+            for outcome in sorted({*outcomes}, key=lambda item: item.value)
+        )
+        definite = sum(1 for item in outcomes if item is ExactRestoreActionOutcome.WRITTEN_VERIFIED)
+        possible = sum(
+            1 for item in outcomes if item is ExactRestoreActionOutcome.VERIFIED_AFTER_UNCERTAIN
+        )
+        skipped = sum(1 for item in outcomes if item is ExactRestoreActionOutcome.ALREADY_SATISFIED)
+        write_note = f"{definite} wrote, {possible} may have written, {skipped} skipped"
         summary = (
             "Jebao exact restore parked disposition authorization\n"
             f"operation_sha256: {manifest.operation_sha256}\n"
             f"journal_sha256: {manifest.journal_sha256}\n"
             f"manifest_sha256: {manifest.manifest_sha256}\n"
             f"evidence_series_sha256: {manifest.evidence.series_sha256}\n"
+            f"parked_cycle: {eligibility.record.cycle.value}\n"
+            f"predecessor_depth: {_predecessor_depth(eligibility.record)}\n"
+            f"reason: {manifest.reason.value}\n"
+            f"past_action_outcomes: {outcome_counts}\n"
             "outcome: PARKED_UNQUALIFIED\n"
             "qualification_achieved: false\n"
             "device_network_access: false\n"
-            "device_write_count: 0\n"
+            f"device_write_count: 0 (this park only; past restore actions above: {write_note})\n"
             "This does not access either device and does not create a qualification receipt.\n"
             "After immutable archive verification it replaces the live recovery journal with "
             "a non-resumable tombstone.\n"
@@ -1274,8 +1667,17 @@ def public_park_eligibility(eligibility: VerifiedParkEligibility) -> dict[str, o
         "evidence_series_sha256": eligibility.manifest.evidence.series_sha256,
         "journal_sha256": eligibility.manifest.journal_sha256,
         "operation_sha256": eligibility.manifest.operation_sha256,
+        "maximum_pair_completion_gap_seconds": (
+            eligibility.manifest.maximum_pair_completion_gap_seconds
+        ),
+        "observed_action_outcomes": [
+            item.outcome.value for item in eligibility.record.completed_actions
+        ],
         "pair_completion_gap_ns": eligibility.artifact.pair_completion_gap_ns,
+        "parked_cycle": eligibility.record.cycle.value,
+        "predecessor_depth": _predecessor_depth(eligibility.record),
         "qualification_achieved": False,
+        "reason": eligibility.manifest.reason.value,
         "status": "exact_restore_park_disposition_ready",
         "total_attempt_ns": eligibility.total_attempt_ns,
     }
@@ -1289,8 +1691,24 @@ def public_parked_disposition(disposition: ParkedDispositionRecord) -> dict[str,
         "disposition_sha256": disposition.disposition_sha256,
         "journal_snapshot_sha256": disposition.journal_snapshot_sha256,
         "operation_sha256": disposition.operation_sha256,
+        "parked_cycle": disposition.cycle.value,
         "phase": "parked_unqualified",
+        # This is the park operation's own device write count.  Past restore actions in this
+        # journal may have written; the outcome vector below is where that shows.
+        "past_action_outcomes": (
+            [outcome.value for outcome in disposition.completed_action_outcomes]
+            if disposition.completed_action_outcomes is not None
+            # Version 1 asserts a single required outcome for its whole prefix, so render that
+            # rather than hiding the past actions behind a null.
+            else [ExactRestoreActionOutcome.WRITTEN_VERIFIED.value]
+            * disposition.completed_action_count
+        ),
+        # Version 1 is sentinel-only by its own validator, so its depth is 0, not unknown.
+        "predecessor_depth": (
+            disposition.predecessor_depth if disposition.predecessor_depth is not None else 0
+        ),
         "qualification_achieved": False,
+        "reason": disposition.reason.value,
         "status": "exact_restore_parked_unqualified",
     }
 

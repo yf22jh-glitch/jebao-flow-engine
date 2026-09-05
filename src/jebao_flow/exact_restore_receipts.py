@@ -1285,6 +1285,15 @@ class ExactRestoreReceiptArchive:
         journal_snapshot_sha256 = decoded.get("journal_snapshot_sha256")
         authority = decoded.get("disposition_authority")
         authority_sha256 = decoded.get("disposition_authority_sha256")
+        # Version 1 is the original sentinel overload park.  Version 2 is the generic park and
+        # carries the approved pair bound, the predecessor depth and the ordered outcome vector,
+        # so its exact key set and reason differ and must be branched rather than widened.
+        disposition_version = decoded.get("version")
+        version_two_keys = {
+            "maximum_pair_completion_gap_seconds",
+            "predecessor_depth",
+            "completed_action_outcomes",
+        }
         expected_keys = {
             "version",
             "disposition_id",
@@ -1324,15 +1333,20 @@ class ExactRestoreReceiptArchive:
             raise ExactRestoreReceiptArchiveError(
                 "parked exact-restore authority is not canonicalizable"
             ) from error
+        if disposition_version == 2:
+            expected_keys = expected_keys | version_two_keys
+            expected_reason = "final_verification_unresolved"
+        else:
+            expected_reason = "final_verification_policy_overload"
         if (
             canonical != disposition_payload
             or set(decoded) != expected_keys
-            or decoded.get("version") != 1
+            or disposition_version not in (1, 2)
             or decoded.get("outcome") != "parked_unqualified"
             or decoded.get("qualification_achieved") is not False
             or decoded.get("device_network_access") is not False
             or decoded.get("device_write_count") != 0
-            or decoded.get("reason") != "final_verification_policy_overload"
+            or decoded.get("reason") != expected_reason
             or decoded.get("operation_finalization_sha256") != finalization.operation_sha256
             or decoded.get("cycle") != finalization.cycle.value
             or not isinstance(journal_snapshot_sha256, str)
