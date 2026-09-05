@@ -1251,10 +1251,16 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
 - 잔여 `< 720초`이면 **tombstone을 건드리지 않고 종료·보고**합니다. 재수집은 **새 승인 B1**.
 - 이 계산은 **1차**입니다. 승인 상의에 시간이 걸리므로 **6단계에서 `prepare` 직전에 다시
   계산합니다.** 여기서 통과했다는 것이 그때도 통과한다는 뜻이 아닙니다.
-- **첫 challenge가 `300초`를 전부 소모해 만료된 뒤에도 재발급 여유를 *보장*하려면** `prepare`
-  시점 잔여가 **`1020초`를 넘어야** 합니다. 그 밖의 실패(빠른 거부, TTY 실패 등)는 보장이 아니라
-  **실제 재발급 시점의 잔여가 `720초` 이상인지**로 판정합니다. 잔여가 `1020초` 이하라면 재발급이
-  보장되지 않는다는 것을 **알고** 진행할지 여기서 결정합니다.
+- **첫 challenge가 `300초`를 전부 소모해 만료된 뒤에도 재발급 여유를 *보장*하려면** — 측정
+  기준점을 명시합니다.
+  - **6단계 2번의 최종 예산 확인 기준**으로는 **`1080초`를 넘어야** 합니다
+    (`60` transition + `300` 첫 challenge + `720` 재발급 예산).
+  - **첫 challenge가 이미 표시된 시점 기준**으로는 **`1020초`**입니다(`300` + `720`).
+  두 값은 같은 조건을 서로 다른 지점에서 표현한 것이며, **실행 중에는 6단계 2번이 실제 검사
+  지점이므로 `1080초`가 적용되는 값**입니다.
+- 그 밖의 실패(빠른 거부, TTY 실패 등)는 보장이 아니라 **실제 재발급 시점의 잔여가 `720초`
+  이상인지**로 판정합니다. 6단계 2번에서 잔여가 `1080초` 이하라면 재발급이 보장되지 않는다는
+  것을 **알고** 진행할지 여기서 결정합니다.
 
 ## 5단계 — 승인 B2·C·D 확보
 
@@ -1424,7 +1430,7 @@ append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있�
 | `RESTORING`, inflight 있음 | 역시 attended reauthorize가 먼저입니다. 재개된 execute는 그 inflight를 **관측으로만 조정하고 재전송하지 않습니다.** 불일치하거나 관측에 실패할 때만 latch되어 `RECOVERY_REQUIRED`가 됩니다 |
 | `RECOVERY_REQUIRED` | **이때만** `recover` entry입니다 |
 | `ARMED`, authority 만료 | fresh baseline 예산이 남아 있으면 reauthorize로 진행 가능합니다. 다만 `BASELINE_EXPIRED`라면 reauthorize로 해결되지 않는 **dead-end**입니다 |
-| **sentinel(depth `0`)** `PREPARED`/`ARMED`, 첫 possible write 이전, **challenge 실패·만료** | 최초 1회에 한해, **재발급 시점 first-wire 잔여가 `720초` 이상이면 같은 record에서 1회 재발급** 가능합니다. 잔여가 부족하거나 이미 1회 재발급했다면 **dead-end**이므로 중단·보고합니다 |
+| **sentinel(depth `0`)** `PREPARED`/`ARMED`, 첫 possible write 이전, **challenge 실패·만료** | 최초 1회에 한해, **재발급 시점 first-wire 잔여가 `720초` 이상이면 같은 record에서 1회 재발급** 가능합니다. 그 `720초`는 다시 `60` transition + `300` challenge + `300` authority + `60` margin이므로, **재발급 precommit 직후부터 새 challenge 표시까지에도 같은 `60초` cap이 적용됩니다.** 잔여가 부족하거나 이미 1회 재발급했다면 **dead-end**이므로 중단·보고합니다 |
 | **baseline(depth `1`)** — 그리고 이 경계를 phase-5(depth `2`)까지 볼 경우 그쪽도 — `PREPARED`/`ARMED`, **challenge 실패·만료** | **capture-age `720초`를 적용하지 않습니다.** freshness 게이트는 sentinel cycle 전용이므로 여기에 그 예산을 걸면 코드에 없는 gate로 유효한 재발급을 dead-end로 오판합니다. 첫 실패에서 중단·보고하고 자동 재시도 `0` 뒤, **A+B2+C+D와 새 precommit을 재승인**하면 같은 record에서 1회 재발급이 가능합니다 |
 | **sentinel(depth `0`)** `PREPARED`/`ARMED`, **`BASELINE_EXPIRED`** | **사용할 수 있는 attended entry가 없습니다.** park·recover·clear·재prepare 모두 불가하며 그대로 두고 중단·보고합니다. 이 만료는 **sentinel cycle에만** 발생합니다 |
 | 모든 cycle, **digest mismatch** | **사용할 수 있는 attended entry가 없습니다.** cycle별 offline 검토값과 어긋난 것이므로 cycle과 무관하게 중단·보고하며 park·recover·clear·재prepare 모두 불가입니다 |
@@ -1557,8 +1563,8 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
   bundle의 handoff 유효기간을 겸용합니다. 저장소 값만으로 말할 수 있는 것은 보수적 봉투뿐입니다 —
   이전 run의 게이트 요구는 **`≤ 1295.800558초`**, `1800`의 **증명 가능한 최소 여유는
   `504.199442초`**입니다. 실제 `captured_at`과 first-wire 시각은 보존 산출물에서 읽지 않았습니다.
-- **최소 잔여 `720초`** (그리고 재발급 보장 조건 `1020초`) — 이것은 **첫 sentinel challenge와 첫
-  wire까지의 예산**입니다. **두 번째 baseline grant의 freshness 예산이 아닙니다** — freshness
+- **최소 잔여 `720초`** (재발급 보장 조건은 6단계 2번 기준 `1080초`, 첫 challenge 표시 기준
+  `1020초`) — 이것은 **첫 sentinel challenge와 첫 wire까지의 예산**입니다. **두 번째 baseline grant의 freshness 예산이 아닙니다** — freshness
   게이트 자체가 sentinel cycle 전용이기 때문입니다. 값은 다음 네 항의 합입니다.
   - **`60초`** — **6단계 2번의 최종 예산 확인부터 첫 challenge 표시까지**의 command transition
     상한. manifest persist·exact reload, `prepare`, qualify 시작, challenge 표시가 모두 여기
