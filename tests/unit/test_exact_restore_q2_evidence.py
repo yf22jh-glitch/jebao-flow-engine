@@ -539,7 +539,7 @@ def test_only_the_sentinel_archived_never_yields_q2_evidence(tmp_path: Path) -> 
         clock=lambda: NOW + timedelta(minutes=1),
     )
 
-    with pytest.raises(ExactRestoreQ2EvidenceError):
+    with pytest.raises(ExactRestoreQ2EvidenceError, match="q2_restore_unfinalized"):
         verifier.derive_q2_exact_restore_evidence()
 
 

@@ -4,6 +4,7 @@ import copy
 import hashlib
 import inspect
 import json
+import os
 import subprocess
 import sys
 import time
@@ -49,6 +50,7 @@ from jebao_flow.exact_restore import (
     system_boot_identity_sha256,
     system_boottime_ns,
 )
+from jebao_flow.exact_restore_receipts import ExactRestoreReceiptArchive
 from jebao_flow.physical_identity import PhysicalDeviceBinding
 from jebao_flow.protocol.models import DeviceTarget, LinkageRole
 from jebao_flow.protocol.schedule_wire import (
@@ -471,6 +473,7 @@ class RestoreHarness:
         self.write_action_indexes: list[int] = []
         self.observed_roles: list[ExactRestoreRole] = []
         self.observation_count = 0
+        self.resolve_count = 0
         self.before_observe: Callable[[ExactRestoreRole, int], None] | None = None
         self.after_observe: Callable[[ExactRestoreRole, int], None] | None = None
         self.observation_wall_offset = timedelta(0)
@@ -551,6 +554,7 @@ class RestoreHarness:
         observation: ExactRestoreObservation,
     ) -> FakeDevice:
         assert observation.role is role
+        self.resolve_count += 1
         return self.devices[role]
 
     def before_write(
@@ -2882,10 +2886,20 @@ async def test_qualified_baseline_can_stage_and_complete_one_distinct_phase5_res
 
     # Clearing must leave no operation in the embedded chain replayable: the phase-5 record
     # names the baseline, and the baseline names the sentinel.
-    final_controller.clear_after_receipt(final_receipt)
-    assert final_store.record is None
     nested = qualified.qualification_final_record
     assert nested is not None
+    sentinel_receipt = _receipt_from_final_verified_record(nested)
+    before_receipt = copy.deepcopy(
+        archive.load_final_verified_receipt(sentinel_receipt.receipt_sha256)
+    )
+    before_finalization = copy.deepcopy(archive.load_operation_finalization(nested.operation_id))
+    assert before_receipt is not None and before_finalization is not None
+
+    final_controller.clear_after_receipt(final_receipt)
+    assert final_store.record is None
+    # Re-persisting an already-installed predecessor bundle must not alter it.
+    assert archive.load_final_verified_receipt(sentinel_receipt.receipt_sha256) == before_receipt
+    assert archive.load_operation_finalization(nested.operation_id) == before_finalization
     for operation_id in (nested.operation_id, qualified.operation_id, completed.operation_id):
         assert archive.load_operation_finalization(operation_id) is not None
 
@@ -3009,8 +3023,7 @@ def test_baseline_arm_refuses_an_unarchived_predecessor_before_any_device_io() -
         controller.arm(_authority(prepared))
 
     assert refused.value.code is ExactRestoreErrorCode.AUTHORITY
-    assert harness.writes == []
-    assert harness.observation_count == 0
+    assert (harness.writes, harness.observation_count, harness.resolve_count) == ([], 0, 0)
     assert ExactRestoreRecord.model_validate(store.record).phase is ExactRestorePhase.PREPARED
 
 
@@ -3040,7 +3053,7 @@ def test_baseline_arm_refuses_a_predecessor_bound_to_a_different_receipt() -> No
         controller.arm(_authority(prepared))
 
     assert refused.value.code is ExactRestoreErrorCode.AUTHORITY
-    assert harness.writes == []
+    assert (harness.writes, harness.observation_count, harness.resolve_count) == ([], 0, 0)
 
 
 def _archive_only_immediate_parent(
@@ -3238,8 +3251,128 @@ async def test_archive_is_only_touched_while_the_journal_claim_is_held() -> None
 
     controller._qualification_receipts = _OrderingArchive()  # type: ignore[assignment]
     qualified = await controller.execute()
-    controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+    promoted = controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+    # The second boundary of this work is the baseline arm, so it must be inside the window too.
+    controller.arm(_authority(promoted))
 
     assert "persist_final_verified_receipt" in observed
     assert "confirm_operation_finalization" in observed
     assert qualified.phase is ExactRestorePhase.FINAL_VERIFIED
+
+
+@pytest.mark.asyncio
+async def test_promotion_repairs_a_real_archive_orphan_on_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bind the production archive to the promotion path, not only the in-memory fake.
+
+    The fake models the blob-then-index ordering; this exercises the real one, so a wrong
+    model in the fake cannot hide a broken promotion retry.
+    """
+
+    root = tmp_path / "hardware-safety"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    archive = ExactRestoreReceiptArchive._for_test(root)
+    controller, store, _guard, harness, _armed = _armed_controller(
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION
+    )
+    controller._qualification_receipts = archive  # type: ignore[assignment]
+    qualified = await controller.execute()
+    receipt = _receipt_from_final_verified_record(qualified)
+    before = copy.deepcopy(store.record)
+    writes_after_sentinel = len(harness.writes)
+
+    real_link = os.link
+
+    def _fail_finalization_link(src: str, dst: str, **kwargs: Any) -> None:
+        if dst.startswith("exact-restore-finalized-"):
+            raise OSError("simulated crash installing the finalization index")
+        real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "link", _fail_finalization_link)
+    with pytest.raises(ExactRestorePreflightError) as refused:
+        controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    assert refused.value.code is ExactRestoreErrorCode.JOURNAL
+    assert store.record == before
+    # The real receipt blob landed; its authoritative index did not.
+    assert archive.path_for_receipt(receipt.receipt_sha256).exists()
+    assert not archive.path_for_operation_finalization(qualified.operation_id).exists()
+    # Promotion itself never touches a device; the earlier writes are the sentinel cycle's.
+    assert len(harness.writes) == writes_after_sentinel
+
+    monkeypatch.setattr(os, "link", real_link)
+    promoted = controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    assert archive.path_for_operation_finalization(qualified.operation_id).exists()
+    assert archive.load_operation_finalization(qualified.operation_id) is not None
+    assert archive.confirm_operation_finalization(receipt) is not None
+    assert ExactRestoreRecord.model_validate(store.record) == promoted
+
+
+def test_baseline_arm_refuses_a_damaged_predecessor_archive() -> None:
+    """Present-but-unconfirmable is refused exactly like absent, before any device contact."""
+
+    prepared = _prepared(cycle=ExactRestoreCycle.BASELINE_RESTORE)
+    store = MemoryStore()
+    store.record = prepared.model_dump(mode="json")
+    harness = RestoreHarness(prepared.baseline, store)
+    archive = _receipt_store_with_predecessor(prepared)
+    archive.fail_finalization_confirm = True
+    controller = ExactRestoreController(
+        store,
+        FakeGuard(),
+        observe=harness.observe,
+        resolve_device=harness.resolve_device,
+        qualification_receipts=archive,
+        clock=lambda: NOW,
+        monotonic_clock=lambda: MONOTONIC_NS,
+        boot_identity=lambda: BOOT_A_SHA256,
+    )
+
+    with pytest.raises(ExactRestorePreflightError) as refused:
+        controller.arm(_authority(prepared))
+
+    assert refused.value.code is ExactRestoreErrorCode.AUTHORITY
+    assert (harness.writes, harness.observation_count, harness.resolve_count) == ([], 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_promoted_sentinel_operation_cannot_be_rearmed() -> None:
+    """The replay barrier closes arm as well as create, before any device contact."""
+
+    controller, _store, archive, qualified = await _sentinel_ready_to_promote()
+    controller.promote_to_baseline_restore(operation_id="distinct-baseline-operation")
+
+    replay = prepare_exact_restore_record(
+        qualified.baseline,
+        qualified.safe_targets,
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
+        operation_id=qualified.operation_id,
+        now=NOW + timedelta(seconds=2),
+    )
+    replay_store = MemoryStore()
+    replay_store.record = replay.model_dump(mode="json")
+    replay_harness = RestoreHarness(replay.baseline, replay_store)
+    replay_controller = ExactRestoreController(
+        replay_store,
+        FakeGuard(),
+        observe=replay_harness.observe,
+        resolve_device=replay_harness.resolve_device,
+        qualification_receipts=archive,
+        clock=lambda: NOW + timedelta(seconds=2),
+        monotonic_clock=lambda: MONOTONIC_NS,
+        boot_identity=lambda: BOOT_A_SHA256,
+    )
+
+    with pytest.raises(ExactRestorePreflightError) as refused:
+        replay_controller.arm(_authority(replay, now=NOW + timedelta(seconds=2)))
+
+    assert refused.value.code is ExactRestoreErrorCode.AUTHORITY
+    assert (
+        replay_harness.writes,
+        replay_harness.observation_count,
+        replay_harness.resolve_count,
+    ) == ([], 0, 0)

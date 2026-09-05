@@ -19,6 +19,7 @@ from jebao_flow.app_async_observation_cli import (
     build_parser,
     main,
 )
+from jebao_flow.exact_restore_q2_evidence import ExactRestoreQ2EvidenceError
 from jebao_flow.read_only_collector import CaptureTransportPolicy
 
 SHA = "a" * 64
@@ -290,6 +291,64 @@ def test_prepare_creates_all_four_prebound_plans_before_manifest(
     assert tuple(value["collector_plans"]) == tuple(stage.value for stage in AppAsyncStage)
     assert value["device_writes"] == 0
     assert value["ha_actions"] == 0
+
+
+def test_prepare_refuses_when_the_exact_restore_evidence_is_unfinalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app path consumes the same verifier, so an unfinalized chain stops it before any plan."""
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        app_async_observation_cli,
+        "_attest_app_sources",
+        lambda _commit: (object(), "c" * 64),
+    )
+    monkeypatch.setattr(
+        app_async_observation_cli,
+        "_read_owner_only_json",
+        lambda _path: {
+            "version": 1,
+            "operation_nonce": "0" * 32,
+            "master_boundary_local": "2026-09-03T12:00:00",
+            "checkpoint_pair_count": 2,
+            "checkpoint_cadence_seconds": 3,
+            "observation_pair_count": 43,
+            "observation_cadence_seconds": 10,
+        },
+    )
+    monkeypatch.setattr(app_async_observation_cli, "load_locked_config", lambda _path: object())
+    monkeypatch.setattr(
+        app_async_observation_cli,
+        "select_capture_pair",
+        lambda *_args: (object(), object()),
+    )
+
+    def _refuse() -> None:
+        raise ExactRestoreQ2EvidenceError("q2_restore_unfinalized")
+
+    monkeypatch.setattr(
+        app_async_observation_cli,
+        "_exact_verifier",
+        lambda _path: SimpleNamespace(derive_q2_exact_restore_evidence=_refuse),
+    )
+
+    class RefusingStore:
+        def prepare(self, *_args: object, **_kwargs: object) -> object:
+            calls.append("prepare")
+            raise AssertionError("a collector plan was created after an unfinalized chain")
+
+    monkeypatch.setattr(
+        app_async_observation_cli,
+        "_stores",
+        lambda _root: (RefusingStore(), RefusingStore()),
+    )
+    args = build_parser().parse_args(_prepare_argv())
+
+    with pytest.raises(ExactRestoreQ2EvidenceError, match="q2_restore_unfinalized"):
+        app_async_observation_cli._prepare(args)
+
+    assert calls == []
 
 
 def test_source_attestation_compares_both_runtime_modules_to_commit(
