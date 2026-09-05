@@ -298,7 +298,7 @@ archive의 기존 테스트), **위임**(호출 관계로 상속).
 | 4 | successor 교체 후 ACK 유실 | 직접(fake) | controller seam |
 | 5 | 부재·손상·불일치 → device I/O `0` | 직접 | 세 경우 모두, write·observe·resolve **세 카운터**로 |
 | 6 | 같은 sentinel id replay 거부 | 직접 | `create`와 `arm` **둘 다**, 세 카운터 `0` |
-| 7 | 조기 predecessor bundle의 멱등 | 직접(bytes 동일성) | clear 전후 receipt·finalization **바이트 동일** 단언 |
+| 7 | 조기 predecessor bundle의 멱등 | 직접(payload 동일성) + 하위 계층 | clear 전후 receipt·finalization **payload 동일** 단언. production의 canonical bytes·no-clobber 멱등은 `test_exact_restore_receipts.py`의 기존 테스트가 담당 |
 | 8 | sentinel-only archive → Q2 FAIL | **직접(실 verifier·실 archive)** + 위임 | `q2_restore_unfinalized`로 코드 고정, App `_prepare`가 같은 거부를 전파하고 collector plan을 만들지 않음을 별도 고정 |
 | 9 | lock order | 직접(한 방향) | **controller의 archive 접근이 journal claim 안**임을 단언. promotion과 **baseline arm 경계**를 모두 창 안에 포함. 역방향 부재는 증명하지 않음 |
 

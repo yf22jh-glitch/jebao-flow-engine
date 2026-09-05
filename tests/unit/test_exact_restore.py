@@ -3227,7 +3227,7 @@ async def test_promoted_sentinel_operation_cannot_be_recreated() -> None:
 
 @pytest.mark.asyncio
 async def test_archive_is_only_touched_while_the_journal_claim_is_held() -> None:
-    """Lock order stays journal then archive, never the other way round."""
+    """Controller archive access stays under the journal claim at both boundaries."""
 
     controller, store, _guard, _harness, _armed = _armed_controller(
         cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION
