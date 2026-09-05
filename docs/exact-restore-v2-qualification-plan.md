@@ -1525,13 +1525,23 @@ write를 수행합니다.** 위 표가 그것을 "attended reauthorize" 또는 "
 
 | 재개 경로 | 다시 확인·승인해야 하는 축 |
 |---|---|
-| `RESTORING` resume (inflight 유무 무관) | **A** + **B2**(재개 범위의 device read) + **C**(host journal transition) + **D**(남은 bounded write와 현장 감시·즉시 차단) |
-| `RECOVERY_REQUIRED` → `recover` 후 continuation | **A + B2 + C + D** |
+| `RESTORING` resume, **남은 write 가능성 있음** | **A** + **B2**(재개 범위의 device read) + **C**(host journal transition) + **D**(남은 bounded write와 현장 감시·즉시 차단) |
+| `RESTORING` resume, **남은 write 가능성 `0`** (inflight를 관측으로 조정하면 남는 action이 없음) | **A + B2 + C** + 해당 attended grant. **D 불필요** |
+| `RECOVERY_REQUIRED` → `recover` 후 continuation, **complete prefix** | `recover`는 device I/O 없이 phase만 `AWAITING_FINAL_VERIFY`로 옮깁니다. 이후는 final pair read뿐이므로 **A + B2 + C** + 해당 attended grant. **D 불필요** |
+| `RECOVERY_REQUIRED` → `recover` 후 continuation, **incomplete prefix** | `RESTORING`이 되므로 위 두 `RESTORING` 행의 판정을 그대로 따릅니다 |
 | `ARMED` reauthorize 후 execute | **A + B2 + C + D** |
 | `AWAITING_FINAL_VERIFY`에서 **final verification 수동 재시도**를 선택 | **A + B2 + C**(authority·journal 갱신) + attended grant. **device write `0`이므로 D는 불필요합니다** |
 | `AWAITING_FINAL_VERIFY`에서 **park**을 선택 | **A + B3** + 별도 park host-state 승인 + attended write-free park consent (위 park 소절) |
 | `FINAL_VERIFIED` continuation | device I/O `0`이므로 **A + host mutation 승인**. B2·D·restore grant는 불필요 |
 | dead-end (`PREPARED`/`ARMED`의 `BASELINE_EXPIRED`·digest mismatch) | **승인 경로 자체가 없습니다.** 중단·보고 |
+
+**D를 언제 받는가 — exact live record로 판정합니다.** 무조건 D를 받는 편이 안전해 보이지만, 이
+문서가 앞서 확정한 "승인은 실제 entry가 하는 행위만"이라는 규율에 어긋나고 권한을 필요 이상으로
+넓힙니다. 재개 직전에 **live record의 completed prefix, inflight, 남은 action plan**을 exact로 읽어
+**앞으로 write가 발생할 수 있는지**를 판정하고, 가능한 경우에만 D를 받습니다. inflight 자체는
+관측으로만 조정되고 재전송되지 않으므로, **그 inflight 외에 남은 action이 `0`이면 write 가능성도
+`0`**입니다. D를 받는 경우 승인 문구의 상한은 **그 exact record에서 계산한 남은 write 수**로
+한정합니다.
 
 **A가 모든 실행 가능한 행에 들어가는 이유** — A는 고정 root를 열 때마다 발생하는 private read와
 일시 writability probe이고, 이 문서는 **어느 축도 다른 축을 함축하지 않는다**고 선언했습니다. 재개는
