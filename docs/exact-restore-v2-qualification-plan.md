@@ -1110,3 +1110,229 @@ phase-5는 cycle이 같아 depth로 구분한다"고 확정했으므로, cycle l
 
 두 정정 모두 대상과 id 결속에 대한 설명 오류이며, 나머지 checklist 구조는 그대로 유효합니다.
 hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home Assistant·private state 접촉은 `0`입니다.
+
+---
+
+# 최종 실행 문서 (2026-09-05, R26 반영) — **이 절만이 실행에 사용됩니다**
+
+> **앞의 모든 checklist와 addendum은 역사로 남습니다. 실행에 사용하지 않습니다.** 5차 checklist,
+> 6차 addendum의 대체 지시, R20·R21 보강, R24·R25 정정은 모두 **이 절에 이미 반영돼 있습니다.**
+> 운영자는 다른 절을 참조하거나 치환을 합성할 필요가 없으며, 그렇게 해서도 안 됩니다.
+>
+> 이 문서는 **PLAN ONLY**입니다. 아래 네 승인이 각각 명시적으로 이뤄지기 전에는 어떤 단계도
+> 실행하지 않습니다. hardware는 **NO-GO**입니다.
+
+## 승인 축 — 넷이며 서로를 함축하지 않습니다
+
+| 축 | 범위 | 주체 |
+|---|---|---|
+| **A** | private state read + 고정 root를 여는 것만으로 발생하는 **일시 host-store writability probe**. durable semantic mutation `0`, device write `0` | repository maintainer |
+| **B** | device **read**, 그리고 그 operation이 **반드시 남기는** owner-only collector plan·series·raw artifact의 **durable host write**. Phase 0은 읽기만 하는 단계가 아닙니다 | repository maintainer |
+| **C** | **host-state mutation** — 아래 "승인 C의 범위" 전체 | repository maintainer |
+| **D** | device **write** (7·8단계). 현장 감시와 즉시 물리 차단 포함 | on-site hardware approver |
+
+### 승인 C의 범위
+
+경로 열거가 아니라 **qualification 동안 controller가 계약상 수행하는 journal·archive semantic
+write set 전체**입니다. 최소한 다음을 포함합니다.
+
+- 새 v2 manifest의 owner-only 경로 persist와 exact reload
+- **tombstone → `PREPARED` 교체** — 이 항목은 **독립 명시 승인 없이는 실행하지 않습니다**
+- attended authority와 그 activation의 기록, `ARMED` 전이
+- **action별 inflight intent의 durable 기록**(wire 경계 이전)과 그 해소
+- completed-action prefix의 누적 기록
+- `RESTORING` / `AWAITING_FINAL_VERIFY` / `FINAL_VERIFIED` 전이
+- sentinel → baseline **promotion**(직전 predecessor의 영구 barrier 기록 포함)
+- sentinel receipt, baseline receipt, operation finalization, qualified bundle, staged phase-5 record
+- 직후의 control·ASYNC 두 Q2 manifest
+
+**예상 밖 경로나 이 범위 밖의 파일 write가 관측되면 즉시 중단·보고합니다.** C는 candidate와 두
+action plan과 digest를 **보고 난 뒤에** 받으며, 그 전의 포괄 승인으로 쓰지 않습니다.
+
+---
+
+## 0단계 — 사전 재검증 · **승인 A**
+
+permanent barrier·tombstone·archive 교차확인, `_require_operation_not_parked()`가 parked
+operation id를 계속 거부하는지, recovery supervisor exited, **Home Assistant가 장비에 붙어 있지
+않음**, 앱 완전 종료(background와 다른 폰·태블릿·클라이언트 포함), 모든 code writer 부재
+(`jebao-flowd`·one-shot writer 포함), 미완 recovery journal·비terminal intent·emergency latch 부재,
+실행 UID/GID가 store owner·mode와 호환되고 owner-only store가 writable한지, **실제로 import된
+`jebao_flow`의 경로와 bytes가 reviewed commit과 일치**(마운트 digest만으로는 부족), reviewed
+source/image attestation.
+
+## 1단계 — fresh Phase 0 · **승인 B**
+
+| 항목 | 값 |
+|---|---|
+| series 수 | `2` (primary, corroborating), 서로 다른 plan·series |
+| series당 predeclared pair | `2` |
+| **cadence** | **`30초`** |
+| transport policy | `explicit_only` |
+| discovery/control timeout | `5초` |
+| **retry** | **`0`** — 수집기는 각 ordinal을 한 번만 잡고 invalid read를 재시도가 아니라 증거로 남깁니다 |
+| **채택 ordinal** | **마지막(pair 수 `2`이면 ordinal `1`)** |
+
+- 두 장비의 outer six-field와 432-byte schedule image가 **byte-exact 일치**해야 합니다.
+- **각 series가** coherence `≤20초`와 total acquisition `≤30초`를 통과해야 합니다.
+- 하나라도 `2/2` accepted가 아니면 **`NO-GO`**. 재수집은 자동 retry가 아니며 그 Phase 0의 승인
+  범위는 종료됩니다. **새 승인 B**를 받아야 새 2×2 series를 수집할 수 있습니다.
+- 기존 parked operation의 artifact를 재사용하지 않습니다.
+- observation age가 만료되면 완화하지 말고 재수집합니다.
+
+## 2단계 — v2 manifest **candidate** 작성 · 장비 접촉 `0` · **고정 경로 저장 `0`**
+
+메모리 또는 격리 경로에서 candidate만 만듭니다. **production·private 고정 경로 저장은 이
+단계에서 하지 않습니다**(저장은 6단계, 승인 C 아래).
+
+- `version: 2`
+- **새 `operation_nonce`(32 hex) — 이월 금지**
+- `max_final_pair_gap_seconds: 20`, `max_final_acquisition_duration_seconds: 30`
+- `max_observation_age_seconds: 1800`
+- discovery/control timeout `5초`, identity age `5초`
+- 역할별 accepted latent manual `30`·`89`
+- configured range `30..100` step `1`
+- 역할별 attended maximum `60`·`89`
+- safe fallback `Constant / Flow 30 / Frequency 20`
+- 1단계 fresh artifact 결속(primary + corroborating)
+
+세 operation id는 **새 `operation_nonce`를 포함한 full manifest digest**에 **서로 다른 domain
+label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 cycle이 아니라 역할을
+가리키며, 그래서 cycle이 같은 baseline과 phase-5도 서로 다른 id를 갖습니다. **id를 manifest에 따로
+적지 않습니다. sentinel slot도 적지 않습니다.**
+
+## 3단계 — offline plan 도출 · 장비 접촉 `0` · **고정 store 접촉 `0`**
+
+순수 경로(baseline 합성과 계획 수립 함수)만 사용하고 고정 journal·archive·guard에는 접근하지
+않습니다. 필요하면 완전히 격리된 복사본에서 수행합니다.
+
+**두 write plan을 모두 도출합니다** — sentinel 8-action과 baseline 6-action. 검토 항목은:
+
+- **sentinel plan의 두 sentinel slot과 image target digest** (baseline plan에는 sentinel action도
+  slot도 없습니다)
+- **두 plan 각각의 전체 action·target과 `action_plan_sha256`**
+
+## 4단계 — 예산 계산 · **되돌아갈 수 있는 마지막 지점**
+
+`captured_at`은 **채택 pair의 두 read completion 중 max**이며, **두 series의 min**입니다.
+
+- first-wire deadline = **`captured_at + 1780초`**
+- `prepare` 최종 시각 = **`captured_at + 1060초`**
+- 최소 잔여 first-wire 예산 = **`720초`**
+- 잔여 `< 720초`이면 **tombstone을 건드리지 않고 종료·보고**합니다. 재수집은 **새 승인 B**.
+- **첫 challenge가 `300초`를 전부 소모해 만료된 뒤에도 재발급 여유를 *보장*하려면** `prepare`
+  시점 잔여가 **`1020초`를 넘어야** 합니다. 그 밖의 실패(빠른 거부, TTY 실패 등)는 보장이 아니라
+  **실제 재발급 시점의 잔여가 `720초` 이상인지**로 판정합니다. 잔여가 `1020초` 이하라면 재발급이
+  보장되지 않는다는 것을 **알고** 진행할지 여기서 결정합니다.
+
+## 5단계 — 승인 C와 D 확보
+
+**exact candidate manifest, 두 action plan, 그 digest를 놓고** C와 D를 받습니다. 검토·상의·승인
+확보는 **여기까지**입니다. 이 뒤에는 넣지 않습니다.
+
+## 6단계 — manifest persist와 `prepare` · **승인 C**
+
+1. 직전에 source·config·manifest·artifact digest를 **exact로 재확인**합니다.
+2. 승인 C 아래에서 manifest를 owner-only 경로에 **persist하고 exact reload**합니다.
+3. **별도의 행위로** tombstone → `PREPARED` prepare를 실행합니다(독립 명시 승인 항목).
+4. live `action_plan_sha256`을 3단계 offline 값과 **대조**합니다. **불일치하면 token을 제시하지
+   않고 즉시 중단·보고하며, clear·편집·재prepare를 시도하지 않습니다.**
+
+## 7단계 — sentinel cycle · **승인 D**
+
+**arm 직전에 장비 TCP connection과 writer 존재를 다시 확인합니다.** 하나라도 보이면 integration을
+끄거나 밀어붙이지 않고 **token 미입력 · `NO-GO` · 보고**로 닫습니다.
+
+challenge → arm → execute를 **즉시 연속**으로 진행합니다. **exact 8-action plan, 최대 8 device
+writes** — 장비가 이미 그 상태이면 action이 skip될 수 있으므로 `8`은 상한이지 확정값이 아닙니다.
+
+on-site approver가 받아야 하는 문장:
+
+> 이 cycle은 먼저 두 장비를 bounded safe fallback(`TimerOFF + independent + Constant / Flow 30 /
+> Frequency 20`)으로 바꿔 **출력 상태를 실제로 변경**합니다. 그 다음 sentinel write는 이번 fresh
+> capture에서 결정된 **사용되지 않는 한 slot의 표현만** `ZERO ↔ EE`로 바꾸며 active schedule
+> 항목은 건드리지 않습니다. 마지막 두 쌍의 action이 원래 schedule과 원래 outer control을
+> 되돌립니다. 실패가 남길 수 있는 dwell 상태는 그 safe fallback이거나 부분 복원 상태이며, 역할
+> B의 latent manual `Random / Flow 89`가 복원 중 잠시 active가 될 수 있습니다.
+
+Phase 0부터 첫 wire까지 device drift를 막는 것은 **코드 predicate가 아니라 단일 제어권이라는 운영
+전제**입니다. wire 직전 검사는 immutable action이 baseline 파생 target과 일치하는지만 보며, 제3자가
+바꿔 놓은 schedule은 거부되지 않고 덮입니다. 그래서 0단계와 각 arm 직전의 확인이 실제 방어입니다.
+
+## 8단계 — baseline restore cycle · **승인 D (별도 grant)**
+
+promotion 뒤 baseline `action_plan_sha256`을 3단계 offline 값과 대조합니다. 불일치면 6단계와 같은
+경계입니다 — token 미제시, 중단·보고, clear·편집 금지.
+
+**baseline arm 직전에도 TCP connection과 writer 부재를 다시 확인합니다.** sentinel arm에서 한 번,
+여기서 한 번, **두 번 모두 필요합니다.**
+
+**exact 6-action plan, 최대 6 device writes**(정상 경로는 write `4` + `ALREADY_SATISFIED` skip `2`).
+이 cycle은 sentinel과 **다른 operation id, 다른 attended grant**이며, 두 번째 challenge가 첫
+승인의 범위를 암묵적으로 넓히지 않습니다. 현장 승인 문구에 **두 exact action plan이 모두 명시**돼야
+합니다.
+
+## 9단계 — phase-5 staging · device write `0` · host write는 **승인 C**
+
+qualified bundle의 불변 timestamp에 결속된 journal write입니다.
+
+## 10단계 — 두 Q2 manifest · 장비 접촉 `0` · host write는 **승인 C**
+
+phase-5 staging 직후 device-network `0` 상태에서 **control과 ASYNC 두 Q2 manifest를 함께** 만들고
+cutoff를 고정합니다. **baseline receipt 완료로부터 `1800초` 안**이어야 합니다. 이것이 `1800`이
+충분하다는 근거이며, 수학적 함의가 아니라 **절차적 precommit**입니다.
+
+## 11단계 — 기록
+
+receipt·bundle digest, 두 cycle의 실측 coherence/acquisition span, 선행조건 2의 상태 변화를
+append-only로 기록합니다.
+
+---
+
+## 실패 시 — phase와 사유로 갈립니다
+
+**원인 분석이 항상 먼저**이고, **자동·즉시 재시도는 어느 분기에서도 `0`회**입니다. **park은 만능
+탈출구가 아닙니다** — 아래 한 줄에만 열려 있으며, 다른 상태에서 park을 시도하면 필요한 recovery를
+하지 않은 채 부분 복원 dwell만 길어집니다.
+
+| 상태 | 올바른 entry |
+|---|---|
+| `RESTORING`, prefix 불완전, inflight 없음 | `recover`가 **아닙니다.** attended reauthorize를 거쳐 resume합니다 |
+| `RESTORING`, inflight 있음 | 역시 attended reauthorize가 먼저입니다. 재개된 execute는 그 inflight를 **관측으로만 조정하고 재전송하지 않습니다.** 불일치하거나 관측에 실패할 때만 latch되어 `RECOVERY_REQUIRED`가 됩니다 |
+| `RECOVERY_REQUIRED` | **이때만** `recover` entry입니다 |
+| `ARMED`, authority 만료 | fresh baseline 예산이 남아 있으면 reauthorize로 진행 가능합니다. 다만 `BASELINE_EXPIRED`라면 reauthorize로 해결되지 않는 **dead-end**입니다 |
+| `PREPARED`/`ARMED`, freshness·digest·challenge 문제 | **park·recover·clear·재prepare 모두 불가.** 그대로 두고 중단·보고 |
+| `AWAITING_FINAL_VERIFY`, prefix 완전, inflight·error·final evidence 없음 | **park 가능.** 그 journal digest에 결속된 **새 disposition manifest**를 만들고(기존 manifest 재사용 불가) **별도 attended park 승인**을 받습니다 |
+| `FINAL_VERIFIED`, archive·ACK 문제 | 기존 idempotent finalization·clear 경계로 처리 |
+
+위 표의 "reauthorize 후 resume"은 자동 재개가 아니라 **사람이 새 grant를 발급한 뒤의 재개**입니다.
+모든 분기에 공통으로 **중단·보고·새 precommit·새 attended 승인**이 요구됩니다.
+
+`prepare` 이후에는 **재수집으로 돌아갈 수 없습니다.** challenge는 `PREPARED` 설치 뒤에 발급되므로
+그 시점에는 tombstone이 이미 교체됐고, 새 Phase 0을 얻어도 live record에 막히며 park 대상도
+아닙니다. 재발급은 **같은 record에서 1회**, **발급 시점 잔여가 `720초` 이상일 때만** 허용하며,
+아니면 dead-end를 인정하고 멈춥니다.
+
+---
+
+## 이 실행값들이 왜 이 값인지 (설명부 — 실행 시 참조 불필요)
+
+- **cadence `30초`** — 보존된 series span(`51.666567`·`52.817943초`)과 채택 ordinal의 attempt
+  (`21.650386049`·`22.795387102초`)가 `30초` precommit과 각각 `16.180951`·`22.555898` 밀리초 안에서
+  정합합니다. 저장소에는 `requested_cadence` 필드가 없고 그 값이 든 private plan을 읽지 않았으므로
+  이것은 **재구성**이며 이전 값의 증명이 아닙니다. 다른 값을 고를 근거가 없어 **새 실행의
+  cadence로 `30초`를 선택**합니다.
+- **`max_observation_age_seconds: 1800`** — 이 필드는 capture freshness(첫 wire 게이트)와 qualified
+  bundle의 handoff 유효기간을 겸용합니다. 저장소 값만으로 말할 수 있는 것은 보수적 봉투뿐입니다 —
+  이전 run의 게이트 요구는 **`≤ 1295.800558초`**, `1800`의 **증명 가능한 최소 여유는
+  `504.199442초`**입니다. 실제 `captured_at`과 first-wire 시각은 보존 산출물에서 읽지 않았습니다.
+- **최소 잔여 `720초`** — attended challenge 최대 수명 `300초` + 발급된 authority 수명 `300초` +
+  첫 action 직전 fresh read 보수값 `60초`(discovery `5초`와 identity-after `5초`의 고정 창 포함)
+  = `660초`에 여유를 더한 값입니다.
+- **채택 ordinal을 마지막으로** — artifact의 `captured_at`이 채택 pair에서 나오므로, 늦은 ordinal이
+  `captured_at`을 늦추고 first-wire 예산을 늘립니다. baseline은 두 series의 min이므로 **두 series를
+  가깝게 수집하고 양쪽 모두 늦은 ordinal을 채택**하는 것이 최선입니다.
+
+**규율**: 산술이 맞아떨어진다는 것은 그 값이 실제로 그렇게 기록돼 있었다는 증명이 아닙니다.
+보존 산출물에서 읽지 않은 값은 재구성으로 적고, 재구성에 기대어 새 값을 고를 때는 그 선택이
+무엇에 근거했는지를 함께 적습니다.
