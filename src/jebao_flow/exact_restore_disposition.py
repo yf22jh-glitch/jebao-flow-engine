@@ -152,7 +152,9 @@ _CYCLE_ACTION_COUNTS: dict[ExactRestoreCycle, int] = {
 # alone cannot tell them apart.  Embedded predecessor depth does: sentinel 0, baseline 1, phase-5 2.
 _MAXIMUM_PREDECESSOR_DEPTH = 2
 
-# Closed set.  A future outcome value must fail rather than be accepted by a stale disposition.
+# Closed set.  Membership here, not the field type, is what refuses an outcome this module has
+# not reasoned about: widening ExactRestoreActionOutcome would let the field parse a new member,
+# and only this gate would still stop a stale disposition from silently accepting it.
 _ALLOWED_ACTION_OUTCOMES: frozenset[ExactRestoreActionOutcome] = frozenset(
     {
         ExactRestoreActionOutcome.ALREADY_SATISFIED,
@@ -245,7 +247,7 @@ class ParkedDispositionManifest(BaseModel):
     completed_action_count: int = Field(default=8, ge=1)
     # Version 1 asserts a single required outcome; version 2 carries the ordered vector
     # instead, because a baseline cycle legitimately skips actions it already satisfies.
-    required_action_outcome: Literal["written_verified"] | None = "written_verified"
+    required_action_outcome: Literal["written_verified"] | None = None
     evidence: ParkedDispositionEvidenceReference
     # A policy bound, not an observation.  Every variant carries it and binds it to the journal.
     maximum_pair_completion_gap_seconds: float = Field(gt=0)
@@ -258,6 +260,23 @@ class ParkedDispositionManifest(BaseModel):
     device_network_access: Literal[False] = False
     device_write_count: Literal[0] = 0
     reason: ParkedDispositionReason = ParkedDispositionReason.FINAL_VERIFICATION_POLICY_OVERLOAD
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_version_one_outcome_default(cls, data: Any) -> Any:
+        """Supply the version 1 outcome default only to version 1 documents.
+
+        The serializer drops ``required_action_outcome`` when it is ``None``, so the canonical
+        JSON of a version 2 manifest carries no such key.  A plain field default would put the
+        version 1 value back on the way in, and the owner-only loader would then refuse a
+        document this very model produced.  Version 1 keeps the default, and therefore its bytes.
+        """
+
+        if not isinstance(data, Mapping) or "required_action_outcome" in data:
+            return data
+        if data.get("version", 1) != 1:
+            return data
+        return {**data, "required_action_outcome": "written_verified"}
 
     @model_serializer(mode="wrap")
     def serialize_legacy_compatible(self, handler: Any) -> dict[str, Any]:
@@ -792,10 +811,15 @@ def verify_park_eligibility(
         raise ExactRestoreDispositionError("disposition_overload_evidence_missing")
     # The eligibility this gate needs is "no device write happened at or after the artifact
     # started".  The checks above already establish that: the completed prefix is exactly the
-    # deterministic plan, every outcome is WRITTEN_VERIFIED, and inflight/error/final evidence are
-    # all absent, so a write can neither be pending nor have been dropped from the record.  The
-    # last verified completion is therefore the write boundary, and it is stamped after the
-    # post-write observation, which makes it conservative against the wire send.  ``updated_at``
+    # deterministic plan, every outcome is drawn from the closed set this module accepts, and
+    # inflight/error/final evidence are all absent, so a write can neither be pending nor have
+    # been dropped from the record.  It is deliberately not "every outcome wrote": a baseline
+    # cycle normally skips two actions, and demanding a write there would refuse the ordinary
+    # case while proving nothing extra about the boundary.  The latest completion among that
+    # closed-outcome prefix is therefore the write boundary, and each completion is stamped after
+    # its own action's device contact, which makes it conservative against the wire send.  Latest
+    # is not last: the two differ exactly when a completion stamp regresses, which is why the
+    # boundary below is a maximum over the prefix rather than its final index.  ``updated_at``
     # is not that boundary: it also moves for write-free journal touches such as an attended
     # reauthorization, and it never moves for a write outside this journal at all.
     # Every allowed outcome stamps its completion after that action's own device contact:
@@ -1690,7 +1714,12 @@ def public_parked_disposition(disposition: ParkedDispositionRecord) -> dict[str,
         "disposition_id": disposition.disposition_id,
         "disposition_sha256": disposition.disposition_sha256,
         "journal_snapshot_sha256": disposition.journal_snapshot_sha256,
+        # The approved policy bound, kept next to the observation rather than merged with it.
+        # Version 1 records predate the stored bound, so it reads as null there: the observation
+        # below is all such a record has, and pretending otherwise would invent evidence.
+        "maximum_pair_completion_gap_seconds": disposition.maximum_pair_completion_gap_seconds,
         "operation_sha256": disposition.operation_sha256,
+        "pair_completion_gap_ns": disposition.pair_completion_gap_ns,
         "parked_cycle": disposition.cycle.value,
         "phase": "parked_unqualified",
         # This is the park operation's own device write count.  Past restore actions in this

@@ -36,6 +36,7 @@ from jebao_flow.exact_restore_composition import (
     select_operation_targets,
 )
 from jebao_flow.exact_restore_disposition import (
+    _ALLOWED_ACTION_OUTCOMES,
     AttendedDispositionIssuer,
     ExactRestoreDispositionArchive,
     ExactRestoreDispositionError,
@@ -46,11 +47,13 @@ from jebao_flow.exact_restore_disposition import (
     ParkedDispositionService,
     ParkedDispositionTombstone,
     load_parked_disposition_manifest,
+    public_parked_disposition,
     public_parked_tombstone_status,
 )
 from jebao_flow.exact_restore_receipts import (
     ExactRestoreOperationFinalization,
     ExactRestoreOperationFinalizationConflictError,
+    ExactRestoreReceiptArchiveError,
 )
 from jebao_flow.exact_restore_store import (
     ExactRestoreJournalClaimError,
@@ -1076,8 +1079,10 @@ def test_version_two_manifest_rejects_unsupported_and_mismatched_shapes() -> Non
     base.update(_v2_manifest_kwargs(record, artifact))
     outcomes = list(base["completed_action_outcomes"])
 
-    # The closed set is enforced by the field type itself, which is stronger than a validator:
-    # a future enum value cannot even be parsed into the vector.
+    # An outcome that is not an `ExactRestoreActionOutcome` at all is refused by the field type
+    # before any validator runs.  That is not what closes the set: a value added to the enum
+    # would parse here, and only the membership gate would still refuse it.  See
+    # `test_accepted_outcome_set_is_exactly_the_three_reasoned_about` for that half.
     with pytest.raises(ValidationError, match="already_satisfied"):
         ParkedDispositionManifest.model_validate(
             {**base, "completed_action_outcomes": [*outcomes[:-1], "some_future_outcome"]}
@@ -1375,13 +1380,14 @@ async def test_version_two_park_covers_every_strandable_cycle_depth(
     assert finalization["disposition_sha256"] == disposition.disposition_sha256
 
 
-async def test_version_two_park_accepts_the_baseline_cycles_real_skip_vector(
+async def test_version_two_park_accepts_the_ordinary_baseline_skip_vector(
     tmp_path: Path,
 ) -> None:
-    """A baseline restore legitimately skips actions the device already satisfies.
+    """The baseline cycle's normal distribution is four writes and two skips.
 
-    The version 1 rule demanded every action be `written_verified`, which would have refused the
-    ordinary baseline distribution outright.  The ordered vector has to carry it instead.
+    Safe fallback writes both roles, the restore schedule is already satisfied on both, and the
+    restore outer writes both.  The version 1 rule demanded every action be `written_verified`,
+    which would have refused this ordinary case outright; the ordered vector carries it instead.
     """
 
     outcomes = (
@@ -1389,7 +1395,7 @@ async def test_version_two_park_accepts_the_baseline_cycles_real_skip_vector(
         ExactRestoreActionOutcome.WRITTEN_VERIFIED,
         ExactRestoreActionOutcome.ALREADY_SATISFIED,
         ExactRestoreActionOutcome.ALREADY_SATISFIED,
-        ExactRestoreActionOutcome.VERIFIED_AFTER_UNCERTAIN,
+        ExactRestoreActionOutcome.WRITTEN_VERIFIED,
         ExactRestoreActionOutcome.WRITTEN_VERIFIED,
     )
     case = await _v2_case(tmp_path, depth=1, outcomes=outcomes)
@@ -1408,18 +1414,12 @@ async def test_version_two_park_accepts_the_baseline_cycles_real_skip_vector(
 def _rebuilt(manifest: ParkedDispositionManifest, **changes: Any) -> ParkedDispositionManifest:
     """Round-trip a manifest with one dimension changed.
 
-    The serializer drops the optional keys it holds as `None`, and re-validating a dump would
-    silently restore their defaults, so absent keys are pinned back to `None` explicitly.
+    Nothing is filled in here on purpose.  An earlier version of this helper pinned the absent
+    optional keys back to `None`, which quietly hid a real defect: the model's own version 2
+    dump could not be revalidated, because the version 1 outcome default came back on the way in.
     """
 
     payload = manifest.model_dump(mode="json")
-    for key in (
-        "required_action_outcome",
-        "minimum_total_attempt_seconds",
-        "predecessor_depth",
-        "completed_action_outcomes",
-    ):
-        payload.setdefault(key, None)
     payload.update(changes)
     return ParkedDispositionManifest.model_validate(payload)
 
@@ -1576,14 +1576,15 @@ async def test_install_claim_repeats_the_predecessor_check_it_does_not_delegate_
     assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
 
 
-async def test_undecodable_candidate_is_refused_before_the_index_can_name_it(
+async def test_cross_binding_is_checked_before_the_index_can_name_the_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A candidate the final loader would refuse must never occupy the finalization index.
+    """The shared journal cross-binding runs on the stored blob before the index exists.
 
-    If the index were installed first, the live journal would be terminalized against a blob no
-    reader can decode, and the operation would be stranded with no way back.
+    The injection point is the one binder both the pre-index validator and the final loader call,
+    so this fixes the ordering of that rule.  It does not exercise the archive's own decoder
+    refusing the bytes; the test below that one covers that seam separately.
     """
 
     case = await _v2_case(tmp_path, depth=1)
@@ -1602,7 +1603,7 @@ async def test_undecodable_candidate_is_refused_before_the_index_can_name_it(
         case.service.park(case.authority)
 
     assert rejected.value.code == "disposition_archive_binding_mismatch"
-    # The read-back decoder ran on the stored bytes before the index was reached.
+    # The stored bytes were read back and bound once, before the index was reached.
     assert calls == [1]
     assert case.archive.load_operation_finalization(case.record.operation_id) is None
     assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
@@ -1697,3 +1698,311 @@ async def test_version_two_park_reaches_no_network_and_writes_no_device(
     # Release the socket ban before this test's event loop is torn down; the loop closes its own
     # self-pipe with a unix socketpair, which is not the traffic this test forbids.
     monkeypatch.undo()
+
+
+async def test_version_two_park_accepts_a_verified_after_uncertain_action(
+    tmp_path: Path,
+) -> None:
+    """An action whose write was uncertain and then verified is a legitimate outcome.
+
+    It is not part of the ordinary distribution, so it is pinned separately: the closed set has
+    three members and a park must accept all three, not only the two the normal case produces.
+    """
+
+    outcomes = (
+        ExactRestoreActionOutcome.WRITTEN_VERIFIED,
+        ExactRestoreActionOutcome.VERIFIED_AFTER_UNCERTAIN,
+        ExactRestoreActionOutcome.ALREADY_SATISFIED,
+        ExactRestoreActionOutcome.ALREADY_SATISFIED,
+        ExactRestoreActionOutcome.WRITTEN_VERIFIED,
+        ExactRestoreActionOutcome.VERIFIED_AFTER_UNCERTAIN,
+    )
+    case = await _v2_case(tmp_path, depth=1, outcomes=outcomes)
+
+    disposition = case.service.park(case.authority)
+
+    assert disposition.completed_action_outcomes == outcomes
+    assert case.archive.load_parked_disposition(case.record.operation_id) == disposition
+
+
+def test_accepted_outcome_set_is_exactly_the_three_reasoned_about() -> None:
+    """The gate that closes the outcome set is membership, not the field type.
+
+    Widening `ExactRestoreActionOutcome` would let the field parse a new member, so this pins the
+    set itself.  A fourth outcome must arrive as a deliberate change here, with the boundary
+    argument revisited, rather than by inheriting acceptance from an enum edit elsewhere.
+    """
+
+    assert _ALLOWED_ACTION_OUTCOMES == frozenset(
+        {
+            ExactRestoreActionOutcome.ALREADY_SATISFIED,
+            ExactRestoreActionOutcome.WRITTEN_VERIFIED,
+            ExactRestoreActionOutcome.VERIFIED_AFTER_UNCERTAIN,
+        }
+    )
+    assert set(ExactRestoreActionOutcome) == _ALLOWED_ACTION_OUTCOMES
+
+
+async def test_version_two_manifest_survives_its_own_canonical_round_trip(
+    tmp_path: Path,
+) -> None:
+    """A manifest this model writes must be one the owner-only loader can read back.
+
+    The serializer drops the optional keys it holds as `None`, so a version 2 document carries no
+    `required_action_outcome`.  A plain field default put the version 1 value back on the way in
+    and the loader refused the model's own output; the default is version-aware for that reason.
+    """
+
+    case = await _v2_case(tmp_path, depth=2)
+    raw = case.manifest.model_dump_json()
+    assert "required_action_outcome" not in json.loads(raw)
+
+    reloaded = ParkedDispositionManifest.model_validate_json(raw)
+
+    assert reloaded == case.manifest
+    assert reloaded.manifest_sha256 == case.manifest.manifest_sha256
+    assert reloaded.required_action_outcome is None
+
+    path = tmp_path / "v2-manifest.json"
+    path.write_bytes(raw.encode("utf-8"))
+    path.chmod(0o600)
+    loaded = load_parked_disposition_manifest(path)
+
+    assert loaded == case.manifest
+    assert loaded.manifest_sha256 == case.manifest.manifest_sha256
+
+
+def test_version_one_manifest_round_trip_keeps_its_default_and_its_bytes(
+    tmp_path: Path,
+) -> None:
+    """Making the outcome default version-aware must not change version 1 in either direction."""
+
+    record, artifact = _awaiting_record_and_artifact()
+    # The same fixed journal digest the shape golden uses, so the digest below stays comparable.
+    manifest = _manifest_for(record, artifact, "a" * 64)
+    raw = manifest.model_dump_json()
+    payload = json.loads(raw)
+
+    assert payload["required_action_outcome"] == "written_verified"
+    assert ParkedDispositionManifest.model_validate_json(raw) == manifest
+    # A version 1 document written before the field existed still gets the default.
+    del payload["required_action_outcome"]
+    assert ParkedDispositionManifest.model_validate(payload) == manifest
+    assert manifest.manifest_sha256 == (
+        "1e6b0a060c5431b0273819577d13468d523eb33db51d52989aebee19b91403b3"
+    )
+
+    path = tmp_path / "v1-manifest.json"
+    path.write_bytes(raw.encode("utf-8"))
+    path.chmod(0o600)
+    assert load_parked_disposition_manifest(path) == manifest
+
+
+async def test_predecessor_chain_is_confirmed_inside_the_active_install_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decisive chain check runs under the very claim that installs the index.
+
+    Confirming it under a separate claim would leave a window between the check and the install.
+    The claim is asserted from inside the checker, and the same assertion is shown to fail once
+    the claim is released, so the check is not vacuous.
+    """
+
+    case = await _v2_case(tmp_path, depth=1)
+    observed: list[tuple[int, int]] = []
+    original = ExactRestoreDispositionArchive._require_archived_predecessor_chain
+
+    def spy(self: Any, root_descriptor: int, journal_canonical: bytes) -> None:
+        observed.append((self._require_active_claim(), root_descriptor))
+        original(self, root_descriptor, journal_canonical)
+
+    monkeypatch.setattr(
+        ExactRestoreDispositionArchive,
+        "_require_archived_predecessor_chain",
+        spy,
+    )
+
+    disposition = case.service.park(case.authority)
+
+    assert len(observed) == 1
+    active_descriptor, passed_descriptor = observed[0]
+    assert active_descriptor == passed_descriptor
+    assert case.archive.load_parked_disposition(case.record.operation_id) == disposition
+    with pytest.raises(ExactRestoreReceiptArchiveError):
+        case.archive._require_active_claim()
+
+
+async def test_backing_decoder_failure_leaves_no_finalization_and_no_tombstone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The archive's own read-back decoder is a barrier at its real seam.
+
+    When the decoder refuses the stored bytes, the pre-index call is the only one that runs: no
+    finalization is installed and the live journal is still a journal.
+    """
+
+    case = await _v2_case(tmp_path, depth=1)
+    calls: list[int] = []
+    original = ExactRestoreDispositionArchive._require_parked_backing_finalization
+
+    def seam(self: Any, root_descriptor: int, finalization: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise ExactRestoreReceiptArchiveError(
+                "parked exact-restore disposition does not decode"
+            )
+        return original(self, root_descriptor, finalization)
+
+    monkeypatch.setattr(
+        ExactRestoreDispositionArchive,
+        "_require_parked_backing_finalization",
+        seam,
+    )
+
+    with pytest.raises(ExactRestoreDispositionError) as rejected:
+        case.service.park(case.authority)
+
+    assert rejected.value.code == "disposition_archive_failed"
+    # Only the pre-index call ran; the post-install confirmation was never reached.
+    assert calls == [1]
+    assert case.archive.load_operation_finalization(case.record.operation_id) is None
+    assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
+
+
+async def test_park_refuses_a_predecessor_barrier_that_names_another_receipt(
+    tmp_path: Path,
+) -> None:
+    """A barrier that exists but binds a different receipt does not protect the ancestor."""
+
+    case = await _v2_case(tmp_path, depth=1, archive_predecessors=False)
+    ancestor = case.record.qualification_final_record
+    assert ancestor is not None
+    genuine = _receipt_from_final_verified_record(ancestor)
+    impostor = genuine.model_copy(
+        update={"final_raw_frame_sha256": (_digest("other-master"), _digest("other-slave"))}
+    )
+    assert impostor.receipt_sha256 != genuine.receipt_sha256
+    case.archive.persist_final_verified_receipt(impostor)
+
+    with pytest.raises(ExactRestoreDispositionError) as rejected:
+        case.service.park(case.authority)
+
+    assert rejected.value.code == "disposition_predecessor_unbarriered"
+    assert case.archive.load_operation_finalization(case.record.operation_id) is None
+    assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
+
+
+async def test_park_refuses_a_predecessor_barrier_that_no_longer_decodes(
+    tmp_path: Path,
+) -> None:
+    """A damaged barrier file is not a barrier; it must fail closed, not read as absent."""
+
+    case = await _v2_case(tmp_path, depth=1)
+    ancestor = case.record.qualification_final_record
+    assert ancestor is not None
+    barriers = sorted(case.safety_root.glob("exact-restore-finalized-*.json"))
+    assert len(barriers) == 1
+    barriers[0].write_bytes(b"{not json\n")
+
+    with pytest.raises(ExactRestoreDispositionError) as rejected:
+        case.service.park(case.authority)
+
+    assert rejected.value.code == "disposition_predecessor_unbarriered"
+    assert case.archive.load_operation_finalization(case.record.operation_id) is None
+    assert ExactRestoreRecord.model_validate(case.journal.load()) == case.record
+
+
+async def test_version_two_disposition_violates_the_immediate_predecessors_accepted_shape(
+    tmp_path: Path,
+) -> None:
+    """Shape-level proof that the binary shipped one commit ago cannot misread a version 2 park.
+
+    This does not run that binary.  It reconstructs the two acceptance rules that binary held —
+    a single fixed key set with a single reason in the archive decoder, and a `Literal[1]` record
+    model — and shows a real version 2 disposition violating both.  The predecessor already
+    understood version 2 *finalizations*, since the version 1 park installs one, so the
+    disposition is where it has to close.  Executing the old binary against a live archive is the
+    complementary half and was done out of tree during review; this is the part the repository
+    can keep honest on its own.
+    """
+
+    case = await _v2_case(tmp_path, depth=2)
+    disposition = case.service.park(case.authority)
+    stored = disposition.model_dump(mode="json")
+
+    # The predecessor's archive decoder: one key set, one reason, no branch on version.
+    predecessor_expected_keys = {
+        "version",
+        "disposition_id",
+        "outcome",
+        "qualification_achieved",
+        "device_network_access",
+        "device_write_count",
+        "reason",
+        "manifest_sha256",
+        "operation_sha256",
+        "operation_finalization_sha256",
+        "cycle",
+        "journal_snapshot_sha256",
+        "baseline_sha256",
+        "action_plan_sha256",
+        "authority_chain_sha256",
+        "completed_action_count",
+        "evidence",
+        "pair_completion_gap_ns",
+        "total_attempt_ns",
+        "disposition_authority",
+        "disposition_authority_sha256",
+        "recorded_at",
+    }
+    assert set(stored) != predecessor_expected_keys
+    assert set(stored) - predecessor_expected_keys == {
+        "completed_action_outcomes",
+        "maximum_pair_completion_gap_seconds",
+        "predecessor_depth",
+    }
+    assert stored["reason"] != "final_verification_policy_overload"
+
+    class PredecessorParkedDisposition(BaseModel):
+        model_config = ConfigDict(extra="forbid", frozen=True)
+
+        version: Literal[1] = 1
+        reason: Literal["final_verification_policy_overload"]
+
+    with pytest.raises(ValidationError):
+        PredecessorParkedDisposition.model_validate(
+            {"version": stored["version"], "reason": stored["reason"]}
+        )
+    # The tombstone the predecessor would find in the journal path is still not a journal record.
+    with pytest.raises(ValidationError):
+        ExactRestoreRecord.model_validate(case.journal.load())
+
+
+async def test_archived_public_view_keeps_the_observation_apart_from_the_bound(
+    tmp_path: Path,
+) -> None:
+    """After a park, an operator still has to be able to tell the two numbers apart.
+
+    A version 2 record stores the approved bound, so both are shown.  A version 1 record never
+    stored it and reports the observation with a null bound rather than a reconstructed one.
+    """
+
+    case = await _v2_case(tmp_path, depth=1)
+    disposition = case.service.park(case.authority)
+    view = public_parked_disposition(disposition)
+
+    assert view["pair_completion_gap_ns"] == disposition.pair_completion_gap_ns
+    assert view["maximum_pair_completion_gap_seconds"] == (
+        case.record.baseline.verification_policy.max_final_pair_gap_seconds
+    )
+    assert view["pair_completion_gap_ns"] <= int(
+        float(view["maximum_pair_completion_gap_seconds"]) * 1_000_000_000  # type: ignore[arg-type]
+    )
+
+    legacy = _case(tmp_path / "legacy")
+    legacy_view = public_parked_disposition(legacy.service.park(legacy.authority))
+
+    assert legacy_view["maximum_pair_completion_gap_seconds"] is None
+    assert legacy_view["pair_completion_gap_ns"] == legacy.artifact.pair_completion_gap_ns
