@@ -1144,6 +1144,10 @@ write set 전체**입니다. 최소한 다음을 포함합니다.
 - `RESTORING` / `AWAITING_FINAL_VERIFY` / `FINAL_VERIFIED` 전이
 - sentinel → baseline **promotion**(직전 predecessor의 영구 barrier 기록 포함)
 - sentinel receipt, baseline receipt, operation finalization, qualified bundle, staged phase-5 record
+- **receipt에 결속된 live journal `clear`** — destructive semantic mutation이므로 "전체 write set"에
+  묻어 두지 않고 별도로 승인합니다
+- **그 clear 직후의 phase-5 successor 설치**와, clear와 설치 사이의 **journal 부재 구간**. 그 구간에서
+  중단되면 재개는 기존 idempotent 경계를 따르며 새로 prepare하지 않습니다
 - 직후의 control·ASYNC 두 Q2 manifest
 
 **예상 밖 경로나 이 범위 밖의 파일 write가 관측되면 즉시 중단·보고합니다.** C는 candidate와 두
@@ -1182,8 +1186,9 @@ source/image attestation.
 
 ## 2단계 — v2 manifest **candidate** 작성 · 장비 접촉 `0` · **고정 경로 저장 `0`**
 
-메모리 또는 격리 경로에서 candidate만 만듭니다. **production·private 고정 경로 저장은 이
-단계에서 하지 않습니다**(저장은 6단계, 승인 C 아래).
+**메모리에서만** candidate 모델·canonical bytes·digest를 도출합니다. **persistent file write `0`**
+입니다 — 고정 경로가 아니더라도 파일로 쓰면 그것은 host-state write이고 private artifact 참조를
+담습니다. 승인 C 이전에 그런 write를 만들지 않습니다. 저장은 6단계, 승인 C 아래에서만 합니다.
 
 - `version: 2`
 - **새 `operation_nonce`(32 hex) — 이월 금지**
@@ -1285,7 +1290,10 @@ cutoff를 고정합니다. **baseline receipt 완료로부터 `1800초` 안**이
 ## 11단계 — 기록
 
 receipt·bundle digest, 두 cycle의 실측 coherence/acquisition span, 선행조건 2의 상태 변화를
-append-only로 기록합니다.
+append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있도록 다음도 함께 남깁니다 —
+**각 cycle의 실제 action outcome vector**(write / `ALREADY_SATISFIED` skip /
+`VERIFIED_AFTER_UNCERTAIN`), **device read·write 횟수**, **네 승인 각각의 실제 범위**, 그리고
+**실패 분기에 진입했는지와 어느 행이었는지**.
 
 ---
 
@@ -1301,17 +1309,21 @@ append-only로 기록합니다.
 | `RESTORING`, inflight 있음 | 역시 attended reauthorize가 먼저입니다. 재개된 execute는 그 inflight를 **관측으로만 조정하고 재전송하지 않습니다.** 불일치하거나 관측에 실패할 때만 latch되어 `RECOVERY_REQUIRED`가 됩니다 |
 | `RECOVERY_REQUIRED` | **이때만** `recover` entry입니다 |
 | `ARMED`, authority 만료 | fresh baseline 예산이 남아 있으면 reauthorize로 진행 가능합니다. 다만 `BASELINE_EXPIRED`라면 reauthorize로 해결되지 않는 **dead-end**입니다 |
-| `PREPARED`/`ARMED`, freshness·digest·challenge 문제 | **park·recover·clear·재prepare 모두 불가.** 그대로 두고 중단·보고 |
+| `PREPARED`/`ARMED`, **challenge 실패·만료** | 최초 1회에 한해, **재발급 시점 잔여가 `720초` 이상이면 같은 record에서 1회 재발급** 가능합니다. 잔여가 부족하거나 이미 1회 재발급했다면 **dead-end**이므로 중단·보고합니다 |
+| `PREPARED`/`ARMED`, **`BASELINE_EXPIRED` 또는 digest mismatch** | **사용할 수 있는 attended entry가 없습니다.** park·recover·clear·재prepare 모두 불가하며 그대로 두고 중단·보고합니다 |
 | `AWAITING_FINAL_VERIFY`, prefix 완전, inflight·error·final evidence 없음 | **park 가능.** 그 journal digest에 결속된 **새 disposition manifest**를 만들고(기존 manifest 재사용 불가) **별도 attended park 승인**을 받습니다 |
-| `FINAL_VERIFIED`, archive·ACK 문제 | 기존 idempotent finalization·clear 경계로 처리 |
+| `FINAL_VERIFIED`, archive·ACK 문제 | 기존 idempotent finalization·clear 경계로 처리합니다. **새 device/restore attended grant는 필요하지 않습니다** |
+
+**모든 분기에 공통인 것은 여기까지입니다 — 첫 실패 즉시 중단·보고, 자동·즉시 재시도 `0`회.**
+새 precommit과 새 attended 승인은 **실제로 resume·recover·park을 수행하는 분기에만** 해당합니다.
+`FINAL_VERIFIED`의 archive 정리에는 새 grant가 필요 없고, dead-end 분기에는 받을 grant 자체가
+없습니다. 공통 규칙을 그보다 넓게 쓰면 존재하지 않는 승인을 찾게 만듭니다.
 
 위 표의 "reauthorize 후 resume"은 자동 재개가 아니라 **사람이 새 grant를 발급한 뒤의 재개**입니다.
-모든 분기에 공통으로 **중단·보고·새 precommit·새 attended 승인**이 요구됩니다.
 
 `prepare` 이후에는 **재수집으로 돌아갈 수 없습니다.** challenge는 `PREPARED` 설치 뒤에 발급되므로
 그 시점에는 tombstone이 이미 교체됐고, 새 Phase 0을 얻어도 live record에 막히며 park 대상도
-아닙니다. 재발급은 **같은 record에서 1회**, **발급 시점 잔여가 `720초` 이상일 때만** 허용하며,
-아니면 dead-end를 인정하고 멈춥니다.
+아닙니다. 위 표의 challenge 행이 그 유일한 예외이며, 그것도 조건부 1회입니다.
 
 ---
 
