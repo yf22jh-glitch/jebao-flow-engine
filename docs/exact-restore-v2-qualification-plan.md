@@ -52,7 +52,18 @@ version `1`은 하나의 policy 필드가 completion coherence와 전체 acquisi
 - controller의 `_require_operation_not_parked()`가 parked operation id를 계속 거부하는지
 - recovery supervisor가 계속 exited인지
 - **Home Assistant가 장비에 붙어 있지 않은지** — read-only preflight에서 Jebao TCP connection이
-  보이면 integration을 끄지 않고 `NO-GO`로 중단해 보고합니다
+  보이면 integration을 끄지 않고 `NO-GO`로 중단해 보고합니다. fresh capture 직전과 **각 attended arm
+  직전에 다시** 확인합니다
+- **앱이 완전히 종료됐는지** — background 포함. 같은 Pro를 쓰는 다른 폰·태블릿·클라이언트가 없어야
+  합니다
+- supervisor뿐 아니라 **모든 code writer 부재** — `jebao-flowd`, one-shot writer 포함
+- 미완 recovery journal·비terminal intent·emergency latch 부재. `prepare`의
+  `require_cross_workflow_quiescent()` 결과를 기록합니다
+- 실행 UID/GID가 store의 owner·mode와 호환되고 owner-only store가 writable한지
+- **stale-image 함정 방지**: mounted source digest만이 아니라 **실제로 import된 `jebao_flow`의 경로와
+  bytes**가 reviewed commit과 일치하는지. 이 컨테이너에서 `/work`로 복사하고도 이미지의
+  `/workspace/src`가 먼저 import된 선례가 있으므로, `PYTHONPATH`와 import attestation을 실기 전에
+  고정합니다
 - reviewed source/image attestation
 
 ### 1단계 — fresh Phase 0 (device **read**, write `0`)
@@ -61,13 +72,21 @@ version `1`은 하나의 policy 필드가 completion coherence와 전체 acquisi
 - 두 series는 서로 다른 plan·series여야 하고, 두 장비의 outer six-field와 432-byte schedule image가
   byte-exact하게 일치해야 함
 - 기존 parked operation의 artifact를 재사용하지 않음
+- **primary와 corroborating 각각이** admission에서 coherence `≤20초`와 total acquisition `≤30초`를
+  통과해야 합니다. 하나라도 실패하면 write 이전에 `NO-GO`입니다. 이것이 위 여유 표를 현재 환경의
+  사전 증거로 보강하는 유일한 지점입니다
+- observation age가 만료되면 **완화하지 말고 재수집**합니다
 
 ### 2단계 — v2 manifest 작성 (장비 접촉 `0`)
 
-- **새 operation nonce와 새 operation id** — parked operation id 재사용은 permanent barrier가 거부하며
+- **새 nonce 하나에서 파생되는 세 operation id 전부가 새것이어야 합니다** — sentinel qualification,
+  baseline restore, phase-5 final restore. parked operation id 재사용은 permanent barrier가 거부하며
   시도해서도 안 됩니다
 - `version: 2`, `max_final_pair_gap_seconds: 20`, `max_final_acquisition_duration_seconds: 30`,
   discovery timeout `5초`, identity age `5초`
+- **timing 외 안전 정책도 manifest에 명시**합니다: 역할별 accepted latent manual `30`·`89`,
+  configured range `30..100` step `1`, attended maximum `60`·`89`, safe fallback
+  `Constant / Flow 30 / Frequency 20`, observation age
 - 1단계의 fresh artifact에 결속
 
 ### 3단계 — `prepare` (device write `0`)
@@ -84,8 +103,19 @@ attended `qualify`는 한 명령 안에서 **두 write cycle**을 수행합니�
 2. baseline restore cycle로 promote → `FINAL_VERIFIED` → **baseline receipt** → qualified bundle
 3. phase-5 final restore record staging
 
-이 단계는 **repository maintainer의 현장 승인·감시와 즉시 물리 전원 차단 수단**을 요구합니다. 앞
-단계의 어떤 승인도 이 단계를 대신하지 않습니다.
+승인 주체가 둘이고 역할이 다릅니다. **repository maintainer**는 code·plan과 operation의 범위를
+승인하고, **on-site hardware approver**는 각 exact operation의 write와 현장 감시·즉시 물리 차단을
+승인합니다. 앞 단계의 어떤 승인도 이 단계를 대신하지 않습니다.
+
+한 `qualify` 명령이라도 **sentinel과 baseline은 서로 다른 operation id와 서로 다른 attended
+grant**입니다. 현장 승인은 **두 exact action plan을 모두 명시적으로 포함**해야 하며, 두 번째
+challenge가 첫 승인의 범위를 암묵적으로 넓히지 않습니다.
+
+**write 등급**: sentinel cycle은 8 action 전부가 write입니다. baseline restore cycle은 **6 action**이고,
+장비가 exact baseline인 정상 경로에서는 safe fallback 2 write + restore schedule 2 `ALREADY_SATISFIED`
+skip + restore outer 2 write = **write 4 + skip 2**입니다. drift가 있으면 최대 6 write까지 가능하므로
+승인 문구는 **"exact 6-action plan, 최대 6 write"**로 씁니다. phase-5 staging은 **host journal write이고
+device write는 `0`**입니다.
 
 ### 7단계 — 기록
 
@@ -94,7 +124,8 @@ append-only로 기록합니다.
 
 ## 실패 시 처리 — 두 cycle의 노출도가 **다릅니다**
 
-final verify가 다시 실패하면 **세 번째 재시도를 하지 않습니다.** v1 때와 같은 규칙입니다. 그러나
+재시도 규칙은 하나입니다: **첫 실패 뒤 자동·즉시 재시도는 `0`회이며, diagnostic 기록과 새 precommit과
+새 승인 없이는 resume하지 않습니다.** 그러나
 좌초한 journal을 종결할 수 있는지는 **어느 cycle에서 좌초했는지에 따라 갈립니다.**
 
 **sentinel cycle(4단계) 좌초 — park 가능합니다.** disposition 기구는 재사용 가능하고 manifest만
@@ -113,7 +144,7 @@ manifest의 재사용 불가였습니다.
 - `verify_park_eligibility()`도 `record.cycle is not SENTINEL_QUALIFICATION`을 거부
 
 즉 disposition 기구는 **v1 overload로 좌초한 sentinel journal 전용**으로 만들어졌고 범용이 아닙니다.
-5단계는 device write 6회를 포함하는데, 좌초하면 **`awaiting_final_verify`에서 나갈 write-free 경로가
+5단계는 6-action plan(정상 경로 write 4 + skip 2, 최대 write 6)을 포함하는데, 좌초하면 **`awaiting_final_verify`에서 나갈 write-free 경로가
 없는 상태로 되돌아갑니다.** 그것이 이 프로젝트가 park 기구를 만들어 탈출한 바로 그 dead-end입니다.
 
 ### 따라서 이 계획은 4~6단계를 **아직 승인 가능한 상태로 제시하지 않습니다**
@@ -130,11 +161,19 @@ manifest의 재사용 불가였습니다.
 제 권고는 1번입니다. 예측(위 여유 표)이 맞다면 어느 쪽이든 좌초하지 않겠지만, **예측이 틀렸을 때의
 비용이 두 선택지에서 크게 다릅니다.** 그리고 v1에서 예측이 이미 한 번 틀렸습니다.
 
-**결정(2026-09-05): repository maintainer가 선택지 1을 택했습니다.** 따라서 disposition 기구를 두
-cycle 모두에 대해 일반화하는 작업이 4~6단계보다 **먼저** 진행되며, 그 작업이 검토·착지하기 전에는
-4~6단계를 승인 대상으로 올리지 않습니다. 그 작업의 계획은
-[`Exact-restore parked disposition generalisation`](exact-restore-disposition-generalisation-plan.md)에
-있습니다.
+**결정(2026-09-05): repository maintainer가 선택지 1을 택했습니다.** 따라서 일반화가 4~6단계보다
+**먼저** 진행됩니다.
+
+**그 뒤 갱신(2026-09-05)**: 첫 일반화 계획은 범위 산정이 세 번 틀려
+[철회됐습니다](exact-restore-disposition-generalisation-plan.md). 교차검증이 찾은 세 결함 중 둘은 §3
+P1 경로입니다. 따라서 선행 작업은 **두 개**로 나뉘고 순서가 있습니다.
+
+1. **predecessor success finalization 불변식** — baseline 좌초 시 embedded sentinel operation이 영구
+   장벽 없이 남는 replay 표면을 원인에서 제거합니다.
+2. **재설계된 disposition 일반화** — receipts decoder, outcome taxonomy, legacy golden bytes까지 포함.
+
+둘이 모두 검토·착지하고 이 문서의 정정과 preflight가 닫히기 전에는 4~6단계를 승인 대상으로 올리지
+않습니다.
 
 ### 그 외 공통
 
@@ -145,7 +184,10 @@ cycle 모두에 대해 일반화하는 작업이 4~6단계보다 **먼저** 진�
 
 ## §3 판정
 
-0~3단계는 device write `0`이라 §3의 세 범주에 도달하지 않습니다. **4~6단계는 실제 device write를
+0~2단계는 device write `0`이고 durable journal도 바꾸지 않습니다. **3단계(`prepare`)는 device write가
+`0`이지만 §3에 도달할 수 있습니다** — live durable journal의 tombstone을 successor로 교체하므로 두 번째
+범주(journal·rollback 손실)가 살아 있습니다. 방어는 R9 연언과 archive confirmation의 fail-closed
+성질입니다. **4~6단계는 실제 device write를
 포함하므로 세 범주가 모두 살아 있습니다.** 이 단계의 방어는 새로 만들지 않고 기존 것을 그대로
 씁니다 — attended authority, guard lease, exactly-once action prefix, wire 경계 이전의 durable
 inflight, 그리고 실패 시 fail-closed latch입니다.
@@ -166,6 +208,8 @@ inflight, 그리고 실패 시 fail-closed latch입니다.
   않습니다.** 그리고 위 "실패 시 처리"의 선택지 1 또는 2 중 하나를 maintainer가 **명시적으로**
   고른 뒤에만 승인 대상이 됩니다.
 - 앱 live-write는 이 계획의 범위 밖이며, 선행조건 2가 닫힌 뒤 별도 계획과 승인을 다시 요구합니다.
+- **on-site approver에게 미리 알릴 것**: 실패가 남길 수 있는 dwell 상태(`ON + TimerOFF + independent +
+  Constant 30 / Frequency 20`, 또는 부분 복원 상태)와, 그 경우 attended recovery가 필요하다는 점.
 
 ## 이 계획을 쓰면서 발견한 것 (기록)
 
