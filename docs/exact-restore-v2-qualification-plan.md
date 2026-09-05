@@ -1382,7 +1382,7 @@ append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있�
 | `PREPARED`/`ARMED`, **challenge 실패·만료** | 최초 1회에 한해, **재발급 시점 잔여가 `720초` 이상이면 같은 record에서 1회 재발급** 가능합니다. 잔여가 부족하거나 이미 1회 재발급했다면 **dead-end**이므로 중단·보고합니다 |
 | `PREPARED`/`ARMED`, **`BASELINE_EXPIRED` 또는 digest mismatch** | **사용할 수 있는 attended entry가 없습니다.** park·recover·clear·재prepare 모두 불가하며 그대로 두고 중단·보고합니다 |
 | `AWAITING_FINAL_VERIFY`, prefix 완전, inflight·error·final evidence 없음 | **park 가능하지만 manifest만으로는 안 됩니다.** 아래 "park을 선택했을 때"를 그대로 따릅니다 |
-| `FINAL_VERIFIED`, archive·ACK 문제 | 기존 idempotent finalization·clear 경계로 처리합니다. **새 device/restore attended grant는 필요하지 않습니다** |
+| `FINAL_VERIFIED`, archive·ACK 문제 | **cycle과 depth에 맞는 기존 idempotent continuation을 같은 command family로 재개합니다. 임의의 `clear`를 호출하지 않습니다** — 아래 세 경로 참조. 셋 다 **새 device/restore attended grant는 필요하지 않지만 host mutation 승인 범위는 필요합니다** |
 
 **모든 분기에 공통인 것은 여기까지입니다 — 첫 실패 즉시 중단·보고, 자동·즉시 재시도 `0`회.**
 새 precommit과 새 attended 승인은 **실제로 resume·recover·park을 수행하는 분기에만** 해당합니다.
@@ -1394,6 +1394,22 @@ append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있�
 `prepare` 이후에는 **재수집으로 돌아갈 수 없습니다.** challenge는 `PREPARED` 설치 뒤에 발급되므로
 그 시점에는 tombstone이 이미 교체됐고, 새 Phase 0을 얻어도 live record에 막히며 park 대상도
 아닙니다. 위 표의 challenge 행이 그 유일한 예외이며, 그것도 조건부 1회입니다.
+
+### `FINAL_VERIFIED`의 세 경로 — `clear`가 정답인 것은 둘뿐입니다
+
+`FINAL_VERIFIED`는 한 상태가 아닙니다. 어느 cycle이 끝난 것인지에 따라 이어지는 행위가 다르고,
+**sentinel에서 `clear`로 읽으면 이미 검증된 8-action predecessor를 promotion 없이 없애는 잘못된
+지시**가 됩니다.
+
+| 끝난 cycle | 이어지는 것 |
+|---|---|
+| **sentinel** (depth `0`) | receipt를 얻은 뒤 **promotion**입니다. predecessor success barrier를 persist하고 baseline `PREPARED` successor로 교체합니다. **`clear`하지 않습니다** |
+| **baseline restore** (depth `1`) | baseline receipt와 bundle을 persist하고, **receipt에 결속된 `clear`** 뒤 phase-5 successor를 stage합니다 |
+| **phase-5** (depth `2`, `restore` 흐름) | final receipt와 finalization 뒤 **receipt에 결속된 `clear`**입니다 |
+
+세 경로 모두 **새 device·restore attended grant는 필요하지 않습니다.** 다만 durable write가
+발생하므로 **host mutation 승인 범위 안**에서 수행합니다. 공개 CLI에 독립 `clear` 명령이 없더라도
+문서의 계약은 위와 같아야 하며, 재개는 항상 **현재 record의 cycle·depth에 맞는 continuation**입니다.
 
 ### park을 선택했을 때 — 새 artifact와 새 승인이 필요합니다
 
