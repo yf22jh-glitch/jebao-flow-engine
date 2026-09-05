@@ -1125,6 +1125,29 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 > action plan을 본 뒤 5단계에서**, 그리고 **B3와 park host·park consent는 실패 후 park을 실제로
 > 선택한 경우에만** 요구합니다. hardware는 **NO-GO**입니다.
 
+## 시도 예산 — 이 계획은 **B1 한 세트**만 허용합니다
+
+`AGENTS.md` §7은 **같은 질문에 실기 2회 또는 1일을 넘기면** 코드를 쓰지 말고 멈춰 repository
+maintainer에게 보고하라고 요구합니다. 보고서에는 (1) 지금까지의 증거, (2) **최소 두 개의 대안
+경로**, (3) park했을 때의 영향이 들어가야 하며, 대안 없이 "한 번 더 하드닝하겠다"는 보고는
+무효입니다.
+
+**이 질문의 실기 1회차는 이미 `2026-09-04` run이었고, 이 계획이 2회차입니다.**
+
+그리고 11단계가 확정하듯 **fresh B1 + 새 nonce + 새 operation id는 그 자체로 새 실기**입니다.
+따라서 **새 B1은 이 run 안의 retry가 될 수 없습니다.**
+
+- **이 계획이 허용하는 qualification 수집은 정확히 한 세트(2 series × 2 pair)뿐입니다.**
+- B1 실패, observation age 만료, `prepare` 이전의 단일 제어권 위반, 4단계 또는 6단계의 예산
+  실패 — 이 모두는 **이 새 run을 기록하고 종료·보고**합니다. 아래 여러 곳에 나오는 "새 승인
+  B1"은 **다음 run의 시작 조건**이지 이 run의 재시도가 아닙니다.
+- 다음 B1은 **새 run 파일 · 새 계획 또는 재개 판단 · 새 승인**을 요구하며, 그 시점에는 이미 같은
+  질문의 **세 번째** 실기이므로 **§7 보고와 대안·park 판단 없이는 승인하지 않습니다.**
+- **B3도 한 번뿐입니다.** 실패 처리에서 park을 선택하면 `1 × 1` 수집을 **한 번** 하고, `1/1`이
+  아니면 **park `NO-GO` · 기록 · 보고**로 닫습니다. 다른 B3를 나중에 고려하려면 **별도 계획·검토·
+  §7 accounting과 새 승인**이 필요합니다. reviewed source가 pair `1`을 허용한다는 사실이 **capture
+  재시도 횟수를 여는 근거가 되지는 않습니다.**
+
 ## 승인 축 — 여섯이며 서로를 함축하지 않습니다
 
 | 축 | 범위 | 주체 |
@@ -1302,7 +1325,7 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
 
 ## 3단계 — offline plan 도출 · 장비 접촉 `0` · **고정 store 접촉 `0`**
 
-승인 B1 아래 이미 보존된 raw artifact를 **read-only로 읽고**, 순수 경로(baseline 합성과 계획 수립
+B1에서 보존된 raw artifact를 **승인 A 아래 read-only로 읽고**, 순수 경로(baseline 합성과 계획 수립
 함수)를 **현재 reviewed image·process 안에서** 실행합니다. 고정 journal·archive·guard에는 접근하지
 않으며, **새 persistent scratch·복사본 write는 `0`**입니다 — 2단계와 같은 이유입니다. 복사본이
 꼭 필요하다면 그 생성 자체가 별도 host-write 승인 범위이므로, 여기서는 memory·process only가
@@ -1353,6 +1376,10 @@ digest, schedule expectation, 그리고 두 spec의 canonical digest**.
 - 이미 owner-only spec이 있다면 **승인 A 아래 exact read**로 대신할 수 있습니다.
 - 실행 시점까지 exact spec을 만들 수 없다면 **C를 둘로 나눠** 10단계 직전에 별도 C를 받는 것이
   정직합니다. **미지의 미래 spec에 대한 포괄 C는 허용하지 않습니다.**
+
+승인 packet에는 **exact source commit, image digest, 실제 import된 package provenance와 bytes
+attestation, command shape**도 함께 넣습니다. approver가 "reviewed"라는 추상어가 아니라 그 값을
+보고 승인하도록 하기 위해서입니다.
 
 그 위에서 **exact candidate manifest, 두 action plan, 두 spec candidate, 그리고 그 digest들을 놓고**
 **B2**(7·8단계 controller device read), **C**(host-state mutation), **D**(두 cycle의 bounded device
@@ -1591,9 +1618,18 @@ async 쪽에서 실패할 수 있습니다. 그 경우 **자동 retry `0`, 삭�
 receipt·bundle digest, 두 cycle의 실측 coherence/acquisition span, 선행조건 2의 상태 변화를
 그 새 파일에 append-only로 기록하며, 증거 등급을 나눕니다.
 
-- **(a)** B1 raw artifact의 opaque id·digest·UTC span·identity binding SHA
-- **(b)** 실제 파일로 확인한 journal·receipt·finalization·bundle과 Q2 산출물
-- **(c)** 승인, process·TCP 관측, 현장 관측
+- **(a)** B1 raw artifact의 opaque id·digest·UTC span·identity binding SHA. **B3가 발생했다면 그
+  artifact도 같은 항목으로** 남깁니다 — accepted뿐 아니라 **invalid capture도 보존된 범위 그대로**.
+- **(b)** 실제 파일로 확인한 journal·receipt·finalization·bundle과 Q2 산출물. **park이 실행됐다면**
+  v2 disposition manifest와 park snapshot·finalization·tombstone·결과도 **파일로 확인한 범위에서**
+  같은 등급으로 남깁니다.
+- **(c)** 승인, process·TCP 관측, 현장 관측. 승인은 **여섯 축(A·B1·B2·B3·C·D)에 더해 실제로
+  발생한 별도 attended grant와 park host 승인·write-free park consent**까지 적습니다 — "여섯
+  승인"만 쓰면 조건부 park 승인들이 조용히 빠집니다.
+- 실행 provenance도 함께 남깁니다 — **exact source commit, image digest, 실제 import된 package
+  provenance와 bytes attestation(private 경로 구조는 적지 않습니다), 그리고 command shape**.
+  "reviewed"라는 말이 runtime 선택으로 남지 않도록, 새 run 파일이 요구하는 실행 commit·명령·주요
+  파라미터 형식을 그대로 따릅니다.
 
 **실패해도 같은 새 파일에** 어느 분기로 갔는지와 durable state를 남깁니다. token·private root·
 host·container 이름은 기록하지 않습니다. 계획과 실행을 나중에 대조할 수 있도록 다음도 함께 남깁니다 —
@@ -1771,8 +1807,9 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
    | retry | **`0`** |
    | 성공 조건 | **`1/1` accepted.** 아니면 **park `NO-GO`** |
 
-   invalid pair가 나오면 **같은 B3 안에서 다시 잡지 않습니다.** 중단·보고한 뒤 **새 B3 승인**을
-   받아야 다시 수집할 수 있습니다.
+   invalid pair가 나오면 **다시 잡지 않습니다.** `1/1`이 아니면 **park `NO-GO` · 기록 · 보고**로
+   닫습니다. 이 실패 처리에서 B3는 **한 번뿐**이며, 다른 B3는 위 "시도 예산"대로 **별도 계획·
+   검토·§7 accounting과 새 승인** 뒤에만 고려합니다.
 
    **pair 수 `1`이 거부되면 값을 올리지 않습니다.** reviewed source는 `1` 이상을 명시적으로
    허용하므로, attested image에서 `1`이라는 이유로 거부되는 정상 경로는 없습니다. 그 거부가
