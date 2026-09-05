@@ -1273,10 +1273,17 @@ read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 �
    predicate가 여기입니다** — `prepare` 뒤에는 recapture·clear·재prepare가 모두 불가능합니다.
 3. 승인 C 아래에서 manifest를 owner-only 경로에 **persist하고 exact reload**합니다.
 4. **별도의 행위로** tombstone → `PREPARED` prepare를 실행합니다(독립 명시 승인 항목).
-5. **`prepare` 완료부터 첫 challenge 표시까지 `60초`를 넘기지 않습니다.** 이 구간에는 코드 bound가
-   없습니다. 늦어지면 `PREPARED` 상태에서 baseline freshness가 먼저 만료되어 R14의 dead-end가
-   그대로 재현됩니다. 넘겼다면 **token 없이 중단·보고**하며, 이미 `PREPARED`이므로
-   recapture·clear·재prepare는 불가능합니다 — 실패표의 dead-end 행 그대로입니다.
+5. **위 2번의 예산 확인 시점부터 첫 challenge 표시까지 전체가 `60초`를 넘지 않습니다.** cap의
+   시작점은 `prepare` 완료가 아니라 **2번의 최종 예산 확인**입니다 — 그 확인 이후의
+   manifest persist·exact reload, `prepare`, qualify process 시작, 첫 challenge 표시가 모두 예산을
+   소비하는데 **코드에는 그 구간의 bound가 없습니다.** 그래야 `720 = 60 + 300 + 300 + 60`이 실제
+   검사 시점과 맞습니다.
+
+   cap을 넘겼다면 **token `0` · 중단 · 보고**하고, **live state를 exact reload해 어디서 넘겼는지
+   기록**합니다. 그 다음은 상태에 따라 갈립니다.
+   - 아직 **tombstone**이면 durable 변경이 없으므로 새 승인 **B1**으로 재수집이 가능합니다.
+   - 이미 **`PREPARED`**면 **recapture·clear·재prepare 모두 불가**입니다 — 실패표의 dead-end 행
+     그대로입니다.
 
 **live `action_plan_sha256`은 어디서 읽는가** — `prepare`의 public status는 이 digest를 내보내지
 않습니다(phase·cycle·action count 등만 있습니다). 그것을 표시하는 표면은 **attended challenge
@@ -1524,8 +1531,9 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
   이전 run의 게이트 요구는 **`≤ 1295.800558초`**, `1800`의 **증명 가능한 최소 여유는
   `504.199442초`**입니다. 실제 `captured_at`과 first-wire 시각은 보존 산출물에서 읽지 않았습니다.
 - **최소 잔여 `720초`** — 다음 네 항의 합입니다.
-  - **`60초`** — `prepare` 완료부터 첫 challenge 표시까지의 **command transition 상한**. 이 구간에는
-    코드 bound가 없으므로 6단계의 **운영 predicate**로 둡니다.
+  - **`60초`** — **6단계 2번의 최종 예산 확인부터 첫 challenge 표시까지**의 command transition
+    상한. manifest persist·exact reload, `prepare`, qualify 시작, challenge 표시가 모두 여기
+    들어갑니다. 코드에는 이 구간의 bound가 없으므로 6단계의 **운영 predicate**로 둡니다.
   - **`300초`** — attended challenge의 최대 수명. digest 대조와 writer 재확인이 그 안에 들어갑니다.
   - **`300초`** — 발급된 authority의 수명. token 이후 controller가 하는 일은 — 여러 번의 fresh
     read를 포함해 — **이 안에 들어갑니다.** 따로 더하지 않습니다.
