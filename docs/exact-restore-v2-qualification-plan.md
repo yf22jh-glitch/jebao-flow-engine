@@ -1337,8 +1337,26 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
 
 ## 5단계 — 승인 B2·C·D 확보
 
-**exact candidate manifest, 두 action plan, 그 digest를 놓고** **B2**(7·8단계 controller device
-read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 받습니다. 셋은 서로를
+승인 C의 범위에는 10단계가 읽는 **owner-only epoch spec 두 개**와 거기서 파생되는 **네 durable
+object**가 들어갑니다. 따라서 **그 spec을 approver에게 보이기 전에는 C를 받을 수 없습니다** —
+아직 보지 못한 미래 spec에 대한 포괄 승인은 이 문서 자신의 "candidate를 본 뒤 승인" 계약을
+깨뜨립니다.
+
+**두 exact spec candidate를 여기서 준비·검증해 제시합니다.** spec의 키 집합은 정확히
+`version` · `epoch_kind` · `planned_pair_count` · `requested_cadence_seconds` · `timing_evidence` ·
+`schedule_expectation`이며, `prepare-pair`는 `epoch_kind`를 뺀 나머지 전부가 두 spec에서 같은지
+확인한 뒤 **그 값으로** 네 object를 씁니다. 따라서 approver에게 다음을 값 또는 안전한 digest로
+제시합니다 — **exact `planned_pair_count`, `requested_cadence_seconds`, timing evidence 참조와
+digest, schedule expectation, 그리고 두 spec의 canonical digest**.
+
+- 기본은 **memory-only canonical candidate**입니다(private persistent write 회피).
+- 이미 owner-only spec이 있다면 **승인 A 아래 exact read**로 대신할 수 있습니다.
+- 실행 시점까지 exact spec을 만들 수 없다면 **C를 둘로 나눠** 10단계 직전에 별도 C를 받는 것이
+  정직합니다. **미지의 미래 spec에 대한 포괄 C는 허용하지 않습니다.**
+
+그 위에서 **exact candidate manifest, 두 action plan, 두 spec candidate, 그리고 그 digest들을 놓고**
+**B2**(7·8단계 controller device read), **C**(host-state mutation), **D**(두 cycle의 bounded device
+write)를 받습니다. 셋은 서로를
 함축하지 않으므로 **각각** 확보합니다. 검토·상의·승인 확보는 **여기까지**입니다. 이 뒤에는 넣지
 않습니다.
 
@@ -1388,8 +1406,14 @@ read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 �
      - **sentinel(depth `0`)** — 첫 challenge가 표시됐다면 그것을 **첫 challenge 실패로 닫고**,
        다음은 **재발급 1회**로 계수합니다. 새 precommit과 **A+B2+C+D 재승인** 뒤, **실제 재발급
        시점에 first-wire 잔여 `≥ 720초`**이고 **재발급에도 같은 `60초` cap**을 적용해 진행합니다.
-       challenge가 표시되기 전에 command나 TTY가 실패했더라도, live `PREPARED`를 exact reload한
-       뒤의 같은 record continuation은 여전히 존재합니다.
+       challenge가 표시되기 전에 command나 TTY가 실패한 경우는 **원인으로 갈립니다.**
+       **host-side 실패였고**, B1 이후 단일 제어권이 **연속으로 유지**됐으며 허용되지 않은 device
+       contact·write·다른 writer 등장·power·reboot·관측되지 않은 구간이 **없었음을 exact evidence로
+       확인**할 수 있을 때에만, cap 초과와 TTY 실패를 **시간 경계로 취급해** 같은 record
+       continuation이 가능합니다. 그 확인이 서지 않거나 실패가 제어 연속성을 끊었다면 **위
+       "단일 제어권 구간"이 우선**하며 continuation과 challenge 재발급 모두 금지입니다 — exact
+       state를 보존하고 보고합니다. **host command 실패 자체가 자동으로 continuation 권한을 만들지
+       않습니다.**
      - **baseline(depth `1`)** — 실패표대로 **capture-age `720초`를 적용하지 않고** 해당
        continuation 규칙을 따릅니다.
      - **dead-end는** 잔여가 부족하거나, 재발급 1회를 이미 소진했거나, digest mismatch이거나,
@@ -1516,6 +1540,8 @@ precommit**입니다.
   이전에 닫힙니다.
 - 실행 **이전에** 두 spec을 exact로 검증하고 그 equality와 transport policy(`explicit_only`)를
   **precommit**합니다.
+- **5단계에서 승인된 그 exact spec bytes와 digest만 사용합니다.** 여기서 값을 새로 정하거나
+  바꾸지 않습니다.
 - spec이 이미 존재하면 exact read와 검토로 충분합니다. **새로 만들거나 덮어써야 한다면 그
   persist·overwrite는 승인 C의 범위**이며 명시 대상입니다.
 
@@ -1549,7 +1575,7 @@ append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있�
 | `RESTORING`, inflight 있음 | 역시 attended reauthorize가 먼저입니다. 재개된 execute는 그 inflight를 **관측으로만 조정하고 재전송하지 않습니다.** 불일치하거나 관측에 실패할 때만 latch되어 `RECOVERY_REQUIRED`가 됩니다 |
 | `RECOVERY_REQUIRED` | **이때만** `recover` entry입니다 |
 | `ARMED`, authority 만료 | fresh baseline 예산이 남아 있으면 reauthorize로 진행 가능합니다. 다만 `BASELINE_EXPIRED`라면 reauthorize로 해결되지 않는 **dead-end**입니다 |
-| **sentinel(depth `0`)** `PREPARED`/`ARMED`, 첫 possible write 이전, **challenge 실패·만료** | 최초 1회에 한해, **재발급 시점 first-wire 잔여가 `720초` 이상이면 같은 record에서 1회 재발급** 가능합니다. 그 `720초`는 다시 `60` transition + `300` challenge + `300` authority + `60` margin이므로, **재발급 precommit 직후부터 새 challenge 표시까지에도 같은 `60초` cap이 적용됩니다.** 잔여가 부족하거나 이미 1회 재발급했다면 **dead-end**이므로 중단·보고합니다 |
+| **sentinel(depth `0`)** `PREPARED`/`ARMED`, 첫 possible write 이전, **challenge 실패·만료** | 먼저 **"단일 제어권 구간"의 판정을 통과해야 합니다** — 그 구간이 연속으로 유지됐음을 exact evidence로 확인할 수 없으면 continuation도 재발급도 없습니다. **host command 실패 자체가 continuation 권한을 만들지 않습니다.** 통과했다면 최초 1회에 한해, **재발급 시점 first-wire 잔여가 `720초` 이상이면 같은 record에서 1회 재발급** 가능합니다. 그 `720초`는 다시 `60` transition + `300` challenge + `300` authority + `60` margin이므로, **재발급 precommit 직후부터 새 challenge 표시까지에도 같은 `60초` cap이 적용됩니다.** 잔여가 부족하거나 이미 1회 재발급했다면 **dead-end**이므로 중단·보고합니다 |
 | **baseline(depth `1`)** — 그리고 이 경계를 phase-5(depth `2`)까지 볼 경우 그쪽도 — `PREPARED`/`ARMED`, **challenge 실패·만료** | **capture-age `720초`를 적용하지 않습니다.** freshness 게이트는 sentinel cycle 전용이므로 여기에 그 예산을 걸면 코드에 없는 gate로 유효한 재발급을 dead-end로 오판합니다. 첫 실패에서 중단·보고하고 자동 재시도 `0` 뒤, **A+B2+C+D와 새 precommit을 재승인**하면 같은 record에서 1회 재발급이 가능합니다 |
 | **sentinel(depth `0`)** `PREPARED`/`ARMED`, **`BASELINE_EXPIRED`** | **사용할 수 있는 attended entry가 없습니다.** park·recover·clear·재prepare 모두 불가하며 그대로 두고 중단·보고합니다. 이 만료는 **sentinel cycle에만** 발생합니다 |
 | 모든 cycle, **digest mismatch** | **사용할 수 있는 attended entry가 없습니다.** cycle별 offline 검토값과 어긋난 것이므로 cycle과 무관하게 중단·보고하며 park·recover·clear·재prepare 모두 불가입니다 |
