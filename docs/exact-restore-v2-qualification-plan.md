@@ -441,3 +441,88 @@ phase-5 id는 그 시점에 아직 staging 전이므로 여기 포함되지 않�
 - 세 operation id는 manifest digest 파생이므로 재사용이 구조적으로 불가능합니다.
 - sentinel slot은 fresh capture에서 결정되고 write 직전에 재검증되므로 manifest에 고정하지
   않습니다.
+
+---
+
+## 2026-09-05 addendum 정정 (2차) — 교차검토 R1~R5
+
+앞 addendum을 고치지 않고 여기서 대체합니다. R1·R2는 이 검토가 도착하기 전에 같은 결론으로
+이미 반영됐으므로 아래에는 그 사실만 적고, 새로 정정하는 것은 R3·R4·R5와 비차단 한 건입니다.
+
+### R1·R2 — 이미 반영됨 (교차 확인 일치)
+
+- **R1**: "한 숫자로 C/D와 G를 만족시킬 수 없다"는 제 결론은 과장이었습니다. 보존 실측을 넣어
+  철회했고 `max_observation_age_seconds = 1800`을 실측에서 재도출했습니다. "C·D를 무의미하게
+  만든다"는 문장도 함께 사라졌습니다. 검토가 지적한 근거와 제 재도출이 같은 값에 도달했습니다.
+  덧붙여 이 검토가 정확히 짚은 것 — C/D와 G는 **같은 절대 budget을 나눠 쓰지 않습니다.** D는
+  `captured_at`부터 sentinel 첫 wire까지이고, G는 **새로 찍힌 baseline receipt의 완료 시각부터**
+  Q2/App manifest 생성까지의 별도 창입니다. 두 창은 이어 붙지 않습니다. source split을 선행
+  작업으로 올린 것도 함께 내렸습니다 — 증거 없는 범위 확장이었습니다.
+- **R2**: 만료된 `PREPARED`/`ARMED`의 비-terminal dead-end와 다섯 가지 절차 요구를 이미
+  넣었습니다. `arm`에서 만료되면 `PREPARED`가, `execute`에서 만료되면 `ARMED`가 그대로 남는다는
+  구분도 포함돼 있습니다.
+
+### R3 — 표의 E 행이 틀렸습니다
+
+표에서 action별 observation 신선도를 "초 미만"이라고 적었습니다. **틀립니다.** runtime의 stamp
+순서를 다시 읽으면 `observed`는 raw read 직후에 찍히지만 `received`는 **disconnect와 identity-after
+재탐색이 끝난 뒤**에 찍힙니다. discovery는 고정 창을 쓰므로 `received − observed`는 초 미만이
+아니라 **약 5초에 local overhead를 더한 값**입니다. 보존된 identity-after 실측도 그 범위였습니다.
+
+E가 비구속이라는 **결론 자체는 유지됩니다** — acquisition `30초`가 이미 더 좁기 때문입니다. 그러나
+근거 수치를 틀리게 적으면 다음 사람이 이 필드를 초 단위로 조여도 된다고 오해합니다. 표의 E 행은
+"약 `5초` + local overhead, `30초` 미만이므로 비구속"으로 읽어야 합니다.
+
+### R4 — baseline restore와 phase-5의 age 우회는 이유가 다릅니다
+
+앞 addendum은 둘을 한 문장으로 묶어 "직전 sentinel cycle의 final verify가 장비 상태를 방금
+재확인했기 때문"이라고 적었습니다. **baseline restore에는 맞고 phase-5에는 틀립니다.**
+
+- **baseline restore** — sentinel cycle의 final verify 직후에 이어지므로 "방금 확인했다"가 실제
+  이유입니다.
+- **phase-5** — 앱 실험이 도는 **긴 시간 동안 staged된 채로 있다가** 나중에 exact restore에
+  쓰입니다. 이때 capture age를 다시 검사하면 시간이 지났다는 이유로 복원 자체를 막게 됩니다.
+  phase-5가 age를 무시하는 이유는 "방금 확인"이 아니라 **오래 지나도 rollback과 restore를
+  strand시키지 않기 위해서**입니다. 이것은 sentinel 게이트가 첫 possible write 이후 스스로 열리는
+  것과 같은 원리입니다.
+
+### R5 — sentinel slot은 attended challenge에 표시되지 않습니다
+
+앞 addendum은 "구체적 slot 번호는 승인 시점에 화면의 challenge에서 확인한다"고 적었습니다.
+**틀립니다.** 코드를 확인하면 challenge가 보여 주는 것은 operation id, cycle, phase,
+`baseline_sha256`, `action_plan_sha256`, `journal_context_sha256`, `authority_chain_sha256`,
+완료/전체 action 수, inflight digest, 그리고 다음 action id뿐입니다. action id는
+`{index:02d}-{role}-{kind}` 형식이라 slot 번호를 담지 않습니다. `sentinel_slot`은 `PREPARED`
+record의 action 안에만 있습니다.
+
+따라서 그 문장을 삭제하고 다음 절차로 대체합니다. 이 순서는 R2의 "prepare 이후에 검토를 넣지
+말라"와도 맞물립니다.
+
+1. fresh Phase 0 artifact로 **network-none offline에서 record와 action plan을 먼저 도출**합니다.
+   baseline 합성과 계획 수립은 장비 접촉 없이 결정론적으로 재현됩니다.
+2. 그 offline 산출물에서 **sentinel slot 번호와 target digest를 검토**합니다. 승인자가 실제로 볼
+   것을 여기서 봅니다.
+3. 그 다음에 live `prepare`를 실행합니다.
+4. live `PREPARED`의 `action_plan_sha256`이 offline에서 검토한 값과 **일치하는지 대조**합니다.
+5. 일치할 때만 challenge token을 제시합니다.
+
+승인 설명의 내용 자체는 유지됩니다 — "이번 fresh capture에서 결정되는, 사용되지 않은 한 slot의
+표현만 ZERO↔EE로 바꾸고 active schedule과 출력은 바꾸지 않는다". 바뀌는 것은 그 slot을 **언제
+어디서 확인하는가**이며, 답은 challenge 화면이 아니라 위 2단계의 offline 검토입니다.
+
+### 비차단 정정 — sentinel cycle의 write 수는 상한이지 확정값이 아닙니다
+
+본문 4~6단계는 "sentinel cycle은 8 action 전부가 write"라고 적었습니다. 정확하지 않습니다.
+`_action_satisfied`는 safe fallback과 qualify sentinel에도 적용되므로, 장비가 이미 그 상태이면
+해당 action은 `ALREADY_SATISFIED`로 건너뜁니다. 따라서 승인 문구는 **"exact 8-action plan, 최대
+8 device writes"**가 정확합니다.
+
+과거 baseline과 동일한 상태에서 시작한다면 8 write를 예상할 수 있지만, 그것은 **예상이지
+확정이 아니며 fresh Phase 0 결과 이전에는 확정할 수 없습니다.** 예상과 상한을 분리해 적습니다.
+baseline restore cycle의 "exact 6-action plan, 최대 6 write"는 이미 같은 형식이었습니다.
+
+### 이 정정으로 달라지지 않는 것
+
+hardware는 계속 **NO-GO**입니다. 이 절은 승인 경계를 넓히지 않으며, 0단계(private state read),
+1단계(device read), 4~6단계(device write)의 분리도 그대로입니다. 이 정정을 쓰는 동안 장비·앱·
+Home Assistant·private journal·archive·recovery supervisor 접촉은 `0`입니다.
