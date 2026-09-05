@@ -316,3 +316,26 @@
 이 run의 후속 조건은 바뀌지 않았습니다. sentinel receipt와 qualified bundle은 여전히 없고,
 앱 주도 live-write의 restore 선행조건은 계속 `NO-GO / BLOCKING`입니다. v2 qualification 4~6단계
 역시 fresh Phase 0, 새 v2 manifest, 별도 on-site 승인이 있어야 하며 현재 **NO-GO**입니다.
+
+## 2026-09-05 증거등급 정정 — 위 addendum의 (b) 한 건을 (c)로 내림
+
+append-only 규칙에 따라 앞 절을 고치지 않고 여기서 대체합니다. 교차검토가 지적한 등급 오류
+한 건입니다.
+
+앞 addendum은 "v1 disposition 바이트 불변"을 fixture 수준 고정과 이전 source tree 재계산으로
+확인했다며 등급 **(b)**를 붙였습니다. 이 디렉터리의 `README.md`가 정의하는 **(b)**는 데몬이 남긴
+저널·영수증·intent 같은 구조화 산출물이 **실제 파일로 보존된** 경우입니다. fixture 고정과 source
+tree 재계산은 그 자체로 daemon artifact가 아니므로 (b)에 해당하지 않습니다. 같은 README의
+"보존 파일과 그 id·digest를 실제로 확인하기 전에는 (b)로 올리지 않는다"를 제가 어겼습니다.
+
+정정 후 두 사실을 분리해 적습니다.
+
+- **이 run이 실제로 남긴 stored disposition의 digest**는 이 문서 앞 절
+  (`712a725ada86796f112631fdbcfb251350d92f470a4ff076cee5083a9758497f`)에서 이미 보존된 산출물로
+  확립돼 있고, 그 등급 **(b)**는 그대로 유효합니다. 이번 작업은 그 파일을 읽지도 쓰지도 않았으므로
+  그 등급에 영향을 주지 않습니다.
+- **새 source가 version 1 canonical 형식과 호환된다는 사실**은 회귀와 이전 source tree 재계산으로
+  확인한 **source-level 사실**입니다. 보존된 결과 artifact가 없으므로 등급은 **(c)**입니다.
+
+두 사실을 하나로 묶어 "(b)로 확인됐다"고 쓴 것이 오류였습니다. 등급을 올리기 위해 새 daemon
+artifact를 만들지 않으며, 이 정정으로 앞 절의 판정·NO-GO 상태는 달라지지 않습니다.

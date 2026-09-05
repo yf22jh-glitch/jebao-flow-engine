@@ -369,6 +369,15 @@ Home Assistant 접촉은 `0`이었고 private journal·archive·recovery supervi
 
 위 결과는 한쪽 실행이 아닙니다. 교차검토 측이 같은 network-none reviewed image에서 전체 unit
 suite를 독립 재실행해 `1888 passed, 0 failed`로 같은 수치를 얻었고, 표적 회귀 `386 passed`,
-변경 파일 ruff lint·format 통과, host와 container 간 파일 바이트 일치도 함께 확인했습니다. 두
-commit의 diff digest 역시 양쪽에서 독립 계산해 일치했습니다: **(b)**. 그 재실행에서도 장비·앱·
-Home Assistant·private state 접촉은 `0`입니다.
+변경 파일 ruff lint·format 통과, host와 container 간 파일 바이트 일치도 함께 확인했습니다.
+
+증거 등급을 정확히 적습니다. 이 test·lint 실행 결과는 **console 관측**이며 보존된 결과 artifact의
+id·digest가 없으므로 **(c)**입니다. `docs/runs/README.md`의 **(b)**는 데몬이 남긴 저널·영수증 같은
+구조화 산출물이 실제 파일로 보존된 경우이고, 여기에는 그런 산출물이 없습니다. 이 등급을 올리려고
+새 daemon artifact를 만들지 않습니다.
+
+두 commit의 diff digest와 blob digest가 양쪽에서 독립 계산해 일치한 것은 등급 문제가 아니라
+**언제든 재계산 가능한 source property**입니다. commit id만 있으면 누구든 같은 값을 다시 얻으므로
+보존 여부에 의존하지 않고, 그래서 등급을 붙이지 않습니다.
+
+그 재실행에서도 장비·앱·Home Assistant·private state 접촉은 `0`입니다: **(c)**.
