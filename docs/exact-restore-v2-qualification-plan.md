@@ -1483,7 +1483,9 @@ retry는 `0`**입니다.
 on-site approver가 받아야 하는 문장:
 
 > 이 cycle은 먼저 두 장비를 bounded safe fallback(`TimerOFF + independent + Constant / Flow 30 /
-> Frequency 20`)으로 바꿔 **출력 상태를 실제로 변경**합니다. 그 다음 sentinel write는 이번 fresh
+> Frequency 20`)으로 맞춥니다. **필요하면 write가 나가 출력 상태가 실제로 바뀌고**, 장비가 이미
+> 그 exact target이면 **write 없이 skip**합니다. 승인 대상은 **가능한 물리 변화**이지 결과 예언이
+> 아닙니다. 그 다음 sentinel write는 이번 fresh
 > capture에서 결정된 **사용되지 않는 한 slot의 표현만** `ZERO ↔ EE`로 바꾸며 active schedule
 > 항목은 건드리지 않습니다. 마지막 두 쌍의 action이 원래 schedule과 원래 outer control을
 > 되돌립니다. 실패가 남길 수 있는 dwell 상태는 그 safe fallback이거나 부분 복원 상태이며, 역할
@@ -1525,8 +1527,10 @@ qualified bundle의 불변 timestamp에 결속된 journal write입니다. **이 
 
 ## 10단계 — `prepare-pair` · 장비 접촉 `0` · host write는 **승인 C**
 
-phase-5 staging 직후 device-network `0` 상태에서 실행하며, **baseline receipt 완료로부터 `1800초`
-안**이어야 합니다. 이것이 `1800`이 충분하다는 근거이며 수학적 함의가 아니라 **절차적
+phase-5 staging 직후 **`network-none`으로 실행**하며, **baseline receipt 완료로부터 `1800초`
+안**이어야 합니다. `prepare-pair`는 network를 쓰지 않으므로 동작은 같고, **import·경로 drift가
+생기더라도 승인되지 않은 device 접촉으로 바뀌는 대신 즉시 실패**합니다. 실행이 `network-none`
+이었다는 사실을 성공·실패 기록 양쪽에 남깁니다. 이것이 `1800`이 충분하다는 근거이며 수학적 함의가 아니라 **절차적
 precommit**입니다.
 
 **이 명령은 manifest 두 개만 쓰지 않습니다.** 두 epoch 각각에 대해 collector plan(빈 series
@@ -1610,6 +1614,7 @@ write를 수행합니다.** 위 표가 그것을 "attended reauthorize" 또는 "
 | `AWAITING_FINAL_VERIFY`에서 **final verification 수동 재시도**를 선택 | **A + B2 + C**(authority·journal 갱신) + attended grant. **device write `0`이므로 D는 불필요합니다** |
 | `AWAITING_FINAL_VERIFY`에서 **park**을 선택 | **A + B3** + 별도 park host-state 승인 + attended write-free park consent (위 park 소절) |
 | `FINAL_VERIFIED` continuation | device I/O `0`이므로 **A + host mutation 승인**. B2·D·restore grant는 불필요 |
+| **journal 부재** — baseline clear는 성공했으나 phase-5 stage 전에 중단 | **A + C**. device I/O `0`이므로 B2·D·restore grant 불필요. 아래 "journal 부재 구간" 참조 |
 | dead-end (`PREPARED`/`ARMED`의 `BASELINE_EXPIRED`·digest mismatch) | **승인 경로 자체가 없습니다.** 중단·보고 |
 
 **D를 언제 받는가 — exact live record로 판정합니다.** 무조건 D를 받는 편이 안전해 보이지만, 이
@@ -1633,6 +1638,33 @@ precommit → 해당 축 재승인" 구조에서는 그편이 단순하고, 예�
 
 `AWAITING_FINAL_VERIFY`에서 재시도와 park 중 무엇을 고를지는 **원인 분석 결과에 따라 결정**하며,
 기본값으로 어느 한쪽을 고르지 않습니다.
+
+### journal 부재 구간 — clear는 됐고 stage는 안 된 상태
+
+승인 C의 범위에 `clear` → **journal 부재** → phase-5 successor 설치를 넣어 두고, 실패표에는 그
+중간 상태를 넣지 않았습니다. 그 상태에서는 **live journal이 아예 없으므로 `FINAL_VERIFIED`
+continuation 행도 적용되지 않습니다.**
+
+복구 entry는 이미 존재합니다 — `stage-final`입니다. receipt·finalization·qualified bundle을 다시
+검증한 뒤 journal이 비어 있을 때 phase-5를 stage합니다. **device I/O는 `0`**이므로 B2·D·restore
+grant는 필요 없고 **A + C**만 필요합니다.
+
+**여기에는 시한이 있습니다.** 그 재검증은 현재 시각을 cutoff로 삼아
+`(cutoff − baseline receipt 완료) ≤ 1800초`를 **다시** 검사합니다. 즉 이 crash 복구도 **baseline
+receipt 완료로부터 `1800초` 안**이어야 하고, 넘기면 `stage-final` 자체가 fail-closed합니다.
+**남은 시간을 계산해 표시하고, 승인자에게도 그 시한이 흐르고 있다는 사실을 보입니다.**
+
+| 상태 | 처리 |
+|---|---|
+| journal 없음 + sentinel·baseline finalization·receipt·qualified bundle이 exact confirm + phase-5 finalization 없음 | **A + C** 아래 `stage-final`. 실행 전 `1800초` 잔여를 계산·표시 |
+| phase-5 successor가 **이미 exact하게 존재**(ACK·출력만 유실) | **`stage-final` 재실행 `0`.** 재실행하면 journal이 비어 있지 않아 거부됩니다. exact load와 status로 성공 경계를 확인하는 것으로 끝냅니다 |
+| journal 없음인데 chain·bundle이 불일치하거나 부재, 또는 `1800초` 만료 | **clear·새 prepare·임의 재구성 모두 `0`.** 중단·보고(dead-end) |
+
+**자동 retry는 여기서도 `0`입니다.** 그리고 이 crash continuation은 **5단계에서 받은 C가 명시적으로
+포함**해야 합니다 — C의 범위 열거에 `clear`와 부재 구간과 successor 설치가 이미 들어 있으므로,
+그 승인 시점에 **"중단되면 같은 범위 안에서 `stage-final`로 이어진다"는 것을 함께 승인**합니다.
+포함하지 않기로 정했다면 그때는 **새 C**를 받습니다. 어느 쪽이든 **`1800초` 시한을 승인자에게
+보이는 것은 동일**합니다.
 
 ### `FINAL_VERIFIED`의 세 경로 — `clear`가 정답인 것은 둘뿐입니다
 
