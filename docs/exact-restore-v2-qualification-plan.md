@@ -1131,7 +1131,7 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 |---|---|---|
 | **A** | private state read + 고정 root를 여는 것만으로 발생하는 **일시 host-store writability probe**. durable semantic mutation `0`, device write `0`. **이 축은 0단계에 한정되지 않고 전체 승인 sequence 동안의 모든 expected fixed-root open에 수반되는 probe를 포괄합니다** — 아래 참조 | repository maintainer |
 | **B1** | 1단계 Phase 0의 device **read**, 그리고 그 operation이 **반드시 남기는** owner-only collector plan·series·raw artifact의 **durable host write**. Phase 0은 읽기만 하는 단계가 아닙니다 | repository maintainer |
-| **B2** | 7·8단계에서 **controller가 계약상 수행하는 모든 device read** — 각 action 이전의 fresh read, already-satisfied 분기의 두 번째 read, write 이후의 explicit verification·reconciliation 관측, 그리고 마지막 final pair capture. 여기에 딸린 discovery·identity 트래픽을 포함합니다 | repository maintainer |
+| **B2** | **7·8단계의 최초 실행과, 아래 재개표로 승인된 continuation에서** controller가 계약상 수행하는 모든 device read — 각 action 이전의 fresh read, already-satisfied 분기의 두 번째 read, write 이후의 explicit verification·reconciliation 관측, 그리고 마지막 final pair capture. 여기에 딸린 discovery·identity 트래픽을 포함합니다. 재개용 B2는 **이름만 같은 별도 권한이 아니라 같은 축**이며, 재개할 때마다 그 범위로 다시 확인·승인합니다 | repository maintainer |
 | **B3** | 실패 후 park을 선택했을 때에 한해, 마지막 completion 뒤의 새 strict artifact 수집(device read)과 그 collector durable write | repository maintainer |
 | **C** | **host-state mutation** — 아래 "승인 C의 범위" 전체 | repository maintainer |
 | **D** | 두 cycle의 bounded device **write** (7·8단계). 현장 감시와 즉시 물리 차단 포함 | on-site hardware approver |
@@ -1436,13 +1436,20 @@ write를 수행합니다.** 위 표가 그것을 "attended reauthorize" 또는 "
 
 | 재개 경로 | 다시 확인·승인해야 하는 축 |
 |---|---|
-| `RESTORING` resume (inflight 유무 무관) | **B2**(재개 범위의 device read) + **C**(host journal transition) + **D**(남은 bounded write와 현장 감시·즉시 차단) |
-| `RECOVERY_REQUIRED` → `recover` 후 continuation | **B2 + C + D** |
-| `ARMED` reauthorize 후 execute | **B2 + C + D** |
-| `AWAITING_FINAL_VERIFY`에서 **final verification 수동 재시도**를 선택 | **B2 + C**(authority·journal 갱신) + attended grant. **device write `0`이므로 D는 불필요합니다** |
-| `AWAITING_FINAL_VERIFY`에서 **park**을 선택 | **B3** + 별도 park host-state 승인 + attended write-free park consent (위 park 소절) |
-| `FINAL_VERIFIED` continuation | device I/O `0`이므로 **host mutation 승인만**. B2·D·restore grant 모두 불필요 |
+| `RESTORING` resume (inflight 유무 무관) | **A** + **B2**(재개 범위의 device read) + **C**(host journal transition) + **D**(남은 bounded write와 현장 감시·즉시 차단) |
+| `RECOVERY_REQUIRED` → `recover` 후 continuation | **A + B2 + C + D** |
+| `ARMED` reauthorize 후 execute | **A + B2 + C + D** |
+| `AWAITING_FINAL_VERIFY`에서 **final verification 수동 재시도**를 선택 | **A + B2 + C**(authority·journal 갱신) + attended grant. **device write `0`이므로 D는 불필요합니다** |
+| `AWAITING_FINAL_VERIFY`에서 **park**을 선택 | **A + B3** + 별도 park host-state 승인 + attended write-free park consent (위 park 소절) |
+| `FINAL_VERIFIED` continuation | device I/O `0`이므로 **A + host mutation 승인**. B2·D·restore grant는 불필요 |
 | dead-end (`PREPARED`/`ARMED`의 `BASELINE_EXPIRED`·digest mismatch) | **승인 경로 자체가 없습니다.** 중단·보고 |
+
+**A가 모든 실행 가능한 행에 들어가는 이유** — A는 고정 root를 열 때마다 발생하는 private read와
+일시 writability probe이고, 이 문서는 **어느 축도 다른 축을 함축하지 않는다**고 선언했습니다. 재개는
+새 command와 새 fixed-root open을 수반하므로, 0단계의 A가 시간 제한 없이 이후 모든 재개까지
+암묵적으로 존속한다고 쓰지 않는 한 그 probe들은 무승인이 됩니다. A의 lifetime을 따로 정의하는
+대신 **재개할 때마다 A를 다시 확인**하는 쪽을 택했습니다 — "첫 실패 즉시 중단·보고 → 새
+precommit → 해당 축 재승인" 구조에서는 그편이 단순하고, 예외를 만들지 않습니다.
 
 순서는 어느 경로든 같습니다 — **원인 분석 → 새 precommit → 해당 축들을 다시 확인·승인 →
 그 다음에 attended grant 발급**입니다. **이전 grant나 "reauthorize"라는 단어가 이 순서를 건너뛰게
