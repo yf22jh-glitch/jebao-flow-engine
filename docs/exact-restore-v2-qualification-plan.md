@@ -1206,6 +1206,20 @@ operation id를 계속 거부하는지, recovery supervisor exited, **Home Assis
 `jebao_flow`의 경로와 bytes가 reviewed commit과 일치**(마운트 digest만으로는 부족), reviewed
 source/image attestation.
 
+**private config의 두 값을 digest가 아니라 값으로 확인합니다.** `docs/hardware-readiness.md`의
+phase 0 계약이 요구하는 것이고, 상위 안전 문서가 이 실행 절보다 우선합니다. "reviewed config"라는
+말이 값 자체를 대체하지 않습니다.
+
+- **`runtime.dry_run` 이 `true`**
+- 이번 pair를 포함한 **모든 configured device의 `control.allow_hardware_writes` 가 `false`**
+
+**이 잠금은 의도된 exact-restore를 막지 않습니다.** attended production composition이 승인된
+exact-restore writer를 **별도로** write 가능하게 구성하기 때문이며, 그 예외는 **config 파일을
+바꾸지 않습니다.** 반대로 daemon이나 일반 경로가 우발적으로 다시 뜰 때 이 두 값이 두 번째
+방어가 됩니다.
+
+**값이 다르면 `NO-GO`·보고입니다.** integration을 임의로 끄거나 값을 고쳐서 계속하지 않습니다.
+
 ## 1단계 — fresh Phase 0 · **승인 B1**
 
 | 항목 | 값 |
@@ -1330,7 +1344,10 @@ read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 �
 
 ## 6단계 — manifest persist와 `prepare` · **승인 C**
 
-1. 직전에 source·config·manifest·artifact digest를 **exact로 재확인**합니다.
+1. 직전에 source·config·manifest·artifact digest를 **exact로 재확인**합니다. 이 확인에는
+   **0단계의 두 config 값 — `runtime.dry_run` 이 `true`, 모든 configured device의
+   `control.allow_hardware_writes` 가 `false` — 을 값으로 다시 보는 것이 포함**됩니다. digest만
+   맞추고 값을 건너뛰지 않습니다.
 2. **예산을 다시 계산합니다.** 4단계에서 충분했더라도 5단계의 승인 상의가 길어졌다면 지금은
    부족할 수 있습니다. `now < captured_at + 1060초`이고 first-wire 잔여가 `≥ 720초`인지 **다시
    계산해 표시**합니다. **하나라도 실패하면 manifest save `0`, `prepare` `0`, tombstone 불변으로
@@ -1410,7 +1427,8 @@ writer가 붙을 수 있으므로, 확인은 challenge **이전이 아니라 tok
 1. challenge summary를 표시합니다. **아직 token은 입력하지 않습니다.**
 2. summary의 `action_plan_sha256`을 3단계 offline **sentinel** plan 값과 대조합니다.
 3. **token을 계속 보류한 상태에서** 장비 TCP connection 부재와 앱·Home Assistant·daemon·다른
-   one-shot/qualifier process 부재를 **다시 확인**합니다.
+   one-shot/qualifier process 부재, 그리고 **`runtime.dry_run` 이 `true`이고 모든 configured
+   device의 `control.allow_hardware_writes` 가 `false`인지**를 **다시 확인**합니다.
 4. 둘 중 하나라도 실패하면 **token 미입력 · `NO-GO` · 보고**입니다. integration을 끄거나 밀어붙이지
    않으며, clear·편집·재prepare도 하지 않습니다.
 5. **둘 다 통과했을 때만** token → arm → execute를 즉시 연속으로 진행합니다.
