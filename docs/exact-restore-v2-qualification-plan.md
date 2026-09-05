@@ -1087,3 +1087,26 @@ attempt만 있습니다. 두 값의 차이가 `30.016`·`30.023`초라는 것은
 같은 규율이 이 문서 전체에 적용됩니다. **산술이 맞아떨어진다는 것은 그 값이 실제로 그렇게
 기록돼 있었다는 증명이 아닙니다.** 보존 산출물에서 읽지 않은 값은 재구성으로 적고, 재구성에
 기대어 새 값을 고를 때는 그 선택이 무엇에 근거했는지를 함께 적습니다.
+
+### R24 · R25 보강 — 최종 checklist의 두 문구를 대체합니다
+
+**R24 — "각 plan의 sentinel slot"은 존재하지 않습니다.** 계획 생성기는 `SENTINEL_QUALIFICATION`
+cycle에서만 두 개의 `QUALIFY_SENTINEL` action과 그 `sentinel_slot`·image digest를 넣습니다.
+**baseline 6-action plan에는 sentinel action도 slot도 없습니다.** 3단계 offline 검토 항목을 다음으로
+대체합니다.
+
+> sentinel plan의 **두 sentinel slot과 image target digest**, 그리고 **두 plan 각각의 전체
+> action·target과 `action_plan_sha256`**.
+
+**R25 — operation id preimage의 suffix를 "cycle label"이라고 부르면 phase-5에서 틀립니다.**
+sentinel은 `sentinel`, baseline restore는 `baseline` 라벨을 쓰지만, phase-5 final restore는 같은
+`BASELINE_RESTORE` cycle을 가지면서도 별개의 `final` 라벨을 씁니다. 이 문서는 이미 "baseline과
+phase-5는 cycle이 같아 depth로 구분한다"고 확정했으므로, cycle label이라는 표현을 남기면 문서
+내부 모순입니다. 2단계 문구를 다음으로 대체합니다.
+
+> 세 operation id는 새 `operation_nonce`를 포함한 **full manifest digest**에 **서로 다른 domain
+> label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 cycle이 아니라 역할을
+> 가리키며, 그래서 cycle이 같은 baseline과 phase-5도 서로 다른 id를 갖습니다.
+
+두 정정 모두 대상과 id 결속에 대한 설명 오류이며, 나머지 checklist 구조는 그대로 유효합니다.
+hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home Assistant·private state 접촉은 `0`입니다.
