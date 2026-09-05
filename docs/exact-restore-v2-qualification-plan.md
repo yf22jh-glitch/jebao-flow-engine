@@ -1122,14 +1122,21 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 > 이 문서는 **PLAN ONLY**입니다. 아래 네 승인이 각각 명시적으로 이뤄지기 전에는 어떤 단계도
 > 실행하지 않습니다. hardware는 **NO-GO**입니다.
 
-## 승인 축 — 넷이며 서로를 함축하지 않습니다
+## 승인 축 — 여섯이며 서로를 함축하지 않습니다
 
 | 축 | 범위 | 주체 |
 |---|---|---|
 | **A** | private state read + 고정 root를 여는 것만으로 발생하는 **일시 host-store writability probe**. durable semantic mutation `0`, device write `0`. **이 축은 0단계에 한정되지 않고 전체 승인 sequence 동안의 모든 expected fixed-root open에 수반되는 probe를 포괄합니다** — 아래 참조 | repository maintainer |
-| **B** | device **read**, 그리고 그 operation이 **반드시 남기는** owner-only collector plan·series·raw artifact의 **durable host write**. Phase 0은 읽기만 하는 단계가 아닙니다 | repository maintainer |
+| **B1** | 1단계 Phase 0의 device **read**, 그리고 그 operation이 **반드시 남기는** owner-only collector plan·series·raw artifact의 **durable host write**. Phase 0은 읽기만 하는 단계가 아닙니다 | repository maintainer |
+| **B2** | 7·8단계에서 **controller가 계약상 수행하는 모든 device read** — 각 action 이전의 fresh read, already-satisfied 분기의 두 번째 read, write 이후의 explicit verification·reconciliation 관측, 그리고 마지막 final pair capture. 여기에 딸린 discovery·identity 트래픽을 포함합니다 | repository maintainer |
+| **B3** | 실패 후 park을 선택했을 때에 한해, 마지막 completion 뒤의 새 strict artifact 수집(device read)과 그 collector durable write | repository maintainer |
 | **C** | **host-state mutation** — 아래 "승인 C의 범위" 전체 | repository maintainer |
-| **D** | device **write** (7·8단계). 현장 감시와 즉시 물리 차단 포함 | on-site hardware approver |
+| **D** | 두 cycle의 bounded device **write** (7·8단계). 현장 감시와 즉시 물리 차단 포함 | on-site hardware approver |
+
+**B2는 D를 함축하지 않고 D도 B2를 함축하지 않습니다.** qualification cycle의 device 접촉은 write만이
+아닙니다 — `execute()`는 각 action 앞뒤로 장비를 읽고 마지막에 final pair를 잡습니다. 그 read들은
+1단계 collector read(B1)가 아니며 D의 "write"에도 들어가지 않으므로, **B2 없이는 승인되지 않은
+장비 접촉**이 됩니다. B2는 exact candidate와 두 action plan을 본 뒤 5단계에서 확보합니다.
 
 ### 승인 C의 범위
 
@@ -1176,7 +1183,7 @@ operation id를 계속 거부하는지, recovery supervisor exited, **Home Assis
 `jebao_flow`의 경로와 bytes가 reviewed commit과 일치**(마운트 digest만으로는 부족), reviewed
 source/image attestation.
 
-## 1단계 — fresh Phase 0 · **승인 B**
+## 1단계 — fresh Phase 0 · **승인 B1**
 
 | 항목 | 값 |
 |---|---|
@@ -1191,7 +1198,7 @@ source/image attestation.
 - 두 장비의 outer six-field와 432-byte schedule image가 **byte-exact 일치**해야 합니다.
 - **각 series가** coherence `≤20초`와 total acquisition `≤30초`를 통과해야 합니다.
 - 하나라도 `2/2` accepted가 아니면 **`NO-GO`**. 재수집은 자동 retry가 아니며 그 Phase 0의 승인
-  범위는 종료됩니다. **새 승인 B**를 받아야 새 2×2 series를 수집할 수 있습니다.
+  범위는 종료됩니다. **새 승인 B1**을 받아야 새 2×2 series를 수집할 수 있습니다.
 - 기존 parked operation의 artifact를 재사용하지 않습니다.
 - observation age가 만료되면 완화하지 말고 재수집합니다.
 
@@ -1219,7 +1226,7 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
 
 ## 3단계 — offline plan 도출 · 장비 접촉 `0` · **고정 store 접촉 `0`**
 
-승인 B 아래 이미 보존된 raw artifact를 **read-only로 읽고**, 순수 경로(baseline 합성과 계획 수립
+승인 B1 아래 이미 보존된 raw artifact를 **read-only로 읽고**, 순수 경로(baseline 합성과 계획 수립
 함수)를 **현재 reviewed image·process 안에서** 실행합니다. 고정 journal·archive·guard에는 접근하지
 않으며, **새 persistent scratch·복사본 write는 `0`**입니다 — 2단계와 같은 이유입니다. 복사본이
 꼭 필요하다면 그 생성 자체가 별도 host-write 승인 범위이므로, 여기서는 memory·process only가
@@ -1238,7 +1245,7 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
 - first-wire deadline = **`captured_at + 1780초`**
 - `prepare` 최종 시각 = **`captured_at + 1060초`**
 - 최소 잔여 first-wire 예산 = **`720초`**
-- 잔여 `< 720초`이면 **tombstone을 건드리지 않고 종료·보고**합니다. 재수집은 **새 승인 B**.
+- 잔여 `< 720초`이면 **tombstone을 건드리지 않고 종료·보고**합니다. 재수집은 **새 승인 B1**.
 - 이 계산은 **1차**입니다. 승인 상의에 시간이 걸리므로 **6단계에서 `prepare` 직전에 다시
   계산합니다.** 여기서 통과했다는 것이 그때도 통과한다는 뜻이 아닙니다.
 - **첫 challenge가 `300초`를 전부 소모해 만료된 뒤에도 재발급 여유를 *보장*하려면** `prepare`
@@ -1246,10 +1253,12 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
   **실제 재발급 시점의 잔여가 `720초` 이상인지**로 판정합니다. 잔여가 `1020초` 이하라면 재발급이
   보장되지 않는다는 것을 **알고** 진행할지 여기서 결정합니다.
 
-## 5단계 — 승인 C와 D 확보
+## 5단계 — 승인 B2·C·D 확보
 
-**exact candidate manifest, 두 action plan, 그 digest를 놓고** C와 D를 받습니다. 검토·상의·승인
-확보는 **여기까지**입니다. 이 뒤에는 넣지 않습니다.
+**exact candidate manifest, 두 action plan, 그 digest를 놓고** **B2**(7·8단계 controller device
+read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 받습니다. 셋은 서로를
+함축하지 않으므로 **각각** 확보합니다. 검토·상의·승인 확보는 **여기까지**입니다. 이 뒤에는 넣지
+않습니다.
 
 ## 6단계 — manifest persist와 `prepare` · **승인 C**
 
@@ -1257,7 +1266,7 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
 2. **예산을 다시 계산합니다.** 4단계에서 충분했더라도 5단계의 승인 상의가 길어졌다면 지금은
    부족할 수 있습니다. `now < captured_at + 1060초`이고 first-wire 잔여가 `≥ 720초`인지 **다시
    계산해 표시**합니다. **하나라도 실패하면 manifest save `0`, `prepare` `0`, tombstone 불변으로
-   중단·보고**하고, 새 승인 B 없이 recapture하지 않습니다. **되돌아갈 수 있는 진짜 마지막
+   중단·보고**하고, 새 승인 B1 없이 recapture하지 않습니다. **되돌아갈 수 있는 진짜 마지막
    predicate가 여기입니다** — `prepare` 뒤에는 recapture·clear·재prepare가 모두 불가능합니다.
 3. 승인 C 아래에서 manifest를 owner-only 경로에 **persist하고 exact reload**합니다.
 4. **별도의 행위로** tombstone → `PREPARED` prepare를 실행합니다(독립 명시 승인 항목).
@@ -1282,7 +1291,7 @@ baseline `FINAL_VERIFIED` → bundle persist → receipt 결속 clear → phase-
 운영자가 개입하는 지점은 **두 attended challenge에서 token을 보류하고 있는 동안**뿐입니다. 아래
 7·8단계의 검사는 모두 그 두 pause 안에서 수행합니다.
 
-## 7단계 — sentinel cycle · **승인 D**
+## 7단계 — sentinel cycle · **승인 B2 + D**
 
 **token 직전 순서를 이대로 지킵니다.** challenge를 띄운 뒤 approver가 검토하는 동안에도 다른
 writer가 붙을 수 있으므로, 확인은 challenge **이전이 아니라 token 직전**에 해야 합니다.
@@ -1324,7 +1333,7 @@ Phase 0부터 첫 wire까지 device drift를 막는 것은 **코드 predicate가
 전제**입니다. wire 직전 검사는 immutable action이 baseline 파생 target과 일치하는지만 보며, 제3자가
 바꿔 놓은 schedule은 거부되지 않고 덮입니다. 그래서 0단계와 각 arm 직전의 확인이 실제 방어입니다.
 
-## 8단계 — baseline restore cycle · **승인 D (별도 grant)**
+## 8단계 — baseline restore cycle · **승인 B2 + D (D는 별도 grant)**
 
 같은 `qualify` 실행이 promotion을 마치고 **두 번째 challenge**를 띄웁니다. 7단계와 **동일한 순서**를
 그대로 반복합니다.
@@ -1362,8 +1371,8 @@ cutoff를 고정합니다. **baseline receipt 완료로부터 `1800초` 안**이
 receipt·bundle digest, 두 cycle의 실측 coherence/acquisition span, 선행조건 2의 상태 변화를
 append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있도록 다음도 함께 남깁니다 —
 **각 cycle의 실제 action outcome vector**(write / `ALREADY_SATISFIED` skip /
-`VERIFIED_AFTER_UNCERTAIN`), **device read·write 횟수**, **네 승인 각각의 실제 범위**, 그리고
-**실패 분기에 진입했는지와 어느 행이었는지**.
+`VERIFIED_AFTER_UNCERTAIN`), **device read·write 횟수를 B1 / B2 /(발생했다면) B3로 구분해**,
+**여섯 승인 각각의 실제 범위**, 그리고 **실패 분기에 진입했는지와 어느 행이었는지**.
 
 ---
 
@@ -1439,13 +1448,13 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
 - **capture 직전** 앱·Home Assistant·장비 TCP connection·모든 code writer 부재를 다시 확인합니다.
 - **capture부터 park 완료까지** device contact와 write는 `0`이고 단일 제어권을 유지합니다.
 - 그 사이에 **어떤 접촉이나 지연, 또는 의심이 생기면 그 artifact 재사용은 `0`**입니다. 새 승인
-  B부터 다시 시작합니다.
+  B3부터 다시 시작합니다.
 
 #### 순서와 승인
 
 1. **먼저 중단하고 원인을 분석합니다.** 자동·즉시 재시도는 `0`회입니다.
 2. park을 선택했다면, **마지막 completion보다 뒤에** 새 explicit-only strict artifact를
-   수집합니다. device read이므로 **새 승인 B**와 그에 딸린 collector durable write가 필요합니다.
+   수집합니다. device read이므로 **승인 B3**(새 device read + collector durable write)가 필요합니다.
 3. 그 artifact와 **좌초한 journal의 exact digest**에 결속된 **새 v2 disposition manifest
    candidate**를 만들고, 위 eligibility 조건 전부를 **offline에서 재검증**합니다. 이 시점의
    candidate는 메모리에만 둡니다. **기존 Phase 0 artifact와 기존 disposition manifest 재사용은
