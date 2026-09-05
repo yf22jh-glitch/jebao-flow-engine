@@ -1113,7 +1113,7 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 
 ---
 
-# 최종 실행 문서 (2026-09-05, R26 반영) — **이 절만이 실행에 사용됩니다**
+# 최종 실행 문서 (현행) — **이 절만이 실행에 사용됩니다**
 
 > **앞의 모든 checklist와 addendum은 역사로 남습니다. 실행에 사용하지 않습니다.** 5차 checklist,
 > 6차 addendum의 대체 지시, R20·R21 보강, R24·R25 정정은 모두 **이 절에 이미 반영돼 있습니다.**
@@ -1125,6 +1125,26 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 > action plan을 본 뒤 5단계에서**, 그리고 **B3와 park host·park consent는 실패 후 park을 실제로
 > 선택한 경우에만** 요구합니다. hardware는 **NO-GO**입니다.
 
+## −1단계 — §7 보고가 **먼저**입니다 (이미 발화했습니다)
+
+`AGENTS.md` §7의 조건은 **"실기 2회 **또는** 1일"**이라는 독립 disjunction입니다. 아래 "시도 예산"은
+횟수 쪽만 계산했지만, **시간 조건은 이미 발화했습니다** — 이 질문의 첫 관련 실기는 `2026-09-04`
+run이고 그 종료로부터 하루가 지났습니다. **따라서 시도 횟수와 무관하게, B1 승인 검토로 넘어가기
+전에 멈추고 보고해야 합니다.**
+
+**이 문서 자체는 아직 §7 보고를 충족하지 않습니다.** §7이 요구하는 세 가지 중 (2)와 (3)이
+비어 있습니다. 보고에는 다음이 들어가야 합니다.
+
+1. **지금까지의 증거**
+2. **최소 두 개의 대안 경로** — 대안 없이 "한 번 더 하드닝하겠다"는 보고는 §7상 **무효**입니다.
+   고려 가능한 예: (a) 정정된 v2 qualification을 **단회**로 진행, (b) exact-restore qualification과
+   Q2 live track을 **park**하고 이미 병렬 허용된 software-independent actuator·product track을 진행,
+   (c) 별도 사람이 설계한 앱·수동 복원 경로를 **새 계획**으로 검토.
+3. **지금 park했을 때의 영향**
+
+**그 보고를 제시하고 repository maintainer가 이 2회차 v2 qualification을 명시적으로 선택한 뒤에만**
+0단계와 B1 승인 검토로 넘어갑니다. 결론은 maintainer가 고르며, 이 문서가 (a)를 전제하지 않습니다.
+
 ## 시도 예산 — 이 계획은 **B1 한 세트**만 허용합니다
 
 `AGENTS.md` §7은 **같은 질문에 실기 2회 또는 1일을 넘기면** 코드를 쓰지 말고 멈춰 repository
@@ -1132,7 +1152,9 @@ maintainer에게 보고하라고 요구합니다. 보고서에는 (1) 지금까�
 경로**, (3) park했을 때의 영향이 들어가야 하며, 대안 없이 "한 번 더 하드닝하겠다"는 보고는
 무효입니다.
 
-**이 질문의 실기 1회차는 이미 `2026-09-04` run이었고, 이 계획이 2회차입니다.**
+**이 질문의 실기 1회차는 이미 `2026-09-04` run이었고, 이 계획이 2회차입니다.** 그리고 §7의 시간
+조건은 횟수와 **독립적으로** 이미 발화했으므로, 위 −1단계의 보고가 **이 2회차 이전에도** 선행
+조건입니다. "세 번째 run에서만 보고"로 읽으면 안 됩니다.
 
 그리고 11단계가 확정하듯 **fresh B1 + 새 nonce + 새 operation id는 그 자체로 새 실기**입니다.
 따라서 **새 B1은 이 run 안의 retry가 될 수 없습니다.**
@@ -1284,6 +1306,12 @@ exact-restore writer를 **별도로** write 가능하게 구성하기 때문이�
 
 앱·Home Assistant·daemon·다른 client의 접촉과 write는 **`0`**입니다.
 
+**실패 후 park을 선택하면 이 구간은 먼저 종료·동결됩니다.** B3 collector는 위 허용 목록에 없으며
+park 절의 B3 승인이 이 목록을 대체하지도 않습니다. 순서는 이렇습니다 — **qualification 구간을
+종료·동결하고 원인을 분석한 뒤, 선택과 새 B3 승인을 거쳐 별도의 `park-only exclusive interval`을
+엽니다.** 그 interval에서는 **B3 collector가 유일한 device contact**이고 **capture부터 park 완료까지
+그 외 device contact·write는 `0`**입니다. 두 interval은 겹치지 않습니다.
+
 **baseline 불변을 의심하게 하는 사건**이 하나라도 있으면, **나중에 endpoint 확인이 깨끗하더라도
 그 artifact를 신뢰하지 않습니다.** 해당하는 것은 위 둘 이외의 **device contact 또는 write, 다른
 writer의 등장, 단일 제어권 상실, power·reboot, 예상 밖 pause·interruption**입니다.
@@ -1342,7 +1370,8 @@ B1에서 보존된 raw artifact를 **승인 A 아래 read-only로 읽고**, 순�
 `captured_at`은 **채택 pair의 두 read completion 중 max**이며, **두 series의 min**입니다.
 
 - first-wire deadline = **`captured_at + 1780초`**
-- `prepare` 최종 시각 = **`captured_at + 1060초`**
+- **final pre-persist checkpoint deadline** = **`captured_at + 1060초`** — 실제 predicate는 6단계
+  2번의 pre-persist checkpoint이고 `prepare`는 그 뒤 `60초` cap 안에서 일어납니다
 - 최소 잔여 first-wire 예산 = **`720초`**
 - 잔여 `< 720초`이면 **tombstone을 건드리지 않고 종료·보고**합니다. 재수집은 **새 승인 B1**.
 - 이 계산은 **1차**입니다. 승인 상의에 시간이 걸리므로 **6단계에서 `prepare` 직전에 다시
@@ -1364,6 +1393,28 @@ B1에서 보존된 raw artifact를 **승인 A 아래 read-only로 읽고**, 순�
 object**가 들어갑니다. 따라서 **그 spec을 approver에게 보이기 전에는 C를 받을 수 없습니다** —
 아직 보지 못한 미래 spec에 대한 포괄 승인은 이 문서 자신의 "candidate를 본 뒤 승인" 계약을
 깨뜨립니다.
+
+> **미결 — 승인 전에 채워야 합니다.** 아래 spec의 **exact tuple이 아직 이 문서에 없습니다** —
+> `planned_pair_count`, `requested_cadence_seconds`, 사용할 두 `timing_evidence`의 id·digest, 그리고
+> `master_schedule_image_sha256`·`slave_schedule_image_sha256`의 exact 값 또는 predeclared 앱
+> schedule에서의 유일한 도출 규칙입니다. **이 값들이 비어 있는 한 승인 C를 받을 수 없고 이 계획은
+> 실행 가능하지 않습니다.**
+>
+> 제가 임의로 채우지 않는 이유는, 이 tuple이 이후 앱 관측 **epoch의 길이와 판정 target**을
+> 결정하기 때문입니다. 그것은 이 계획의 범위가 아니라 별도 결정이고, 근거 없이 고른 수를 실행
+> 문서에 박아 두는 것이 이 저장소가 막으려는 형태입니다.
+>
+> 값을 정할 때의 **제약**입니다.
+> - 코드는 `planned_pair_count`를 `1..10000`, cadence를 양수로 받되
+>   **`(count − 1) × cadence ≥ q2_minimum_series_span`**을 강제합니다.
+> - `docs/hardware-readiness.md`는 **`30초` cadence에서 최소 `191` pair**(더 큰 값 권장)라고
+>   적습니다. 최소값은 여유가 `0`이라는 뜻입니다.
+> - `timing_evidence`는 **이번 fresh B1의 primary와 corroborating series**를 쓰는 것이 가장
+>   자연스럽습니다. 다른 것을 쓰려면 이유를 함께 적습니다.
+> - 두 spec은 `epoch_kind`만 다르고 나머지가 **전부 동일**해야 합니다.
+>
+> **10단계를 별도 계획으로 분리하는 선택지는 현재 구조와 맞지 않습니다** — handoff 창 때문에
+> `prepare-pair`가 baseline receipt로부터 `1800초` 안, 같은 자리에서 수행돼야 하기 때문입니다.
 
 **두 exact spec candidate를 여기서 준비·검증해 제시합니다.** spec의 키 집합은 정확히
 `version` · `epoch_kind` · `planned_pair_count` · `requested_cadence_seconds` · `timing_evidence` ·
@@ -1407,7 +1458,25 @@ write)를 받습니다. 셋은 서로를
    `operation_nonce`로 새 candidate와 두 plan을 만든 뒤, **5단계의 B2·C·D를 전부 다시 받습니다.**
    새 artifact와 새 nonce는 manifest digest와 **세 operation id를 모두 바꾸므로**, 이전 exact
    candidate를 보고 받은 B2·C·D는 **더 이상 같은 대상에 대한 승인이 아닙니다.**
-3. 승인 C 아래에서 manifest를 owner-only 경로에 **persist하고 exact reload**합니다.
+3. 승인 C 아래에서 manifest를 **durable하게 설치**합니다. `exact reload`는 durability가 아닙니다 —
+   page cache에 보이는 것과 disk에 남은 것은 다릅니다. 순서를 이대로 지킵니다.
+
+   1. 승인된 canonical bytes를 **새 no-clobber owner-only 경로**에 씁니다. **기존 v1 manifest
+      overwrite는 `0`**입니다.
+   2. mode `0600` · owner · `nlink 1`을 확인합니다.
+   3. **file fsync → parent directory fsync → close**.
+   4. 그 뒤 `load_operation_manifest()`로 **exact reload와 digest identity**를 확인합니다.
+
+   **이 durable ACK 이전에는 `prepare` `0`입니다.** write·fsync·reload 오류이거나 ACK가 불확실하면
+   **`prepare` `0` · tombstone 불변**으로 닫고, candidate와 부분 상태의 exact inventory를 남겨
+   보존·보고합니다. **자동 retry·삭제·overwrite는 `0`**이며, **bytes가 보인다는 이유로 fsync 실패를
+   성공으로 취급하지 않습니다.**
+
+   **이 경계가 필요한 이유** — `qualify`·`recover`·`stage-final`·`restore` **모든 command가 매번
+   operation manifest를 로드**합니다. manifest가 page cache에만 있다가 host crash로 사라지면 live
+   `PREPARED`/`RESTORING` journal만 남고 **continuation에 필요한 manifest를 로드할 수 없어 rollback
+   권한이 좌초**합니다. 이 경계는 10단계 spec의 `persist·fsync·exact reload`보다 약해서는 안
+   됩니다.
 4. **별도의 행위로** tombstone → `PREPARED` prepare를 실행합니다(독립 명시 승인 항목).
 5. **위 2번의 예산 확인 시점부터 첫 challenge 표시까지 전체가 `60초`를 넘지 않습니다.** cap의
    시작점은 `prepare` 완료가 아니라 **2번의 최종 예산 확인**입니다 — 그 확인 이후의
@@ -1516,10 +1585,11 @@ on-site approver가 받아야 하는 문장:
 > 이 cycle은 먼저 두 장비를 bounded safe fallback(`TimerOFF + independent + Constant / Flow 30 /
 > Frequency 20`)으로 맞춥니다. **필요하면 write가 나가 출력 상태가 실제로 바뀌고**, 장비가 이미
 > 그 exact target이면 **write 없이 skip**합니다. 승인 대상은 **가능한 물리 변화**이지 결과 예언이
-> 아닙니다. 그 다음 sentinel write는 이번 fresh
-> capture에서 결정된 **사용되지 않는 한 slot의 표현만** `ZERO ↔ EE`로 바꾸며 active schedule
-> 항목은 건드리지 않습니다. 마지막 두 쌍의 action이 원래 schedule과 원래 outer control을
-> 되돌립니다. 실패가 남길 수 있는 dwell 상태는 그 safe fallback이거나 부분 복원 상태이며, 역할
+> 아닙니다. 그 다음 sentinel write는 **432-byte schedule image 전체를 wire로 보냅니다** — slot
+> 하나만 쓰는 것이 아닙니다. 다만 그 image의 **의미상 차이는 이번 fresh capture에서 결정된
+> 사용되지 않는 slot 한 개의 표현이 `ZERO ↔ EE`로 바뀐 것뿐**이고 active schedule 항목은
+> 그대로입니다. 이어지는 restore-schedule action도 **baseline 432-byte image 전체를 다시
+> 보냅니다.** 마지막 두 쌍의 action이 원래 schedule과 원래 outer control을 되돌립니다. 실패가 남길 수 있는 dwell 상태는 그 safe fallback이거나 부분 복원 상태이며, 역할
 > B의 latent manual `Random / Flow 89`가 복원 중 잠시 active가 될 수 있습니다.
 
 device drift를 막는 것은 **코드 predicate가 아니라 위 "단일 제어권 구간"의 stop rule**입니다.
