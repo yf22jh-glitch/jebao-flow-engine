@@ -264,27 +264,80 @@ inflight, 그리고 실패 시 fail-closed latch입니다.
 | F | final verify의 observation age | `completed − observed`, acquisition(30)이 이미 더 좁음 | 비구속 |
 | G | **Q2 handoff 유효기간** | qualification 종료 → 앱 ASYNC manifest 생성까지의 경과 | **클수록 필요** |
 
-C·D는 **작은 값**을 원하고 G는 **큰 값**을 요구합니다. 한 숫자가 둘을 동시에 만족시킬 수
-없습니다. G가 존재한다는 것은 이 필드가 baseline 신선도 정책이 아니라 **qualified bundle의 수명**
-이기도 하다는 뜻입니다. 값은 bundle에 `maximum_handoff_age_seconds`로 복사되어 보존되고, 앱
-관측 manifest 생성 시점에 `(cutoff − baseline receipt 완료) ≤ 그 값`으로 다시 쓰입니다.
+C·D는 **작은 값**을 원하고 G는 **큰 값**을 요구합니다. G가 존재한다는 것은 이 필드가 baseline
+신선도 정책이 아니라 **qualified bundle의 수명**이기도 하다는 뜻입니다. 값은 bundle에
+`maximum_handoff_age_seconds`로 복사되어 보존되고, 앱 관측 manifest 생성 시점에
+`(cutoff − baseline receipt 완료) ≤ 그 값`으로 다시 쓰입니다.
 
-따라서 이전 operation의 `1800`을 관성으로 이월하는 것도, 신선도를 근거로 작은 값을 넣는 것도
-둘 다 틀립니다. 전자는 C·D를 사실상 무의미하게 만들고, 후자는 G를 만족시키지 못해 qualification이
-성공해도 앱 경로가 열리지 않습니다. **그래서 이 addendum은 숫자를 확정하지 않고 결정을
-maintainer에게 올립니다.**
+**이 절의 초안은 여기서 "한 숫자가 둘을 동시에 만족시킬 수 없다"고 썼습니다. 그것은 과장이었고
+아래에서 철회합니다.** 보존된 실측을 넣어 보면 D의 하한이 이미 충분히 커서, D를 만족시키는 값은
+G도 자동으로 넉넉히 만족시킵니다. 실현 불가능한 것이 아니라, **두 창이 한 숫자에 묶여 있어 어느
+쪽도 독립적으로 조일 수 없다**는 것이 이 overload의 실제 비용입니다.
 
-- **(권고) 먼저 이 필드를 분리한다.** 작업 A가 `max_final_pair_gap_seconds`에 대해 한 것과 같은
-  범위 한정 작업입니다. capture freshness bound와 handoff validity bound를 별도 필드로 나누고,
-  version 1 의미와 바이트는 유지합니다. 분리가 착지하면 근거 기반 값을 각각 제안할 수 있습니다 —
-  capture 쪽은 두 series 수집(실측 pair당 약 `22.8초`)과 `prepare`, 그리고 attended challenge
-  낭독·입력까지를 덮는 분 단위, handoff 쪽은 승인 사이의 현실적 간격을 덮는 훨씬 긴 값입니다.
-- 분리 없이 진행한다면, 값은 G가 지배하므로 크게 잡을 수밖에 없고, **이 필드가 신선도를 지켜
-  준다고 주장하지 않아야 합니다.** 그 경우 실제 신선도 통제는 "Phase 0 직후에 곧바로 prepare하고
-  곧바로 arm한다"는 절차이며, 그 사실을 계획과 승인 문구에 명시해야 합니다.
+#### 실측에 근거한 재도출
 
-숫자가 비어 있는 한 2단계 manifest는 완성될 수 없고, manifest 없이는 3단계도 4~6단계도 없습니다.
-**이것이 4~6단계의 새 보류 사유입니다.**
+이 저장소의 run 기록에 보존된 값으로 D를 계산합니다.
+
+- primary strict series의 accepted pair 수집 종료: `2026-09-04T01:21:10.832179Z`
+- 첫 action 완료: `2026-09-04T01:41:34.966170Z`
+- 경과: `1224.134초` (약 `20.40분`)
+- 게이트 요구: `경과 + pair_gap(20) = 1244.134초`
+
+이 구간에는 manifest 검토, `prepare`, 현장 승인 낭독과 입력, 그리고 한 번 만료된 challenge의
+재발급이 모두 들어 있습니다. 즉 이것은 이상적인 tempo가 아니라 **실제로 관측된 tempo**입니다.
+
+따라서 `max_observation_age_seconds = 1800`은 **유지하되, 이월이 아니라 이 실측에서 재도출된
+값으로** 적습니다. 근거는 다음과 같습니다.
+
+- 실측 요구 `1244.134초`에 대해 여유 `555.866초`(약 `9.26분`)를 남깁니다. 약 `45%`입니다.
+- first-wire deadline은 `captured_at + age − pair_gap = captured_at + 1780초`(약 `29.67분`)이며,
+  이 값을 Phase 0 직후에 계산해 표시합니다.
+- 같은 값이 handoff 창이므로, **baseline receipt 완료 뒤 앱 ASYNC manifest를 `1800초` 안에
+  만들어야 합니다.** 이것은 부수 효과가 아니라 이 선택이 만드는 **절차 요구**이며 계획과 승인
+  문구에 명시합니다.
+
+더 작은 값은 권하지 않습니다. 예컨대 `600초`면 실측 tempo에서 first write에 도달하지 못하고,
+도달하더라도 handoff 창이 `10분`으로 줄어 앱 경로가 같은 자리에서 이어지지 않으면 닫힙니다.
+더 큰 값도 권하지 않습니다. C·D의 신선도 의미가 그만큼 희석되고, 얻는 것은 이미 확보된 여유뿐입니다.
+
+**여전히 권고하는 후속 작업**: 작업 A가 `max_final_pair_gap_seconds`에 대해 한 것과 같은 분리입니다.
+capture freshness bound와 handoff validity bound가 별도 필드가 되면, 운영 tempo가 빨라졌을 때
+freshness를 조이면서도 handoff 창을 줄이지 않을 수 있습니다. 지금은 tempo를 개선할수록 freshness를
+조일 수 있게 되지만 **그렇게 하면 handoff 창이 함께 줄어드는** 구조입니다. 이것은 4~6단계를 막는
+사유가 아니라 별도 안건입니다.
+
+### 2b. 만료된 `PREPARED`/`ARMED`는 종결 경로가 없습니다 — 새로 공개하는 실패 경계
+
+교차검토가 찾아 준 것이고 저는 놓쳤습니다. 코드로 확인했습니다.
+
+`build_verified_baseline`은 artifact age만 보고 `PREPARED`를 설치합니다. 그 뒤 freshness 게이트는
+`arm`, `execute` 진입, 각 action 앞, 그리고 실제 첫 wire 직전의 lock 안에서까지 다시 작동합니다.
+첫 possible write 전에 창을 넘기면 `baseline_expired_before_first_write`로 fail-closed하는데,
+**journal은 `PREPARED` 또는 `ARMED`인 채로 남습니다.** 이 상태에서 빠져나갈 길이 없습니다.
+
+- park 불가 — eligibility가 `awaiting_final_verify`와 완전한 action prefix를 요구합니다.
+- 새 record로 교체 불가 — `create`는 기존 record가 있으면 거부하고, 교체 분기는 **parked
+  tombstone일 때만** 열립니다. 살아 있는 `PREPARED`/`ARMED`는 그 분기에 들어가지 않습니다.
+- receipt 없는 clear 불가 — journal을 지우는 유일한 경로는 `clear_after_receipt`이고
+  `FINAL_VERIFIED`와 정확히 일치하는 receipt를 요구합니다.
+- `recover` 대상 아님 — 이 실패는 preflight 거부이지 latch가 아니므로 `RECOVERY_REQUIRED`로
+  가지 않습니다.
+
+device write `0`이고 §3 P1도 아니지만, **write 없이 좌초하는 비-terminal journal**입니다. 작업 B가
+연 종결 경로는 `awaiting_final_verify` 좌초를 위한 것이지 이 경계를 덮지 않습니다.
+
+따라서 4~6단계 절차에 다음을 넣습니다.
+
+1. exact manifest 검토와 operation별 repository·on-site readiness를 **`prepare` 이전에** 끝냅니다.
+   승인 대기 시간이 창을 먹는 구간은 `prepare` 이후이지 이전이 아닙니다.
+2. Phase 0 직후 `captured_at + max_observation_age − max_final_pair_gap`으로 **first-wire deadline을
+   계산해 표시**합니다. 현재 값에서는 `captured_at + 1780초`입니다.
+3. 남은 여유가 충분하지 않으면 **tombstone을 교체하지 않고 Phase 0부터 재수집**합니다. 이미
+   `prepare`한 뒤에 모자란 것을 알면 늦습니다.
+4. `prepare` 이후에는 challenge·arm·execute를 **즉시 연속으로** 진행합니다. 이 구간에 검토나
+   상의를 넣지 않습니다.
+5. 그럼에도 `BASELINE_EXPIRED`가 나면 **clear·편집·새 prepare를 시도하지 않고** maintainer에게
+   보고하고 멈춥니다. 이 상태를 정리하는 것은 별도 안건입니다.
 
 ### 3. 교차검토의 전제 하나를 정정합니다 — approval delay는 재검사됩니다
 
@@ -378,8 +431,11 @@ phase-5 id는 그 시점에 아직 staging 전이므로 여기 포함되지 않�
 ### 이 재검증으로 새로 확정된 것
 
 - baseline restore cycle 좌초의 종결 경로 부재는 해소됐습니다. 본문의 그 노출 서술은 대체됩니다.
-- `max_observation_age_seconds`는 capture freshness와 handoff validity를 겸용하는 overload이며,
-  **한 숫자로 둘을 만족시킬 수 없습니다.** 2단계 manifest는 이 결정 없이는 완성될 수 없습니다.
+- `max_observation_age_seconds`는 capture freshness와 handoff validity를 겸용하는 overload입니다.
+  실현 불가능한 것은 아니고, 실측에서 `1800초`로 재도출했습니다. 비용은 두 창을 독립적으로 조일
+  수 없다는 것이며, 분리는 별도 후속 안건입니다.
+- **만료된 `PREPARED`/`ARMED` journal에는 종결 경로가 없습니다.** device write `0`이지만
+  비-terminal dead-end이며, 이것이 값을 좁힐 수 없는 직접 근거입니다.
 - sentinel freshness 게이트는 첫 possible write까지 반복 평가되고, baseline·phase-5에는 적용되지
   않습니다.
 - 세 operation id는 manifest digest 파생이므로 재사용이 구조적으로 불가능합니다.
