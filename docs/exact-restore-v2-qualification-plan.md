@@ -1232,6 +1232,38 @@ source/image attestation.
 - 기존 parked operation의 artifact를 재사용하지 않습니다.
 - observation age가 만료되면 완화하지 말고 재수집합니다.
 
+## 단일 제어권 구간 — B1 첫 접촉부터 두 cycle이 끝날 때까지
+
+**이 구간의 규칙은 개념이 아니라 stop rule입니다.** 0단계와 token 직전의 두 snapshot 확인만으로는
+그 사이에 들어왔다 나간 transient writer를 검출할 수 없습니다. 코드도 도와주지 않습니다 — wire
+직전 검사는 immutable action이 **record에 박제된 baseline**에서 파생된 target과 맞는지만 보고,
+현재 장비의 schedule drift와 비교하지 않습니다. 따라서 stale baseline을 "원상복구"로 쓰면 operation
+직전 상태를 잃습니다.
+
+**허용되는 접촉은 정확히 둘뿐입니다.**
+
+- **B1 collector** — 1단계 수집 동안.
+- **승인된 단 하나의 qualifier** — B2 read와 D write. 7·8단계의 그 process입니다.
+
+앱·Home Assistant·daemon·다른 client의 접촉과 write는 **`0`**입니다.
+
+**baseline 불변을 의심하게 하는 사건**이 하나라도 있으면, **나중에 endpoint 확인이 깨끗하더라도
+그 artifact를 신뢰하지 않습니다.** 해당하는 것은 위 둘 이외의 **device contact 또는 write, 다른
+writer의 등장, 단일 제어권 상실, power·reboot, 예상 밖 pause·interruption**입니다.
+
+**위반했을 때의 분기 — 어디까지 진행됐는지에 따라 다릅니다.**
+
+- **tombstone 교체(`prepare`) 이전**이면 artifact·candidate·두 plan을 폐기하고 **새 B1부터** 다시
+  시작합니다. 새 `operation_nonce`로 세 operation id가 바뀌므로 **B2·C·D도 다시 받습니다.**
+- **`PREPARED` 이후, 첫 wire 이전**이면 **recapture·clear·재prepare·계속 실행 모두 금지**입니다.
+  exact state를 남기고 **중단·보고**합니다. **코드가 drift를 판정하지 못하므로 challenge 재발급
+  규칙으로 자동 연결하지 않습니다** — 이것은 시간 문제가 아니라 baseline 신뢰성 문제입니다.
+- **첫 wire 이후**에 다른 writer나 제어권 상실이 관측되면 **즉시 중단·보고**하고, 현재 journal의
+  phase·inflight에 따라 **아래 실패표만** 적용합니다. 자동 continue는 `0`입니다.
+
+**token 직전의 TCP·process 확인은 이 연속 제어 계약의 마지막 확인이지, 구간 전체가 불변이었다는
+증명이 아닙니다.** 그 확인이 통과했다는 것과 그 사이에 아무 일도 없었다는 것은 다릅니다.
+
 ## 2단계 — v2 manifest **candidate** 작성 · 장비 접촉 `0` · **고정 경로 저장 `0`**
 
 **메모리에서만** candidate 모델·canonical bytes·digest를 도출합니다. **persistent file write `0`**
@@ -1415,9 +1447,10 @@ on-site approver가 받아야 하는 문장:
 > 되돌립니다. 실패가 남길 수 있는 dwell 상태는 그 safe fallback이거나 부분 복원 상태이며, 역할
 > B의 latent manual `Random / Flow 89`가 복원 중 잠시 active가 될 수 있습니다.
 
-Phase 0부터 첫 wire까지 device drift를 막는 것은 **코드 predicate가 아니라 단일 제어권이라는 운영
-전제**입니다. wire 직전 검사는 immutable action이 baseline 파생 target과 일치하는지만 보며, 제3자가
-바꿔 놓은 schedule은 거부되지 않고 덮입니다. 그래서 0단계와 각 arm 직전의 확인이 실제 방어입니다.
+device drift를 막는 것은 **코드 predicate가 아니라 위 "단일 제어권 구간"의 stop rule**입니다.
+wire 직전 검사는 immutable action이 baseline 파생 target과 일치하는지만 보며, 제3자가 바꿔 놓은
+schedule은 거부되지 않고 덮입니다. 그 구간에서 금지된 사건이 하나라도 있었다면, 여기 token 직전
+확인이 깨끗하더라도 **진행하지 않고 그 절의 분기를 따릅니다.**
 
 ## 8단계 — baseline restore cycle · **승인 B2 + D (D는 별도 grant)**
 
