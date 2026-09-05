@@ -1416,6 +1416,13 @@ class ExactRestoreController:
                 if not confirmed:
                     raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
                 return
+            # A sentinel record has no embedded provenance, so this is a no-op there.  A phase-5
+            # record names the baseline, which names the sentinel, and it must not be installed
+            # while some link in that chain still lacks its permanent barrier.
+            self._confirm_archived_predecessor_chain(
+                record,
+                code=ExactRestoreErrorCode.INVALID_BASELINE,
+            )
             try:
                 self._store.create(payload)
             except BaseException:
@@ -1476,10 +1483,12 @@ class ExactRestoreController:
                 qualification_receipt_sha256 = qualification_receipt.receipt_sha256
                 if qualification_receipt_sha256 != record.qualification_receipt_sha256:
                     raise ExactRestorePreflightError(ExactRestoreErrorCode.AUTHORITY)
-                # The embedded record can be self-consistent while the archive holds nothing, so
-                # an unbarriered predecessor must never reach a device write through this arm.
-                self._confirm_archived_success(
-                    qualification_receipt,
+                # The embedded chain can be self-consistent while the archive holds nothing for
+                # some link, so no unbarriered predecessor may reach a device write through this
+                # arm.  A phase-5 record's chain includes the nested sentinel, not just the
+                # baseline it names directly.
+                self._confirm_archived_predecessor_chain(
+                    record,
                     code=ExactRestoreErrorCode.AUTHORITY,
                 )
             else:
@@ -1982,12 +1991,14 @@ class ExactRestoreController:
             receipt_store = self._qualification_receipts
             if receipt_store is None:
                 raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+            # Walk the whole embedded provenance chain, not just one level.  A phase-5 record
+            # names the baseline, which itself names the sentinel, and every finished operation
+            # in that chain needs its permanent barrier before this journal is cleared.
             receipts = [expected]
-            if record.qualification_final_record is not None:
-                receipts.insert(
-                    0,
-                    self._receipt_from_final_record(record.qualification_final_record),
-                )
+            parent = record.qualification_final_record
+            while parent is not None:
+                receipts.insert(0, self._receipt_from_final_record(parent))
+                parent = parent.qualification_final_record
             try:
                 for archived_receipt in receipts:
                     receipt_store.persist_final_verified_receipt(archived_receipt)
@@ -2277,6 +2288,29 @@ class ExactRestoreController:
             receipt_store.confirm_operation_finalization(receipt)
         except BaseException as error:
             raise ExactRestorePreflightError(code) from error
+
+    def _confirm_archived_predecessor_chain(
+        self,
+        record: ExactRestoreRecord,
+        *,
+        code: ExactRestoreErrorCode,
+    ) -> None:
+        """Confirm every embedded finished predecessor, not only the immediate one.
+
+        A phase-5 record embeds the baseline final record, which itself embeds the sentinel.
+        Confirming only the immediate parent would let a state where the baseline is archived
+        but its nested sentinel is not reach a device write, and afterwards that sentinel
+        operation id would still be replayable.
+        """
+
+        parent = record.qualification_final_record
+        while parent is not None:
+            try:
+                receipt = _receipt_from_final_verified_record(parent)
+            except (TypeError, ValueError) as error:
+                raise ExactRestorePreflightError(code) from error
+            self._confirm_archived_success(receipt, code=code)
+            parent = parent.qualification_final_record
 
     def _persist_predecessor_success(self, receipt: ExactRestoreReceipt) -> None:
         """Bind a finished predecessor before the journal stops describing it.

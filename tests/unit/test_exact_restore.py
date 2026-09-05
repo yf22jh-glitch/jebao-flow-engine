@@ -777,8 +777,9 @@ def _receipt_store_with_predecessor(
 
     store = MemoryQualificationReceiptStore()
     parent = record.qualification_final_record
-    if parent is not None:
+    while parent is not None:
         store.persist_final_verified_receipt(_receipt_from_final_verified_record(parent))
+        parent = parent.qualification_final_record
     return store
 
 
@@ -2845,6 +2846,7 @@ async def test_qualified_baseline_can_stage_and_complete_one_distinct_phase5_res
         now=NOW + timedelta(seconds=1),
     )
 
+    archive = _receipt_store_with_predecessor(staged)
     final_store = MemoryStore()
     final_guard = FakeGuard()
     final_harness = RestoreHarness(
@@ -2857,7 +2859,7 @@ async def test_qualified_baseline_can_stage_and_complete_one_distinct_phase5_res
         final_guard,
         observe=final_harness.observe,
         resolve_device=final_harness.resolve_device,
-        qualification_receipts=_receipt_store_with_predecessor(staged),
+        qualification_receipts=archive,
         clock=lambda: NOW + timedelta(seconds=1),
         monotonic_clock=lambda: MONOTONIC_NS,
         boot_identity=lambda: BOOT_A_SHA256,
@@ -2873,6 +2875,26 @@ async def test_qualified_baseline_can_stage_and_complete_one_distinct_phase5_res
     assert completed.qualification_receipt_sha256 == qualification_receipt.receipt_sha256
     assert final_receipt.qualification_receipt_sha256 == qualification_receipt.receipt_sha256
     assert len(final_harness.writes) == 6
+
+    # Clearing must leave no operation in the embedded chain replayable: the phase-5 record
+    # names the baseline, and the baseline names the sentinel.
+    final_controller.clear_after_receipt(final_receipt)
+    assert final_store.record is None
+    nested = qualified.qualification_final_record
+    assert nested is not None
+    for operation_id in (nested.operation_id, qualified.operation_id, completed.operation_id):
+        assert archive.load_operation_finalization(operation_id) is not None
+
+    replay = prepare_exact_restore_record(
+        nested.baseline,
+        nested.safe_targets,
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
+        operation_id=nested.operation_id,
+        now=NOW + timedelta(seconds=2),
+    )
+    with pytest.raises(ExactRestorePreflightError) as replay_refusal:
+        final_controller.create(replay)
+    assert replay_refusal.value.code is ExactRestoreErrorCode.AUTHORITY
 
 
 def test_public_boot_identity_and_suspend_inclusive_clock_are_controller_defaults(
@@ -2984,6 +3006,7 @@ def test_baseline_arm_refuses_an_unarchived_predecessor_before_any_device_io() -
 
     assert refused.value.code is ExactRestoreErrorCode.AUTHORITY
     assert harness.writes == []
+    assert harness.observation_count == 0
     assert ExactRestoreRecord.model_validate(store.record).phase is ExactRestorePhase.PREPARED
 
 
@@ -3014,3 +3037,62 @@ def test_baseline_arm_refuses_a_predecessor_bound_to_a_different_receipt() -> No
 
     assert refused.value.code is ExactRestoreErrorCode.AUTHORITY
     assert harness.writes == []
+
+
+def _archive_only_immediate_parent(
+    record: ExactRestoreRecord,
+) -> MemoryQualificationReceiptStore:
+    """Archive one level exactly, leaving any nested predecessor unbarriered."""
+
+    store = MemoryQualificationReceiptStore()
+    parent = record.qualification_final_record
+    assert parent is not None
+    store.persist_final_verified_receipt(_receipt_from_final_verified_record(parent))
+    return store
+
+
+@pytest.mark.asyncio
+async def test_phase5_arm_refuses_when_only_the_immediate_baseline_is_archived() -> None:
+    """A nested sentinel that never got a barrier must not reach a phase-5 device write."""
+
+    controller, _store, _guard, _harness, _armed = _armed_controller()
+    qualified = await controller.execute()
+    staged = prepare_qualified_final_restore_record(
+        qualified,
+        operation_id="distinct-phase5-operation",
+        now=NOW + timedelta(seconds=1),
+    )
+    nested = qualified.qualification_final_record
+    assert nested is not None and nested.cycle is ExactRestoreCycle.SENTINEL_QUALIFICATION
+
+    archive = _archive_only_immediate_parent(staged)
+    sentinel_receipt = _receipt_from_final_verified_record(nested)
+    assert archive.load_operation_finalization(nested.operation_id) is None
+
+    final_store = MemoryStore()
+    final_harness = RestoreHarness(staged.baseline, final_store)
+    final_controller = ExactRestoreController(
+        final_store,
+        FakeGuard(),
+        observe=final_harness.observe,
+        resolve_device=final_harness.resolve_device,
+        qualification_receipts=archive,
+        clock=lambda: NOW + timedelta(seconds=1),
+        monotonic_clock=lambda: MONOTONIC_NS,
+        boot_identity=lambda: BOOT_A_SHA256,
+    )
+
+    with pytest.raises(ExactRestorePreflightError) as staging_refusal:
+        final_controller.create_qualified_final_restore(staged)
+    assert staging_refusal.value.code is ExactRestoreErrorCode.INVALID_BASELINE
+    assert final_store.record is None
+
+    # Even if the record were installed without that boundary, the arm still refuses.
+    final_store.record = staged.model_dump(mode="json")
+    with pytest.raises(ExactRestorePreflightError) as arm_refusal:
+        final_controller.arm(_authority(staged, now=NOW + timedelta(seconds=1)))
+
+    assert arm_refusal.value.code is ExactRestoreErrorCode.AUTHORITY
+    assert final_harness.writes == []
+    assert final_harness.observation_count == 0
+    assert archive.load_final_verified_receipt(sentinel_receipt.receipt_sha256) is None
