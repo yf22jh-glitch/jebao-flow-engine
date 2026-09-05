@@ -1269,8 +1269,13 @@ read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 �
 2. **예산을 다시 계산합니다.** 4단계에서 충분했더라도 5단계의 승인 상의가 길어졌다면 지금은
    부족할 수 있습니다. `now < captured_at + 1060초`이고 first-wire 잔여가 `≥ 720초`인지 **다시
    계산해 표시**합니다. **하나라도 실패하면 manifest save `0`, `prepare` `0`, tombstone 불변으로
-   중단·보고**하고, 새 승인 B1 없이 recapture하지 않습니다. **되돌아갈 수 있는 진짜 마지막
-   predicate가 여기입니다** — `prepare` 뒤에는 recapture·clear·재prepare가 모두 불가능합니다.
+   중단·보고**합니다. **되돌아갈 수 있는 진짜 마지막 predicate가 여기입니다** — `prepare` 뒤에는
+   recapture·clear·재prepare가 모두 불가능합니다.
+
+   재개하려면 **1단계로 돌아갑니다.** 새 승인 **B1**으로 fresh artifact를 다시 수집하고, 새
+   `operation_nonce`로 새 candidate와 두 plan을 만든 뒤, **5단계의 B2·C·D를 전부 다시 받습니다.**
+   새 artifact와 새 nonce는 manifest digest와 **세 operation id를 모두 바꾸므로**, 이전 exact
+   candidate를 보고 받은 B2·C·D는 **더 이상 같은 대상에 대한 승인이 아닙니다.**
 3. 승인 C 아래에서 manifest를 owner-only 경로에 **persist하고 exact reload**합니다.
 4. **별도의 행위로** tombstone → `PREPARED` prepare를 실행합니다(독립 명시 승인 항목).
 5. **위 2번의 예산 확인 시점부터 첫 challenge 표시까지 전체가 `60초`를 넘지 않습니다.** cap의
@@ -1283,11 +1288,13 @@ read), **C**(host-state mutation), **D**(두 cycle의 bounded device write)를 �
    reload해** 어디까지 진행됐는지 기록합니다. cap의 시작점이 persist보다 앞이므로 **manifest가
    이미 durable하게 저장돼 있을 수 있습니다** — journal semantic mutation이 `0`인 것과 host durable
    mutation이 `0`인 것은 다릅니다. 다음 두 가지로 갈립니다.
-   - **journal이 아직 tombstone**이면 journal·tombstone은 불변이므로 새 승인 **B1**으로 재수집이
-     가능합니다. 다만 **방금 저장된 manifest는 stale candidate로 보존하고 재사용은 `0`**입니다.
-     fresh artifact와 **새 `operation_nonce`**로 새 candidate를 만들고, **새 승인 C** 아래에서 새
-     owner-only manifest를 persist합니다. 기존 경로를 덮어야 한다면 **그 overwrite까지 명시 승인**
-     대상입니다.
+   - **journal이 아직 tombstone**이면 journal·tombstone은 불변이므로 재개가 가능합니다. 다만
+     **1단계로 돌아가야 합니다** — 새 승인 **B1**으로 fresh artifact를 다시 수집하고, 새
+     `operation_nonce`로 새 candidate와 두 plan을 만든 뒤, **5단계의 B2·C·D를 전부 다시
+     받습니다.** 새 artifact와 새 nonce는 manifest digest와 **세 operation id를 모두 바꾸므로**,
+     이전 exact candidate를 보고 받은 B2·C·D는 **더 이상 같은 대상에 대한 승인이 아닙니다.**
+     **방금 저장된 manifest는 stale candidate로 보존하고 재사용은 `0`**이며, 새 C가 새 persist와
+     **필요하다면 기존 경로의 overwrite까지** 포함해야 합니다.
    - 이미 **`PREPARED`**면 **recapture·clear·재prepare 모두 불가**입니다 — 실패표의 dead-end 행
      그대로입니다.
 
