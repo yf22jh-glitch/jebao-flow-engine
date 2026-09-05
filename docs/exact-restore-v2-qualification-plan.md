@@ -967,3 +967,83 @@ write가 끼인 채 실패한 경우는 두 번째 줄입니다. 이 계획은 �
 hardware는 이 절 이후로도 **NO-GO**입니다. 위 네 승인이 각각 명시적으로 이뤄지기 전에는 어떤
 단계도 실행하지 않습니다. 이 문서를 쓰는 동안 장비·앱·Home Assistant·private journal·archive·
 recovery supervisor 접촉은 `0`입니다.
+
+---
+
+## 2026-09-05 addendum 정정 (6차) — 교차검토 R20~R23
+
+앞 절의 최종 checklist를 고치지 않고 여기서 **네 항목을 대체**합니다. 나머지는 그대로 유효하며,
+실행 시 이 절의 대체 내용을 반영해 읽습니다.
+
+### R20 — cadence 근거가 순환 계산이었습니다
+
+5차 addendum은 채택 attempt를 "약 `21.666`초"라고 적고 cadence 30과의 차이를 "1밀리초"라고
+했습니다. **그 `21.666`은 span에서 30을 뺀 값이므로, 30을 가정해 얻은 수로 30을 입증한
+순환입니다.** 보존된 실측 attempt는 다르고, 그것을 써야 합니다.
+
+| series | 채택 attempt (보존값) | `30 + attempt` | series span (보존값) | 차이 |
+|---|---|---|---|---|
+| primary | `21.650386049초` | `51.650386049초` | `51.666567초` | **`16.180951` ms** |
+| corroborating | `22.795387102초` | `52.795387102초` | `52.817943초` | **`22.555898` ms** |
+
+**cadence `30초` 결론은 그대로 방어됩니다.** 두 series 모두 20밀리초 안팎의 잔차만 남고, 그
+잔차는 pair 시작 스케줄링의 지터로 설명됩니다. 바뀌는 것은 근거의 독립성입니다 — 이제 span과
+attempt라는 **서로 다른 두 보존값**에서 cadence를 역산합니다.
+
+### R21 — 승인 C의 시점이 모순이었고 Phase 0 host write가 어디에도 없었습니다
+
+5차 checklist는 2단계에서 "manifest 작성·저장은 승인 C"라고 하면서 5단계에 가서야 "승인 대기
+완료"라고 했습니다. **승인 C 없이 먼저 저장하거나, 정확한 plan을 보기 전에 C를 받아야 하는
+순서 모순입니다.** 그리고 Phase 0 수집기가 필수로 남기는 owner-only plan·series·raw artifact의
+durable host write는 **어느 승인 축에도 들어 있지 않았습니다.** 실제 수집기 동작과 불일치합니다.
+
+다음으로 대체합니다.
+
+- **승인 B(device read)의 범위에 그 operation이 반드시 남기는 owner-only collector plan·series·
+  raw artifact의 durable host write를 명시적으로 포함**합니다. Phase 0은 읽기만 하는 단계가
+  아닙니다.
+- **2단계**는 메모리 또는 격리 경로에서 v2 manifest **candidate**를 만드는 데 그칩니다.
+  production·private 고정 경로 저장은 `0`입니다.
+- **3단계 offline plan 도출**과 **4단계 예산 계산**을 마친 뒤, exact candidate·두 action plan·
+  digest를 **놓고** 승인 C와 D를 확보합니다.
+- 그 다음 **승인 C 아래에서** manifest를 owner-only 경로에 persist하고 exact reload한 뒤,
+  **별도로** tombstone→`PREPARED` prepare를 실행합니다.
+
+승인 C는 성공 시 뒤따를 receipt·finalization·bundle·staged record·두 Q2 manifest까지 미리 승인할
+수 있지만, **candidate를 보기 전의 포괄 승인으로 써서는 안 됩니다.**
+
+### R22 — `1020초` 문장을 조건부로 좁힙니다
+
+5차 checklist는 "잔여가 `1020초`를 넘지 않으면 재발급 기회가 존재하지 않는다"고 절대화했습니다.
+그것은 **첫 challenge가 `300초`를 전부 소모하고 만료된 경우에만** 참입니다. 빠른 거부나 TTY
+실패로 끝났다면 `prepare` 잔여가 `900초`여도 재발급 시점에 `720초` 이상이 남을 수 있습니다.
+
+정확한 문언으로 대체합니다 — **"첫 challenge가 `300초`를 전부 소모해 만료된 뒤에도 재발급 여유를
+보장하려면 `prepare` 시점 잔여가 `1020초`를 넘어야 한다. 그 밖의 실패는 보장이 아니라 실제
+재발급 시점의 잔여가 `720초` 이상인지로 판정한다."**
+
+### R23 — 실패 표가 서로 다른 controller entry를 한 줄에 섞었습니다
+
+5차 표는 `RECOVERY_REQUIRED`·불완전 prefix·inflight·mid-write 실패를 모두 "attended
+recovery/rollback"으로 보냈습니다. **틀린 운영 지시입니다.** 불완전 prefix를 `recover`로 보내면
+CLI가 `recovery_not_required`로 거부합니다. phase와 사유로 나눕니다.
+
+| 상태 | 올바른 entry |
+|---|---|
+| `RESTORING`, prefix 불완전, inflight 없음 | `recover`가 **아닙니다.** qualify 재개 시 attended reauthorize를 거쳐 resume합니다 |
+| `RESTORING`, inflight 있음 | 역시 attended reauthorize가 먼저입니다. 재개된 execute는 그 inflight를 **관측으로만 조정하고 재전송하지 않습니다.** 불일치하거나 관측에 실패할 때만 latch되어 `RECOVERY_REQUIRED`가 됩니다 |
+| `RECOVERY_REQUIRED` | **이때만** `recover` entry입니다 |
+| `ARMED`, authority 만료 | fresh baseline 예산이 남아 있으면 reauthorize로 진행 가능합니다. 다만 `BASELINE_EXPIRED`라면 reauthorize로 해결되지 않는 **dead-end**입니다 |
+| `PREPARED`/`ARMED`, freshness·digest·challenge 문제 | park·recover·clear·재prepare 모두 불가. 중단·보고 |
+| `AWAITING_FINAL_VERIFY`, prefix 완전, inflight·error·final evidence 없음 | **park 가능.** 새 disposition manifest와 별도 attended park 승인 |
+| `FINAL_VERIFIED`, archive·ACK 문제 | 기존 idempotent finalization·clear 경계 |
+
+**모든 분기에 공통**입니다 — 첫 실패 뒤 **중단·보고·새 precommit·새 attended 승인**이며 자동
+resume은 `0`회입니다. 위 표의 "reauthorize 후 resume"은 자동 재개가 아니라 **사람이 새 grant를
+발급한 뒤의 재개**를 뜻합니다.
+
+### 이 정정으로 달라지지 않는 것
+
+hardware는 계속 **NO-GO**입니다. 승인 축 넷과 5차 checklist의 나머지 구조는 유효하며, 이 절은
+그중 네 항목만 대체합니다. 이 정정을 쓰는 동안 장비·앱·Home Assistant·private journal·archive·
+recovery supervisor 접촉은 `0`입니다.
