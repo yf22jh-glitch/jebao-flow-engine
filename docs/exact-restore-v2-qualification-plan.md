@@ -1047,3 +1047,28 @@ resume은 `0`회입니다. 위 표의 "reauthorize 후 resume"은 자동 재개�
 hardware는 계속 **NO-GO**입니다. 승인 축 넷과 5차 checklist의 나머지 구조는 유효하며, 이 절은
 그중 네 항목만 대체합니다. 이 정정을 쓰는 동안 장비·앱·Home Assistant·private journal·archive·
 recovery supervisor 접촉은 `0`입니다.
+
+### R21 보강 — 승인 C는 중간 journal transition까지 덮어야 합니다
+
+위 R21은 승인 C의 범위를 "시작(manifest 저장, tombstone→`PREPARED`)과 최종 산출물"로 적었습니다.
+**그 사이의 live journal semantic transition이 빠져 있습니다.** 그것들이야말로 exactly-once와
+rollback을 보존하는 핵심 durable write입니다.
+
+승인 C의 범위를 다음으로 닫습니다 — **qualification 동안 controller가 계약상 수행하는 journal·
+archive semantic write 전체**. 구체적으로 최소한 다음을 포함합니다.
+
+- 새 v2 manifest의 owner-only 경로 persist와 exact reload
+- **tombstone → `PREPARED` 교체** (독립 명시 승인 없이는 실행 금지)
+- attended authority와 그 activation의 기록, `ARMED` 전이
+- **action별 inflight intent의 durable 기록**(wire 경계 이전) 과 그 해소
+- completed-action prefix의 누적 기록
+- `RESTORING` / `AWAITING_FINAL_VERIFY` / `FINAL_VERIFIED` 전이
+- sentinel → baseline **promotion**(직전 predecessor의 영구 barrier 기록 포함)
+- sentinel receipt, baseline receipt, operation finalization, qualified bundle, staged phase-5
+  record
+- 직후의 control·ASYNC 두 Q2 manifest
+
+`ExactRestoreGuard`의 epoch 자체는 process-local이지만 deployment lock·latch·고정 root는 접근·
+검증되며, 고정 root를 여는 것만으로 일시 writability probe가 발생합니다(승인 A). 따라서 C 문구는
+경로 열거가 아니라 **"계약상 수행하는 write set 전체"**로 닫고, **예상 밖 경로나 범위 밖 파일
+write가 관측되면 즉시 중단·보고**합니다.
