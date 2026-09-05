@@ -1198,7 +1198,14 @@ source/image attestation.
 | **retry** | **`0`** — 수집기는 각 ordinal을 한 번만 잡고 invalid read를 재시도가 아니라 증거로 남깁니다 |
 | **채택 ordinal** | **마지막(pair 수 `2`이면 ordinal `1`)** |
 
-- 두 장비의 outer six-field와 432-byte schedule image가 **byte-exact 일치**해야 합니다.
+- **비교 축은 두 series 사이입니다.** primary와 corroborating이 **각 논리 역할·device에 대해**
+  outer six-field와 432-byte schedule image를 **byte-exact하게 동일하게 관측**해야 합니다. 두
+  series는 plan·series·pair digest가 서로 달라야 하고(독립성), 그 위에서 역할별로 짝지어
+  비교합니다.
+- **master와 slave가 서로 같은 값을 가져야 한다는 뜻이 아닙니다.** 이전 run의 보존 baseline만
+  보아도 master는 `Constant / Flow 30 / Frequency 32`, slave는 `Random / Flow 89 / Frequency 34`로
+  schedule digest까지 서로 다릅니다. 두 장비가 같아야 한다고 읽으면 **정상 Phase 0이 문서상 반드시
+  `NO-GO`**가 됩니다.
 - **각 series가** coherence `≤20초`와 total acquisition `≤30초`를 통과해야 합니다.
 - 하나라도 `2/2` accepted가 아니면 **`NO-GO`**. 재수집은 자동 retry가 아니며 그 Phase 0의 승인
   범위는 종료됩니다. **새 승인 B1**을 받아야 새 2×2 series를 수집할 수 있습니다.
