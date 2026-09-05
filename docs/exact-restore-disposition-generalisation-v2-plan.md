@@ -252,3 +252,115 @@ exact-restore **operation / final verification**"으로 정정합니다.
 철회된 초판의 실패가 모두 "한 계층만 보고 세 계층을 판단한 것"이었으므로, 구현 착수 시 모든 범위
 주장에 대해 **저장 시점 decoder · 실행 시점 분기 · archive 시점 순서** 세 계층을 각각 확인하고 그
 결과를 실행 addendum에 기록합니다.
+
+## 실행 addendum (2026-09-05) — source 착지와 §10 이행
+
+이 계획의 source는 두 commit으로 착지했습니다.
+
+- `1b8d2b900b2a3ab752f7e8a1aaf141424e7145a6` — 본체. `exact_restore_disposition.py`,
+  `exact_restore_receipts.py`와 회귀를 §11의 요구대로 한 commit에 묶었습니다.
+- `56146bd8b5dae8cf148b14a5ebfe032f9ced02d2` — 교차검토 후속. 아래에서 설명하는 canonical
+  round-trip 결함과 문언 정정, 추가 회귀.
+
+network-none reviewed image에서 disposition 파일 `51 passed`,
+`tests/unit -k "exact_restore or app_async"` `386 passed`, 전체 unit `1888 passed`,
+변경 파일 ruff lint·format 통과를 확인했습니다. 두 commit 모두 독립 재계산·적대 검토를 거쳐
+diff digest가 일치했고 §3 P1은 발견되지 않았습니다.
+
+### 착수 전 확인 규율의 결과
+
+철회된 초판이 "한 계층만 보고 세 계층을 판단"해 실패했으므로, 이 계획은 모든 범위 주장에 대해
+**저장 시점 decoder · 실행 시점 분기 · archive 시점 순서** 세 계층을 각각 확인하도록 요구했습니다.
+실제로 그 규율이 잡아낸 것들입니다.
+
+- 저장 시점 decoder — receipt archive의 parked backing 검사는 고정 key set과 단일 reason을
+  갖고 있었습니다. version별로 분기하지 않으면 v2 blob이 저장은 되고 읽히지 않습니다.
+- 실행 시점 분기 — eligibility gate가 sentinel cycle을 하드코딩하고 있었습니다. 이것을 그대로
+  두면 v2 park은 **전부** 거부됩니다.
+- archive 시점 순서 — predecessor 확인과 candidate 재검증을 index 설치와 같은 claim 안,
+  index 이전으로 옮겨야 검사와 설치 사이의 창이 사라집니다.
+
+### 교차검토가 프로덕션에서 확인한 canonical round-trip 결함
+
+구현 중 저는 test helper에서 "dump한 뒤 다시 validate하면 optional key의 기본값이 되살아난다"는
+현상을 만났고, 이를 **의심으로만** 보고했습니다. 교차검토는 같은 현상이 helper가 아니라 production
+model에서 실제로 성립함을 확인했습니다.
+
+`ParkedDispositionManifest`의 직렬화기는 `required_action_outcome`이 `None`이면 key를 제거하므로
+version 2 manifest의 canonical JSON에는 그 key가 없습니다. 그런데 그 필드의 기본값이
+`"written_verified"`였으므로, owner-only loader(`load_parked_disposition_manifest`는 곧바로
+`model_validate_json`입니다)가 그 문서를 다시 읽으면 version 1 값이 되살아나 "version 2
+disposition must be a generic unresolved park"로 거부됐습니다. **모델이 스스로 쓴 v2 manifest를
+로더가 읽지 못하는 상태**였고, test helper가 absent key를 `None`으로 채우고 있었기 때문에 회귀에
+잡히지 않았습니다.
+
+수정은 기본값을 `None`으로 내리고 `model_validator(mode="before")`에서 payload가 version 1이며
+key가 없을 때만 채우는 version-aware 처리입니다. version 1은 입력 관용성, 18-key shape,
+manifest digest `1e6b0a060c5431b0273819577d13468d523eb33db51d52989aebee19b91403b3`을 모두
+유지합니다. helper의 우회는 제거했고, round-trip 자체를 in-memory와 mode `0600` 파일 양쪽에서
+고정했습니다.
+
+이 항목은 §3 P1이 아닙니다. 결과는 fail-closed이고 durable journal이나 장비 write에 영향을 주지
+않습니다. 다만 v2 park을 사실상 사용 불가로 만드는 비용 결함이었고, **의심을 확인으로 바꾸지 않고
+전달한 것이 제 쪽의 절차 실패**였습니다.
+
+### §10 검증 계약 이행
+
+증명 출처를 셋으로 구분해 적습니다 — **직접**(이 계획이 추가한 회귀), **하위 계층**(이미 있는
+production archive/모델 자신의 테스트), **재구성**(옛 동작을 shape 수준으로 재현).
+
+| §10 항목 | 이행 | 출처 |
+| --- | --- | --- |
+| legacy golden bytes·hash, v1 end-to-end와 `status` | 이행 | 직접 — manifest 18-key/digest, stored disposition 22-key/digest `0552d597…`, 두 shape 모두 v2 key 부재 |
+| v2 sentinel·baseline·phase-5 park end-to-end | 이행 | 직접 — depth 0/1/2 parametrize, phase-5는 cycle이 baseline과 같아 depth로만 구분됨을 단언 |
+| 세 outcome vector와 미래 outcome 거부 | 이행 | 직접 — 정상 skip vector와 uncertain vector를 분리, 허용 집합이 정확히 셋임을 고정 |
+| version·cycle·count·policy·reason·depth 교차 불일치 거부 | 이행 | 직접 — 생성 시점(ValidationError)과 실행 시점(`disposition_journal_ineligible`)을 나눠 고정 |
+| generic reason의 overload bound 부재, v1 predicate 무변경 | 이행 | 직접 + 하위 계층 — 모델 validator 회귀와 v1 golden |
+| v2 bound 누락·불일치가 index 이전에 거부 | 이행 | 직접 — 공유 binder 주입으로 순서 고정, current finalization 부재 확인 |
+| legacy v1 archived record가 bound 없이 load, digest 불변 | 이행 | 직접 — v1 park 후 archive 재적재 동일성 |
+| predecessor absent·corrupt·mismatch → 설치 0회 | 이행 | 직접 — 세 경우 모두 `disposition_predecessor_unbarriered`, finalization 부재, live journal 보존 |
+| candidate decoder 실패가 index보다 먼저 | 이행 | 직접 — cross-binding seam과 backing decoder seam을 **각각** 고정 |
+| crash ordering 전 경계 + old binary fail-closed | 부분 이행 | 하위 계층 + 재구성 — crash ordering은 기존 tombstone/archive 회귀, old binary는 아래 참조 |
+| Q2/App이 어떤 parked variant도 수용하지 않음 | 이행 | 하위 계층 — finalization shape가 version 간 동일하므로 기존 parked 거부가 variant-independent |
+| network-none, import graph, device I/O `0` | 이행 | 직접 — v1에 더해 depth-2 v2에서도 socket 생성 차단하에 verify·park·resume |
+
+### composite proof의 범위 — 정직하게 좁힌 부분
+
+"old binary fail-closed" 항목은 두 절반으로 이루어져 있고, 저장소가 지킬 수 있는 것은 한쪽뿐입니다.
+
+- 저장소 안: 직전 binary가 갖고 있던 두 수용 규칙(archive decoder의 고정 key set + 단일 reason,
+  `Literal[1]` record model)을 **재구성**해 실제 v2 disposition이 둘 다 위반함을 보입니다. 테스트
+  이름과 docstring에 "이 테스트는 그 binary를 실행하지 않는다"를 명시했습니다.
+- 저장소 밖: 실제 직전 source tree를 별도 경로에 풀어 새 v2 depth-2 backing을 열어보는 실행은
+  교차검토 과정에서 수행됐고 fail-closed를 확인했습니다. 이것은 durable artifact가 아니므로
+  등급 **(c)**로 남기고, 저장소 회귀로 대체하지 않았습니다.
+
+같은 정직성 규율을 두 곳에 더 적용했습니다. active claim 안의 predecessor 확인 테스트는 공개
+dry 검사를 끄고 안쪽 gate만 격리하므로 그 사실을 docstring에 적었고, claim 해제 후 같은 단언이
+실패함을 함께 고정해 단언이 공허하지 않음을 보였습니다. cross-binding 테스트는 공유 binder에
+주입하므로 "decoder가 스스로 거부하는 경로가 아니다"를 적고, 그 seam은 별도 테스트로 덮었습니다.
+
+### 함께 정정한 세 문언
+
+착지한 코드의 주석이 코드보다 뒤처져 있던 곳입니다. 셋 다 동작이 아니라 근거 서술의 오류입니다.
+
+- eligibility 경계 근거가 아직 "every outcome is WRITTEN_VERIFIED"라고 적고 있었습니다. 이 규칙은
+  이번 작업이 폐기한 것이고 baseline의 정상 skip을 부정합니다. closed outcome set 논거로 교체하고,
+  "latest는 last가 아니다 — 둘은 completion stamp가 역행할 때 정확히 갈리며 그래서 경계가 마지막
+  index가 아니라 prefix 최대값"이라고 `max()` 논증과 이어 붙였습니다.
+- 허용 outcome 집합 주석이 "field type 자체가 미래 값을 파싱조차 못 한다"고 주장하고 있었습니다.
+  틀립니다. enum이 넓어지면 field는 새 멤버를 파싱하고, 막는 것은 membership gate뿐입니다.
+- 직전 binary 회귀의 이름과 docstring이 실행 증명처럼 읽혔습니다. 위와 같이 좁혔습니다.
+
+### 비차단 개선
+
+archived public view가 관측 gap(`pair_completion_gap_ns`)과 승인 bound
+(`maximum_pair_completion_gap_seconds`)를 나란히 노출합니다. version 1 record는 bound를 저장한
+적이 없으므로 `null`로 드러내고 재구성하지 않습니다. §5의 "관측치와 정책값을 분리한다"가
+eligibility 이후에도 유지됩니다.
+
+### hardware gate 무변경
+
+이 source 착지는 hardware 승인이 아닙니다. v2 qualification 4~6단계는 계속 **NO-GO**이며 fresh
+Phase 0, 새 v2 manifest, 별도 on-site 승인이 선행 조건입니다. 두 commit을 만드는 동안 장비·앱·
+Home Assistant 접촉은 `0`이었고 private journal·archive·recovery supervisor도 건드리지 않았습니다.

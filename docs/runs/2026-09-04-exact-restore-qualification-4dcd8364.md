@@ -280,3 +280,39 @@
 - recovery supervisor는 reviewed v2 prepare가 permanent barrier와 backing archive를 exact reload한
   뒤 tombstone을 정당한 successor로 교체할 때까지 exited로 둔다. 새 앱 action, 새 qualification,
   journal 편집·삭제·강제 archive와 Home Assistant 조작은 계속 금지한다.
+
+## 2026-09-05 parked disposition 일반화 source addendum — 이 run에 대한 소급 없음
+
+이 run이 남긴 후속 안건 중 "park 완료 뒤의 별도 source 안건"으로 미뤄 둔 것들이 두 commit으로
+착지했습니다 — `1b8d2b900b2a3ab752f7e8a1aaf141424e7145a6`와
+`56146bd8b5dae8cf148b14a5ebfe032f9ced02d2`. 이 addendum은 **이 run에 무엇이 소급되지 않는지**를
+먼저 적습니다.
+
+- 이 run이 만든 version 1 disposition은 바이트가 변하지 않았습니다. 저장 disposition의 22-key
+  canonical shape와 digest 계산이 변경 전과 동일함을 fixture 수준에서 고정했고, 위 두 commit
+  이전 source tree로도 같은 값을 재계산해 대조했습니다: **(b)**.
+- 이 run의 disposition 의미는 재해석되지 않았습니다. version 1은 계속 sentinel cycle·overload
+  reason·전 action `written_verified`만을 서술하며, 새 version 2 vocabulary는 version 1 문서에
+  들어갈 수 없도록 모델 validator가 막습니다.
+- 이 run의 operation id, tombstone, permanent barrier는 그대로입니다. 이 작업은 이 archive를
+  읽지도 쓰지도 않았습니다. 전 과정에서 private journal·archive·recovery supervisor·장비·앱·
+  Home Assistant 접촉은 `0`입니다: **(c)**.
+
+새로 확정된 것은 다음입니다.
+
+- park은 이제 sentinel qualification뿐 아니라 baseline restore와 phase-5 staged restore도
+  종결할 수 있습니다. phase-5는 baseline과 같은 cycle을 갖기 때문에 embedded predecessor depth
+  (sentinel `0` / baseline `1` / phase-5 `2`)가 구분자입니다.
+- baseline cycle의 정상 분포(write 4 · skip 2)가 거부되지 않습니다. 이전 규칙은 전 action이
+  `written_verified`일 것을 요구했으므로 정상 baseline을 park할 수 없었습니다.
+- 끝난 predecessor의 영구 barrier 확인이 finalization index를 설치하는 **같은 claim 안에서**,
+  index 이전에 수행됩니다. predecessor가 없거나, 다른 receipt를 가리키거나, barrier 파일이
+  디코딩되지 않는 세 경우 모두 fail-closed하며 current finalization과 tombstone 설치는 `0`회입니다.
+- 저장될 candidate가 archive 자신의 decoder를 통과하는지 index 이전에 재확인합니다. 실패 시
+  live journal은 여전히 journal입니다.
+- 이 run이 남긴 진단 안건 중 archive claim 경합이 `disposition_tombstone_invalid`로 표시되던
+  건은 앞선 별도 commit에서 이미 정정됐고, 이번 작업은 그 위에 얹혔습니다.
+
+이 run의 후속 조건은 바뀌지 않았습니다. sentinel receipt와 qualified bundle은 여전히 없고,
+앱 주도 live-write의 restore 선행조건은 계속 `NO-GO / BLOCKING`입니다. v2 qualification 4~6단계
+역시 fresh Phase 0, 새 v2 manifest, 별도 on-site 승인이 있어야 하며 현재 **NO-GO**입니다.

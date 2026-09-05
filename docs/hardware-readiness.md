@@ -1059,3 +1059,33 @@ coherence와 전체 acquisition duration을 별도 bound로 검사합니다. leg
 승인입니다. 이 source commit은 hardware 승인이 아니므로 앱 live-write와 새 qualification은 계속
 **NO-GO / BLOCKING**입니다. reviewed v2 prepare가 tombstone을 정당하게 교체하기 전에는 recovery
 supervisor를 재기동하지 않고, Home Assistant no-touch도 유지합니다.
+
+## 2026-09-05 parked disposition 일반화 source 완료 — 남은 순서 갱신
+
+작업 B의 parked disposition 일반화가 두 commit으로 landed했습니다 —
+`1b8d2b900b2a3ab752f7e8a1aaf141424e7145a6`(본체)와
+`56146bd8b5dae8cf148b14a5ebfe032f9ced02d2`(교차검토 후속). park 기능이 sentinel overload 한
+경우에서 벗어나, 엔진이 실제로 좌초시킬 수 있는 모든 journal — sentinel qualification, baseline
+restore, phase-5 staged restore — 을 대상으로 동작합니다. baseline cycle이 정상적으로 두 action을
+건너뛰는 분포도 이제 그대로 park됩니다. version 1 park의 바이트는 manifest digest
+`1e6b0a060c5431b0273819577d13468d523eb33db51d52989aebee19b91403b3`, 저장 disposition digest
+`0552d597dccb0c83d60de1e49f81bd89074912bea9b3557cb32d3fb072309905`으로 변경 전과 동일합니다.
+
+network-none reviewed image에서 표적 회귀 `386 passed`, 전체 unit `1888 passed`, 변경 파일 ruff
+lint·format 통과를 확인했고, 두 commit 모두 독립 재계산과 적대 검토에서 diff digest 일치·§3 P1
+없음으로 닫혔습니다. 상세는
+[계획 문서](exact-restore-disposition-generalisation-v2-plan.md)의 실행 addendum에 있습니다.
+
+교차검토가 프로덕션에서 확인한 결함이 하나 있었고 후속 commit에서 닫혔습니다. version 2 manifest의
+canonical JSON을 owner-only loader가 다시 읽지 못하는 상태였습니다(직렬화기가 제거한 optional key의
+version 1 기본값이 재검증 때 되살아났습니다). 결과는 fail-closed였으므로 durable journal이나 장비
+write에는 영향이 없지만, v2 park을 사실상 사용 불가로 만드는 결함이었습니다. 제가 이것을 test
+helper 수준의 **의심으로만** 전달하고 확인하지 않은 것이 절차 실패였습니다.
+
+앞 문단들이 적은 남은 순서 중 이번에 완료된 것은 없습니다. park 일반화는 좌초한 journal을 안전하게
+종결하는 능력이지 qualification 성공이 아닙니다. 남은 순서는 그대로 **영구 barrier 재검증 → fresh
+Phase 0 → 새 v2 manifest → 별도 operation 승인**입니다. 이 source commit들은 hardware 승인이
+아니므로 앱 live-write와 새 qualification은 계속 **NO-GO / BLOCKING**이고, v2 qualification
+4~6단계도 **NO-GO**입니다. reviewed v2 prepare가 tombstone을 정당하게 교체하기 전에는 recovery
+supervisor를 재기동하지 않으며, Home Assistant no-touch도 유지합니다. 이 작업 동안 장비·앱·HA
+접촉은 `0`이었습니다.
