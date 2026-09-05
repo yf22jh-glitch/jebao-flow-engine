@@ -217,3 +217,171 @@ inflight, 그리고 실패 시 fail-closed latch입니다.
 요구한다는 점, 그리고 disposition 기구가 sentinel cycle 전용이라 **baseline restore cycle 좌초에는
 종결 경로가 없다**는 점은 이 계획을 작성하는 과정에서 드러났습니다. 둘 다 실기 이전에 알아야 할
 사실이었고, 후자는 4~6단계의 승인 조건 자체를 바꿉니다.
+
+---
+
+## 2026-09-05 supersede — 현재 source 기준 재검증 (PLAN ONLY, 여전히 hardware NO-GO)
+
+위 본문의 역사 서술은 삭제하지 않습니다. 그것은 작성 시점의 사실이었고, 아래는 그 뒤 두 작업이
+착지한 뒤의 상태로 해당 부분을 **대체**합니다. 이 절 자체는 장비·앱·Home Assistant 접촉 권한을
+만들지 않으며, 아래 어느 문장도 4~6단계를 승인 대상으로 올리지 않습니다.
+
+### 1. "baseline restore cycle 좌초에는 종결 경로가 없다"는 이제 사실이 아닙니다
+
+본문 `실패 시 처리` 절의 다음 서술은 **대체됩니다**.
+
+- `cycle: Literal[SENTINEL_QUALIFICATION]` → 현재는 `cycle: ExactRestoreCycle`이며 sentinel과
+  baseline restore 모두를 담습니다.
+- `completed_action_count: Literal[8]` → 현재는 cycle별 결정론 계획과 대조되는 정수이고,
+  sentinel `8` / baseline restore `6`입니다.
+- `reason: Literal["final_verification_policy_overload"]` → version 2는
+  `final_verification_unresolved`를 씁니다.
+- `verify_park_eligibility()`의 `record.cycle is not SENTINEL_QUALIFICATION` 하드코딩 → 제거됐고
+  manifest와 대조합니다.
+
+두 선행 작업이 모두 착지했습니다 — predecessor success finalization 불변식(작업 A)과 disposition
+일반화(작업 B). 현재 park은 embedded predecessor depth `0`(sentinel) / `1`(baseline restore) /
+`2`(phase-5 staged restore) 셋 모두에서 동작하고, baseline cycle의 정상 분포(write 4 · skip 2)도
+거부되지 않습니다. 5단계 좌초 시 write-free 종결 수단이 없다는 본문의 노출 서술은 해소됐습니다.
+
+**그러나 이것은 hardware GO가 아닙니다.** 본문이 4~6단계를 보류한 이유는 두 가지였고, 해소된 것은
+그중 하나뿐입니다. 나머지 — fresh Phase 0, 새 v2 manifest, 두 operation 각각의 on-site 승인 — 은
+그대로 남아 있고, 아래 2번에서 **새 보류 사유가 하나 더 생깁니다**.
+
+### 2. `max_observation_age_seconds`에 숫자를 넣지 못했습니다 — 이 필드도 overload입니다
+
+본문 2단계는 이 필드를 이름만 적고 값을 비워 뒀습니다. 값을 정하려고 현재 source의 소비처를 전수
+추적한 결과, 이 필드는 **성격이 다른 네 종류의 창을 동시에 재고 있습니다.** version 1의
+`max_final_pair_gap_seconds`가 그랬던 것과 같은 구조입니다.
+
+| # | 소비처 | 재는 것 | 방향 |
+|---|---|---|---|
+| A | `ExactRestoreVerificationPolicy` 검증 | `pair_gap ≤ age`, `acquisition ≤ age` | 하한 `≥ 30` |
+| B | `ExactRestoreOperationManifest.validate_pair` | `identity_age(5) ≤ age` | 하한 `≥ 5` |
+| C | `build_verified_baseline` | Phase 0 각 sample 완료 → `prepare` 실행까지의 경과 | **작을수록 강함** |
+| D | `_initial_sentinel_baseline_freshness` | `(첫 write 시각 − captured_at) + pair_gap ≤ age` | **작을수록 강함** |
+| E | action별 observation 신선도 | 단일 read의 `received − observed` | 비구속(초 미만) |
+| F | final verify의 observation age | `completed − observed`, acquisition(30)이 이미 더 좁음 | 비구속 |
+| G | **Q2 handoff 유효기간** | qualification 종료 → 앱 ASYNC manifest 생성까지의 경과 | **클수록 필요** |
+
+C·D는 **작은 값**을 원하고 G는 **큰 값**을 요구합니다. 한 숫자가 둘을 동시에 만족시킬 수
+없습니다. G가 존재한다는 것은 이 필드가 baseline 신선도 정책이 아니라 **qualified bundle의 수명**
+이기도 하다는 뜻입니다. 값은 bundle에 `maximum_handoff_age_seconds`로 복사되어 보존되고, 앱
+관측 manifest 생성 시점에 `(cutoff − baseline receipt 완료) ≤ 그 값`으로 다시 쓰입니다.
+
+따라서 이전 operation의 `1800`을 관성으로 이월하는 것도, 신선도를 근거로 작은 값을 넣는 것도
+둘 다 틀립니다. 전자는 C·D를 사실상 무의미하게 만들고, 후자는 G를 만족시키지 못해 qualification이
+성공해도 앱 경로가 열리지 않습니다. **그래서 이 addendum은 숫자를 확정하지 않고 결정을
+maintainer에게 올립니다.**
+
+- **(권고) 먼저 이 필드를 분리한다.** 작업 A가 `max_final_pair_gap_seconds`에 대해 한 것과 같은
+  범위 한정 작업입니다. capture freshness bound와 handoff validity bound를 별도 필드로 나누고,
+  version 1 의미와 바이트는 유지합니다. 분리가 착지하면 근거 기반 값을 각각 제안할 수 있습니다 —
+  capture 쪽은 두 series 수집(실측 pair당 약 `22.8초`)과 `prepare`, 그리고 attended challenge
+  낭독·입력까지를 덮는 분 단위, handoff 쪽은 승인 사이의 현실적 간격을 덮는 훨씬 긴 값입니다.
+- 분리 없이 진행한다면, 값은 G가 지배하므로 크게 잡을 수밖에 없고, **이 필드가 신선도를 지켜
+  준다고 주장하지 않아야 합니다.** 그 경우 실제 신선도 통제는 "Phase 0 직후에 곧바로 prepare하고
+  곧바로 arm한다"는 절차이며, 그 사실을 계획과 승인 문구에 명시해야 합니다.
+
+숫자가 비어 있는 한 2단계 manifest는 완성될 수 없고, manifest 없이는 3단계도 4~6단계도 없습니다.
+**이것이 4~6단계의 새 보류 사유입니다.**
+
+### 3. 교차검토의 전제 하나를 정정합니다 — approval delay는 재검사됩니다
+
+요청서는 "`prepare`가 window 안에 끝나면 이후 approval delay가 baseline age를 재검사하지 않는
+성질"을 확인해 달라고 했습니다. 추적 결과 **sentinel cycle에서는 그 전제가 성립하지 않습니다.**
+
+freshness 게이트는 `arm()`에서, `execute()` 진입에서, 그리고 첫 write 가능성이 생기기 전까지는
+**모든 action 앞에서** 다시 평가됩니다. 즉 승인 대기로 시간이 흘렀다면 첫 write 직전에 다시
+막히고 `baseline_expired_before_first_write`로 fail-closed합니다. 게이트가 비활성화되는 시점은
+`prepare` 성공이 아니라 **첫 possible write가 기록된 뒤**이며, 그 이후로는 복원 가능성을 유지하기
+위해 의도적으로 열려 있습니다.
+
+전제가 성립하는 곳은 따로 있습니다. 같은 게이트는 `record.cycle is not SENTINEL_QUALIFICATION`이면
+즉시 통과하므로, **baseline restore cycle과 phase-5에는 capture-age 재검사가 없습니다.** 이는
+결함이 아니라 설계입니다 — 그 시점에는 직전 sentinel cycle의 final verify가 장비 상태를 방금
+재확인했기 때문입니다. 다만 승인 문구에서 "매 단계 age가 재검사된다"고 일반화하면 틀립니다.
+
+### 4. sentinel slot은 manifest에 고정하지 않습니다 — 고정하면 오히려 틀립니다
+
+본문 4번 항목의 승인 설명은 **다시 넣어야 합니다.** 다만 slot 번호를 이월하거나 manifest에 적는
+방식은 안 됩니다. 현재 코드가 slot을 고르는 방식은 다음과 같습니다.
+
+- fresh baseline의 432-byte schedule image를 검증한 뒤 index `0`부터 훑어 **wire 형태가 unused
+  ZERO 또는 unused EE인 첫 slot**을 고릅니다. ZERO면 EE로, EE면 ZERO로 **뒤집습니다**.
+- 둘 중 어느 형태도 아닌 slot은 건너뜁니다. 즉 **사용 중인 schedule 항목은 후보가 아닙니다.**
+- 후보가 하나도 없으면 계획 수립 자체가 `INVALID_BASELINE`으로 실패합니다.
+- 실행 시점에도 같은 함수로 slot과 기대 image를 다시 계산해 계획에 기록된 값과 대조하므로,
+  장비가 그사이 drift했다면 다른 slot에 쓰는 대신 fail-closed합니다.
+
+따라서 승인 설명은 "**이번 fresh capture에서 결정되는, 사용되지 않은 한 slot의 표현만 ZERO↔EE로
+바꾼다. active schedule과 출력은 바뀌지 않으며, slot 번호는 이전 run에서 이월되지 않고 write
+직전에 다시 검증된다**"가 정확합니다. 구체적 slot 번호는 fresh Phase 0 뒤에야 알 수 있으므로
+승인 시점에 화면의 challenge에서 확인합니다.
+
+### 5. 세 operation id는 nonce가 아니라 manifest digest에서 파생됩니다
+
+본문 2단계는 "새 nonce 하나에서 파생되는 세 operation id"라고 적었습니다. 현재 코드는 nonce가
+아니라 **manifest 전체의 SHA-256**에 도메인 라벨(`sentinel` / `baseline` / `final`)을 붙여
+파생합니다. 실질적으로 더 강한 성질입니다 — manifest의 어떤 필드든 바뀌면 세 id가 모두 자동으로
+새것이 되고, 기존 id를 재현하려면 manifest가 바이트 단위로 동일해야 합니다. fresh artifact 결속과
+새 timing 값이 들어가는 이상 재사용은 구조적으로 불가능합니다. 문구를 그렇게 정정합니다.
+
+`prepare` 직전 precheck는 sentinel과 baseline 두 id에 대해 기존 finalization 부재를 확인합니다.
+phase-5 id는 그 시점에 아직 staging 전이므로 여기 포함되지 않고, staging하는 create 경로에서
+같은 barrier로 확인됩니다. 두 확인을 하나로 뭉뚱그려 적지 않습니다.
+
+### 6. 종료 조건과 두 grant는 현재 source에서 그대로 성립합니다
+
+- `AppRestoreClaim`이 요구하는 네 값(sentinel receipt, baseline receipt, phase-5 operation id와
+  record digest)은 변함이 없습니다. 종료 조건은 여전히 "두 cycle을 모두 `FINAL_VERIFIED`로 닫고
+  qualified bundle과 staged phase-5 record까지 만드는 것"입니다.
+- 한 `qualify` 명령 안에서 sentinel이 끝나고 baseline restore로 promote한 직후 **이미 받은 승인
+  플래그가 명시적으로 해제되며**, baseline cycle은 `/dev/tty`에서 새 attended grant를 다시
+  받습니다. 두 operation·두 grant는 코드에 실재합니다.
+- phase-5 staging은 qualified bundle의 불변 timestamp에 결속된 journal write일 뿐이며 **device
+  write는 `0`**입니다. staging 경로에 장비 관측 호출이 없습니다.
+- 각 후속 cycle 전에 predecessor success barrier가 존재해야 한다는 요구는 작업 A로 코드에
+  들어갔습니다. baseline cycle의 `arm`은 embedded chain 전체를 archive와 대조하고, park 경로도
+  index 설치와 같은 claim 안에서 같은 chain을 확인합니다.
+
+### 7. 실패 처리 순서 — park이 가능해졌다고 순서가 바뀌지는 않습니다
+
+작업 B가 write-free 종결을 가능하게 했지만, 본문의 순서는 **그대로 유지합니다.**
+
+1. 실패한 predicate와 실측값을 diagnostic에서 읽어 기록한다. **원인 분석이 먼저입니다.**
+2. 그 다음에 좌초한 journal에 결속된 **새 disposition manifest**를 만든다. 기존 manifest는
+   특정 journal digest에 결속되므로 재사용할 수 없습니다.
+3. 별도 attended park 승인을 받는다. qualification 승인은 park 승인이 아닙니다.
+
+**자동·즉시 재시도는 계속 `0`회입니다.** park 기구가 생겼다는 것은 좌초에서 안전하게 빠져나올
+수단이 생겼다는 뜻이지, 재시도 문턱이 낮아졌다는 뜻이 아닙니다. v2에서의 실패는 이 문서의 여유
+표가 틀렸다는 **새 정보**이므로 재시도가 아니라 분석으로 갑니다.
+
+### 8. 승인 경계 — 이 요청으로 확장되지 않습니다
+
+현재 사용자가 승인한 범위는 **plan 검토와 static source 추적까지**입니다. 이 addendum을 쓰는 동안
+장비·앱·Home Assistant·private journal·archive·recovery supervisor 접촉은 `0`이며, 아래 세 경계는
+서로를 함축하지 않습니다.
+
+- **0단계** — private barrier·tombstone·readiness 확인. device network `0`이지만 private state를
+  읽으므로 **별도 승인**이 필요합니다. 이 addendum은 그 승인을 갖고 있지 않습니다.
+- **1단계** — fresh Phase 0. device **read**를 포함하므로 **별도 승인**이 필요합니다.
+- **4~6단계** — device **write**. on-site 승인·감시·즉시 물리 차단을 요구하며, 위 두 승인 중
+  어느 것으로도 대체되지 않습니다. 두 exact action plan을 모두 명시적으로 포함해야 하고, 두 번째
+  challenge가 첫 승인의 범위를 넓히지 않습니다.
+
+작업 A와 작업 B가 착지했다는 사실은 위 어느 승인도 만들지 않습니다. 그 둘은 **좌초 시 종결
+수단**을 만든 것이지 **좌초하지 않는다는 근거**를 만든 것이 아닙니다. 여유 표는 여전히 네 pair
+실측에 기반한 예측이고, v1에서 예측은 이미 한 번 틀렸습니다.
+
+### 이 재검증으로 새로 확정된 것
+
+- baseline restore cycle 좌초의 종결 경로 부재는 해소됐습니다. 본문의 그 노출 서술은 대체됩니다.
+- `max_observation_age_seconds`는 capture freshness와 handoff validity를 겸용하는 overload이며,
+  **한 숫자로 둘을 만족시킬 수 없습니다.** 2단계 manifest는 이 결정 없이는 완성될 수 없습니다.
+- sentinel freshness 게이트는 첫 possible write까지 반복 평가되고, baseline·phase-5에는 적용되지
+  않습니다.
+- 세 operation id는 manifest digest 파생이므로 재사용이 구조적으로 불가능합니다.
+- sentinel slot은 fresh capture에서 결정되고 write 직전에 재검증되므로 manifest에 고정하지
+  않습니다.
