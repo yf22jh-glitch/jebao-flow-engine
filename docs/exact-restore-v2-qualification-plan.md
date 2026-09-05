@@ -1360,21 +1360,53 @@ append-only로 기록합니다. 계획과 실행을 나중에 대조할 수 있�
 
 ### park을 선택했을 때 — 새 artifact와 새 승인이 필요합니다
 
-park eligibility는 manifest가 가리키는 accepted pair를 **다시 읽어** 그 attempt 시작이 **완료된
-action들의 최대 completion보다 뒤**일 것을 요구합니다. **1단계의 Phase 0 artifact는 write보다
-앞서므로 반드시 거부됩니다.** 새 journal manifest만 만들어서는 park할 수 없습니다. 실제로 필요한
-것은 다음입니다.
+park eligibility는 manifest가 가리키는 accepted pair를 **다시 읽어** 여러 조건을 한꺼번에
+요구합니다. 시간 조건은 그중 하나일 뿐입니다.
+
+- accepted pair 정본 재독과 plan·series·ordinal·digest 일치
+- pair completion gap `≤` manifest가 선언한 bound
+- 두 역할의 **identity binding**과 **raw-frame hash** 일치
+- **outer six-field와 432-byte schedule image가 좌초한 journal의 baseline과 exact 일치**
+- attempt 시작이 **완료된 action들의 최대 completion보다 뒤**
+
+**1단계의 Phase 0 artifact는 write보다 앞서므로 마지막 조건에서 반드시 거부됩니다.** 그리고 네
+번째 조건 때문에, **artifact가 "장비가 baseline 상태가 아님"을 보여 준다면 park은 허용되지
+않습니다** — 그 경우는 park이 아니라 복원 문제입니다.
+
+**park-verify는 network-none·device I/O `0`으로 실행하며, park 본체도 마찬가지입니다.** 위 조건
+중 하나라도 실패하면 **finalization `0` · tombstone `0` · live journal 불변**으로 중단·보고합니다.
+
+#### artifact 이후의 drift 창 — 코드가 아니라 운영으로 닫습니다
+
+park은 artifact를 수집한 뒤 **현재 장비를 다시 읽지 않으며, artifact의 age 상한도 없습니다.**
+따라서 capture 이후 앱·Home Assistant·다른 code writer가 장비를 바꿔 놓으면, **stale이지만
+유효한 artifact로 live journal을 terminalize**해 recovery context를 잃을 수 있습니다. 이는 §3의
+rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들지 않고 운영으로 닫습니다.
+
+- **capture 직전** 앱·Home Assistant·장비 TCP connection·모든 code writer 부재를 다시 확인합니다.
+- **capture부터 park 완료까지** device contact와 write는 `0`이고 단일 제어권을 유지합니다.
+- 그 사이에 **어떤 접촉이나 지연, 또는 의심이 생기면 그 artifact 재사용은 `0`**입니다. 새 승인
+  B부터 다시 시작합니다.
+
+#### 순서와 승인
 
 1. **먼저 중단하고 원인을 분석합니다.** 자동·즉시 재시도는 `0`회입니다.
 2. park을 선택했다면, **마지막 completion보다 뒤에** 새 explicit-only strict artifact를
-   수집합니다. 이것은 device read이므로 **새 승인 B**와 그에 딸린 collector durable write가
-   필요합니다.
-3. 그 artifact와 **좌초한 journal의 exact digest**에 결속된 **새 v2 disposition manifest**를
-   만듭니다. **기존 Phase 0 artifact와 기존 disposition manifest 재사용은 `0`입니다.**
-4. park archive·snapshot·v2 finalization·tombstone mutation을 위한 **별도 host-state mutation
-   승인**을 받습니다. qualification용으로 받은 승인 C가 이것을 포괄한다고 보지 않습니다.
-5. **별도의 attended write-free park consent**를 받습니다. park의 device write는 `0`이므로 이것은
+   수집합니다. device read이므로 **새 승인 B**와 그에 딸린 collector durable write가 필요합니다.
+3. 그 artifact와 **좌초한 journal의 exact digest**에 결속된 **새 v2 disposition manifest
+   candidate**를 만들고, 위 eligibility 조건 전부를 **offline에서 재검증**합니다. 이 시점의
+   candidate는 메모리에만 둡니다. **기존 Phase 0 artifact와 기존 disposition manifest 재사용은
+   `0`입니다.**
+4. **별도 park host-state mutation 승인**을 받습니다. qualification용으로 받은 승인 C가 이것을
+   포괄한다고 보지 않습니다. 범위는 **owner-only disposition manifest의 persist와 exact reload**,
+   그리고 park archive·journal snapshot·v2 finalization·tombstone mutation입니다.
+5. 그 승인 아래에서 **disposition manifest를 owner-only 경로에 persist하고 exact reload**합니다.
+   park CLI는 그 파일을 입력으로 요구하므로 이 단계 없이는 park을 실행할 수 없습니다.
+6. **network-none으로 `park-verify`를 실행**합니다. 실패하면 **consent 요청 `0`, archive·index·
+   tombstone mutation `0`**으로 중단·보고합니다.
+7. **별도의 attended write-free park consent**를 받습니다. park의 device write는 `0`이므로 이것은
    승인 D가 아닙니다.
+8. **network-none으로 park을 실행**합니다.
 
 ---
 
