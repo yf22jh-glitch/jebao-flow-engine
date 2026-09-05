@@ -1126,7 +1126,7 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 
 | 축 | 범위 | 주체 |
 |---|---|---|
-| **A** | private state read + 고정 root를 여는 것만으로 발생하는 **일시 host-store writability probe**. durable semantic mutation `0`, device write `0` | repository maintainer |
+| **A** | private state read + 고정 root를 여는 것만으로 발생하는 **일시 host-store writability probe**. durable semantic mutation `0`, device write `0`. **이 축은 0단계에 한정되지 않고 전체 승인 sequence 동안의 모든 expected fixed-root open에 수반되는 probe를 포괄합니다** — 아래 참조 | repository maintainer |
 | **B** | device **read**, 그리고 그 operation이 **반드시 남기는** owner-only collector plan·series·raw artifact의 **durable host write**. Phase 0은 읽기만 하는 단계가 아닙니다 | repository maintainer |
 | **C** | **host-state mutation** — 아래 "승인 C의 범위" 전체 | repository maintainer |
 | **D** | device **write** (7·8단계). 현장 감시와 즉시 물리 차단 포함 | on-site hardware approver |
@@ -1152,6 +1152,17 @@ write set 전체**입니다. 최소한 다음을 포함합니다.
 
 **예상 밖 경로나 이 범위 밖의 파일 write가 관측되면 즉시 중단·보고합니다.** C는 candidate와 두
 action plan과 digest를 **보고 난 뒤에** 받으며, 그 전의 포괄 승인으로 쓰지 않습니다.
+
+### 승인 A의 probe는 0단계에만 있지 않습니다
+
+고정 root는 **열릴 때마다** 일시 writability probe를 수행합니다. journal store의 부모 open, receipt
+archive의 root open, guard의 lease 획득이 각각 그 경로를 지나므로, probe는 0단계에서 한 번이
+아니라 **`prepare`와 qualify가 잡는 모든 claim·lease에서 반복**됩니다.
+
+따라서 **승인 A는 전체 승인 sequence 동안 expected store·guard·archive open에 수반되는 probe
+전부를 포괄합니다.** 6~10단계에서 발생하는 이 일시 write들도 A의 범위이며 C로 다시 세지 않습니다.
+**횟수를 미리 고정하지 않습니다** — 범위는 "expected open에 수반되는 probe"로 닫고, 그 밖의 경로나
+그 밖의 write가 관측되면 위의 중단·보고 규칙이 그대로 적용됩니다.
 
 ---
 
@@ -1217,7 +1228,7 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
   slot도 없습니다)
 - **두 plan 각각의 전체 action·target과 `action_plan_sha256`**
 
-## 4단계 — 예산 계산 · **되돌아갈 수 있는 마지막 지점**
+## 4단계 — 예산 계산 (1차) · 승인 상의 이전
 
 `captured_at`은 **채택 pair의 두 read completion 중 max**이며, **두 series의 min**입니다.
 
@@ -1225,6 +1236,8 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
 - `prepare` 최종 시각 = **`captured_at + 1060초`**
 - 최소 잔여 first-wire 예산 = **`720초`**
 - 잔여 `< 720초`이면 **tombstone을 건드리지 않고 종료·보고**합니다. 재수집은 **새 승인 B**.
+- 이 계산은 **1차**입니다. 승인 상의에 시간이 걸리므로 **6단계에서 `prepare` 직전에 다시
+  계산합니다.** 여기서 통과했다는 것이 그때도 통과한다는 뜻이 아닙니다.
 - **첫 challenge가 `300초`를 전부 소모해 만료된 뒤에도 재발급 여유를 *보장*하려면** `prepare`
   시점 잔여가 **`1020초`를 넘어야** 합니다. 그 밖의 실패(빠른 거부, TTY 실패 등)는 보장이 아니라
   **실제 재발급 시점의 잔여가 `720초` 이상인지**로 판정합니다. 잔여가 `1020초` 이하라면 재발급이
@@ -1238,9 +1251,14 @@ label(`sentinel` / `baseline` / `final`)**을 붙여 파생됩니다. 라벨은 
 ## 6단계 — manifest persist와 `prepare` · **승인 C**
 
 1. 직전에 source·config·manifest·artifact digest를 **exact로 재확인**합니다.
-2. 승인 C 아래에서 manifest를 owner-only 경로에 **persist하고 exact reload**합니다.
-3. **별도의 행위로** tombstone → `PREPARED` prepare를 실행합니다(독립 명시 승인 항목).
-4. live `action_plan_sha256`을 3단계 offline 값과 **대조**합니다. **불일치하면 token을 제시하지
+2. **예산을 다시 계산합니다.** 4단계에서 충분했더라도 5단계의 승인 상의가 길어졌다면 지금은
+   부족할 수 있습니다. `now < captured_at + 1060초`이고 first-wire 잔여가 `≥ 720초`인지 **다시
+   계산해 표시**합니다. **하나라도 실패하면 manifest save `0`, `prepare` `0`, tombstone 불변으로
+   중단·보고**하고, 새 승인 B 없이 recapture하지 않습니다. **되돌아갈 수 있는 진짜 마지막
+   predicate가 여기입니다** — `prepare` 뒤에는 recapture·clear·재prepare가 모두 불가능합니다.
+3. 승인 C 아래에서 manifest를 owner-only 경로에 **persist하고 exact reload**합니다.
+4. **별도의 행위로** tombstone → `PREPARED` prepare를 실행합니다(독립 명시 승인 항목).
+5. live `action_plan_sha256`을 3단계 offline 값과 **대조**합니다. **불일치하면 token을 제시하지
    않고 즉시 중단·보고하며, clear·편집·재prepare를 시도하지 않습니다.**
 
 ## 7단계 — sentinel cycle · **승인 D**
