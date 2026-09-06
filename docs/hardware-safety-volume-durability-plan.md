@@ -281,3 +281,33 @@ link 이전 crash가 남긴 orphan marker temporary는 자동 삭제하지 않�
 
 source가 착지해도 실제 expected identity와 marker는 존재하지 않습니다. 별도 provisioning 승인과
 실행 결과를 확인하기 전까지 모든 hardware operation은 계속 `NO-GO / BLOCKING`입니다.
+
+## 2026-09-06 volume identity marker source 착지
+
+위 설계는 source commit `adec0a33ce7d212f7ad95b1b3fb91378d01614bf`로 착지했습니다. 기준 commit은
+`631df0ab5b01b8849087295281a2955258b61211`이고, 그 사이 diff SHA-256은
+`c125c7bbca62aeb929ef01e1186a32e056629c7d0739842352291d3c1ba91779`, 변경 규모는 16파일
+`+1387/-67`입니다. frozen native linkage source와 test는 수정하지 않았습니다.
+
+서로 다른 두 실행자가 동일 diff와 파일 bytes를 대조한 뒤 network-none container에서 전체 unit
+`1939 passed`, 표적 7파일 `188 passed`를 독립 확인했습니다. `ruff check src tests`는 최종 diff에서,
+format 검사는 byte-identical Python 변경에서 통과했습니다. Compose는 private identity가 없으면
+non-zero로 거부하고 형식이 맞는 dummy identity에서는 구성이 유효함을 확인했습니다. 실제 volume
+대신 disposable non-persistent root를 사용한 CLI
+검증은 `provisioned` → `verified` → `already_provisioned` 순서로 성공했고 raw 32-hex identity를
+stdout·stderr에 노출하지 않았습니다. foreign-device marker, FIFO marker, env 부재, probe 중 marker
+교체, 중단된 same-inode hard-link install과 설명되지 않는 temporary 이름도 각각 fail-closed 또는
+계약된 좁은 복구로 확인했습니다. 교차검증은 착지 전에 production privacy 계약을 실행하지 않던
+공허한 test, supervisor 선기동 순서 모순, bash 3.2에서 무효였던 standalone `[[ -n ]]` guard와 실제
+동작에 맞지 않던 restart-loop 설명을 찾아 수정했습니다. 이 실행 결과는 증거등급 **(c) reconstructed
+operator observation**이고, diff SHA-256은 commit에서 재계산 가능한 source property라 증거등급
+대상이 아닙니다.
+
+이 작업은 실제 named volume을 생성·mount·provision하지 않았고 private expected identity도 만들지
+않았습니다. 실제 safety volume·private journal·archive·device·앱·Home Assistant·recovery supervisor
+접촉은 `0`입니다. 따라서 이 착지는 source 계약의 완료일 뿐 hardware `GO`가 아닙니다. 다음 순서는
+**lowercase 32-hex identity를 한 번 생성해 private secret store와 별도 복구 가능한 private backup에
+보관 → active context와 exact named-volume host preflight → 별도 승인된 provisioning → runtime
+verify → 그 뒤 status 또는 park 검토 → fresh Phase 0와 해당 승인 축**입니다. provisioning 뒤에는
+identity를 바꾸지 않고, 분실 시 새 값을 만들지 않으며 checklist의 승인된 read-only 회수 절차만
+따릅니다. 그 전까지 모든 hardware operation은 계속 `NO-GO / BLOCKING`입니다.

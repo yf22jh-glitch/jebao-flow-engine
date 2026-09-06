@@ -1183,3 +1183,35 @@ artifact를 복구하지 않았고 named volume identity/provisioning도 수행�
 착지하거나 repository maintainer가 exact host preflight를 충분한 장기 경계로 선택하고, 별도 승인된
 named volume provisioning과 fresh Phase 0가 끝나기 전에는 B1/B2/B3·C·D와 recovery supervisor를
 재개하지 않습니다.
+
+## 2026-09-06 hardware-safety volume identity marker source 착지 — 실기는 계속 STOP
+
+volume identity marker와 명시적 provisioning 계약이 source commit
+`adec0a33ce7d212f7ad95b1b3fb91378d01614bf`로 착지했습니다. fixed-root 사용 경로의 runtime은 retained root descriptor에
+결속된 canonical marker와 required expected identity를 **writability probe와 device discovery 전에**
+검사합니다. 별도 provisioning CLI는 no-clobber hard-link install과 fsync 순서를 사용하고, 중단된
+install은 exact temporary 이름과 동일 `(st_dev, st_ino)`가 증명되는 link만 승인된 provisioning에서
+제거합니다. Compose와 operator checklist는 required private identity, exact named volume, network-none
+one-shot, `--rm`, 그리고 running·exited 전체 container mount 검사를 요구합니다.
+
+기준 `631df0ab5b01b8849087295281a2955258b61211` 대비 diff SHA-256은
+`c125c7bbca62aeb929ef01e1186a32e056629c7d0739842352291d3c1ba91779`이고 16파일
+`+1387/-67`입니다. 동일 bytes에 대해 두 실행자가 network-none에서 전체 unit `1939 passed`, 표적
+7파일 `188 passed`와 Compose required-env 계약을 독립 확인했습니다. ruff lint는 최종 diff에서,
+format 검사는 byte-identical Python 변경에서 통과했습니다. disposable non-persistent root에서 실제
+CLI의 provision·verify·idempotent replay도 확인했지만 실제 safety volume이나 private durable state를
+사용한 실행은 아닙니다. 교차검증은 착지 전에 공허한 privacy test, supervisor 순서 모순, bash 3.2에서
+무효였던 mount guard와 잘못된 restart-loop 설명을 찾아 수정했습니다. 이 검증 결과는 증거등급
+**(c) reconstructed operator observation**이고 diff SHA-256은 재계산 가능한 source property라
+증거등급 대상이 아닙니다. 이번 source·test 과정에서 device·앱·Home Assistant·
+private journal·archive·recovery supervisor 접촉은 `0`이었고 새 `docs/runs/` 파일을 만들 실기도
+없었습니다.
+
+**현재 판정은 계속 모든 hardware operation `NO-GO / BLOCKING`입니다.** source가 착지했을 뿐 실제
+named volume·marker·private expected identity는 아직 provision되지 않았습니다. 먼저 lowercase
+32-hex identity를 한 번 생성해 deployment private secret store와 별도 복구 가능한 private backup에
+보관하고, 그 뒤 exact named-volume host preflight, 별도 provisioning 승인과 runtime verify, fresh
+Phase 0, 각 실행 단계의 A·B1·B2·B3·C·D 승인을 순서대로 마쳐야 합니다. provisioning 뒤에는 identity를
+바꾸지 않으며, 분실 시 새 값을 만들지 않고 operator checklist의 승인된 read-only 회수 절차만
+따릅니다. 그 전에는 recovery supervisor, status·park, qualification, 앱 live-write와 device
+read·write를 재개하지 않습니다.
