@@ -1453,12 +1453,24 @@ condition-construction `NO-GO`**로 닫습니다.
   판정은 **3연속 valid boundary + 세 번째 이후 stability**를 요구합니다.
 - boundary는 `P`마다 오므로 **span에 초를 더하는 것이 아니라 slot period를 몇 개 덮느냐**가
   boundary 수를 정합니다. `5700초`와 `6000초`는 **boundary를 최소 `3`개 보장할 뿐**이며(phase에
-  따라 `4`개일 수 있습니다) **임의 위치 1회 reject 내성이 없습니다.** "정확히 3개"가 아닙니다.
+  따라 `4`개일 수 있습니다) **nominal 기준으로도 임의 위치 1회 reject 내성이 없습니다.** "정확히
+  3개"가 아닙니다.
 - boundary `n`개 중 `i`번째가 거부되면 최장 연속 run은 `max(i − 1, n − i)`입니다. 모든 `i`에서
   `≥ 3`이려면 **`n = 6`이 최소**입니다(`n = 5`는 가운데 거부 시 `2`).
-- 따라서 span `= 6P + S = 11100초`, cadence `30`에서 **`11100 / 30 + 1 = 371`**입니다. 이 span은
-  phase와 무관하게 boundary를 **최소 6개** 보장하고, 세 번째 valid boundary 뒤 stability도
-  덮습니다.
+- 따라서 요청 span `= 6P + S = 11100초`, cadence `30`에서 **`11100 / 30 + 1 = 371`**입니다.
+
+**`371`이 보장하는 것과 보장하지 않는 것을 구분합니다.** 이것은 **nominal precommit**이지 실행
+결과의 예언이 아닙니다.
+
+- **보장하는 것** — *요청된* span이 `6P + S`가 되도록 하는 **최소 pair 수**입니다. 그 nominal
+  모델 안에서 boundary `6`개와 임의 위치 1회 reject 내성을 **사는** 값입니다.
+- **보장하지 않는 것** — runtime의 실제 boundary 수와 내성입니다. classifier가 boundary를 세는
+  창은 host의 요청 cadence가 아니라 **첫 valid pair와 마지막 valid pair의 decoded slave
+  `device_time`**입니다. source에는 그 device-time span이 `(count − 1) × cadence` 이상이라는
+  하한도, host↔device drift bound도 없습니다. 앞뒤 pair가 invalid하면 창은 그만큼 줄어듭니다.
+- 따라서 **실제 boundary 수·stability coverage·reject 내성은 device-time evidence로만
+  확정됩니다.** 부족하면 그 결과는 `UNESTABLISHED`여야 하며, 그것을 사후에 값으로 메우지
+  않습니다.
 - **비용**: epoch 하나가 nominal `3시간 5분`, control·ASYNC 두 epoch 합 **`6시간 10분`**입니다.
   collector durable write 규모도 pair 수에 비례해 커지므로 승인 C 설명에 그 규모를 함께 적습니다.
 - 이 선택의 이유는 §7입니다 — **이 계획은 단 1회**이므로, boundary 거부를 덮지 못하는 headroom은

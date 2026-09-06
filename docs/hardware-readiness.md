@@ -1099,9 +1099,15 @@ supervisor를 재기동하지 않으며, Home Assistant no-touch도 유지합니
 
 **repository maintainer가 대안 (a) — 정정된 v2 qualification을 단회로 진행 — 을 선택했고,
 Q2 epoch의 `planned_pair_count`를 `371`(cadence `30초`, span `11100초`)로 확정했습니다.** `371`은
-판정이 요구하는 3연속 valid boundary가 **임의 위치의 boundary 거부 1회 뒤에도** 남도록 보장하는
-최소값입니다. 최소 span `5700초`(191 pair)와 그 근방 값은 boundary를 최소 3개만 보장해 그 내성이
-없습니다. 대신 epoch 하나가 nominal `3시간 5분`, 두 epoch 합 `6시간 10분`입니다.
+**요청 span이 `6P + S`가 되도록 하는 최소 pair 수**이며, 그 nominal 모델에서 3연속 valid boundary가
+임의 위치의 boundary 거부 1회 뒤에도 남을 headroom을 사는 값입니다. 최소 span `5700초`(191 pair)와
+그 근방 값은 nominal 기준으로도 boundary 3개 수준이라 그 headroom이 없습니다. 대신 epoch 하나가
+nominal `3시간 5분`, 두 epoch 합 `6시간 10분`입니다.
+
+**이것은 nominal precommit이지 실행 결과의 보장이 아닙니다.** classifier는 boundary를 host의 요청
+cadence가 아니라 **첫·마지막 valid pair의 decoded slave `device_time`**으로 세고, source에는 그
+device-time span의 하한도 host↔device drift bound도 없습니다. 실제 boundary 수와 stability
+coverage는 device-time evidence로만 확정되며, 부족하면 `UNESTABLISHED`입니다.
 
 **이 결정은 저장소 방향 결정이며 실행 승인이 아닙니다.** 승인 축 A·B1·B2·B3·C·D, attended grant,
 장비 read·write, 앱 live-write와 새 Q2 operation GO는 **어느 것도 발급되지 않았습니다.** 따라서
