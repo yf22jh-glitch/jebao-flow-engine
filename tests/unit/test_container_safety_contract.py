@@ -9,6 +9,18 @@ import yaml
 ROOT = Path(__file__).parents[2]
 
 
+def test_private_env_files_are_excluded_from_container_build_context() -> None:
+    ignored = [
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+    assert ".env" in ignored
+    assert ".env.*" in ignored
+    assert not any(pattern.startswith("!.env") for pattern in ignored)
+
+
 def _dockerfile_volume_paths(dockerfile: str) -> list[str]:
     declared: list[str] = []
     for line_number, raw_line in enumerate(dockerfile.splitlines(), start=1):
@@ -118,6 +130,13 @@ def test_provisioning_service_is_explicit_bounded_and_not_restartable() -> None:
     assert service["entrypoint"] == ["jebao-flow-hardware-safety"]
     assert service["command"] == ["verify"]
     assert service["volumes"] == ["jebao-flow-hardware-safety:/hardware-safety"]
+    assert service["environment"] == {
+        "JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID": (
+            "${JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID:"
+            "?set JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID before starting}"
+        )
+    }
+    assert "depends_on" not in service
 
 
 def test_identity_console_script_is_installed() -> None:

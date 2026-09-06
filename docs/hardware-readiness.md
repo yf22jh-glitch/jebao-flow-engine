@@ -1272,3 +1272,34 @@ content·private journal·archive, device·앱·Home Assistant·recovery supervi
 identity carrier exact 대조와 reviewed image attestation을 다시 통과하고, Compose required-env 계약을
 우회하지 않는 승인된 network-none provisioning packet이 확정되기 전에는 marker·runtime verify,
 supervisor, Phase 0와 device I/O를 실행하지 않습니다.
+
+## 2026-09-06 provisioning 전 identity 회전·build-context 차단
+
+앞 절의 host mutation은 commit `7318065`로 기록했습니다. named volume의 생성 시각은
+`2026-09-06T18:35:18+09:00`이고, 이 단계 시작 시점에도 driver `local`, `LINKS=0 | 0B`,
+`/hardware-safety` mount container `0`이었습니다.
+
+private identity를 일시 worktree에서 비일시적 deployment checkout의 mode `0600`·gitignored `.env`로
+옮기는 첫 시도에서 stdin 결속 오류로 당시 원문이 console execution log에 노출됐습니다. marker가
+아직 없으므로 그 값은 권위가 없고 provisioning에 사용하지 않았습니다. 해당 값과 앞 절에 적힌
+SHA-256 `6b9b4cfb01adc12242d19d8e72aebf3984c4010623182a979c511e5c8cba8dcc`을 폐기하고,
+`secrets.token_hex(16)`으로 새 identity를 생성해 deployment `.env`와 macOS Keychain에 다시
+저장했습니다. 두 carrier는 원문을 출력하지 않은 채 길이·lowercase 32-hex·원문을 exact 대조했고,
+새 identity SHA-256은
+`fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`입니다. 내구성 있는 두 사본을
+재확인한 뒤 일시 worktree의 `.env` 한 파일만 삭제했습니다. marker는 여전히 없습니다.
+
+build 전에 `.dockerignore`가 private `.env`를 제외하지 않아 Dockerfile이 그 파일을 `COPY`하지는
+않더라도 build context로 daemon에 보낼 수 있음을 발견했습니다. `.env`와 `.env.*`를 모두 제외하고
+negation 재포함을 거부하는 repository 회귀를 추가했습니다. 이 변경이 clean commit으로 착지하고
+독립 검증되기 전에는 image를 build하지 않습니다.
+
+현재 private `.env`의 `MQTT_PASSWORD`는 의도적으로 비어 있습니다. provisioning packet은 실제
+provisioning service에 전달되지 않는 명백히 무효한 `provisioning-only-unused` sentinel을 build와
+one-shot 각각의 **단일 명령 prefix**에만 두고, export하거나 `.env`에 기록하지 않습니다. 실제 MQTT
+secret을 생성·사용하지 않으며 one-shot 뒤에도 빈 값과 export 부재를 재확인합니다. 이 packet은 아직
+build·mount·provision·verify하지 않았습니다.
+
+이 identity custody와 source/test 준비 결과는 증거등급 **(c) reconstructed operator observation**입니다.
+실제 named volume content·private journal·archive, device·앱·Home Assistant·recovery supervisor 접촉은
+`0`입니다. **현재 판정은 계속 모든 hardware operation `NO-GO / BLOCKING`입니다.**

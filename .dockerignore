@@ -1,5 +1,8 @@
 .git
 .github
+# Private deployment carriers must never enter the build context.
+.env
+.env.*
 .venv
 __pycache__
 *.py[cod]

@@ -244,8 +244,43 @@ preflight를 통과하고 별도 host-state 승인을 받은 경우에만 networ
 이 명령 직전에 위 두-carrier 대조(길이·lowercase 32-hex·SHA-256·원문)를 다시 수행하고, 어느 하나라도
 불일치하면 provisioning을 실행하지 않습니다.
 
+provisioning image는 marker source commit
+`adec0a33ce7d212f7ad95b1b3fb91378d01614bf`의 후손인 **clean recorded commit**에서 먼저 명시적으로
+build합니다. 먼저 shell-local `deployment_env_file`을 deployment host의 private `.env` 절대경로로
+설정하되 그 경로 자체는 repository 문서·run 기록에 쓰지 않습니다. Compose는 recorded commit의
+clean checkout에서 실행하고 `--env-file`은 그 바깥의 deployment `.env`를 가리키며, 두 checkout은
+서로 다를 수 있습니다. private `.env`는 내용을 렌더링하지 않는 `cp`·`mv` 같은 파일 연산으로만
+다루고 `cat`·`echo`·redirection이나 출력형 `docker compose config`에 넣지 않습니다. Compose 파일
+검증에는 `docker compose ... config --quiet`만 사용합니다.
+
+build 전에 `.dockerignore`가 `.env`와 `.env.*`를 모두 제외하고 negation으로 다시
+포함하지 않는지 확인합니다. private deployment `.env`는 clean build checkout과 Docker build context로
+복사하지 않고 `--env-file`로만 읽습니다. 현재 Compose 파일 전체의 required-env interpolation을
+통과시키기 위한 MQTT sentinel은 실제 provisioning service 환경에 전달되지 않고 의존 service도
+기동하지 않는다는 정적 계약을 확인한 뒤, 다음 **단일 명령 prefix에만** 둡니다. `export`하거나
+`.env`에 쓰지 않습니다.
+
 ```bash
-docker compose --profile hardware-safety-provisioning run --rm \
+[ -n "${deployment_env_file:-}" ] &&
+[ -z "$(git status --porcelain --untracked-files=all)" ] &&
+git merge-base --is-ancestor adec0a33ce7d212f7ad95b1b3fb91378d01614bf HEAD &&
+grep -Fx '.env' .dockerignore >/dev/null &&
+grep -Fx '.env.*' .dockerignore >/dev/null &&
+MQTT_PASSWORD=provisioning-only-unused docker compose \
+  --env-file "$deployment_env_file" \
+  --profile hardware-safety-provisioning \
+  build jebao-flow-hardware-safety-provision
+```
+
+연쇄 전체가 성공해야 build가 실행되며 앞 gate 하나라도 실패하면 즉시 `NO-GO`입니다. build한 exact
+image id와 source commit을 기록한 뒤에만 아래 one-shot을 실행합니다. sentinel은 명백히 무효한 interpolation
+전용 값이며 실제 MQTT secret으로 쓰지 않습니다. build·one-shot 뒤 deployment `.env`의
+`MQTT_PASSWORD`가 계속 비어 있고 현재 shell에 `MQTT_PASSWORD` export가 없음을 확인합니다.
+
+```bash
+MQTT_PASSWORD=provisioning-only-unused docker compose \
+  --env-file "$deployment_env_file" \
+  --profile hardware-safety-provisioning run --rm \
   jebao-flow-hardware-safety-provision provision
 ```
 
@@ -255,6 +290,22 @@ identity를 찍을 수 있습니다. 이 one-shot이 끝날 때까지 daemon·re
 provisioning service가 만든 임시 container가 Compose의 generated name을 포함해 어떤 이름으로도
 running·exited 목록에 없음을 확인합니다. `--rm` 실패 등으로 남아 있으면 자동 삭제하지 않고
 `NO-GO`로 보고합니다.
+
+처음 만든 empty volume에서 provisioning 출력의 `status`는 반드시 `provisioned`이고
+`identity_sha256`은 직전 두-carrier 대조 digest와 같아야 합니다. `already_provisioned`, 다른 digest,
+non-zero 또는 owner·mode 오류가 나오면 재실행하거나 `chmod`·`chown`으로 맞추지 않고 즉시
+`NO-GO`로 보고합니다. container 부재를 재확인한 뒤 같은 image의 default `verify`를 인자 없이 한 번
+실행하고, `status=verified`와 동일 digest를 다시 요구합니다.
+
+```bash
+MQTT_PASSWORD=provisioning-only-unused docker compose \
+  --env-file "$deployment_env_file" \
+  --profile hardware-safety-provisioning run --rm \
+  jebao-flow-hardware-safety-provision
+```
+
+verify 뒤에도 전체-container inspection을 다시 실행해 temporary container `0`을 확인합니다. 어느
+재검사든 실패하면 supervisor를 시작하지 않습니다.
 
 그 뒤에만 supervisor를 시작합니다. Supervisor는 평상시 장비를 검색하거나 연결하지 않고
 `/hardware-safety`의 unfinished journal만 확인합니다. one-shot 프로세스가 비정상 종료된 경우에도

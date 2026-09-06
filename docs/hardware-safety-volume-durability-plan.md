@@ -395,3 +395,38 @@ private journal·archive, device·앱·Home Assistant·recovery supervisor 접�
 두 identity carrier의 provisioning-직전 exact 재대조, reviewed image attestation, network-none
 provisioning과 runtime verify이지만, 그 실행 packet이 현재 Compose required-env 계약을 우회하지
 않는지 확인할 때까지 모든 hardware operation은 계속 `NO-GO / BLOCKING`입니다.
+
+## 2026-09-06 provisioning 전 carrier·build-context 정정
+
+위 host mutation 기록은 commit `7318065`로 착지했습니다. exact named volume은
+`2026-09-06T18:35:18+09:00`에 생성됐고 이 단계 시작 시점에도 driver `local`, `LINKS=0 | 0B`,
+mount container `0`입니다.
+
+일시 worktree의 identity를 비일시적 deployment checkout의 mode `0600`·gitignored `.env`로 옮기는
+첫 stdin 결속 시도에서 당시 원문이 console execution log에 노출됐습니다. marker가 없는 상태라 어느
+carrier도 권위가 아니므로 그 값과 SHA-256
+`6b9b4cfb01adc12242d19d8e72aebf3984c4010623182a979c511e5c8cba8dcc`을 즉시 폐기하고
+provisioning에는 쓰지 않았습니다. `secrets.token_hex(16)`으로 새 값을 생성해 deployment `.env`와
+macOS Keychain에 저장했으며, 원문 출력 없이 두 carrier의 길이·lowercase 32-hex·원문을 대조했습니다.
+새 identity SHA-256은
+`fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`입니다. 두 durable carrier를
+재확인한 다음 일시 worktree `.env`만 삭제했습니다. 이 삭제는 두 사본에서 복구 가능하며 실제 marker는
+아직 없습니다.
+
+Dockerfile은 `.env`를 `COPY`하지 않지만 기존 `.dockerignore`에는 `.env` 계열이 없어 private carrier가
+build context에 포함될 수 있었습니다. build 전에 `.env`와 `.env.*`를 제외하고 negation 재포함을
+거부하는 회귀를 추가했습니다. 이 변경의 clean commit과 exact image attestation 전에는 provisioning
+image를 build하지 않습니다.
+
+Compose 전체 보간이 요구하는 비어 있는 `MQTT_PASSWORD`는 provisioning과 무관하고 provisioning
+service 환경에도 전달되지 않습니다. 따라서 `provisioning-only-unused`를 build와 one-shot 각각의
+**단일 명령 prefix**에만 쓰고, `export`·`.env` 기록·실제 MQTT secret 생성은 하지 않습니다. one-shot
+뒤 `.env`가 계속 빈 값이고 shell export가 없음을 확인합니다. build한 image가 처음 empty volume을
+mount할 때 image directory의 owner·mode가 volume root 초기값이 되는 것은 과거 anonymous volume을
+유효해 보이게 한 메커니즘과 같습니다. 이번에는 exact named volume과 marker가 identity를 추가로
+결속합니다. provisioning이 owner·mode 검증에서 실패하면 `chmod`·`chown`으로 맞추지 않고 즉시
+중단합니다.
+
+이 단계는 source/test와 실행 packet 준비이며 image build·volume mount·marker provisioning·runtime
+verify는 아직 수행하지 않았습니다. device·앱·Home Assistant·private journal·archive·recovery
+supervisor 접촉은 `0`이고 모든 hardware operation은 계속 `NO-GO / BLOCKING`입니다.
