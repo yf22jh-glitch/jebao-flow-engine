@@ -1158,3 +1158,28 @@ incident와 수정 계약은
 사후 artifact 부재 정정은
 [`2026-09-04 run`](runs/2026-09-04-exact-restore-qualification-4dcd8364.md)의 마지막 절을 따릅니다.
 이번 확인과 기록 동안 device·앱·Home Assistant 접촉과 private state write는 `0`이었습니다.
+
+## 2026-09-06 hardware-safety incident source containment 착지 — 실기는 계속 STOP
+
+incident plan의 작업 A·B가 source commit
+`c2a4e8adb425283f94f1d5329d0657c0c705faad`로 착지했습니다. Docker image는 더 이상
+`/hardware-safety` 익명 volume을 자동 provisioning하지 않으므로 explicit mount가 없으면 기존
+`ismount` gate에서 probe와 device discovery 이전에 fail-closed합니다. official Compose의 daemon과
+recovery service가 exact named volume을 공유하는 계약도 repository regression으로 고정했습니다.
+
+사라진 parked operation barrier는 공개 operation digest의 source revocation으로 대체했습니다.
+검사는 현재 record와 embedded predecessor chain 전체를 순회하고 device-capable create·continuation을
+device I/O 전에 거부합니다. 반면 write-free park와 이미 검증된 receipt의 idempotent terminalization은
+막지 않습니다. 다른 deployment에 pre-revocation `FINAL_VERIFIED` journal이 남아 있다면 그 경로가
+새 success finalization을 만들 수 있지만, archive는 journal provenance를 구분하지 못하므로 과거
+operation 성공 판정에는 이 readiness 기록과 incident/run 기록을 함께 사용합니다.
+
+두 실행자가 같은 diff digest에 대해 network-none에서 표적 `167 passed`, 전체 unit `1899 passed`,
+변경 파일 ruff 통과를 각각 확인했습니다. source·test 과정에서 실제 safety volume, private journal·
+archive, device, 앱과 Home Assistant 접촉은 `0`이었습니다.
+
+**현재 판정은 여전히 모든 hardware operation `NO-GO / BLOCKING`입니다.** 이 source 착지는 사라진
+artifact를 복구하지 않았고 named volume identity/provisioning도 수행하지 않았습니다. marker가
+착지하거나 repository maintainer가 exact host preflight를 충분한 장기 경계로 선택하고, 별도 승인된
+named volume provisioning과 fresh Phase 0가 끝나기 전에는 B1/B2/B3·C·D와 recovery supervisor를
+재개하지 않습니다.

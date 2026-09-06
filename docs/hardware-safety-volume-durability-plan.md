@@ -118,3 +118,48 @@ fresh named volume도 처음에는 비어 있으므로 provisioning은 별도 �
 receipt나 qualified bundle도 만들지 않습니다. fresh named volume provisioning, marker 결정,
 fresh Phase 0와 모든 단계별 승인은 별도입니다. 따라서 이 계획과 source가 착지해도 Q2와 앱
 live-write는 계속 `NO-GO / BLOCKING`입니다.
+
+## 2026-09-06 실행 addendum — 작업 A·B source 착지
+
+작업 A와 B는 source commit
+`c2a4e8adb425283f94f1d5329d0657c0c705faad`로 착지했습니다. base
+`fa151903c3b616de9dd9a6b9af412fe97873e915` 대비 diff SHA-256은
+`ec8a93333441b8eeebd88d5d43392bf97e49f5b6d551b3eb85bc080b7f7d08ba`이고, frozen native
+linkage source와 test는 수정하지 않았습니다.
+
+- Dockerfile은 `/data`만 `VOLUME`으로 선언하고 `/hardware-safety`의 image directory·owner·`0700`
+  metadata는 유지합니다. 정적 회귀는 대소문자·선행 공백·tab으로 쓴 `VOLUME`도 탐지하고 shell
+  형식 instruction은 fail-closed하며, official Compose의 두 service가 exact named volume을 공유하는
+  계약을 함께 고정합니다.
+- 사라진 operation의 공개 digest는 source revocation에 들어갔고, 현재 record부터 embedded
+  predecessor chain의 oldest까지 순회합니다. create·promotion과 device-capable continuation은 device
+  observation·resolve·write 이전에 privacy-safe `AUTHORITY` 진단으로 거부됩니다.
+- write-free disposition verify·park, 이미 `FINAL_VERIFIED`인 record의 receipt 회수와 receipt-bound
+  clear는 계속 열려 있습니다.
+
+마지막 항목의 의미를 다음 세 경계로 좁힙니다.
+
+1. 2026-09-06 forensic이 확인한 이 deployment 상태에는 live journal이 없었습니다. 이 commit의
+   source가 적용된 뒤에는 revoked operation의 create·promotion·device-capable continuation이 모두
+   닫히므로 sanctioned 경로로 같은 digest의 `FINAL_VERIFIED` journal에 도달할 수 없습니다. journal을
+   손으로 만드는 것은 계속 금지합니다.
+2. 다른 deployment에 revocation 착지 전에 만들어진 legacy `FINAL_VERIFIED` journal이 실제로
+   존재한다면, 그것을 좌초시키지 않기 위해 write-free terminalization은 의도적으로 허용됩니다. 그
+   경로가 남기는 finalization은 **현재 terminal journal**에서 receipt를 도출해 결속한 새 replay
+   barrier이며, 사라진 2026-09-04 archive bytes를 재구성한 것이 아닙니다.
+3. operation finalization archive는 operation digest로 keying되고 어느 journal instance가 만들었는지
+   provenance를 보존하지 않습니다. 따라서 나중에 같은 digest의 v1 success finalization만 읽어서는
+   2026-09-04 parked operation의 성공 여부와 legacy terminal journal의 후속 처리를 구분할 수 없습니다.
+   과거 성공 판정은 archive 단독이 아니라 원 run 기록과 이 incident 문서를 함께 따라야 합니다.
+
+최종 staged bytes는 서로 다른 두 실행자가 network-none container에서 독립 검증했습니다. 한쪽은
+`/work`·`/tmp`·`/data`·`/hardware-safety`를 tmpfs로 두었고, 다른 쪽은 `/hardware-safety` mount 자체를
+두지 않았습니다. 양쪽 모두 표적 4파일 `167 passed`, 전체 unit `1899 passed`, 변경 Python 5파일
+ruff lint·format 통과를 확인했습니다. 이 실행 결과는 보존 daemon artifact가 아니라 console
+관측입니다. 두 실행자가 일치시킨 diff digest는 commit에서 재계산 가능한 source property이며
+증거등급 대상이 아닙니다. 실제 safety volume·private durable state·device·앱·Home Assistant 접촉은
+`0`이었습니다.
+
+이 착지는 자동 익명 root와 잃은 replay barrier의 source 경로를 닫았지만 hardware `GO`가 아닙니다.
+named volume identity marker와 별도 승인된 provisioning 또는 host preflight를 장기 경계로 삼는
+maintainer 결정, fresh Phase 0와 각 승인 축은 여전히 남아 있습니다.

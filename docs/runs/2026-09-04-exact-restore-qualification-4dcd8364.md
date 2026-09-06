@@ -369,3 +369,25 @@ terminal success로 가장하지 않습니다. 관측된 익명-volume 생성 �
 앱 live-write, Home Assistant 조작과 recovery supervisor 기동은 `NO-GO`입니다. 계획과 범위는
 [`hardware-safety volume durability incident`](../hardware-safety-volume-durability-plan.md)을
 따릅니다.
+
+## 2026-09-06 source containment addendum — 이 run의 성공을 소급 주장하지 않음
+
+incident의 자동 익명 safety-root 경로와 사라진 operation replay는 source commit
+`c2a4e8adb425283f94f1d5329d0657c0c705faad`로 차단했습니다. Dockerfile의 자동
+`/hardware-safety` volume 선언을 제거하고, 이 run operation의 공개 digest를 current record와
+embedded predecessor chain 전체에 적용하는 revocation으로 고정했습니다. 이 source property는
+사라진 journal·snapshot·disposition·finalization을 복원하거나 이 run을 qualification success로
+바꾸지 않습니다.
+
+조사된 이 deployment에는 live journal이 없었고, 새 source에서는 sanctioned create·promotion·
+device-capable continuation이 닫힙니다. 다른 deployment에 revocation 이전의 legacy
+`FINAL_VERIFIED` journal이 실제로 남아 있다면 write-free receipt·clear 경로는 좌초 방지를 위해
+열려 있고, 그 경로의 finalization은 그 **현재 journal**에 결속됩니다. 다만 archive는 operation
+digest로 keying되어 journal provenance를 보존하지 않으므로, 같은 digest의 v1 success 항목 하나만으로
+이 2026-09-04 parked operation이 성공했다고 판정하면 안 됩니다. 이 run의 판정은 앞의 실행 사실과
+2026-09-06 incident 기록을 함께 따릅니다.
+
+같은 source diff를 두 실행자가 network-none container에서 독립 실행해 표적 `167 passed`, 전체
+unit `1899 passed`, 변경 파일 ruff lint·format 통과를 확인했습니다: **(c) console observation**.
+diff SHA-256은 commit에서 재계산 가능한 source property이며 증거등급을 붙이지 않습니다. 이
+검증에서 실제 safety volume·private durable state·device·앱·Home Assistant 접촉은 `0`이었습니다.
