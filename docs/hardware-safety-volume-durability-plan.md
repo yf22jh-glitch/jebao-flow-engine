@@ -430,3 +430,32 @@ mount할 때 image directory의 owner·mode가 volume root 초기값이 되는 �
 이 단계는 source/test와 실행 packet 준비이며 image build·volume mount·marker provisioning·runtime
 verify는 아직 수행하지 않았습니다. device·앱·Home Assistant·private journal·archive·recovery
 supervisor 접촉은 `0`이고 모든 hardware operation은 계속 `NO-GO / BLOCKING`입니다.
+
+## 2026-09-06 provisioning image build와 exact attestation
+
+build-context 차단과 packet은 commit
+`22a5226f26e1cf0f73681273b37bf881654ace8f`로 착지했습니다. marker source
+`adec0a33ce7d212f7ad95b1b3fb91378d01614bf`의 후손이고 build 전후 worktree는 clean입니다. 새 contract
+회귀를 포함한 전체 unit `1940 passed`와 변경 test ruff lint·format 통과를 확인했습니다.
+
+build 이전 첫 container-mount 재검사 시 zsh newline word-splitting 차이 때문에 여러 container id가
+하나의 `docker inspect` 인수로 들어갔고, 뒤 `awk`가 그 오류를 가려 잘못된 `0`을 만들었습니다. stderr로
+오류를 발견한 즉시 그 결과를 폐기하고 build하지 않았습니다. 다음 검사는 Docker JSON을 직접 파싱해
+하위 명령 오류를 전파했으며 identity carrier digest
+`fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10` exact match, context `colima`, named
+volume `local / LINKS=0 / 0B`, safety-root mount container `0`을 확인했습니다. 이어서 문서의 `&&`
+gate 전체를 같은 shell에서 다시 통과한 경우에만 build했습니다.
+
+image reference는 `jebao-q2-slotflowd71lhr-jebao-flow-hardware-safety-provision:latest`, exact id는
+`sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`, 생성 시각은
+`2026-09-06T19:00:43.499183727+09:00`, platform은 `linux/amd64`입니다. network-none·read-only disposable
+container에서 installed `exact_restore.py`·`hardware_safety.py`·`hardware_safety_cli.py`가 source와
+byte-exact하게 같음을 확인했습니다. image의 declared volume은 `/data`뿐이고 private identity·MQTT
+environment와 `/app/.env*`는 없으며, image directory `/hardware-safety`는
+`uid=100 / gid=101 / mode=0700`입니다. 실제 named volume은 attestation container에 mount하지 않았고
+그 뒤에도 `LINKS=0 | 0B`, mount container `0`입니다.
+
+MQTT sentinel은 build 한 명령의 interpolation에만 쓰였고 deployment `.env`의 값은 계속 비어 있으며
+shell export도 없습니다. marker provisioning과 runtime verify는 아직 실행하지 않았습니다. 이 결과는
+증거등급 **(c) reconstructed operator observation**이고 private journal·archive·device·앱·Home
+Assistant·recovery supervisor 접촉은 `0`입니다. hardware는 계속 `NO-GO / BLOCKING`입니다.

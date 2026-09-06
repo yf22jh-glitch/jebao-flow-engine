@@ -1303,3 +1303,35 @@ build·mount·provision·verify하지 않았습니다.
 이 identity custody와 source/test 준비 결과는 증거등급 **(c) reconstructed operator observation**입니다.
 실제 named volume content·private journal·archive, device·앱·Home Assistant·recovery supervisor 접촉은
 `0`입니다. **현재 판정은 계속 모든 hardware operation `NO-GO / BLOCKING`입니다.**
+
+## 2026-09-06 provisioning image build·attestation — marker는 아직 없음
+
+build-context 차단과 실행 packet은 source commit
+`22a5226f26e1cf0f73681273b37bf881654ace8f`로 착지했습니다. 이 commit은 marker source
+`adec0a33ce7d212f7ad95b1b3fb91378d01614bf`의 후손이고 build 직전·직후 tracked/untracked worktree는
+clean이었습니다. 격리 container의 전체 unit은 새 contract 회귀를 포함해 `1940 passed`였고 변경
+test의 ruff lint·format도 통과했습니다.
+
+첫 host-side 재검사 구현은 zsh가 newline-separated container id를 word-split하지 않은 상태에서
+여러 id를 한 인수로 넘겼고, 뒤 `awk`가 `docker inspect` 오류를 가려 mount 수 `0`처럼 보였습니다.
+오류 출력 때문에 즉시 발견해 그 결과를 근거로 쓰지 않았고 build도 시작하지 않았습니다. Docker
+JSON을 직접 파싱해 하위 명령 실패가 전파되도록 다시 실행한 결과 active context `colima`, 두 identity
+carrier exact match, named volume `local / LINKS=0 / 0B`, `/hardware-safety` mount container `0`을
+확인했습니다. 그 뒤 문서에 고정한 `&&` build gate 전체를 같은 shell에서 다시 통과했습니다.
+
+명시적으로 build한 image는
+`jebao-q2-slotflowd71lhr-jebao-flow-hardware-safety-provision:latest`, exact image id는
+`sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`, 생성 시각은
+`2026-09-06T19:00:43.499183727+09:00`, platform은 `linux/amd64`입니다. network-none·read-only 임시
+container에서 installed `exact_restore.py`, `hardware_safety.py`, `hardware_safety_cli.py`를 source
+commit과 SHA-256 byte-exact 대조했습니다. image config의 declared volume은 `/data` 하나뿐이고
+private identity·MQTT env가 embed되지 않았으며 `/app` 아래 `.env*` 파일은 `0`개입니다. image layer의
+`/hardware-safety` metadata는 `uid=100 / gid=101 / mode=0700`으로 확인했습니다. attestation
+container의 `/data`와 `/tmp`에는 tmpfs를 주고 실제 safety volume은 mount하지 않았으며 container는
+자동 제거됐습니다.
+
+build 뒤에도 named volume은 `LINKS=0 | 0B`, safety-root mount container는 `0`입니다. deployment
+`.env`의 MQTT 값은 빈 상태이고 sentinel은 단일 build command에만 전달돼 shell export로 남지
+않았습니다. identity marker provisioning·runtime verify, private journal·archive, device·앱·Home
+Assistant·recovery supervisor 접촉은 아직 `0`입니다. 이 결과는 증거등급 **(c) reconstructed operator
+observation**이며, **모든 hardware operation은 계속 `NO-GO / BLOCKING`입니다.**
