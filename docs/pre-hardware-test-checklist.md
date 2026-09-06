@@ -289,7 +289,8 @@ identity를 찍을 수 있습니다. 이 one-shot이 끝날 때까지 daemon·re
 않습니다. 성공·실패 뒤에는 위 전체-container inspection을 다시 실행해
 provisioning service가 만든 임시 container가 Compose의 generated name을 포함해 어떤 이름으로도
 running·exited 목록에 없음을 확인합니다. `--rm` 실패 등으로 남아 있으면 자동 삭제하지 않고
-`NO-GO`로 보고합니다.
+`NO-GO`로 보고합니다. 그 경우 image의 `/data` `VOLUME`이 만든 anonymous volume도 함께 남을 수
+있으므로 자동 삭제하지 않고 container와 함께 보고합니다.
 
 처음 만든 empty volume에서 provisioning 출력의 `status`는 반드시 `provisioned`이고
 `identity_sha256`은 직전 두-carrier 대조 digest와 같아야 합니다. `already_provisioned`, 다른 digest,

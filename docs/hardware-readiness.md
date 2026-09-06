@@ -1335,3 +1335,40 @@ build 뒤에도 named volume은 `LINKS=0 | 0B`, safety-root mount container는 `
 않았습니다. identity marker provisioning·runtime verify, private journal·archive, device·앱·Home
 Assistant·recovery supervisor 접촉은 아직 `0`입니다. 이 결과는 증거등급 **(c) reconstructed operator
 observation**이며, **모든 hardware operation은 계속 `NO-GO / BLOCKING`입니다.**
+
+## 2026-09-06 safety-root identity marker provisioning·runtime verify 완료
+
+image attestation 기록을 commit `2acc535a5172722f74b5457e33ef814474e69896`로 먼저 착지한 뒤,
+marker write 직전에 clean descendant source, exact image id
+`sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`, active context
+`colima`, driver `local`의 exact named volume, `/hardware-safety` mount container `0`, 두 durable
+carrier의 lowercase 32-hex 원문·SHA-256 exact match를 다시 확인했습니다. 원문은
+출력하지 않았고 public identity SHA-256은
+`fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`입니다.
+
+reviewed image를 `--pull never --no-deps --rm`으로 고정한 network-none provisioning one-shot을 한 번
+실행했고, empty volume의 결과는 `status=provisioned`·위 SHA-256 exact match였습니다. 이어서
+같은 image의 default `verify`를 한 번 실행해 `status=verified`·동일 SHA-256을 확인했습니다.
+두 one-shot 후 모두 provisioning container·safety-root mount container는 `0`건이고, Docker volume name
+set은 전후 `51`개·SHA-256
+`e7409e65b71ba0dc6b18bd6d02ce12310b407cce757f28b4b18aee31b3c0a16f`로 동일했습니다. named volume은
+`LINKS=0 | 61B`이며 marker와 validation probe 외에 exact-restore `status`·journal·archive 명령은
+실행하지 않았습니다.
+
+image의 `/data` `VOLUME`은 one-shot 동안 transient anonymous volume을 만들지만 이 실행에서는
+전후 set이 같아 남지 않았습니다. 독립 실측에서도 `docker compose run --rm`이 정상·비정상
+종료 모두에서 이 volume을 정리했습니다. `--rm` 자체가 실패하면 container와 anonymous
+`/data` volume을 자동 삭제하지 않고 함께 `NO-GO`로 보고하도록 checklist에 고정했습니다.
+image의 `uid=100`은 이제 volume owner 계약의 일부이므로, 후속 image euid가 달라 owner mismatch가
+나면 volume 손상으로 오판하거나 `chown`으로 맞추지 않고 즉시 중단합니다.
+
+사후에도 deployment `.env`의 `MQTT_PASSWORD`는 비어 있고 shell export는 없으며, 두 identity
+carrier는 mode `0600`·`nlink=1`과 exact match를 유지했습니다. 중간 크기 진단에서 Docker
+전역 inventory를 필요 이상으로 console에 펼친 출력 범위 실수가 있었고, raw identity·credential은
+포함되지 않았습니다. 그 출력을 판정 근거로 쓰지 않고 target-only parser로 다시
+확인했습니다.
+
+이 결과는 증거등급 **(c) reconstructed operator observation**입니다. identity marker로 safety-root
+정체성 선행조건은 충족했지만 recovery supervisor·exact-restore `status`·park·fresh Phase 0·
+A·B1·B2·B3·C·D·qualification·앱 live-write·device I/O를 실행하거나 승인하지 않았습니다.
+**현재 판정은 계속 모든 hardware operation `NO-GO / BLOCKING`입니다.**

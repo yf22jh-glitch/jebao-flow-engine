@@ -459,3 +459,52 @@ MQTT sentinel은 build 한 명령의 interpolation에만 쓰였고 deployment `.
 shell export도 없습니다. marker provisioning과 runtime verify는 아직 실행하지 않았습니다. 이 결과는
 증거등급 **(c) reconstructed operator observation**이고 private journal·archive·device·앱·Home
 Assistant·recovery supervisor 접촉은 `0`입니다. hardware는 계속 `NO-GO / BLOCKING`입니다.
+
+## 2026-09-06 marker provisioning·runtime verification 실행 결과
+
+attestation 기록을 commit `2acc535a5172722f74b5457e33ef814474e69896`로 먼저 착지한 뒤 실행했습니다.
+실행 직전의 exact predicate는 다음과 같았습니다.
+
+- source HEAD `2acc535a5172722f74b5457e33ef814474e69896`는 clean이고 marker source
+  `adec0a33ce7d212f7ad95b1b3fb91378d01614bf`의 후손이며, image에 영향을 주는 source·test·
+  container contract은 attested build commit `22a5226f26e1cf0f73681273b37bf881654ace8f` 이후 무변경입니다.
+- image id는 `sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`로
+  exact match했고 `--pull never --no-deps`로 다른 image·service 기동을 금지했습니다.
+- active Docker context는 `colima`, exact named volume은 driver `local`·scope `local`·`LINKS=0 |
+  0B`, running·exited 전체의 `/hardware-safety` mount container는 `0`건이었습니다.
+- deployment `.env`는 mode `0600`·`nlink=1`, Keychain과의 원문·lowercase 32-hex·SHA-256 exact
+  match는 `fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`이었고
+  원문은 출력하지 않았습니다. `.env` MQTT는 빈 값이고 두 secret은 shell export로 없었습니다.
+- Docker volume name set은 `51`개·SHA-256
+  `e7409e65b71ba0dc6b18bd6d02ce12310b407cce757f28b4b18aee31b3c0a16f`로 snapshot했습니다.
+
+`2026-09-06T19:14:47+09:00`에 reviewed image를 network-none·read-only·`--rm`으로 실행해 한 번의
+`provision`을 수행했습니다. empty volume의 exact 출력은 `status=provisioned`·위 identity SHA-256이었습니다.
+`already_provisioned`·digest mismatch·owner/mode error는 없었고 재실행·`chmod`·`chown`은 `0`입니다.
+직후 provisioning container·safety-root mount container는 `0`, named volume은 `LINKS=0 | 61B`, 전체
+volume set은 위 snapshot과 같았습니다.
+
+`2026-09-06T19:15:51+09:00`에 같은 image의 default `verify`를 인자 없이 한 번 수행했고 exact 출력은
+`status=verified`·동일 identity SHA-256이었습니다. 사후에도 provisioning container·safety-root mount
+container는 `0`, volume은 `LINKS=0 | 61B`, 전체 volume set은 동일했습니다. 두 durable
+carrier는 mode·link·원문·digest exact match를 유지했고 deployment `.env` MQTT는 비었으며 shell
+export는 없었습니다.
+
+image의 `/data` `VOLUME`은 one-shot container 생성 중 transient anonymous volume을 만들지만 이 실행의
+전후 volume set이 같아 남지 않았습니다. 독립 실측에서도 `docker compose run --rm`은
+정상·비정상 종료 모두에서 이 volume을 제거했습니다. `--rm` 자체가 실패하면 container와
+anonymous `/data` volume을 자동 삭제하지 않고 함께 보고하도록 checklist에 고정했습니다.
+image layer의 `uid=100`은 최초 mount가 volume root에 복사했으므로 이제 해당 volume owner 계약의
+일부입니다. 후속 image euid가 달라 owner mismatch가 나면 손상으로 오판하거나 `chown`으로
+맞추지 않고 중단합니다.
+
+중간 `docker system df --format json` 스키마 확인 진단이 target만 내보내려던 의도와 달리
+전역 Docker inventory metadata를 console에 펼쳤습니다. raw identity·credential은 포함되지 않았고,
+그 결과를 판정 근거로 쓰지 않았으며 target-only parser로 container `0`·volume `61B`를 다시
+확인했습니다.
+
+이 실행의 증거등급은 **(c) reconstructed operator observation**입니다. safety-root에는 marker와
+validation probe만 접촉했고 exact-restore `status`·journal·archive·recovery supervisor는 실행하지
+않았습니다. device·앱·Home Assistant 접촉도 `0`입니다. marker는 safety-root 정체성을 증명하는
+한 선행조건만 닫았으며 fresh Phase 0·A·B1·B2·B3·C·D를 대신하지 않습니다.
+**hardware는 계속 `NO-GO / BLOCKING`입니다.**
