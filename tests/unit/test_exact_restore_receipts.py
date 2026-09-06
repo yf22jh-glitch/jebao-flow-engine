@@ -20,6 +20,7 @@ from jebao_flow.exact_restore_receipts import (
     ExactRestoreReceiptArchiveClaimError,
     ExactRestoreReceiptArchiveError,
 )
+from tests.unit.hardware_safety_support import install_test_hardware_safety_identity
 
 
 def _receipt(*, operation_id: str = "qualification_001") -> ExactRestoreReceipt:
@@ -76,6 +77,7 @@ def test_default_archive_uses_fixed_hardware_safety_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _private_root(tmp_path)
+    install_test_hardware_safety_identity(root, monkeypatch)
     monkeypatch.setattr(hardware_safety, "_HARDWARE_SAFETY_ROOT", root)
     monkeypatch.setattr(hardware_safety.os.path, "ismount", lambda path: path == root)
     archive = ExactRestoreReceiptArchive()

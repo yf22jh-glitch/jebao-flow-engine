@@ -149,10 +149,24 @@ directed broadcast 주소를 넣습니다. 저장소의 예제는 `dry_run: true
 못합니다. 현장에서만 `dry_run: false`로 바꿉니다.
 
 Compose는 `hardware` 프로필의 서비스만 실행해도 전체 파일의 환경 변수 보간을 먼저 검사합니다.
-따라서 배포 호스트의 private `.env`에 `MQTT_PASSWORD`와
-`JEBAO_FLOW_HARDWARE_CONFIG=./config.hardware-test.yaml`을 설정한 뒤 아래 명령을 실행합니다.
+따라서 배포 호스트의 private `.env`에 `MQTT_PASSWORD`,
+`JEBAO_FLOW_HARDWARE_CONFIG=./config.hardware-test.yaml`, 그리고 lowercase 32-hex
+`JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID`를 설정한 뒤 아래 명령을 실행합니다. volume identity는
+`python -c 'import secrets; print(secrets.token_hex(16))'`로 최초 provisioning 전에 **한 번만** 생성해
+private `.env` 또는 동등한 secret store와 별도 복구 가능한 private backup에 보존하며, marker가
+설치된 뒤에는 바꾸거나 재생성하지 않습니다. 관측 전용 `jebao-flowd`도 Compose의 동일한 required-env
+계약 때문에 이 값이 없으면 시작하지 않습니다.
 MQTT 비밀번호는 recovery 컨테이너 환경에는 전달되지 않지만, 기본 `jebao-flowd` 서비스의
 필수 변수 검증 때문에 비어 있으면 Compose 명령 자체가 거부됩니다.
+
+expected identity를 잃었다면 새 값으로 provisioning하거나 volume·marker를 삭제하지 않습니다.
+모든 hardware operation을 `NO-GO`로 두고, 아래 active-context·전체-container·exact named-volume
+inspection을 먼저 통과한 뒤 별도 승인 아래 reviewed exact image의 network-none·read-only·`--rm`
+one-shot에 exact named volume을 read-only로 mount해 canonical marker의 기존 `volume_id`만 회수합니다.
+그 exact 값을 private secret store에 복원하고 recovery one-shot이 running·exited 목록에서 완전히
+사라진 뒤 host inspection과 `jebao-flow-hardware-safety verify`를 다시 통과시킵니다. raw identity는
+저장소·run 기록·일반 console log에 남기지 않으며 provenance나 canonical bytes를 확인하지 못하면
+복구하지 않고 `NO-GO`를 유지합니다.
 
 ## 1. 현장 상태 준비
 
@@ -167,63 +181,102 @@ MQTT 비밀번호는 recovery 컨테이너 환경에는 전달되지 않지만, 
 docker compose stop jebao-flowd
 ```
 
-## 2. recovery supervisor 먼저 시작
+## 2. volume identity를 확인한 뒤 recovery supervisor 시작
 
-Supervisor는 평상시 장비를 검색하거나 연결하지 않고 `/hardware-safety`의 unfinished journal만
-확인합니다. one-shot 프로세스가 비정상 종료된 경우에도 시험을 재개하지 않고 복구만 수행합니다.
-
-```bash
-docker compose --profile hardware up -d jebao-flow-recovery
-```
+Supervisor를 먼저 기동하면 marker 없는 migration에서는 `Up` 상태를 유지한 채 매 cycle runtime
+검증에 실패해 `ERROR`만 보고하고 복구를 전혀 수행하지 않습니다. `docker ps`에서 정상으로 보이는
+것은 순서가 맞았다는 증거가 아닙니다. 따라서 **exact named volume host inspection → 필요한 경우 별도 승인 provisioning →
+provisioning container 부재 재확인 → supervisor 기동 → runtime mount 확인** 순서를 지킵니다.
 
 Supervisor와 모든 one-shot 컨테이너는 Compose의 동일한
 `jebao-flow-hardware-safety:/hardware-safety` 볼륨을 사용해야 합니다. 공식 Compose 파일은
 project 이름과 무관하게 이 호스트 전역 볼륨 이름을 고정합니다. 임의 볼륨으로 바꾸거나 Compose
 밖에서 별도 컨테이너를 실행하면 전역 제어권을 공유한다고 볼 수 없으므로 사용하지 않습니다.
 
-**2026-09-06 incident 이후에는 Compose 선언만 보지 않고 실제 container mount를 확인합니다.**
-`/hardware-safety`를 열거나 writability probe를 만들기 전에 host에서 다음 read-only inspection을
-실행합니다.
+**2026-09-06 incident 이후에는 Compose 선언만 보지 않고 실제 Docker context·volume·container
+mount를 확인합니다.** 어떤 container가 `/hardware-safety`를 열거나 writability probe를 만들기 전에
+host에서 다음 read-only provisioning preflight를 실행합니다.
 
 ```bash
 docker context show
+docker volume inspect --format '{{.Name}}' jebao-flow-hardware-safety
 
-docker inspect --format \
-  '{{range .Mounts}}{{if eq .Destination "/hardware-safety"}}{{printf "%s %s %s %s\n" $.Name .Type .Name .Destination}}{{end}}{{end}}' \
-  $(docker container ls --all --quiet)
-
-docker inspect --format \
-  '{{range .Mounts}}{{if eq .Destination "/hardware-safety"}}{{printf "%s %s %s\n" .Type .Name .Destination}}{{end}}{{end}}' \
-  jebao-flow-recovery
+bash -eu -o pipefail <<'BASH'
+container_ids="$(docker container ls --all --quiet)"
+for container_id in $container_ids; do
+  mount_lines="$(docker inspect --format \
+    '{{range .Mounts}}{{if eq .Destination "/hardware-safety"}}{{printf "%s %s %s %s %s\n" $.Name $.State.Status .Type .Name .Destination}}{{end}}{{end}}' \
+    "$container_id")"
+  if [[ -n "$mount_lines" ]]; then
+    printf '%s\n' "$mount_lines"
+  fi
+done
+BASH
 ```
 
-첫 명령은 running·exited container를 모두 검사합니다. 출력의 container 이름은
-`/jebao-flow-recovery` 또는 `/jebao-flowd`만 허용하고, 각 줄의 나머지는 정확히
+첫 줄의 active Docker context는 precommit한 daemon과 같아야 하고 실행 기록에 남깁니다. volume
+inspection 출력은 정확히 `jebao-flow-hardware-safety` 한 줄이어야 합니다. volume이 없거나 명령이
+실패하면 provisioning command가 그것을 암묵적으로 만들게 두지 않고, 별도 volume-creation 승인과
+확인 전까지 `NO-GO`입니다.
+
+container inspection은 running·exited 전체를 검사합니다. provisioning 전에는 container가 하나도
+없어 출력이 0줄인 것이 허용됩니다. 줄이 있다면 container 이름은 `/jebao-flow-recovery` 또는
+`/jebao-flowd`만 허용하고, type·volume name·destination은 정확히
 `volume jebao-flow-hardware-safety /hardware-safety`여야 합니다. 다른 container가 한 줄이라도
-나오면 이번 incident와 같은 unsanctioned root 사용이므로 `NO-GO`입니다.
+나오면 이번 incident와 같은 unsanctioned root 사용이므로 `NO-GO`입니다. marker provisioning이
+필요한 경우에는 두 sanctioned container도 부재하거나 `created`·`exited` 상태여야 하며,
+`running`·`restarting`·`paused` 등 root를 사용할 수 있는 상태가 하나라도 있으면 별도 승인된 정지와
+재검증 전에는 provisioning을 실행하지 않습니다.
 
-volume identity를 최초 provisioning하는 별도 one-shot은 이 허용 집합에 들어가지 않습니다.
-provisioning은 반드시 exact named-volume host inspection을 먼저 통과한 뒤 별도 승인 아래
-`docker compose run --rm`으로 실행하고, 성공·실패 어느 경우든 위 inspection 시점에는 그 container가
-running·exited 목록에서 완전히 부재해야 합니다. provisioning은 journal·archive 내용을 확인하지
-않으므로 선행 host inspection을 생략하면 잘못된 volume에 identity를 찍을 수 있습니다. `--rm` 실패
-등으로 container가 남아 있으면 자동 삭제하지 않고 `NO-GO`로 보고합니다.
+volume identity를 최초 provisioning하는 별도 one-shot은 이 허용 집합에 들어가지 않습니다. 위
+preflight를 통과하고 별도 host-state 승인을 받은 경우에만 network-none service를 **명시적으로**
+`provision` mode로 한 번 실행합니다. 이미 provisioned인 정상 운영에서는 이 단계를 반복하지 않습니다.
 
-둘째 명령의 출력은 **정확히 한 줄**
-`volume jebao-flow-hardware-safety /hardware-safety`여야 합니다. 어느 inspection 명령이든 비영
-종료하거나, target container 부재, 빈 출력, 두 줄 이상, `bind`, 익명 volume id 또는 다른 named
-volume이면 supervisor·status·one-shot을 실행하지 않고 `NO-GO`로 보고합니다. daemon을 사용할 때도
-`jebao-flowd`에 둘째 검사를 별도로 적용합니다. image의 `/hardware-safety` directory나 단순
-`os.path.ismount()` 통과는 named volume identity의 증명이 아닙니다.
+```bash
+docker compose --profile hardware-safety-provisioning run --rm \
+  jebao-flow-hardware-safety-provision provision
+```
 
-첫 줄의 active Docker context가 precommit한 daemon과 같은지도 확인하고 실행 기록에 남깁니다.
-위 inspection은 **파이프 없이** 실행합니다. 출력을 가공해야 한다면 먼저 `set -o pipefail`을 켜서
+provisioning은 journal·archive 내용을 확인하지 않으므로 선행 inspection을 생략하면 잘못된 volume에
+identity를 찍을 수 있습니다. 이 one-shot이 끝날 때까지 daemon·recovery·다른 root user를 시작하지
+않습니다. 성공·실패 뒤에는 위 전체-container inspection을 다시 실행해
+provisioning service가 만든 임시 container가 Compose의 generated name을 포함해 어떤 이름으로도
+running·exited 목록에 없음을 확인합니다. `--rm` 실패 등으로 남아 있으면 자동 삭제하지 않고
+`NO-GO`로 보고합니다.
+
+그 뒤에만 supervisor를 시작합니다. Supervisor는 평상시 장비를 검색하거나 연결하지 않고
+`/hardware-safety`의 unfinished journal만 확인합니다. one-shot 프로세스가 비정상 종료된 경우에도
+시험을 재개하지 않고 복구만 수행합니다.
+
+```bash
+docker compose --profile hardware up -d jebao-flow-recovery
+
+bash -eu -o pipefail <<'BASH'
+target_mount="$(docker inspect --format \
+  '{{range .Mounts}}{{if eq .Destination "/hardware-safety"}}{{printf "%s %s %s\n" .Type .Name .Destination}}{{end}}{{end}}' \
+  jebao-flow-recovery)"
+[ -n "$target_mount" ]
+printf '%s\n' "$target_mount"
+BASH
+```
+
+마지막 inspection 출력은 **정확히 한 줄**
+`volume jebao-flow-hardware-safety /hardware-safety`여야 합니다. 비영 종료, target container 부재,
+빈 출력, 두 줄 이상, `bind`, 익명 volume id 또는 다른 named volume이면 supervisor·status·one-shot을
+실행하지 않고 `NO-GO`로 보고합니다. supervisor 기동 뒤 전체-container inspection도 다시 적용합니다.
+daemon을 사용할 때는 `jebao-flowd`에 같은 target inspection을 별도로 적용합니다. image의
+`/hardware-safety` directory나 단순 `os.path.ismount()` 통과는 named volume identity의 증명이
+아닙니다.
+
+inspection은 **파이프 없이** 실행합니다. 출력을 가공해야 한다면 먼저 `set -o pipefail`을 켜서
 `docker inspect` 자체의 실패가 파이프 성공으로 바뀌지 않게 합니다. `| wc -l`·`| grep`·`| head`
 뒤의 파이프 최종 종료코드를 Docker 성공으로 오독하지 않습니다.
 
 Dockerfile은 `/hardware-safety`를 `VOLUME`으로 선언하지 않습니다. 따라서 mount 없이 ad-hoc
 container를 띄우면 image directory가 남더라도 runtime의 mount 검사가 fail-closed해야 합니다.
 명시적인 다른 `-v ...:/hardware-safety`도 금지하며, 위 actual-mount 검사를 생략하지 않습니다.
+link 이전에 중단된 provisioning은 marker 형식의 orphan temporary를 남길 수 있습니다. 그것은 final
+marker가 아니며 자동 삭제하지 않고 증거로 보존합니다.
 
 ## 3. 첫 Pro 한 대 검증
 

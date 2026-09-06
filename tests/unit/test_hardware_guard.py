@@ -13,6 +13,7 @@ from jebao_flow.hardware_guard import (
     HardwareOperationBusyError,
     HardwareOperationLockError,
 )
+from tests.unit.hardware_safety_support import install_test_hardware_safety_identity
 
 
 def _guard(tmp_path: Path, *, poll_interval_seconds: float = 0.01) -> DeploymentHardwareGuard:
@@ -214,6 +215,8 @@ def test_default_paths_validate_fixed_safety_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    os.chmod(tmp_path, 0o700)
+    install_test_hardware_safety_identity(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "jebao_flow.hardware_guard.global_operation_lock_path",
         lambda: tmp_path / "hardware-operation.lock",
@@ -249,6 +252,7 @@ def test_fixed_root_swap_never_opens_replacement_namespace(
     detached = tmp_path / "detached-hardware-safety"
     root.mkdir(mode=0o700)
     os.chmod(root, 0o700)
+    install_test_hardware_safety_identity(root, monkeypatch)
     monkeypatch.setattr(hardware_safety, "_HARDWARE_SAFETY_ROOT", root)
     monkeypatch.setattr(hardware_safety.os.path, "ismount", lambda path: path == root)
     guard = DeploymentHardwareGuard()

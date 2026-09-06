@@ -177,9 +177,13 @@ expected identity 생성은 승인하지 않습니다.
   production 생성자는 normal runtime config를 받지 않고 `status`도 config 없이 root를 열기 때문에,
   config 결속을 새로 퍼뜨리지 않습니다. Compose는 daemon·recovery·provisioning service 모두에서
   `${JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID:?...}`로 미설정을 먼저 거부하고 실제 값은 commit하지
+  않습니다. 값은 최초 provisioning 전에 한 번만 생성해 deployment private `.env` 또는 동등한
+  secret store와 별도 복구 가능한 private backup에 보존합니다. marker가 설치된 뒤에는 값을 rotate·
+  재생성하지 않습니다. 관측 전용 `jebao-flowd`도 같은 Compose 계약 때문에 이 값이 없으면 시작하지
   않습니다.
 - root marker는 `.hardware-safety-identity`, owner process 소유, mode `0600`, regular file,
-  `nlink == 1`입니다. 내용은 newline으로 끝나는 canonical JSON이며 exact key set은
+  `nlink == 1`이고 marker의 `st_dev`는 root descriptor의 `st_dev`와 같아야 합니다. 내용은 newline으로
+  끝나는 canonical JSON이며 exact key set은
   `{"version":1,"volume_id":"<lowercase 32 hex>"}`입니다. dirfd-relative no-follow open과 named/opened
   inode 대조를 사용하고 expected value 비교는 constant-time으로 수행합니다.
 - 이 marker는 unprovisioned root와 **다른 identity를 가진** accidental wrong volume을 fail-closed로
@@ -191,7 +195,8 @@ expected identity 생성은 승인하지 않습니다.
 
 1. runtime open은 fixed root mount·owner·`0700` descriptor를 먼저 확인합니다.
 2. **어떤 writability probe보다 먼저** marker metadata·canonical bytes·expected identity를 확인하고,
-   marker 부재·환경변수 부재/형식 오류·mismatch·corruption이면 volume에 write하지 않고 거부합니다.
+   marker 부재·환경변수 부재/형식 오류·mismatch·corruption·다른 filesystem의 marker이면 volume에
+   write하지 않고 거부합니다.
 3. marker 확인 뒤에만 기존 temporary `0600` probe를 수행하고, mount descriptor와 marker를 다시
    확인한 뒤 retained capability를 반환합니다. 따라서 journal store·archive·guard의 실패는 device
    discovery·observation·resolve·write보다 앞입니다.
@@ -225,7 +230,9 @@ context와 모든 container mount를 host preflight로 확인하고, journal·ar
 별도 host-state 승인 아래 provisioning one-shot을 **`docker compose run --rm` 형태로** 실행합니다.
 provisioning 자체는 volume 안의 journal·archive 내용을 판정하지 않으므로, exact named-volume host
 preflight가 잘못된 volume에 identity를 찍지 않게 하는 유일한 선행 경계입니다. 이 순서를 바꾸지
-않습니다. provisioning container는 hardware preflight의 허용 container가 아니며, 성공·실패 어느
+않습니다. provisioning interval에는 daemon·recovery·다른 root user가 부재하거나 정지된 상태임을
+확인하고 one-shot 종료 전에는 시작하지 않습니다. provisioning container는 hardware preflight의
+허용 container가 아니며, 성공·실패 어느
 경우든 preflight 시점에 running·exited 목록에서 완전히 부재해야 합니다. `--rm` 실패 등으로 남아
 있으면 삭제를 자동 수행하지 않고 별도 확인·승인 전까지 hardware `NO-GO`를 유지합니다.
 
@@ -243,15 +250,34 @@ journal과 archive를 신뢰할 수 없으므로, **exact named-volume preflight
 - provisioning은 no-clobber이고 동일 marker 재실행만 멱등 성공합니다. 다른/corrupt final marker는
   보존한 채 거부하고, partial temporary가 final marker로 보이지 않음을 고정합니다. temporary write →
   file fsync → close → hard-link install → parent fsync → temporary unlink → parent fsync → exact reload
-  순서를 회귀로 고정합니다.
+   순서를 회귀로 고정합니다.
 - hard-link install 직후 crash 상태(final marker와 같은 inode인 temporary, `nlink == 2`)에서는 runtime이
   probe 전에 거부하고, 승인된 provisioning만 exact marker temporary link를 제거해 `nlink == 1`로
   복구합니다. 다른 이름이나 다른 inode의 파일은 그대로 남고, 설명되지 않는 link는 fail-closed합니다.
 - Compose 세 service의 required env, provisioning service의 network-none/read-only/exact named mount와
   `restart: "no"`·console entrypoint를 정적으로 검증합니다. checklist는 provisioning을 `--rm`으로만
   실행하고 hardware preflight 시점의 running·exited 허용 집합에서 제외합니다.
+- `.env.example`은 실제 identity를 넣지 않은 채 required variable과 one-time 생성·보존 규칙을
+  드러냅니다. digest helper와 실제 verify/provision CLI 회귀는 private 32-hex 원문이 stdout·stderr에
+  나오지 않음을 고정합니다.
 - frozen native linkage source와 test는 수정하지 않고, 실제 volume과 private state는 테스트에서
   mount하지 않습니다.
+
+### expected identity 분실 시 복구
+
+private expected identity를 잃거나 변경했다면 새 값을 생성해 맞추지 않고 모든 hardware operation을
+`NO-GO`로 둡니다. volume·marker·journal을 삭제하거나 marker를 overwrite·재provision하지 않습니다.
+active Docker context, running·exited 전체 mount와 exact named volume을 아래 checklist 계약으로 먼저
+확인한 뒤, 별도 승인 아래 reviewed exact image를 사용하는 network-none·read-only·`--rm` one-shot에
+그 named volume을 **read-only**로 mount해 canonical marker의 기존 `volume_id`를 회수합니다. 그 exact
+값만 deployment private `.env` 또는 secret store에 복원하고 one-shot이 완전히 사라진 뒤 host
+preflight와 `verify`를 다시 통과시킵니다. raw identity는 저장소·run 기록·일반 console log에 남기지
+않습니다. 어느 단계에서든 exact volume provenance나 marker canonicality를 확인하지 못하면 복구를
+계속하지 않고 `NO-GO`를 유지합니다.
+
+link 이전 crash가 남긴 orphan marker temporary는 자동 삭제하지 않으며 final marker로 신뢰하지
+않습니다. root 목록에서 보이더라도 증거로 보존하고, final marker의 identity·metadata 검증과 별개로
+기록합니다.
 
 source가 착지해도 실제 expected identity와 marker는 존재하지 않습니다. 별도 provisioning 승인과
 실행 결과를 확인하기 전까지 모든 hardware operation은 계속 `NO-GO / BLOCKING`입니다.

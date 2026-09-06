@@ -13,6 +13,7 @@ from jebao_flow.exact_restore_store import (
     ExactRestoreJournalError,
     ExactRestoreJournalStore,
 )
+from tests.unit.hardware_safety_support import install_test_hardware_safety_identity
 
 
 def _record(phase: str = "captured") -> dict[str, object]:
@@ -56,6 +57,7 @@ def test_default_path_uses_hardware_safety_root(
     root = tmp_path / "hardware-safety"
     root.mkdir(mode=0o700)
     os.chmod(root, 0o700)
+    install_test_hardware_safety_identity(root, monkeypatch)
     monkeypatch.setattr(hardware_safety, "_HARDWARE_SAFETY_ROOT", root)
     monkeypatch.setattr(hardware_safety.os.path, "ismount", lambda path: path == root)
 
@@ -64,7 +66,10 @@ def test_default_path_uses_hardware_safety_root(
     assert store.path == root / "exact-restore.json"
     with store.claim():
         pass
-    assert {path.name for path in root.iterdir()} == {".exact-restore.json.lock"}
+    assert {path.name for path in root.iterdir()} == {
+        ".exact-restore.json.lock",
+        hardware_safety.HARDWARE_SAFETY_IDENTITY_FILENAME,
+    }
 
 
 @pytest.mark.parametrize("operation", ["claim", "load"])
@@ -77,6 +82,7 @@ def test_fixed_root_swap_after_validation_never_uses_replacement_namespace(
     detached = tmp_path / "detached-hardware-safety"
     root.mkdir(mode=0o700)
     os.chmod(root, 0o700)
+    install_test_hardware_safety_identity(root, monkeypatch)
     monkeypatch.setattr(hardware_safety, "_HARDWARE_SAFETY_ROOT", root)
     monkeypatch.setattr(hardware_safety.os.path, "ismount", lambda path: path == root)
     store = ExactRestoreJournalStore()

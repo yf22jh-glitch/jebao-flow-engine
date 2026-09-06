@@ -16,6 +16,7 @@ from jebao_flow.exact_restore_guard import (
     ExactRestoreOperationBusyError,
     ExactRestoreOperationLockError,
 )
+from tests.unit.hardware_safety_support import install_test_hardware_safety_identity
 
 
 def _guard(tmp_path: Path, *, poll_interval_seconds: float = 0.01) -> ExactRestoreGuard:
@@ -239,6 +240,7 @@ def test_default_paths_validate_fixed_safety_root(
     root = tmp_path / "hardware-safety"
     root.mkdir(mode=0o700)
     os.chmod(root, 0o700)
+    install_test_hardware_safety_identity(root, monkeypatch)
     monkeypatch.setattr(hardware_safety, "_HARDWARE_SAFETY_ROOT", root)
     monkeypatch.setattr(hardware_safety.os.path, "ismount", lambda path: path == root)
 
@@ -246,7 +248,10 @@ def test_default_paths_validate_fixed_safety_root(
     with guard.lease():
         pass
 
-    assert {path.name for path in root.iterdir()} == {"hardware-operation.lock"}
+    assert {path.name for path in root.iterdir()} == {
+        hardware_safety.HARDWARE_SAFETY_IDENTITY_FILENAME,
+        "hardware-operation.lock",
+    }
 
 
 def test_fixed_root_swap_after_validation_never_opens_replacement_namespace(
@@ -257,6 +262,7 @@ def test_fixed_root_swap_after_validation_never_opens_replacement_namespace(
     detached = tmp_path / "detached-hardware-safety"
     root.mkdir(mode=0o700)
     os.chmod(root, 0o700)
+    install_test_hardware_safety_identity(root, monkeypatch)
     monkeypatch.setattr(hardware_safety, "_HARDWARE_SAFETY_ROOT", root)
     monkeypatch.setattr(hardware_safety.os.path, "ismount", lambda path: path == root)
     guard = ExactRestoreGuard()

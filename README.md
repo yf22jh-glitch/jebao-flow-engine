@@ -138,16 +138,24 @@ jebao-flowctl probe 192.0.2.41 --decode --json
 
 ```bash
 cp config.example.yaml config.yaml
-MQTT_PASSWORD='replace-on-home-server' \
-  JEBAO_FLOW_CONFIG=./config.yaml \
-  docker compose up --build
+if [ ! -e .env ]; then
+  cp .env.example .env
+fi
+# Edit the private .env values before continuing.
+docker compose up --build
 ```
 
 현재 Compose 파일은 기본적으로 예제 설정을 읽고 Observer 데몬을 실행합니다. Linux 홈서버에서
 UDP 브로드캐스트 검색을 사용할 수 있도록 host network를 기본값으로 둡니다. 실제 배포
 전에는 `config.example.yaml`을 `config.yaml`로 복사해 장비와 MQTT 주소를 수정하고,
 `JEBAO_FLOW_CONFIG`로 그 파일을 마운트합니다. 비밀번호는 저장소 파일이 아니라 홈서버의
-환경 변수나 비밀 저장소로 주입합니다.
+환경 변수나 private `.env`·비밀 저장소로 주입합니다.
+
+`JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID`는 최초 safety-volume provisioning 전에 한 번만 생성해 private
+`.env` 또는 비밀 저장소와 별도 복구 가능한 private backup에 보존합니다. marker 설치 뒤에는 값을
+바꾸거나 재생성하지 않습니다. 값을 잃었다면 새 identity로 덮지 말고
+[`docs/pre-hardware-test-checklist.md`](docs/pre-hardware-test-checklist.md)의 승인된 read-only 복구
+절차를 따릅니다. 이 required variable이 없으면 관측 전용 daemon도 Compose 단계에서 시작하지 않습니다.
 
 각 장비의 실제 `device_id`와 MAC은 공개 예제에 넣지 말고 홈서버의 `config.yaml`에서
 `devices[].identity`로 지정해야 합니다. 정확히 매핑되지 않은 장비는 관찰 연결을 열지 않습니다.

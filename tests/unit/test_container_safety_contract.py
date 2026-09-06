@@ -70,7 +70,11 @@ def test_compose_services_share_the_exact_named_hardware_safety_volume() -> None
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     expected_mount = "jebao-flow-hardware-safety:/hardware-safety"
 
-    for service_name in ("jebao-flowd", "jebao-flow-recovery"):
+    for service_name in (
+        "jebao-flowd",
+        "jebao-flow-recovery",
+        "jebao-flow-hardware-safety-provision",
+    ):
         mounts = compose["services"][service_name]["volumes"]
         safety_mounts = [mount for mount in mounts if mount.endswith(":/hardware-safety")]
         assert safety_mounts == [expected_mount]
@@ -78,3 +82,45 @@ def test_compose_services_share_the_exact_named_hardware_safety_volume() -> None
     assert compose["volumes"]["jebao-flow-hardware-safety"] == {
         "name": "jebao-flow-hardware-safety"
     }
+
+
+def test_compose_requires_one_external_identity_for_every_safety_root_user() -> None:
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    expected = (
+        "${JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID:"
+        "?set JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID before starting}"
+    )
+
+    for service_name in (
+        "jebao-flowd",
+        "jebao-flow-recovery",
+        "jebao-flow-hardware-safety-provision",
+    ):
+        environment = compose["services"][service_name]["environment"]
+        assert environment["JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID"] == expected
+
+
+def test_example_env_declares_but_does_not_embed_the_private_volume_identity() -> None:
+    lines = (ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+
+    assert "JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID=" in lines
+
+
+def test_provisioning_service_is_explicit_bounded_and_not_restartable() -> None:
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    service = compose["services"]["jebao-flow-hardware-safety-provision"]
+
+    assert service["profiles"] == ["hardware-safety-provisioning"]
+    assert service["restart"] == "no"
+    assert service["network_mode"] == "none"
+    assert service["read_only"] is True
+    assert service["tmpfs"] == ["/tmp"]
+    assert service["entrypoint"] == ["jebao-flow-hardware-safety"]
+    assert service["command"] == ["verify"]
+    assert service["volumes"] == ["jebao-flow-hardware-safety:/hardware-safety"]
+
+
+def test_identity_console_script_is_installed() -> None:
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'jebao-flow-hardware-safety = "jebao_flow.hardware_safety_cli:main"' in pyproject
