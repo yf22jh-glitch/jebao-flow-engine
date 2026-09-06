@@ -1118,3 +1118,43 @@ coverage는 device-time evidence로만 확정되며, 부족하면 `UNESTABLISHED
 실기 run 파일은 **아직 만들지 않습니다** — `docs/runs/`는 실제 장비 실행 기록이므로, B1의 첫 장비
 접촉이 발생하는 시점에 새 run id로 만듭니다. 이 결정 기록 작업 동안 장비·앱·Home Assistant·private
 journal·archive·recovery supervisor 접촉은 `0`이었습니다.
+
+## 2026-09-06 hardware-safety durable root incident — 전체 실기 STOP
+
+승인된 0단계의 첫 read-only 확인에서 현재 `/hardware-safety` root가 비어 있고, 그 root를 제공하는
+유일한 container mount가 Docker **익명 volume**임을 확인했습니다. 이어진 범위 한정 read-only
+forensic은 daemon의 전체 volume, 사용 가능한 Docker context/profile, 제한된 host 경로와 VM
+root에서 2026-09-04 run이 참조한 parked disposition, journal snapshot, tombstone과 permanent
+operation finalization을 찾지 못했습니다. 탐색의 정확한 범위와 제외 대상은 incident 문서에
+기록했으며 외부 매체·다른 머신·백업은 조사하지 않았습니다. 삭제 시각·주체와 실제 삭제 명령은
+`UNKNOWN`입니다.
+
+따라서 위 설치 환경 기준선의 “recovery와 one-shot 명령이 고정 이름 `/hardware-safety` volume을
+공유” 체크와, 뒤 절들의 “permanent barrier 재검증” 전제는 **현재 충족되지 않습니다.** 당시 파일이
+생성·대조됐다는 실행 기록을 소급 부정하지 않지만 2026-09-06 현재 그 파일은 보존돼 있지 않아
+재검증할 수 없고, 같은 operation의 영구 replay 차단도 현재 존재하지 않습니다.
+
+구조적 결함은 source에서 독립적으로 확인됐습니다. Dockerfile은 owner·mode가 runtime gate와 정확히
+일치하는 빈 `/hardware-safety`를 만든 뒤 그 경로를 `VOLUME`으로 선언합니다. ad-hoc container는
+이 metadata로 초기화된 폐기 가능한 익명 volume을 자동으로 받고, mount·owner·mode·writability
+검사를 모두 통과할 수 있습니다. 이것은 `AGENTS.md` §3의 durable journal/rollback·replay barrier
+손실 P1입니다.
+
+현재 판정은 다음으로 대체합니다.
+
+- **모든 hardware operation, B1/B2/B3 device read, C semantic host mutation, D device write,
+  앱 live-write와 recovery supervisor 기동: `NO-GO / BLOCKING`.**
+- 빈 root에서 `exact-restore status`를 실행하지 않습니다. temporary probe와 오도하는 `idle` 결과만
+  만들 수 있습니다.
+- 현재 volume을 삭제·prune·rename·recreate·초기화하거나, 사라진 artifact를 digest에서 재구성하지
+  않습니다.
+- Dockerfile의 자동 익명 safety volume 경로, official Compose named-mount 계약과 사라진 operation
+  replay를 source·회귀로 먼저 차단합니다.
+- 그 뒤에도 actual named volume의 identity·durability를 host-side에서 exact 확인하고 별도 승인된
+  provisioning을 끝내기 전에는 실기를 재개하지 않습니다.
+
+incident와 수정 계약은
+[`Hardware-safety volume durability incident and remediation`](hardware-safety-volume-durability-plan.md),
+사후 artifact 부재 정정은
+[`2026-09-04 run`](runs/2026-09-04-exact-restore-qualification-4dcd8364.md)의 마지막 절을 따릅니다.
+이번 확인과 기록 동안 device·앱·Home Assistant 접촉과 private state write는 `0`이었습니다.

@@ -2066,3 +2066,18 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
 **규율**: 산술이 맞아떨어진다는 것은 그 값이 실제로 그렇게 기록돼 있었다는 증명이 아닙니다.
 보존 산출물에서 읽지 않은 값은 재구성으로 적고, 재구성에 기대어 새 값을 고를 때는 그 선택이
 무엇에 근거했는지를 함께 적습니다.
+
+## 2026-09-06 중단 — durable safety root 전제 상실
+
+이 계획의 현행 실행 절은 **실행에 사용하지 않습니다.** 승인된 0단계에서 `/hardware-safety`가 빈
+Docker 익명 volume이고, 2026-09-04 parked disposition의 journal snapshot·disposition·tombstone·
+operation finalization이 2026-09-06 범위 한정 forensic에서 발견되지 않음을 확인했습니다.
+삭제 시각·주체와 현재 volume이 그 run의 exact volume이었는지는 `UNKNOWN`입니다.
+
+따라서 이 문서가 첫 선행조건으로 둔 permanent barrier exact reload는 실패합니다. B1부터 뒤의
+모든 승인·실행 단계와 recovery supervisor 기동은 `NO-GO`입니다. Dockerfile이 자동으로 만드는
+익명 safety volume을 차단하고, official named mount 계약과 잃어버린 operation replay를 source
+회귀로 닫고, 새 durable root의 identity를 별도 승인 아래 검증·provision한 뒤에만 이 계획을 새
+전제에서 다시 검토합니다. 상세는
+[`Hardware-safety volume durability incident and remediation`](hardware-safety-volume-durability-plan.md)을
+따릅니다.

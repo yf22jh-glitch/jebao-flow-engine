@@ -554,3 +554,15 @@ permanent version `2` barrier 재검증 뒤 fresh Phase 0, 새 v2 manifest와 �
 awaiting-transition proxy로 쓰는 eligibility 의미와, archive claim 경합을
 `disposition_tombstone_invalid`로 표시하는 오도가 그것입니다. 작업 A에서는 의도적으로 건드리지
 않았고, 각각 자체 계획과 검토를 거쳐야 합니다.
+
+## 2026-09-06 사후 정정 — permanent barrier 부재
+
+이 계획이 만든 source와 당시 park 절차의 기록은 유지하지만, 2026-09-06 범위 한정 read-only
+forensic에서 journal snapshot·disposition·tombstone·operation finalization 원본이 발견되지
+않았습니다. 따라서 이 계획이 완료 조건으로 삼은 permanent barrier는 **현재 배포 상태에는
+존재하지 않으며 재검증할 수도 없습니다.** 삭제 시각·주체와 실제 경로는 `UNKNOWN`입니다.
+
+해당 operation은 source-level revocation으로 다시 차단하고, Dockerfile의 자동 anonymous safety
+volume 경로와 deployment mount 계약을 먼저 수정합니다. 자세한 범위와 hardware `NO-GO`는
+[`Hardware-safety volume durability incident and remediation`](hardware-safety-volume-durability-plan.md)을
+따릅니다.

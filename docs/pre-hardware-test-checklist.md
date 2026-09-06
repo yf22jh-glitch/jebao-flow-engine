@@ -181,6 +181,43 @@ Supervisor와 모든 one-shot 컨테이너는 Compose의 동일한
 project 이름과 무관하게 이 호스트 전역 볼륨 이름을 고정합니다. 임의 볼륨으로 바꾸거나 Compose
 밖에서 별도 컨테이너를 실행하면 전역 제어권을 공유한다고 볼 수 없으므로 사용하지 않습니다.
 
+**2026-09-06 incident 이후에는 Compose 선언만 보지 않고 실제 container mount를 확인합니다.**
+`/hardware-safety`를 열거나 writability probe를 만들기 전에 host에서 다음 read-only inspection을
+실행합니다.
+
+```bash
+docker context show
+
+docker inspect --format \
+  '{{range .Mounts}}{{if eq .Destination "/hardware-safety"}}{{printf "%s %s %s %s\n" $.Name .Type .Name .Destination}}{{end}}{{end}}' \
+  $(docker container ls --all --quiet)
+
+docker inspect --format \
+  '{{range .Mounts}}{{if eq .Destination "/hardware-safety"}}{{printf "%s %s %s\n" .Type .Name .Destination}}{{end}}{{end}}' \
+  jebao-flow-recovery
+```
+
+첫 명령은 running·exited container를 모두 검사합니다. 출력의 container 이름은
+`/jebao-flow-recovery` 또는 `/jebao-flowd`만 허용하고, 각 줄의 나머지는 정확히
+`volume jebao-flow-hardware-safety /hardware-safety`여야 합니다. 다른 container가 한 줄이라도
+나오면 이번 incident와 같은 unsanctioned root 사용이므로 `NO-GO`입니다.
+
+둘째 명령의 출력은 **정확히 한 줄**
+`volume jebao-flow-hardware-safety /hardware-safety`여야 합니다. 어느 inspection 명령이든 비영
+종료하거나, target container 부재, 빈 출력, 두 줄 이상, `bind`, 익명 volume id 또는 다른 named
+volume이면 supervisor·status·one-shot을 실행하지 않고 `NO-GO`로 보고합니다. daemon을 사용할 때도
+`jebao-flowd`에 둘째 검사를 별도로 적용합니다. image의 `/hardware-safety` directory나 단순
+`os.path.ismount()` 통과는 named volume identity의 증명이 아닙니다.
+
+첫 줄의 active Docker context가 precommit한 daemon과 같은지도 확인하고 실행 기록에 남깁니다.
+위 inspection은 **파이프 없이** 실행합니다. 출력을 가공해야 한다면 먼저 `set -o pipefail`을 켜서
+`docker inspect` 자체의 실패가 파이프 성공으로 바뀌지 않게 합니다. `| wc -l`·`| grep`·`| head`
+뒤의 파이프 최종 종료코드를 Docker 성공으로 오독하지 않습니다.
+
+Dockerfile은 `/hardware-safety`를 `VOLUME`으로 선언하지 않습니다. 따라서 mount 없이 ad-hoc
+container를 띄우면 image directory가 남더라도 runtime의 mount 검사가 fail-closed해야 합니다.
+명시적인 다른 `-v ...:/hardware-safety`도 금지하며, 위 actual-mount 검사를 생략하지 않습니다.
+
 ## 3. 첫 Pro 한 대 검증
 
 먼저 read-only preview로 현재 snapshot과 `JFV-...` 확인 토큰을 발급합니다. 아래 34는 현재

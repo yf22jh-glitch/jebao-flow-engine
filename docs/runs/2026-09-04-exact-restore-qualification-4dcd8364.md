@@ -339,3 +339,33 @@ tree 재계산은 그 자체로 daemon artifact가 아니므로 (b)에 해당하
 
 두 사실을 하나로 묶어 "(b)로 확인됐다"고 쓴 것이 오류였습니다. 등급을 올리기 위해 새 daemon
 artifact를 만들지 않으며, 이 정정으로 앞 절의 판정·NO-GO 상태는 달라지지 않습니다.
+
+## 2026-09-06 정정 — 보존됐던 safety artifact의 사후 부재
+
+이 절은 앞의 실행 사실을 지우지 않고 **2026-09-06 현재 상태**를 덧붙입니다. 승인된 범위 한정
+read-only forensic에서 daemon이 볼 수 있는 전체 Docker volume, 사용 가능한 Docker
+context/profile, 사용자 홈 아래 depth `7` 범위(`Library`·`node_modules`·`.git`·`.Trash` 제외)와
+Docker 내부 저장소를 제외한 VM root를 조사했지만 이 run이 참조한 exact-restore journal snapshot,
+disposition blob, live tombstone과 operation finalization을 찾지 못했습니다. 외부 매체·다른 머신·
+백업은 조사하지 않았습니다. 조사 과정의 volume mount는 모두 read-only였고 write·삭제·복구·
+writability probe·device contact는 `0`이었습니다: **(c) reconstructed operator observation**.
+
+따라서 앞에서 기록한 disposition digest
+`712a725ada86796f112631fdbcfb251350d92f470a4ff076cee5083a9758497f`, journal snapshot digest
+`273a7f38638033dd0030a268279bb67b8451b985936051a83f42f605c8486bcf`와 tombstone digest
+`f899c8117106cd5286d764d5c6663246bb7fe7e9a426c7186d86990dba829301`은 당시 대조 결과의 문서
+참조로는 남지만, **현재 원본 파일이 보존돼 있지 않아 다시 (b)로 검증할 수 없습니다.** 이 정정은
+그 파일들이 2026-09-04에 생성·대조됐다는 당시 기록을 소급해 부정하지 않습니다.
+
+삭제 시각·주체·명령은 확인할 event history가 없어 `UNKNOWN`입니다. 현재 `/hardware-safety`를
+제공하는 유일한 container mount가 빈 Docker 익명 volume이라는 사실은 확인했지만, 그것이 이 run의
+exact volume이었는지 또는 어떤 삭제 경로가 실제로 발화했는지는 단정하지 않습니다.
+
+현재 source의 operation-finalization lookup은 backing file을 찾지 못하므로, 이 run의 operation
+SHA-256 `4dcd8364b272644ac883faca9494c7884b045e387970e9a38601df6d5bf4baa0`에 대해 앞 절이 주장한
+**영구 replay barrier는 현재 성립하지 않습니다.** 사라진 bytes를 digest에서 재구성하거나 새
+terminal success로 가장하지 않습니다. 관측된 익명-volume 생성 경로와 이 operation replay를
+별도 source 차단으로 닫고, verified named safety volume을 새로 준비하기 전까지 장비 read·write,
+앱 live-write, Home Assistant 조작과 recovery supervisor 기동은 `NO-GO`입니다. 계획과 범위는
+[`hardware-safety volume durability incident`](../hardware-safety-volume-durability-plan.md)을
+따릅니다.

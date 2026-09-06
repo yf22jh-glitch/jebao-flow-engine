@@ -381,3 +381,16 @@ id·digest가 없으므로 **(c)**입니다. `docs/runs/README.md`의 **(b)**는
 보존 여부에 의존하지 않고, 그래서 등급을 붙이지 않습니다.
 
 그 재실행에서도 장비·앱·Home Assistant·private state 접촉은 `0`입니다: **(c)**.
+
+## 2026-09-06 사후 확인 — run artifact는 현재 재검증 불가
+
+이 계획의 source-level canonical compatibility와 unit 결과는 그대로입니다. 다만 실행 addendum이
+참조한 2026-09-04 v1 disposition 원본, backing journal snapshot, tombstone과 finalization은
+2026-09-06 범위 한정 read-only forensic에서 발견되지 않았습니다. 따라서 그 run의 stored bytes를
+현재 다시 load해 대조할 수 없으며, “현재도 보존된 (b) artifact”라는 전제로 사용하지 않습니다.
+
+이 사실은 v1 bytes를 source fixture로 재계산할 수 있다는 주장과 구분합니다. 재계산은 source
+property이고 사라진 run artifact를 복원하지 않습니다. 삭제 원인은 `UNKNOWN`이며, 자세한 incident
+처리와 hardware `NO-GO`는
+[`Hardware-safety volume durability incident and remediation`](hardware-safety-volume-durability-plan.md)을
+따릅니다.
