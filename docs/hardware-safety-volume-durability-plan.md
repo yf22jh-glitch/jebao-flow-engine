@@ -370,3 +370,28 @@ preflight 뒤 새로 드러난 다음 두 mutation은 최초 범위가 자동으
 container 예외를 checklist에 넣어 계속 보존하는 대안도 있지만, 그동안 provisioning preflight는
 계속 `NO-GO`입니다. 두 결정을 받기 전에는 container stop/remove, volume create·mount, marker
 provisioning과 runtime verify를 실행하지 않습니다.
+
+## 2026-09-06 scratch container 처분과 exact named volume 생성
+
+repository maintainer는 앞 절의 두 host mutation을 각각 설명받고 모두 승인했습니다. 이 승인은
+scratch container 처분과 empty named volume 생성만 포함했고 marker provisioning·runtime verify,
+recovery supervisor, Phase 0와 device·앱·Home Assistant 접촉은 포함하지 않았습니다.
+
+실행 직전 container id·anonymous volume name의 SHA-256, image, creation time, `sleep infinity`, running
+state, `auto_remove=false`, restart `no`, anonymous 64-hex volume과 `LINKS=1 | 0B`를 precommit과 다시
+대조했습니다. 모두 일치한 뒤 container를 `docker stop --time 10`으로 정지하고 `docker rm`으로
+제거했습니다. `-v`는 사용하지 않았습니다. container가 더는 존재하지 않고 anonymous volume은
+즉시 삭제되지 않은 채 `LINKS=0 | 0B`로 남았음을 확인했습니다. 이 empty dangling volume은 이후
+prune될 수 있고 그 생존을 증거 조건으로 삼지 않습니다.
+
+active context `colima`에서 exact named volume이 아직 없음을 다시 확인한 다음
+`docker volume create --driver local jebao-flow-hardware-safety`로 명시 생성했습니다. 생성 결과는 exact
+name, driver `local`, `LINKS=0 | 0B`입니다. running·exited 전체 container를 다시 열거했을 때
+`/hardware-safety` mount는 `0`건이었습니다. Compose one-shot에 implicit volume creation을 맡기지
+않았고, 새 volume을 아직 어떤 container에도 mount하지 않았으며 marker도 설치하지 않았습니다.
+
+이 결과의 증거등급은 **(c) reconstructed operator observation**입니다. actual volume content,
+private journal·archive, device·앱·Home Assistant·recovery supervisor 접촉은 `0`입니다. 다음 단계는
+두 identity carrier의 provisioning-직전 exact 재대조, reviewed image attestation, network-none
+provisioning과 runtime verify이지만, 그 실행 packet이 현재 Compose required-env 계약을 우회하지
+않는지 확인할 때까지 모든 hardware operation은 계속 `NO-GO / BLOCKING`입니다.

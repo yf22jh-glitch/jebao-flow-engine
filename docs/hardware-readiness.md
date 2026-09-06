@@ -1253,3 +1253,22 @@ scratch container 처분과 exact named volume 생성은 각각 명시적 host-s
 container stop/remove, volume create·mount, provisioning·runtime verify, recovery supervisor,
 Phase 0와 device·앱·Home Assistant 접촉을 실행하지 않습니다. 이 확인과 identity 보관 동안 실제
 safety volume·private journal·archive·device·앱·Home Assistant 접촉은 `0`이었습니다.
+
+## 2026-09-06 승인된 host cleanup·named-volume 생성 완료 — marker는 아직 없음
+
+repository maintainer가 두 host mutation을 각각 설명받고 모두 승인했습니다. 먼저 SHA-256과 속성을
+재대조한 개발용 `sleep infinity` scratch container를 정지·영구 제거했습니다. `docker rm`에는 `-v`를
+사용하지 않았고, 붙어 있던 anonymous volume이 즉시 삭제되지 않은 채 `LINKS=0 | 0B`로 남았음을
+확인했습니다. 이 volume은 dangling·prune 대상이며 그 생존에 증거를 의존하지 않습니다.
+
+그다음 active context `colima`에서 부재를 다시 확인하고 empty exact named volume
+`jebao-flow-hardware-safety`를 driver `local`로 명시 생성했습니다. 결과는 `LINKS=0 | 0B`이고,
+running·exited 전체 container의 `/hardware-safety` mount는 `0`건입니다. 아직 container mount,
+identity marker provisioning과 runtime verify는 수행하지 않았습니다.
+
+이 host-state 결과는 증거등급 **(c) reconstructed operator observation**입니다. actual volume
+content·private journal·archive, device·앱·Home Assistant·recovery supervisor 접촉은 `0`입니다.
+**현재 판정은 계속 모든 hardware operation `NO-GO / BLOCKING`입니다.** provisioning 직전 두
+identity carrier exact 대조와 reviewed image attestation을 다시 통과하고, Compose required-env 계약을
+우회하지 않는 승인된 network-none provisioning packet이 확정되기 전에는 marker·runtime verify,
+supervisor, Phase 0와 device I/O를 실행하지 않습니다.
