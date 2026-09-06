@@ -1092,8 +1092,9 @@ supervisor를 재기동하지 않으며, Home Assistant no-touch도 유지합니
 
 ## 2026-09-06 §7 보고와 maintainer 결정 — 방향 A 선택, 실행은 여전히 NO-GO
 
-`AGENTS.md` §7의 **"실기 2회 또는 1일"** 조건이 시간 쪽으로 발화했습니다 — 이 질문의 첫 관련
-실기가 `2026-09-04` run이고 그로부터 하루가 지났기 때문입니다. 그래서 B1 승인 검토 이전에 멈추고
+`AGENTS.md` §7의 **"실기 2회 또는 1일"** 조건이 시간 쪽으로 발화했습니다 — **늦어도 `2026-09-04`
+standalone qualification run으로부터 하루를 넘겼기 때문입니다.** 그 이전에도 Q2·qualification 계열
+run이 여럿 있으므로 몇 회차인지는 주장하지 않으며, §7 발화에 ordinal은 필요하지 않습니다. 그래서 B1 승인 검토 이전에 멈추고
 증거·대안 둘 이상·park 영향을 담은 §7 보고를 제시했습니다. 보고 전문은
 [v2 qualification 계획](exact-restore-v2-qualification-plan.md)의 최종 실행 문서 −1단계에 있습니다.
 

@@ -1128,9 +1128,10 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 ## −1단계 — §7 보고와 maintainer 결정 (**완료**, 2026-09-06)
 
 `AGENTS.md` §7의 조건은 **"실기 2회 **또는** 1일"**이라는 독립 disjunction이고, **시간 조건이 이미
-발화했습니다** — 이 질문의 첫 관련 실기가 `2026-09-04` run이고 그로부터 하루가 지났기 때문입니다.
-따라서 시도 횟수와 무관하게 B1 승인 검토 이전에 멈추고 보고해야 했습니다. **아래가 그 보고이며,
-maintainer 결정까지 기록합니다.**
+발화했습니다** — **늦어도 `2026-09-04` standalone qualification run으로부터 하루를 넘겼기
+때문입니다.** 이 저장소에는 그 이전에도 Q2·qualification 계열 run이 여럿 있으므로 **몇 회차인지를
+주장하지 않습니다.** §7 발화에는 ordinal이 필요 없고, 시간 조건 하나로 충분합니다. 따라서 B1 승인
+검토 이전에 멈추고 보고해야 했습니다. **아래가 그 보고이며, maintainer 결정까지 기록합니다.**
 
 ### (1) 지금까지의 증거
 
@@ -1149,17 +1150,25 @@ maintainer 결정까지 기록합니다.**
 
 ### (2) 대안 경로 — 최소 두 개
 
-- **(a) 정정된 v2 qualification을 단회로 진행.** 남은 미지는 실제 장비의 timing이 v2 bound 안에
-  들어오는지 하나입니다.
+- **(a) 정정된 v2 qualification을 단회로 진행.** **주된 측정 미지**는 실제 장비의 timing이 v2
+  bound 안에 들어오는지이지만, **그것만 남은 것은 아닙니다** — fresh Phase 0, park eligibility,
+  단일 제어권 연속성, attended authorization, 그리고 receipt·bundle·staging의 end-to-end 경계도
+  runtime에서 fail-closed할 수 있고 현장에서 함께 재검증됩니다.
 - **(b) exact-restore qualification과 Q2 live track을 park**하고, 이미 병렬 허용된
   software-independent actuator·product track을 진행합니다.
 - **(c) 앱·수동 복원 경로를 사람이 설계**해 새 계획으로 검토합니다.
 
 ### (3) 지금 park했을 때의 영향
 
-장비는 현재 상태 그대로이고 좌초한 journal도 없습니다. 앱 주도 live-write의 선행조건 2는 계속
-`BLOCKING`으로 남고, 앱 관측 track이 그만큼 미뤄집니다. **되돌릴 수 없는 상태는 생기지 않으며
-잃는 것은 시간입니다.**
+- **Q2는 `UNKNOWN`으로 남습니다.**
+- **standalone exact-restore 선행조건은 `BLOCKING`으로 남습니다** — sentinel·baseline receipt와
+  qualified bundle, staged phase-5 record가 없기 때문입니다.
+- **앱 live-write와 새 Q2 operation은 불가**합니다.
+- **product actuator track은 병렬로 계속 진행할 수 있습니다.** park이 그 track을 막지 않습니다.
+- **새로운 물리 변화도, 새로운 durable mutation도 생기지 않습니다.** 장비는 현재 상태 그대로이고
+  좌초한 journal도 없습니다.
+
+시간 지연은 이 결과들 중 하나이지 영향의 전부가 아닙니다.
 
 ### 결정
 
@@ -1177,19 +1186,20 @@ maintainer에게 보고하라고 요구합니다. 보고서에는 (1) 지금까�
 경로**, (3) park했을 때의 영향이 들어가야 하며, 대안 없이 "한 번 더 하드닝하겠다"는 보고는
 무효입니다.
 
-**이 질문의 실기 1회차는 이미 `2026-09-04` run이었고, 이 계획이 2회차입니다.** 그리고 §7의 시간
-조건은 횟수와 **독립적으로** 이미 발화했으므로, 위 −1단계의 보고가 **이 2회차 이전에도** 선행
-조건입니다. "세 번째 run에서만 보고"로 읽으면 안 됩니다.
+§7의 시간 조건은 횟수와 **독립적으로** 이미 발화했고, 위 −1단계의 보고와 maintainer 결정이 그
+선행 조건을 충족했습니다. **몇 회차인지는 주장하지 않습니다** — 이 저장소에는 Q2·qualification
+계열 run이 여럿 있고, §7 발화에 ordinal은 필요 없습니다.
 
 그리고 11단계가 확정하듯 **fresh B1 + 새 nonce + 새 operation id는 그 자체로 새 실기**입니다.
 따라서 **새 B1은 이 run 안의 retry가 될 수 없습니다.**
 
-- **이 계획이 허용하는 qualification 수집은 정확히 한 세트(2 series × 2 pair)뿐입니다.**
+- **이번 선택이 허용하는 B1은 정확히 한 세트(2 series × 2 pair)뿐입니다.**
 - B1 실패, observation age 만료, `prepare` 이전의 단일 제어권 위반, 4단계 또는 6단계의 예산
   실패 — 이 모두는 **이 새 run을 기록하고 종료·보고**합니다. 아래 여러 곳에 나오는 "새 승인
   B1"은 **다음 run의 시작 조건**이지 이 run의 재시도가 아닙니다.
-- 다음 B1은 **새 run 파일 · 새 계획 또는 재개 판단 · 새 승인**을 요구하며, 그 시점에는 이미 같은
-  질문의 **세 번째** 실기이므로 **§7 보고와 대안·park 판단 없이는 승인하지 않습니다.**
+- 그 뒤의 추가 B1은 **ordinal을 주장하지 않고** 다음을 모두 요구합니다 — **새 §7 보고, 대안 제시,
+  park 판단, 그리고 새 run 파일·새 계획 또는 재개 판단·새 승인.** 이 중 하나라도 없이는 승인하지
+  않습니다.
 - **B3도 한 번뿐입니다.** 실패 처리에서 park을 선택하면 `1 × 1` 수집을 **한 번** 하고, `1/1`이
   아니면 **park `NO-GO` · 기록 · 보고**로 닫습니다. 다른 B3를 나중에 고려하려면 **별도 계획·검토·
   §7 accounting과 새 승인**이 필요합니다. reviewed source가 pair `1`을 허용한다는 사실이 **capture
