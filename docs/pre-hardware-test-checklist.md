@@ -159,6 +159,16 @@ private `.env` 또는 동등한 secret store와 별도 복구 가능한 private 
 MQTT 비밀번호는 recovery 컨테이너 환경에는 전달되지 않지만, 기본 `jebao-flowd` 서비스의
 필수 변수 검증 때문에 비어 있으면 Compose 명령 자체가 거부됩니다.
 
+**provisioning 직전에는 primary carrier와 별도 backup carrier에서 identity를 각각 읽어** 두 값이
+모두 lowercase 32-hex인지, 길이가 32인지, SHA-256과 원문이 서로 같은지를 확인합니다. 원문은
+출력하지 않고 일치한 SHA-256만 operator 기록에 남깁니다. 읽어서 대조하지 않은 backup은
+provisioning 근거로 쓰지 않습니다. marker가 아직 없는데 두 carrier가 다르면 어느 쪽도 권위로
+간주하지 않고 둘 다 폐기한 뒤 `secrets.token_hex(16)`으로 새 값을 만들어 다시 저장·대조합니다.
+marker가 이미 있으면 새 값을 만들지 않으며 marker가 유일한 권위입니다. 아래 승인된 read-only
+회수 절차로 exact marker 값을 확인해 carrier를 복구합니다. 공개 digest가 brute-force 가능한 짧은
+값을 가리지 않도록, 공개 digest 관행은 반드시 `secrets.token_hex(16)`으로 생성한 128-bit identity와
+함께 적용합니다.
+
 expected identity를 잃었다면 새 값으로 provisioning하거나 volume·marker를 삭제하지 않습니다.
 모든 hardware operation을 `NO-GO`로 두고, 아래 active-context·전체-container·exact named-volume
 inspection을 먼저 통과한 뒤 별도 승인 아래 reviewed exact image의 network-none·read-only·`--rm`
@@ -231,6 +241,8 @@ container inspection은 running·exited 전체를 검사합니다. provisioning 
 volume identity를 최초 provisioning하는 별도 one-shot은 이 허용 집합에 들어가지 않습니다. 위
 preflight를 통과하고 별도 host-state 승인을 받은 경우에만 network-none service를 **명시적으로**
 `provision` mode로 한 번 실행합니다. 이미 provisioned인 정상 운영에서는 이 단계를 반복하지 않습니다.
+이 명령 직전에 위 두-carrier 대조(길이·lowercase 32-hex·SHA-256·원문)를 다시 수행하고, 어느 하나라도
+불일치하면 provisioning을 실행하지 않습니다.
 
 ```bash
 docker compose --profile hardware-safety-provisioning run --rm \

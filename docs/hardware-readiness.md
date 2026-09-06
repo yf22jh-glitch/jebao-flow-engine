@@ -1215,3 +1215,41 @@ Phase 0, 각 실행 단계의 A·B1·B2·B3·C·D 승인을 순서대로 마쳐�
 바꾸지 않으며, 분실 시 새 값을 만들지 않고 operator checklist의 승인된 read-only 회수 절차만
 따릅니다. 그 전에는 recovery supervisor, status·park, qualification, 앱 live-write와 device
 read·write를 재개하지 않습니다.
+
+## 2026-09-06 provisioning preflight — identity는 준비, host mutation 두 건은 BLOCKING
+
+다음 단계 승인 뒤 device I/O 없이 host metadata만 다시 확인했습니다. active context는 `colima`, exact
+named volume은 부재했고, `/hardware-safety` mount는 total `1`, sanctioned `0`, unsanctioned `1`,
+active `1`이었습니다. sanctioned daemon·recovery·provisioning container는 모두 부재했습니다.
+
+유일한 mount owner는 production daemon이 아니라 2026-09-03 생성된 `sleep infinity` 개발용 scratch
+container이고, `jebao-flow-engine:sync-ownership-wip` image에서 restart 없이 64-hex anonymous volume을
+read-write로 잡고 있습니다. container id SHA-256은
+`e26f1e8e264bc90ec37916ca90b4d50045cd22061377580f986d2faa4d5d3b31`, volume name SHA-256은
+`9ad2c1b7ae3c07230ab75e8a4066f3a1b3797844e4a6a813ce32627bcb22a072`입니다. 이것이 사라진 artifact의
+exact substrate였다고 단정하지 않지만, 현재 anonymous substrate의 용도를 잇는 유일한 Docker
+metadata link라서 처분보다 먼저 이 기록을 남깁니다.
+
+별도의 read-only `docker system df -v` 관측에서 이 anonymous volume은 `LINKS=1`, `0B`였습니다.
+현재 보존할 내용이 없다는 독립 관측이며, 과거 artifact 존재 여부를 증명하지는 않습니다. digest와
+metadata·`0B`를 기록한 뒤에는 이 empty volume 자체의 생존을 증거 조건으로 삼지 않습니다.
+
+승인된 범위에서 expected identity를 mode `0600`의 gitignored deployment `.env`와 macOS Keychain에
+저장했습니다. 첫 Keychain 입력이 empty item으로 남고 `.env`만 valid했던 것을 provisioning 전에
+탐지했습니다. marker 전에는 어느 carrier도 권위가 아니라는 규칙에 따라 provisional identity
+SHA-256 `88e06fdf9ca74eb5d556bed738a5604716349c7027d2415e8537fd3cc905fd6f`를 폐기하고
+`secrets.token_hex(16)`으로 새 값을 생성해 두 carrier에 다시 저장·대조했습니다. 원문은 출력·기록하지
+않았으며 최종 값은 lowercase 32-hex로 exact match하고 SHA-256은
+`6b9b4cfb01adc12242d19d8e72aebf3984c4010623182a979c511e5c8cba8dcc`입니다. provisioning 직전에도 두
+carrier를 각각 읽어 길이·digest·원문을 재대조하며, 불일치면 provisioning을 실행하지 않습니다.
+named volume·marker는 아직 없습니다.
+
+**현재 판정은 계속 모든 hardware operation `NO-GO / BLOCKING`입니다.** preflight 뒤 새로 필요한
+scratch container 처분과 exact named volume 생성은 각각 명시적 host-state 결정이 필요합니다. 권고는
+이 기록을 먼저 보존한 뒤 개발용 scratch container를 되돌릴 수 없게 `docker rm`하되 `-v`를 사용하지
+않는 것입니다. 붙어 있던 `0B` anonymous volume은 `LINKS=0`의 dangling·prune 대상이 되지만 그
+생존을 증거 조건으로 삼지 않습니다. 두 번째 결정은 marker를 받을 empty exact named volume을
+별도로 생성·확인하는 것입니다. 그 승인 전에는
+container stop/remove, volume create·mount, provisioning·runtime verify, recovery supervisor,
+Phase 0와 device·앱·Home Assistant 접촉을 실행하지 않습니다. 이 확인과 identity 보관 동안 실제
+safety volume·private journal·archive·device·앱·Home Assistant 접촉은 `0`이었습니다.

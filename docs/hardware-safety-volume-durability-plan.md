@@ -190,6 +190,12 @@ expected identity 생성은 승인하지 않습니다.
   구분합니다. marker 파일까지 byte-for-byte 복제하고 같은 expected env를 주거나 volume과 env를
   함께 고의로 바꾸는 경우를 container 내부에서 구분하지는 못합니다. 그러므로 running·exited 전체
   container 열거와 exact Docker volume-name host preflight는 marker 뒤에도 필수입니다.
+- provisioning 직전에는 primary carrier와 별도 backup carrier를 각각 읽어 lowercase 32-hex·길이·
+  SHA-256·원문 exact match를 확인하고 공개 기록에는 일치한 SHA-256만 남깁니다. marker가 아직 없는데
+  두 carrier가 다르면 어느 쪽도 권위로 간주하지 않고 둘 다 폐기한 뒤 `secrets.token_hex(16)`으로 새
+  identity를 생성해 다시 저장·대조합니다. marker가 이미 있으면 marker가 유일한 권위이고 새 값을
+  생성하지 않으며 승인된 read-only 회수 절차를 따릅니다. identity digest를 공개할 수 있는 근거는
+  반드시 `secrets.token_hex(16)`으로 만든 128-bit entropy입니다.
 
 ### runtime과 provisioning 순서
 
@@ -311,3 +317,56 @@ operator observation**이고, diff SHA-256은 commit에서 재계산 가능한 s
 verify → 그 뒤 status 또는 park 검토 → fresh Phase 0와 해당 승인 축**입니다. provisioning 뒤에는
 identity를 바꾸지 않고, 분실 시 새 값을 만들지 않으며 checklist의 승인된 read-only 회수 절차만
 따릅니다. 그 전까지 모든 hardware operation은 계속 `NO-GO / BLOCKING`입니다.
+
+## 2026-09-06 provisioning preflight — identity 준비, 두 host mutation은 대기
+
+repository maintainer가 다음 단계를 진행하라고 한 뒤 범위를 private identity 생성·보관, exact
+named-volume preflight, 별도 provisioning과 runtime verify까지로 한정했습니다. device·앱·Home
+Assistant·Phase 0는 이 범위에 포함하지 않았습니다.
+
+read-only host metadata preflight의 증거등급은 **(c) reconstructed operator observation**입니다.
+active Docker context는 `colima`, exact named volume `jebao-flow-hardware-safety`는 부재했고,
+`/hardware-safety` mount는 total `1`, sanctioned `0`, unsanctioned `1`, active `1`이었습니다. sanctioned
+daemon·recovery·provisioning container는 모두 부재했습니다.
+
+유일한 unsanctioned mount는 production daemon이 아니라 2026-09-03T07:01:59.439008193Z에 생성된
+개발용 scratch container였습니다. image는 `jebao-flow-engine:sync-ownership-wip`, entrypoint/command는
+`sleep infinity`, restart policy는 `no`, auto-remove는 false이고, read-write `/hardware-safety` mount의
+source는 64-hex 이름의 Docker anonymous volume입니다. 공개 기록에는 원문 id를 넣지 않고 다음 digest로
+결속합니다.
+
+- container id SHA-256:
+  `e26f1e8e264bc90ec37916ca90b4d50045cd22061377580f986d2faa4d5d3b31`
+- anonymous volume name SHA-256:
+  `9ad2c1b7ae3c07230ab75e8a4066f3a1b3797844e4a6a813ce32627bcb22a072`
+
+이 container와 volume이 2026-09-04 run artifact를 실제로 보유했던 exact substrate였다고 단정하지
+않습니다. 다만 run 이전부터 존재한 anonymous safety-root substrate 후보이고, container가 volume의
+용도를 보여 주는 현재 유일한 Docker metadata link입니다. 따라서 기록보다 먼저 container를 제거하지
+않습니다. 별도의 read-only `docker system df -v` 관측에서 이 volume은 2026-09-06 현재 `LINKS=1`,
+`0B`였습니다. 이는 현재 보존할 volume 내용이 없다는 독립 관측이지, 과거 artifact가 이 volume에
+있었거나 없었다는 증명은 아닙니다. 이 값과 위 digest·metadata를 기록한 뒤에는 empty anonymous
+volume 자체의 생존을 증거 조건으로 삼지 않습니다.
+
+승인 범위 안에서 lowercase 32-hex expected identity를 생성했습니다. 원문은 출력·commit하지 않았고,
+mode `0600`의 gitignored deployment `.env`와 macOS Keychain generic-password item이라는 두 carrier에
+보관했습니다. 첫 non-interactive Keychain 입력은 empty item을 만들고 `.env`에는 valid identity를
+남겼습니다. provisioning 전에 길이·digest mismatch를 탐지했습니다. marker가 없는 상태에서는 어느
+carrier도 권위로 삼지 않는 위 규칙을 적용해 provisional identity SHA-256
+`88e06fdf9ca74eb5d556bed738a5604716349c7027d2415e8537fd3cc905fd6f`를 폐기하고 새 identity를 두
+carrier에 다시 저장·대조했습니다. 최종 두 값은 lowercase 32-hex로 exact match하고 identity SHA-256은
+`6b9b4cfb01adc12242d19d8e72aebf3984c4010623182a979c511e5c8cba8dcc`입니다. marker와 named volume은
+아직 없으므로 device나 durable safety root에는 영향이 없습니다.
+
+preflight 뒤 새로 드러난 다음 두 mutation은 최초 범위가 자동으로 승인하지 않습니다.
+
+1. scratch container를 되돌릴 수 없게 `docker rm`하되 **`-v`를 사용하지 않는** 처분. 현재 `0B`인
+   anonymous volume은 당장 삭제하지 않지만 `LINKS=0`의 dangling·prune 대상이 되며, 그 생존을
+   증거 조건으로 삼지 않습니다.
+2. exact named volume `jebao-flow-hardware-safety`의 명시적 생성
+
+권고는 위 digest·`0B` 기록 뒤 1번을 실행해 container metadata link를 문서로 승격하고, 별도 승인된
+2번과 재검사를 거쳐 provisioning으로 가는 것입니다.
+container 예외를 checklist에 넣어 계속 보존하는 대안도 있지만, 그동안 provisioning preflight는
+계속 `NO-GO`입니다. 두 결정을 받기 전에는 container stop/remove, volume create·mount, marker
+provisioning과 runtime verify를 실행하지 않습니다.
