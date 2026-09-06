@@ -71,6 +71,7 @@ from tests.unit.test_exact_restore import (
     RestoreHarness,
     _armed_controller,
     _authority,
+    _lost_barrier_operation_id,
     _promoted_record,
     _safe_targets,
 )
@@ -120,7 +121,10 @@ class _CollectorStore:
         return self.artifact
 
 
-def _awaiting_record_and_artifact() -> tuple[ExactRestoreRecord, VerifiedPilotPairArtifact]:
+def _awaiting_record_and_artifact(
+    *,
+    operation_id: str = "operation-parked-qualification",
+) -> tuple[ExactRestoreRecord, VerifiedPilotPairArtifact]:
     restore_manifest = _restore_manifest()
     config = _config()
     artifact = _artifact(config)
@@ -134,7 +138,7 @@ def _awaiting_record_and_artifact() -> tuple[ExactRestoreRecord, VerifiedPilotPa
         baseline,
         _safe_targets(),
         cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
-        operation_id="operation-parked-qualification",
+        operation_id=operation_id,
         now=NOW,
     )
     authority = _authority(
@@ -227,13 +231,14 @@ def _authority_for(manifest: ParkedDispositionManifest) -> ParkedDispositionAuth
 def _case(
     tmp_path: Path,
     *,
+    operation_id: str = "operation-parked-qualification",
     record_payload_update: dict[str, Any] | None = None,
 ) -> SimpleNamespace:
     safety_root = tmp_path / "hardware-safety"
     safety_root.mkdir(mode=0o700, parents=True)
     journal = ExactRestoreJournalStore._for_test(safety_root / "exact-restore.json")
     archive = ExactRestoreDispositionArchive._for_test(safety_root)
-    record, artifact = _awaiting_record_and_artifact()
+    record, artifact = _awaiting_record_and_artifact(operation_id=operation_id)
     if record_payload_update is not None:
         payload = record.model_dump(mode="json")
         payload.update(record_payload_update)
@@ -331,6 +336,19 @@ def test_park_installs_backed_terminal_barriers_without_network_or_device_io(
         )["status"]
         == "exact_restore_parked_unqualified"
     )
+    assert case.service.resume_if_archived() == disposition
+
+
+def test_source_revocation_does_not_block_write_free_verify_and_park(tmp_path: Path) -> None:
+    case = _case(tmp_path, operation_id=_lost_barrier_operation_id())
+
+    eligibility = case.service.verify()
+    disposition = case.service.park(case.authority)
+
+    assert eligibility.record.operation_id == case.record.operation_id
+    assert disposition.operation_sha256 == case.manifest.operation_sha256
+    assert disposition.device_network_access is False
+    assert disposition.device_write_count == 0
     assert case.service.resume_if_archived() == disposition
 
 

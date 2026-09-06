@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+import jebao_flow.exact_restore as exact_restore_module
 from jebao_flow.exact_restore import (
     ExactRestoreActionKind,
     ExactRestoreActionOutcome,
@@ -65,6 +66,7 @@ NOW = datetime(2026, 8, 30, 3, 0, tzinfo=UTC)
 MONOTONIC_NS = 1_000_000_000
 BOOT_A_SHA256 = hashlib.sha256(b"boot-a").hexdigest()
 BOOT_B_SHA256 = hashlib.sha256(b"boot-b").hexdigest()
+LOST_BARRIER_OPERATION_SHA256 = "4dcd8364b272644ac883faca9494c7884b045e387970e9a38601df6d5bf4baa0"
 
 
 class MutableClock:
@@ -85,6 +87,28 @@ class MutableMonotonicClock:
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("ascii")).hexdigest()
+
+
+def _lost_barrier_operation_id() -> str:
+    """Rebuild only the public operation id preimage, never the lost barrier bytes."""
+
+    manifest_sha256 = "feebbd0bf279c0189a6365b7f19e21d528e8284584470e6e22b132b257da9cb8"
+    derived = hashlib.sha256(
+        b"jebao-flow/exact-restore-composition/v1\0"
+        + b"sentinel\0"
+        + bytes.fromhex(manifest_sha256)
+    ).hexdigest()
+    operation_id = f"er-sentinel-{derived}"
+    assert _digest(operation_id) == LOST_BARRIER_OPERATION_SHA256
+    return operation_id
+
+
+def _assert_lost_barrier_revocation(error: ExactRestorePreflightError) -> None:
+    assert error.code is ExactRestoreErrorCode.AUTHORITY
+    assert error.diagnostic == {
+        "reason": "operation_revoked_after_barrier_loss",
+        "operation_sha256": LOST_BARRIER_OPERATION_SHA256,
+    }
 
 
 def _binding(label: str) -> PhysicalDeviceBinding:
@@ -2579,6 +2603,147 @@ async def test_cleared_operation_cannot_reuse_the_same_live_authority_or_write_p
     assert replay.value.code is ExactRestoreErrorCode.AUTHORITY
     assert store.load() is None
     assert len(harness.writes) == first_write_count
+
+
+def test_lost_barrier_operation_cannot_be_recreated_or_promoted() -> None:
+    operation_id = _lost_barrier_operation_id()
+    prepared = prepare_exact_restore_record(
+        _baseline(),
+        _safe_targets(),
+        cycle=ExactRestoreCycle.SENTINEL_QUALIFICATION,
+        operation_id=operation_id,
+        now=NOW,
+    )
+    store = MemoryStore()
+    harness = RestoreHarness(prepared.baseline, store)
+    controller = ExactRestoreController(
+        store,
+        FakeGuard(),
+        observe=harness.observe,
+        resolve_device=harness.resolve_device,
+        qualification_receipts=MemoryQualificationReceiptStore(),
+        clock=lambda: NOW,
+        monotonic_clock=lambda: MONOTONIC_NS,
+        boot_identity=lambda: BOOT_A_SHA256,
+    )
+
+    with pytest.raises(ExactRestorePreflightError) as recreate:
+        controller.create(prepared)
+    _assert_lost_barrier_revocation(recreate.value)
+    assert store.record is None
+
+    finalized = _sentinel_final_record(operation_id=operation_id)
+    store.record = finalized.model_dump(mode="json")
+    with pytest.raises(ExactRestorePreflightError) as promote:
+        controller.promote_to_baseline_restore(operation_id="descendant-baseline")
+    _assert_lost_barrier_revocation(promote.value)
+    assert ExactRestoreRecord.model_validate(store.record) == finalized
+    assert (harness.writes, harness.observation_count, harness.resolve_count) == ([], 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_revoked_sentinel_in_a_baseline_blocks_arm_and_execute_before_device_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model a descendant installed by the source that predated the revocation list."""
+
+    finalized = _sentinel_final_record(operation_id=_lost_barrier_operation_id())
+    controller, store, harness, _qualification = _promotion_controller(finalized)
+    with monkeypatch.context() as legacy_source:
+        legacy_source.setattr(exact_restore_module, "_REVOKED_OPERATION_SHA256S", frozenset())
+        promoted = controller.promote_to_baseline_restore(operation_id="descendant-baseline")
+
+    with pytest.raises(ExactRestorePreflightError) as arm:
+        controller.arm(_authority(promoted))
+    _assert_lost_barrier_revocation(arm.value)
+    assert ExactRestoreRecord.model_validate(store.record).phase is ExactRestorePhase.PREPARED
+
+    with monkeypatch.context() as legacy_source:
+        legacy_source.setattr(exact_restore_module, "_REVOKED_OPERATION_SHA256S", frozenset())
+        armed = controller.arm(_authority(promoted))
+    assert armed.phase is ExactRestorePhase.ARMED
+
+    with pytest.raises(ExactRestorePreflightError) as execute:
+        await controller.execute()
+    _assert_lost_barrier_revocation(execute.value)
+    assert ExactRestoreRecord.model_validate(store.record).phase is ExactRestorePhase.ARMED
+    assert (harness.writes, harness.observation_count, harness.resolve_count) == ([], 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_revoked_sentinel_nested_in_phase5_blocks_create_and_arm_before_device_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Walk through both embedded parents instead of checking only the immediate baseline."""
+
+    finalized = _sentinel_final_record(operation_id=_lost_barrier_operation_id())
+    controller, _store, _harness, _qualification = _promotion_controller(finalized)
+    with monkeypatch.context() as legacy_source:
+        legacy_source.setattr(exact_restore_module, "_REVOKED_OPERATION_SHA256S", frozenset())
+        promoted = controller.promote_to_baseline_restore(operation_id="descendant-baseline")
+        controller.arm(_authority(promoted))
+        qualified = await controller.execute()
+
+    staged = prepare_qualified_final_restore_record(
+        qualified,
+        operation_id="descendant-phase5",
+        now=NOW + timedelta(seconds=1),
+    )
+    archive = _receipt_store_with_predecessor(staged)
+    final_store = MemoryStore()
+    final_harness = RestoreHarness(staged.baseline, final_store)
+    final_controller = ExactRestoreController(
+        final_store,
+        FakeGuard(),
+        observe=final_harness.observe,
+        resolve_device=final_harness.resolve_device,
+        qualification_receipts=archive,
+        clock=lambda: NOW + timedelta(seconds=1),
+        monotonic_clock=lambda: MONOTONIC_NS,
+        boot_identity=lambda: BOOT_A_SHA256,
+    )
+
+    with pytest.raises(ExactRestorePreflightError) as create:
+        final_controller.create_qualified_final_restore(staged)
+    _assert_lost_barrier_revocation(create.value)
+    assert final_store.record is None
+
+    # A journal installed by pre-revocation source must still fail at its next device boundary.
+    final_store.record = staged.model_dump(mode="json")
+    with pytest.raises(ExactRestorePreflightError) as arm:
+        final_controller.arm(_authority(staged, now=NOW + timedelta(seconds=1)))
+    _assert_lost_barrier_revocation(arm.value)
+    assert (final_harness.writes, final_harness.observation_count, final_harness.resolve_count) == (
+        [],
+        0,
+        0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_revocation_keeps_verified_receipt_and_receipt_bound_clear_available() -> None:
+    finalized = _sentinel_final_record(operation_id=_lost_barrier_operation_id())
+    store = MemoryStore()
+    store.record = finalized.model_dump(mode="json")
+    harness = RestoreHarness(finalized.baseline, store)
+    archive = MemoryQualificationReceiptStore()
+    controller = ExactRestoreController(
+        store,
+        FakeGuard(),
+        observe=harness.observe,
+        resolve_device=harness.resolve_device,
+        qualification_receipts=archive,
+        clock=lambda: NOW,
+        monotonic_clock=lambda: MONOTONIC_NS,
+        boot_identity=lambda: BOOT_A_SHA256,
+    )
+
+    receipt = await controller.finalize()
+    controller.clear_after_receipt(receipt)
+
+    assert store.record is None
+    assert archive.load_operation_finalization(finalized.operation_id) is not None
+    assert (harness.writes, harness.observation_count, harness.resolve_count) == ([], 0, 0)
 
 
 def _promotion_controller(

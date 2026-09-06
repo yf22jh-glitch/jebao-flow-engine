@@ -39,6 +39,11 @@ def test_missing_or_unmounted_safety_root_fails_closed(
         hardware_safety.validate_hardware_safety_root()
 
     root.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        hardware_safety,
+        "_probe_hardware_safety_root",
+        lambda _descriptor: pytest.fail("an unmounted image directory must not be probed"),
+    )
     with pytest.raises(hardware_safety.HardwareSafetyRootError, match="not a mounted volume"):
         hardware_safety.validate_hardware_safety_root()
 

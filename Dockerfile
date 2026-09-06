@@ -18,7 +18,7 @@ RUN mkdir -p /config /data /hardware-safety \
     && chmod 0700 /hardware-safety
 
 USER jebao-flow
-VOLUME ["/data", "/hardware-safety"]
+VOLUME ["/data"]
 
 ENTRYPOINT ["jebao-flowd"]
 CMD ["--config", "/config/config.yaml"]

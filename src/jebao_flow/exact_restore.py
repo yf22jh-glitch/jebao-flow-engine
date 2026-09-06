@@ -47,6 +47,13 @@ OperationId = Annotated[
     StringConstraints(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
 ]
 
+# The backing v2 finalization for this publicly recorded operation digest was found absent on
+# 2026-09-06.  Keep the replacement barrier in source so it cannot disappear with the safety
+# volume it protects.  Store only the public digest; diagnostics must not disclose the operation id.
+_REVOKED_OPERATION_SHA256S = frozenset(
+    {"4dcd8364b272644ac883faca9494c7884b045e387970e9a38601df6d5bf4baa0"}
+)
+
 
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
@@ -59,6 +66,10 @@ def _canonical_json(value: object) -> bytes:
 
 def _sha256_json(value: object) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
+
+
+def _operation_public_sha256(operation_id: str) -> str:
+    return hashlib.sha256(operation_id.encode("ascii")).hexdigest()
 
 
 def system_boot_identity_sha256() -> str:
@@ -1394,6 +1405,7 @@ class ExactRestoreController:
 
         payload = record.model_dump(mode="json")
         with self._store.claim():
+            self._require_record_chain_not_revoked(record)
             self._require_operation_not_finalized(record.operation_id)
             existing = self._store.load()
             if existing is not None and _is_parked_unqualified_tombstone(existing):
@@ -1438,6 +1450,7 @@ class ExactRestoreController:
 
         with self._store.claim():
             qualification = self._load()
+            self._require_record_chain_not_revoked(qualification)
             self._require_operation_not_parked(qualification.operation_id)
             if (
                 qualification.cycle is not ExactRestoreCycle.SENTINEL_QUALIFICATION
@@ -1468,6 +1481,7 @@ class ExactRestoreController:
     def arm(self, authority: ExactRestoreAuthority) -> ExactRestoreRecord:
         with self._store.claim():
             record = self._load()
+            self._require_record_chain_not_revoked(record)
             self._require_operation_not_parked(record.operation_id)
             if record.phase is not ExactRestorePhase.PREPARED:
                 raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
@@ -1546,6 +1560,7 @@ class ExactRestoreController:
 
         with self._store.claim():
             record = self._load()
+            self._require_record_chain_not_revoked(record)
             self._require_operation_not_parked(record.operation_id)
             if record.phase not in {
                 ExactRestorePhase.ARMED,
@@ -1586,6 +1601,7 @@ class ExactRestoreController:
 
         with self._store.claim():
             record = self._load()
+            self._require_record_chain_not_revoked(record)
             self._require_operation_not_parked(record.operation_id)
             if record.phase is not ExactRestorePhase.RECOVERY_REQUIRED:
                 raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
@@ -1635,6 +1651,7 @@ class ExactRestoreController:
                 raise ExactRestorePreflightError(ExactRestoreErrorCode.SAFETY_INTERLOCK)
             epoch = self._guard.epoch
             record = self._load()
+            self._require_record_chain_not_revoked(record)
             self._require_operation_not_parked(record.operation_id)
             if record.phase not in {
                 ExactRestorePhase.ARMED,
@@ -1834,6 +1851,7 @@ class ExactRestoreController:
                 return self._receipt_from_final_record(record)
             if record.phase is not ExactRestorePhase.AWAITING_FINAL_VERIFY:
                 raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
+            self._require_record_chain_not_revoked(record)
             with _CommitAfterVerifiedLease(self._guard.lease(), self._save_exact) as final_commit:
                 self._guard.clear()
                 if not self._guard.permitted:
@@ -2330,6 +2348,23 @@ class ExactRestoreController:
             raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL) from error
         self._confirm_archived_success(receipt, code=ExactRestoreErrorCode.JOURNAL)
 
+    def _require_operation_not_revoked(self, operation_id: str) -> None:
+        operation_sha256 = _operation_public_sha256(operation_id)
+        if operation_sha256 in _REVOKED_OPERATION_SHA256S:
+            raise ExactRestorePreflightError(
+                ExactRestoreErrorCode.AUTHORITY,
+                diagnostic={
+                    "reason": "operation_revoked_after_barrier_loss",
+                    "operation_sha256": operation_sha256,
+                },
+            )
+
+    def _require_record_chain_not_revoked(self, record: ExactRestoreRecord) -> None:
+        current: ExactRestoreRecord | None = record
+        while current is not None:
+            self._require_operation_not_revoked(current.operation_id)
+            current = current.qualification_final_record
+
     def _require_operation_not_parked(self, operation_id: str) -> None:
         receipt_store = self._qualification_receipts
         if receipt_store is None:
@@ -2346,6 +2381,7 @@ class ExactRestoreController:
             raise ExactRestorePreflightError(ExactRestoreErrorCode.AUTHORITY)
 
     def _require_operation_not_finalized(self, operation_id: str) -> None:
+        self._require_operation_not_revoked(operation_id)
         receipt_store = self._qualification_receipts
         if receipt_store is None:
             raise ExactRestorePreflightError(ExactRestoreErrorCode.JOURNAL)
