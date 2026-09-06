@@ -1125,25 +1125,50 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 > action plan을 본 뒤 5단계에서**, 그리고 **B3와 park host·park consent는 실패 후 park을 실제로
 > 선택한 경우에만** 요구합니다. hardware는 **NO-GO**입니다.
 
-## −1단계 — §7 보고가 **먼저**입니다 (이미 발화했습니다)
+## −1단계 — §7 보고와 maintainer 결정 (**완료**, 2026-09-06)
 
-`AGENTS.md` §7의 조건은 **"실기 2회 **또는** 1일"**이라는 독립 disjunction입니다. 아래 "시도 예산"은
-횟수 쪽만 계산했지만, **시간 조건은 이미 발화했습니다** — 이 질문의 첫 관련 실기는 `2026-09-04`
-run이고 그 종료로부터 하루가 지났습니다. **따라서 시도 횟수와 무관하게, B1 승인 검토로 넘어가기
-전에 멈추고 보고해야 합니다.**
+`AGENTS.md` §7의 조건은 **"실기 2회 **또는** 1일"**이라는 독립 disjunction이고, **시간 조건이 이미
+발화했습니다** — 이 질문의 첫 관련 실기가 `2026-09-04` run이고 그로부터 하루가 지났기 때문입니다.
+따라서 시도 횟수와 무관하게 B1 승인 검토 이전에 멈추고 보고해야 했습니다. **아래가 그 보고이며,
+maintainer 결정까지 기록합니다.**
 
-**이 문서 자체는 아직 §7 보고를 충족하지 않습니다.** §7이 요구하는 세 가지 중 (2)와 (3)이
-비어 있습니다. 보고에는 다음이 들어가야 합니다.
+### (1) 지금까지의 증거
 
-1. **지금까지의 증거**
-2. **최소 두 개의 대안 경로** — 대안 없이 "한 번 더 하드닝하겠다"는 보고는 §7상 **무효**입니다.
-   고려 가능한 예: (a) 정정된 v2 qualification을 **단회**로 진행, (b) exact-restore qualification과
-   Q2 live track을 **park**하고 이미 병렬 허용된 software-independent actuator·product track을 진행,
-   (c) 별도 사람이 설계한 앱·수동 복원 경로를 **새 계획**으로 검토.
-3. **지금 park했을 때의 영향**
+- `2026-09-04` 실기에서 sentinel cycle의 8 action이 모두 `written_verified`로 완료됐고, 이어진
+  final pair에서 `verify_mismatch`로 종료했습니다. 저널은 `awaiting_final_verify / 8-of-8 /
+  inflight=false / error=null`을 유지했습니다.
+- 원인은 하나의 policy 필드가 participant completion coherence와 전체 acquisition duration을
+  동시에 재는 **구조적 overload**였습니다. version 2가 두 bound를 분리했고 precommit은 coherence
+  `20초` · acquisition `30초`입니다.
+- 보존된 실측 대비 여유는 coherence 약 `8.3초`, acquisition 약 `7.2초`입니다. **이것은 네 pair에서
+  나온 예측이지 보증이 아닙니다.** v2에서도 실패하면 그것은 예측이 틀렸다는 새 정보입니다.
+- 그 뒤 세 가지가 착지했습니다 — timing split, predecessor success finalization 불변식, 그리고
+  parked disposition 일반화. 좌초한 journal을 write 없이 종결할 수단은 이제 있습니다.
+- 그 종결 수단이 곧 성공 가능성은 아닙니다. 이 계획 자체도 교차검토에서 다수의 실행 결함이
+  발견돼 여러 차례 정정됐고, 그중 여럿은 **실행 불가능한 절차를 지시**하던 것이었습니다.
 
-**그 보고를 제시하고 repository maintainer가 이 2회차 v2 qualification을 명시적으로 선택한 뒤에만**
-0단계와 B1 승인 검토로 넘어갑니다. 결론은 maintainer가 고르며, 이 문서가 (a)를 전제하지 않습니다.
+### (2) 대안 경로 — 최소 두 개
+
+- **(a) 정정된 v2 qualification을 단회로 진행.** 남은 미지는 실제 장비의 timing이 v2 bound 안에
+  들어오는지 하나입니다.
+- **(b) exact-restore qualification과 Q2 live track을 park**하고, 이미 병렬 허용된
+  software-independent actuator·product track을 진행합니다.
+- **(c) 앱·수동 복원 경로를 사람이 설계**해 새 계획으로 검토합니다.
+
+### (3) 지금 park했을 때의 영향
+
+장비는 현재 상태 그대로이고 좌초한 journal도 없습니다. 앱 주도 live-write의 선행조건 2는 계속
+`BLOCKING`으로 남고, 앱 관측 track이 그만큼 미뤄집니다. **되돌릴 수 없는 상태는 생기지 않으며
+잃는 것은 시간입니다.**
+
+### 결정
+
+**repository maintainer가 `(a)` — 정정된 v2 qualification을 단회로 진행 — 을 명시적으로
+선택했습니다(2026-09-06).**
+
+**이 선택은 저장소 방향 결정이며 그 이상이 아닙니다.** 승인 축 A·B1·B2·B3·C·D, attended grant,
+장비 read 또는 write, 앱·Q2 live GO 중 **어느 것도 이 선택으로 발급되지 않습니다.** 각 단계는
+아래 표가 요구하는 승인을 실행 직전에 따로 받아야 합니다.
 
 ## 시도 예산 — 이 계획은 **B1 한 세트**만 허용합니다
 
@@ -1394,27 +1419,50 @@ object**가 들어갑니다. 따라서 **그 spec을 approver에게 보이기 �
 아직 보지 못한 미래 spec에 대한 포괄 승인은 이 문서 자신의 "candidate를 본 뒤 승인" 계약을
 깨뜨립니다.
 
-> **미결 — 승인 전에 채워야 합니다.** 아래 spec의 **exact tuple이 아직 이 문서에 없습니다** —
-> `planned_pair_count`, `requested_cadence_seconds`, 사용할 두 `timing_evidence`의 id·digest, 그리고
-> `master_schedule_image_sha256`·`slave_schedule_image_sha256`의 exact 값 또는 predeclared 앱
-> schedule에서의 유일한 도출 규칙입니다. **이 값들이 비어 있는 한 승인 C를 받을 수 없고 이 계획은
-> 실행 가능하지 않습니다.**
->
-> 제가 임의로 채우지 않는 이유는, 이 tuple이 이후 앱 관측 **epoch의 길이와 판정 target**을
-> 결정하기 때문입니다. 그것은 이 계획의 범위가 아니라 별도 결정이고, 근거 없이 고른 수를 실행
-> 문서에 박아 두는 것이 이 저장소가 막으려는 형태입니다.
->
-> 값을 정할 때의 **제약**입니다.
-> - 코드는 `planned_pair_count`를 `1..10000`, cadence를 양수로 받되
->   **`(count − 1) × cadence ≥ q2_minimum_series_span`**을 강제합니다.
-> - `docs/hardware-readiness.md`는 **`30초` cadence에서 최소 `191` pair**(더 큰 값 권장)라고
->   적습니다. 최소값은 여유가 `0`이라는 뜻입니다.
-> - `timing_evidence`는 **이번 fresh B1의 primary와 corroborating series**를 쓰는 것이 가장
->   자연스럽습니다. 다른 것을 쓰려면 이유를 함께 적습니다.
-> - 두 spec은 `epoch_kind`만 다르고 나머지가 **전부 동일**해야 합니다.
->
-> **10단계를 별도 계획으로 분리하는 선택지는 현재 구조와 맞지 않습니다** — handoff 창 때문에
-> `prepare-pair`가 baseline receipt로부터 `1800초` 안, 같은 자리에서 수행돼야 하기 때문입니다.
+**epoch spec의 exact tuple은 아래로 확정됐습니다**(maintainer 결정, 2026-09-06).
+
+| 필드 | 값 |
+|---|---|
+| `version` | `1` |
+| `epoch_kind` | control은 `independent_control`, ASYNC는 `async` — **두 spec에서 이 필드만 다릅니다** |
+| `planned_pair_count` | **`371`** |
+| `requested_cadence_seconds` | **`30`** |
+| `timing_evidence` | **이번 fresh B1의 primary → corroborating 두 series의 exact id·digest**를 5단계에서 채웁니다(생성 규칙). 다른 series를 쓰려면 **그 이유를 함께 기록**합니다 |
+| `master_schedule_image_sha256` | `8e8488bbfa060da176064a42c79d2d3271bba58fcd2ffd8642a19f6a2b19b467` |
+| `slave_schedule_image_sha256` | `97fae9d0b2b321b61ace403fe51bc2717bcc4f74cff6193b67d9958eda2bbddf` |
+
+**두 schedule image의 유일한 도출 규칙** — 장비 접촉 없이 계산되며 reviewed encoder만 씁니다.
+
+1. all-EE 48-slot image(`48 × 9 = 432 byte`)에서 시작합니다.
+2. 각 entry를 reviewed **encode → patch**로 넣고 매 단계 **validate**를 통과시킵니다.
+3. master는 **slot 0만** `00:00–24:00 / constant(code 2) / Flow 35`, 나머지 파라미터 `0`, 나머지
+   47 slot은 EE입니다.
+4. slave는 **48개의 30분 연속 slot**, 전부 `constant(code 2)`, **짝수 slot Flow 32 / 홀수 slot
+   Flow 40**, 나머지 파라미터 `0`입니다.
+5. 최종 image를 SHA-256합니다.
+
+**이 두 digest는 vendor 앱이 실제로 그렇게 쓴다는 증명이 아니라 predeclared expectation입니다.**
+앱 write 이후 collector가 읽은 exact digest가 다르면 **값을 맞추러 가지 않고
+condition-construction `NO-GO`**로 닫습니다.
+
+**`371`의 근거** — 임의로 고른 수가 아니라 다음에서 나옵니다.
+
+- `slave_slot_duration P = 1800초`, `stability floor S = 300초`.
+- 코드가 강제하는 최소 span은 `3P + S = 5700초`이고 cadence `30`에서 `191` pair입니다.
+- 그러나 판정을 깨는 것은 pair 부족이 아니라 **`rejected_boundary_breaks_consecutive_run`**입니다.
+  판정은 **3연속 valid boundary + 세 번째 이후 stability**를 요구합니다.
+- boundary는 `P`마다 오므로 **span에 초를 더하는 것이 아니라 slot period를 몇 개 덮느냐**가
+  boundary 수를 정합니다. `5700초`와 `6000초`는 **boundary를 최소 `3`개 보장할 뿐**이며(phase에
+  따라 `4`개일 수 있습니다) **임의 위치 1회 reject 내성이 없습니다.** "정확히 3개"가 아닙니다.
+- boundary `n`개 중 `i`번째가 거부되면 최장 연속 run은 `max(i − 1, n − i)`입니다. 모든 `i`에서
+  `≥ 3`이려면 **`n = 6`이 최소**입니다(`n = 5`는 가운데 거부 시 `2`).
+- 따라서 span `= 6P + S = 11100초`, cadence `30`에서 **`11100 / 30 + 1 = 371`**입니다. 이 span은
+  phase와 무관하게 boundary를 **최소 6개** 보장하고, 세 번째 valid boundary 뒤 stability도
+  덮습니다.
+- **비용**: epoch 하나가 nominal `3시간 5분`, control·ASYNC 두 epoch 합 **`6시간 10분`**입니다.
+  collector durable write 규모도 pair 수에 비례해 커지므로 승인 C 설명에 그 규모를 함께 적습니다.
+- 이 선택의 이유는 §7입니다 — **이 계획은 단 1회**이므로, boundary 거부를 덮지 못하는 headroom은
+  사실상 값이 없습니다.
 
 **두 exact spec candidate를 여기서 준비·검증해 제시합니다.** spec의 키 집합은 정확히
 `version` · `epoch_kind` · `planned_pair_count` · `requested_cadence_seconds` · `timing_evidence` ·

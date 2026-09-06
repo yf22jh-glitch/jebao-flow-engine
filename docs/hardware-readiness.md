@@ -1089,3 +1089,25 @@ Phase 0 → 새 v2 manifest → 별도 operation 승인**입니다. 이 source c
 4~6단계도 **NO-GO**입니다. reviewed v2 prepare가 tombstone을 정당하게 교체하기 전에는 recovery
 supervisor를 재기동하지 않으며, Home Assistant no-touch도 유지합니다. 이 작업 동안 장비·앱·HA
 접촉은 `0`이었습니다.
+
+## 2026-09-06 §7 보고와 maintainer 결정 — 방향 A 선택, 실행은 여전히 NO-GO
+
+`AGENTS.md` §7의 **"실기 2회 또는 1일"** 조건이 시간 쪽으로 발화했습니다 — 이 질문의 첫 관련
+실기가 `2026-09-04` run이고 그로부터 하루가 지났기 때문입니다. 그래서 B1 승인 검토 이전에 멈추고
+증거·대안 둘 이상·park 영향을 담은 §7 보고를 제시했습니다. 보고 전문은
+[v2 qualification 계획](exact-restore-v2-qualification-plan.md)의 최종 실행 문서 −1단계에 있습니다.
+
+**repository maintainer가 대안 (a) — 정정된 v2 qualification을 단회로 진행 — 을 선택했고,
+Q2 epoch의 `planned_pair_count`를 `371`(cadence `30초`, span `11100초`)로 확정했습니다.** `371`은
+판정이 요구하는 3연속 valid boundary가 **임의 위치의 boundary 거부 1회 뒤에도** 남도록 보장하는
+최소값입니다. 최소 span `5700초`(191 pair)와 그 근방 값은 boundary를 최소 3개만 보장해 그 내성이
+없습니다. 대신 epoch 하나가 nominal `3시간 5분`, 두 epoch 합 `6시간 10분`입니다.
+
+**이 결정은 저장소 방향 결정이며 실행 승인이 아닙니다.** 승인 축 A·B1·B2·B3·C·D, attended grant,
+장비 read·write, 앱 live-write와 새 Q2 operation GO는 **어느 것도 발급되지 않았습니다.** 따라서
+앱 live-write와 새 qualification은 계속 **NO-GO / BLOCKING**이고 v2 qualification 4~6단계도
+**NO-GO**입니다. 각 단계는 실행 직전에 해당 승인을 따로 받습니다.
+
+실기 run 파일은 **아직 만들지 않습니다** — `docs/runs/`는 실제 장비 실행 기록이므로, B1의 첫 장비
+접촉이 발생하는 시점에 새 run id로 만듭니다. 이 결정 기록 작업 동안 장비·앱·Home Assistant·private
+journal·archive·recovery supervisor 접촉은 `0`이었습니다.
