@@ -202,6 +202,13 @@ docker inspect --format \
 `volume jebao-flow-hardware-safety /hardware-safety`여야 합니다. 다른 container가 한 줄이라도
 나오면 이번 incident와 같은 unsanctioned root 사용이므로 `NO-GO`입니다.
 
+volume identity를 최초 provisioning하는 별도 one-shot은 이 허용 집합에 들어가지 않습니다.
+provisioning은 반드시 exact named-volume host inspection을 먼저 통과한 뒤 별도 승인 아래
+`docker compose run --rm`으로 실행하고, 성공·실패 어느 경우든 위 inspection 시점에는 그 container가
+running·exited 목록에서 완전히 부재해야 합니다. provisioning은 journal·archive 내용을 확인하지
+않으므로 선행 host inspection을 생략하면 잘못된 volume에 identity를 찍을 수 있습니다. `--rm` 실패
+등으로 container가 남아 있으면 자동 삭제하지 않고 `NO-GO`로 보고합니다.
+
 둘째 명령의 출력은 **정확히 한 줄**
 `volume jebao-flow-hardware-safety /hardware-safety`여야 합니다. 어느 inspection 명령이든 비영
 종료하거나, target container 부재, 빈 출력, 두 줄 이상, `bind`, 익명 volume id 또는 다른 named
