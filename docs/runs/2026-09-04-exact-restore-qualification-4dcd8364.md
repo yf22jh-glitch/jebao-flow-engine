@@ -447,3 +447,18 @@ actual deployment backup에는 `.hardware-safety-identity` marker가 없습니�
 deployment 기준 A를 새로 승인받기 전에는 이 root를 더 열거나 수정하지 않습니다. 이 발견과 backup은
 remote root mutation·device·앱·Home Assistant 접촉을 만들지 않았고 hardware는 계속
 `NO-GO / BLOCKING`입니다.
+
+### 2026-09-07 migration 설계 전 metadata 보존과 offline copy 검증
+
+actual root를 참조하는 exited container `9`개의 full inspect metadata를 console에 출력하지 않고
+owner-only private artifact `JHC-3edcb721461feacea6b1fc6b`로 보존했습니다. artifact는 `57855` bytes,
+SHA-256 `2ff51baf97436afed056921b733cf3b9ada0cbc56173bb02b3e1afdb0ebdab5e`이고 running·OOM-killed는
+`0`입니다. 전체 container-id set SHA-256은
+`42b9cbd647b94228a2b13f77deee2aa4ec14bd657c79d42f3d55bb8ee3c81377`입니다. raw id, environment,
+host path는 private artifact에만 있습니다.
+
+앞 절의 safety-root backup을 disposable copy로 풀어 current production provisioner를 network-none에서
+offline 실행했습니다. 기존 entry `29`개의 content digest·mode·link count·inode는 모두 같았고,
+추가된 것은 canonical marker 한 개뿐이며 runtime verify 뒤 temporary residue는 `0`이었습니다:
+**(c) reconstructed operator observation**. actual remote volume·container는 이 검증에서 바뀌지
+않았습니다. 이 검증은 migration의 실행 승인이 아니며 hardware는 `NO-GO / BLOCKING`입니다.

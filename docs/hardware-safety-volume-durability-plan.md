@@ -563,3 +563,68 @@ Dockerfile의 anonymous `/hardware-safety` 제거, marker 계약과 hardcoded op
 그 뒤 actual deployment 기준의 새 승인 A입니다. local empty-root에 맞춘 C 재정의와 A/B1 결과는
 remote execution 승인이 아닙니다. 이 정정 중 remote root mutation·device·앱·Home Assistant 접촉은
 `0`이고 hardware는 계속 **`NO-GO / BLOCKING`**, Q2는 `UNKNOWN`입니다.
+
+## 2026-09-07 actual deployment marker migration 설계 — 실행 전
+
+actual root를 복사한 owner-only backup에서 current production provisioner를 network-none disposable
+container로 offline 실행했습니다. mount 판정만 backup copy에 결속하고 실제 remote root는 열지
+않았습니다. marker가 없던 copy의 기존 entry `29`개는 content digest·mode·link count·inode가 모두
+같았고, 추가된 것은 canonical identity marker 한 개뿐이었습니다. runtime validation까지 통과한 뒤
+temporary residue는 `0`이었습니다: **(c) reconstructed operator observation**. 이 결과는 current
+source가 existing journal·archive를 읽거나 덮지 않고 marker만 설치한다는 static trace와 일치합니다.
+
+remote root를 참조하는 exited container `9`개의 full `docker inspect` 결과도 console에 펼치지 않고
+owner-only private artifact `JHC-3edcb721461feacea6b1fc6b`로 보존했습니다. bytes는 `57855`, SHA-256은
+`2ff51baf97436afed056921b733cf3b9ada0cbc56173bb02b3e1afdb0ebdab5e`입니다. 모두 exited·RW mount이고
+running·OOM-killed는 `0`, restart policy는 `no` `5`개와 `unless-stopped` `4`개, 서로 다른 image는
+`8`개입니다. 전체 container-id set SHA-256은
+`42b9cbd647b94228a2b13f77deee2aa4ec14bd657c79d42f3d55bb8ee3c81377`입니다. raw container id,
+environment와 host path는 private artifact에만 있고 repository에는 기록하지 않습니다.
+
+actual root archive가 보존한 root metadata는 `uid=100`, `gid=101`, mode `0700`이고 identity marker는
+없습니다. reviewed provisioning image도 `linux/amd64`, user `jebao-flow` (`100:101`)로 exact match하지만
+remote image store에는 아직 없습니다. remote의 clean historical deployment checkout은 marker
+service 이전 commit이고 private identity carrier도 없습니다. 따라서 old checkout이나 old image로
+provision하지 않고 reviewed exact image를 별도 결속해야 합니다.
+
+`docker-compose.hardware-safety-migration.yml`은 이 migration만 위한 최소 Compose 계약입니다. exact
+image와 128-bit identity를 required environment로 받고 `build`가 없으며 `pull_policy: never`,
+network-none, read-only root filesystem, `/tmp`·`/data` tmpfs, cap-drop ALL,
+no-new-privileges, restart `no`, default `verify`입니다. safety volume은 exact global name을
+`external: true`로만 참조하므로 volume이나 unrelated `/data` volume을 암묵 생성할 수 없습니다.
+변수 누락 시 `docker compose config --quiet`가 non-zero임을 확인했습니다.
+
+실행 순서는 다음 하나로 고정합니다.
+
+1. 위 safety-root backup과 container-metadata backup을 reload하고, remote volume의 name·size·전체
+   volume-set digest, exact container-id set, running unit·process·TCP `12416` `0`을 read-only로 다시
+   확인합니다. 하나라도 다르면 mutation 없이 중단합니다.
+2. actual deployment 전용 `secrets.token_hex(16)` identity를 console에 출력하지 않고 remote의
+   owner-only durable carrier와 별도 host의 owner-only private backup에 각각 저장합니다. 두 carrier의
+   길이·lowercase 32-hex·원문·SHA-256을 무출력 대조하고 digest만 기록합니다. local `colima` identity를
+   재사용하지 않습니다.
+3. attested image
+   `sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`만
+   save/load하고 remote에서 exact image id를 다시 확인합니다. build·pull·registry access는 하지
+   않습니다. image load도 remote host mutation이므로 같은 explicit packet에 포함합니다.
+4. private metadata backup의 exact set과 다시 일치할 때만 public exited recovery container를 남기고
+   나머지 exited root-user `8`개를 `docker rm` **without `-v`**로 제거합니다. 이는 irreversible
+   container metadata mutation이고 별도 명시 승인 대상입니다. 부분 실패면 provision하지 않습니다.
+5. root user가 그 exited recovery container 하나뿐이고 volume size와 critical artifact backup이
+   그대로임을 확인한 뒤 migration Compose one-shot을 `--rm --no-deps --pull never`로 한 번만
+   `provision`합니다. expected status는 `provisioned`와 precommitted identity SHA-256입니다.
+   `already_provisioned`, 다른 digest, owner/mode 오류, container 잔여면 자동 retry·`chmod`·`chown` 없이
+   중단합니다.
+6. existing recovery container를 시작하지 않고 다시 `docker cp` byte stream을 얻어 새 owner-only
+   post-migration backup으로 보존합니다. pre-backup의 기존 `25`개 file bytes·metadata가 exact하고,
+   canonical marker 한 개만 추가됐으며 journal·archive·barrier cross-binding이 그대로인지 offline
+   검증합니다. 불일치면 recovery container를 지우지 않고 중단합니다.
+7. post-backup 검증 뒤에만 public recovery container도 `docker rm` **without `-v`**로 제거하고 root-user
+   count `0`을 확인합니다. 그 다음 migration Compose의 default `verify`를 한 번 실행해 같은 identity
+   digest와 `--rm` 후 container `0`을 확인합니다.
+
+어느 단계에서도 exact-restore `status`·`park`, recovery supervisor, device network/read/write, 앱이나
+Home Assistant를 실행하지 않습니다. marker가 설치된 뒤 ACK를 잃었거나 예상 밖 상태가 나오면
+provision을 반복하지 않습니다. 이 source·test·plan 착지는 위 remote image load, carrier 생성,
+container removal과 marker write를 승인하지 않습니다. 다음 경계는 이 exact mutation packet에 대한
+repository maintainer의 별도 승인입니다.

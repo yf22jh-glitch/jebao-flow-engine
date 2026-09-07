@@ -1576,3 +1576,29 @@ actual remote root에는 identity marker가 없고 기존 durable state가 있�
 설계·offline 검증에 대한 maintainer 결정과, 그 설계가 착지한 뒤 actual deployment topology에서의 새
 A 승인입니다. 그 뒤에만 새 exact B1을 요청합니다. 그 전까지 standalone exact restore와 Q2는 모두
 **`NO-GO / BLOCKING`**, Q2는 `UNKNOWN`입니다.
+
+## 2026-09-07 actual deployment marker migration 실행 전 판정
+
+actual safety-root backup의 disposable copy에서 current provisioner를 실행해 기존 entry `29`개의
+content·mode·link·inode가 그대로이고 canonical marker 한 개만 추가되며 temporary residue가 없음을
+확인했습니다. remote의 exited root-user `9`개 metadata도 private artifact
+`JHC-3edcb721461feacea6b1fc6b`(SHA-256
+`2ff51baf97436afed056921b733cf3b9ada0cbc56173bb02b3e1afdb0ebdab5e`)로 먼저 보존했습니다. actual
+remote root나 device에는 write하지 않았습니다.
+
+existing volume 전용 Compose 계약은 exact preloaded image만 사용하고 build·pull·network를 금지하며,
+global safety volume을 `external: true`로 요구하고 `/data`를 tmpfs로 덮습니다. 따라서 migration 중
+다른 volume을 암묵 생성하지 않습니다. 실행 전 exact container set·volume·process를 다시 대조하고,
+별도 두 carrier에 actual-deployment 전용 identity를 무출력 보존해야 합니다.
+
+승인 대상 remote mutation은 reviewed image load, exited legacy root-user container `9`개의 단계별
+`docker rm`(모두 `-v` 금지), temporary probe와 canonical marker 설치입니다. public recovery container는
+post-migration byte backup과 기존 `25`개 file exact 비교가 끝날 때까지 남깁니다. 불일치·부분 제거·
+`already_provisioned`·다른 identity digest·container residue는 자동 수정이나 retry 없이 중단합니다.
+상세 순서와 digest는
+[`hardware-safety volume durability plan`](hardware-safety-volume-durability-plan.md)의 2026-09-07
+migration 절을 따릅니다.
+
+이 계획과 Compose/test 착지는 remote mutation 승인이 아닙니다. actual root marker migration과 그 뒤
+actual deployment A가 별도 승인·통과하기 전까지 exact restore와 Q2는 **`NO-GO / BLOCKING`**, Q2는
+`UNKNOWN`입니다.

@@ -1,0 +1,29 @@
+name: jebao-flow-hardware-safety-migration
+
+services:
+  jebao-flow-hardware-safety-migrate:
+    profiles: ["hardware-safety-migration"]
+    image: ${JEBAO_FLOW_HARDWARE_SAFETY_IMAGE:?set exact reviewed image before migration}
+    container_name: jebao-flow-hardware-safety-migrate
+    restart: "no"
+    pull_policy: never
+    network_mode: none
+    environment:
+      JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID: ${JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID:?set deployment volume identity before migration}
+    volumes:
+      - jebao-flow-hardware-safety:/hardware-safety
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["jebao-flow-hardware-safety"]
+    command: ["verify"]
+
+volumes:
+  jebao-flow-hardware-safety:
+    name: jebao-flow-hardware-safety
+    external: true

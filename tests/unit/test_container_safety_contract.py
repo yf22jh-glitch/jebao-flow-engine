@@ -139,6 +139,41 @@ def test_provisioning_service_is_explicit_bounded_and_not_restartable() -> None:
     assert "depends_on" not in service
 
 
+def test_existing_volume_migration_compose_is_external_and_offline() -> None:
+    compose = yaml.safe_load(
+        (ROOT / "docker-compose.hardware-safety-migration.yml").read_text(encoding="utf-8")
+    )
+    service = compose["services"]["jebao-flow-hardware-safety-migrate"]
+
+    assert compose["name"] == "jebao-flow-hardware-safety-migration"
+    assert service["profiles"] == ["hardware-safety-migration"]
+    assert service["image"] == (
+        "${JEBAO_FLOW_HARDWARE_SAFETY_IMAGE:?set exact reviewed image before migration}"
+    )
+    assert "build" not in service
+    assert service["restart"] == "no"
+    assert service["pull_policy"] == "never"
+    assert service["network_mode"] == "none"
+    assert service["environment"] == {
+        "JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID": (
+            "${JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID:"
+            "?set deployment volume identity before migration}"
+        )
+    }
+    assert service["volumes"] == ["jebao-flow-hardware-safety:/hardware-safety"]
+    assert service["read_only"] is True
+    assert service["tmpfs"] == ["/tmp", "/data"]
+    assert service["cap_drop"] == ["ALL"]
+    assert service["security_opt"] == ["no-new-privileges:true"]
+    assert service["entrypoint"] == ["jebao-flow-hardware-safety"]
+    assert service["command"] == ["verify"]
+    assert "depends_on" not in service
+    assert compose["volumes"]["jebao-flow-hardware-safety"] == {
+        "name": "jebao-flow-hardware-safety",
+        "external": True,
+    }
+
+
 def test_identity_console_script_is_installed() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 

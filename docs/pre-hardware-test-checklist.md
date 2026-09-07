@@ -531,3 +531,28 @@ Emergency latch는 자동으로 지워지지 않습니다. 펌프 전원과 수�
 `TimerON/independent/mode/power/frequency`, schedule enabled, 14 slots, invalid 0과 snapshot
 schedule fingerprint가 일치하는지 교차 확인합니다. 마지막으로 private 설정을 반드시 다시
 `dry_run: true`로 잠급니다.
+
+## 2026-09-07 pre-marker existing deployment volume migration
+
+marker 도입 전부터 journal·archive가 있는 non-empty volume에는 위 fresh-volume provisioning 명령을
+그대로 대입하지 않습니다. 먼저 actual root의 byte-exact private backup과 그 root를 참조하는 모든
+container의 private metadata backup을 만들고 digest를 확인합니다. current provisioner가 그 exact
+backup의 disposable copy에서 기존 entry를 바꾸지 않고 marker 하나만 추가하는지도 offline으로 먼저
+검증합니다.
+
+실행에는 repository의 `docker-compose.hardware-safety-migration.yml`만 사용합니다. 이 파일은 volume을
+`external: true`로 요구하고 build·pull·network·restart·anonymous `/data` volume을 닫습니다. exact
+reviewed image id와 deployment 전용 identity가 없으면 Compose config 자체가 실패해야 합니다. old
+deployment checkout의 Compose나 image, raw `docker run`으로 우회하지 않습니다.
+
+legacy exited container는 running이 아니어도 old source로 root를 다시 열 수 있으므로 migration 뒤에
+남기지 않습니다. full inspect metadata를 private backup한 exact ID set과 직전 read-only 재검사가
+일치할 때만, post-migration copy에 사용할 public recovery container 하나를 제외한 나머지를 먼저
+`docker rm` **without `-v`**로 제거합니다. marker 설치·post-backup·기존 file exact 비교 뒤에만 마지막
+recovery container도 같은 방식으로 제거합니다. partial removal이나 set mismatch면 marker를 설치하지
+않습니다.
+
+이 migration의 exact 실행 packet, stop condition과 현재 artifact digest는
+[`docs/hardware-safety-volume-durability-plan.md`](hardware-safety-volume-durability-plan.md)의
+2026-09-07 actual deployment marker migration 절을 따릅니다. 그 별도 승인이 있기 전에는 image load,
+private carrier 생성, container removal, probe와 marker write를 실행하지 않습니다.
