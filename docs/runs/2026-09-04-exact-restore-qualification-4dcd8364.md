@@ -462,3 +462,19 @@ offline 실행했습니다. 기존 entry `29`개의 content digest·mode·link c
 추가된 것은 canonical marker 한 개뿐이며 runtime verify 뒤 temporary residue는 `0`이었습니다:
 **(c) reconstructed operator observation**. actual remote volume·container는 이 검증에서 바뀌지
 않았습니다. 이 검증은 migration의 실행 승인이 아니며 hardware는 `NO-GO / BLOCKING`입니다.
+
+### 2026-09-07 marker migration 1차 packet 중단
+
+승인 뒤 actual-deployment 전용 identity를 두 owner-only private carrier에 보존하고 무출력 대조했습니다.
+backup opaque id는 `JHI-b507f6d0c014f7d3d3d29bd8`, identity SHA-256은
+`d72417f1aa03190b4ed2e4bfa16b23a03669926aaed9ab53d2457c0b50028aef`입니다. raw identity와 private
+path는 repository에 기록하지 않습니다.
+
+reviewed local image를 한 번 load한 뒤 remote runtime image ID가 precommitted local descriptor와 달라
+STOP했습니다. saved archive의 config blob과 remote ID는 모두 `b8f35abb…37484`이고 ordered RootFS와
+Config/History projection은 source와 exact match했지만, 이 해석은 사전 조건에 없었으므로 continuation
+승인으로 사용하지 않았습니다: **(c) reconstructed operator observation**.
+
+legacy container 삭제·root mount·probe·marker와 device·앱·Home Assistant 접촉은 `0`입니다. root는
+계속 `LINKS=9 | 1.071MB`이고 container-id set·volume-set digest도 위 preflight와 같습니다. 새 image
+transport 결속 결정 전까지 migration과 hardware는 `NO-GO / BLOCKING`입니다.

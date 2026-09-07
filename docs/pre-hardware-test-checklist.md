@@ -556,3 +556,16 @@ recovery container도 같은 방식으로 제거합니다. partial removal이나
 [`docs/hardware-safety-volume-durability-plan.md`](hardware-safety-volume-durability-plan.md)의
 2026-09-07 actual deployment marker migration 절을 따릅니다. 그 별도 승인이 있기 전에는 image load,
 private carrier 생성, container removal, probe와 marker write를 실행하지 않습니다.
+
+### Cross-engine image transport ID
+
+containerd image store와 classic Docker image store 사이에서 `docker image save | docker image load`를
+쓸 때 source의 `docker image inspect .Id`가 destination의 runtime image ID와 같다고 가정하지
+않습니다. load 전에 source descriptor, saved `manifest.json`의 config blob 이름, 그 blob content
+SHA-256, ordered RootFS와 `{Architecture,Os,Config,RootFS,History}` canonical projection digest를
+각각 precommit합니다. destination ID는 saved config blob digest와 같아야 하고 두 projection도
+exact match해야 합니다.
+
+이 결속을 load 전에 precommit하지 않았거나 어느 값이든 다르면 container 생성·volume mount 전에
+즉시 중단합니다. 실행 중의 해석으로 기존 exact-ID 조건을 완화하지 않고, 관측을 append-only로
+기록한 뒤 continuation 범위를 다시 승인받습니다. 예상 밖 image object도 자동 삭제하지 않습니다.

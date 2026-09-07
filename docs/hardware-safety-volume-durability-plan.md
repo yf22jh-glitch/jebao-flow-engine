@@ -628,3 +628,45 @@ Home Assistant를 실행하지 않습니다. marker가 설치된 뒤 ACK를 잃�
 provision을 반복하지 않습니다. 이 source·test·plan 착지는 위 remote image load, carrier 생성,
 container removal과 marker write를 승인하지 않습니다. 다음 경계는 이 exact mutation packet에 대한
 repository maintainer의 별도 승인입니다.
+
+## 2026-09-07 actual migration 1차 packet 중단 — image-store ID 의미
+
+repository maintainer가 위 exact packet을 승인한 뒤 실행 전 predicate를 다시 확인했습니다. 두 private
+backup의 digest·owner-only metadata, critical artifact 네 digest, remote root의 container-id set
+`42b9cbd647b94228a2b13f77deee2aa4ec14bd657c79d42f3d55bb8ee3c81377`, volume-set
+`da2a46d39e0ea3bbd6ebd70a2f622fb7fe5d0970cdf16fea1b15a6031cd1ddba`, root `LINKS=9 | 1.071MB`,
+running writer·service·TCP `12416` `0`이 모두 일치했습니다.
+
+actual-deployment 전용 128-bit identity를 새로 생성해 remote durable carrier와 별도 host의 owner-only
+private backup `JHI-b507f6d0c014f7d3d3d29bd8`에 보존했습니다. 원문·길이·lowercase 32-hex를 무출력
+대조했고 SHA-256은
+`d72417f1aa03190b4ed2e4bfa16b23a03669926aaed9ab53d2457c0b50028aef`입니다. 첫 remote carrier
+시도는 실행 wrapper의 newline regexp escaping 오류로 input validation에서 거부됐고 remote parent와
+target이 모두 부재함을 재확인했습니다. identity를 재생성하지 않고 같은 local value로 validation만
+수정해 durable install과 exact readback을 완료했습니다.
+
+그 다음 승인된 image load를 한 번 수행했지만 사전 문언이 요구한 local image ID와 remote daemon의
+post-load image ID가 달라 즉시 중단했습니다. 이는 content mismatch가 아니라 image-store ID 의미의
+차이임을 read-only로 확인했습니다.
+
+- local Docker `29.5.2` containerd snapshotter가 표시하는 descriptor는
+  `sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`입니다.
+- 그 descriptor의 `docker image save` 단일 manifest가 가리키는 config blob과 blob content SHA-256은
+  둘 다 `b8f35abb0ac5a31f8173e78585eedb183c548eb104369ec2ee9f4f6b63437484`입니다.
+- remote Docker `29.7.1` overlay2 store는 load 뒤 그 config digest를 image ID로 보고합니다.
+- 양쪽 ordered `.RootFS` canonical projection SHA-256은
+  `0683fee3f4b0219479ff173b752b9db8ce5b78849b3638d47a603da6d1d7745f`,
+  `{Architecture,Os,Config,RootFS,History}` canonical projection SHA-256은
+  `9ec40619b81ba8d650b6305e31d0d00863943caf4f8055e3709b122e4d1fba03`으로 exact match입니다.
+
+그럼에도 위 3단계는 remote에서 `d67998b3…` 자체를 확인하라고 precommit했으므로 이를 실행 중
+재해석하지 않았습니다. remote image object와 두 identity carrier 생성 뒤에 STOP했고, legacy container
+삭제·safety-root mount·probe·marker·device·앱·Home Assistant 접촉은 `0`입니다. STOP 뒤에도 root
+container set·volume set·`LINKS=9 | 1.071MB`는 그대로입니다. local backup path가 한 rejected local
+validation command의 agent console 오류에 한 번 노출됐지만 repository·remote·외부 전송에는 들어가지
+않았습니다.
+
+다음 continuation은 새 save/load나 자동 정리를 하지 않습니다. 위 descriptor → saved config blob →
+remote runtime image ID의 결속과 두 projection exact match를 repository maintainer가 명시적으로
+수용한 뒤에만, migration Compose의 image 값을 remote runtime ID `sha256:b8f35abb…37484`로 결속해
+위 4단계부터 재개합니다. 그 전까지 marker와 container에는 손대지 않습니다.

@@ -1129,6 +1129,25 @@ operation finalization을 찾지 못했습니다. 탐색의 정확한 범위와 
 기록했으며 외부 매체·다른 머신·백업은 조사하지 않았습니다. 삭제 시각·주체와 실제 삭제 명령은
 `UNKNOWN`입니다.
 
+## 2026-09-07 marker migration 1차 packet 현재 판정
+
+승인된 packet의 실행 전 predicate는 모두 재통과했고, actual-deployment 전용 identity 두 carrier도
+무출력 대조해 SHA-256
+`d72417f1aa03190b4ed2e4bfa16b23a03669926aaed9ab53d2457c0b50028aef`로 결속했습니다. carrier
+backup의 opaque id는 `JHI-b507f6d0c014f7d3d3d29bd8`입니다.
+
+image load 뒤 remote ID가 precommitted local ID와 달라 packet은 정지했습니다. local containerd
+descriptor `d67998b3…a139b`의 saved config blob digest가 `b8f35abb…37484`이고 remote overlay2
+daemon이 바로 그 config digest를 image ID로 사용했습니다. ordered RootFS와
+`{Architecture,Os,Config,RootFS,History}` canonical projection은 양쪽에서 exact match합니다. 따라서
+content mismatch 증거는 없지만, 실행 중에 precommit을 바꾸지 않고 별도 maintainer 결정으로
+분리했습니다.
+
+현재 remote mutation은 identity carrier 두 사본과 loaded image object뿐입니다. legacy container
+`9`개와 actual safety root는 변하지 않았고 marker·probe·device·앱·Home Assistant 접촉은 `0`입니다.
+새 결속을 승인받기 전까지 migration은 **`NO-GO / BLOCKING`** 이며 exact restore와 Q2도 계속
+`NO-GO / BLOCKING`, Q2는 `UNKNOWN`입니다.
+
 따라서 위 설치 환경 기준선의 “recovery와 one-shot 명령이 고정 이름 `/hardware-safety` volume을
 공유” 체크와, 뒤 절들의 “permanent barrier 재검증” 전제는 **현재 충족되지 않습니다.** 당시 파일이
 생성·대조됐다는 실행 기록을 소급 부정하지 않지만 2026-09-06 현재 그 파일은 보존돼 있지 않아
