@@ -508,3 +508,62 @@ actual deployment에 사용할 identity는 `d72417f1…28aef`이고, 앞 local `
 digest pin, root holder와 parked-tombstone successor C는 아직 plan·contract 변경일 뿐이고 remote
 mutation 승인이 아닙니다. 이 addendum은 새 hardware run이나 Sep-04 qualification success를 주장하지
 않으며 marker migration과 hardware는 계속 **`NO-GO / BLOCKING`**입니다.
+
+### 2026-09-07 actual root marker migration과 holder 전환 완료
+
+repository maintainer는 actual deployment에 대한 image config-digest 결속, parked-tombstone successor
+C 복원, post-`PREPARED` dead-end, exact holder와 revised mutation packet을 명시 승인했습니다. 실행
+직전 JHS/JHC/JHD backup과 actual identity 두 carrier를 다시 검증했고, stopped recovery가 읽은 live
+root tar는 앞선 JHS의 `1091072` bytes·SHA-256 `741f0823…25bcf`와 exact match했습니다. live
+tombstone·disposition·journal snapshot·finalization bytes는 따라서 앞 addendum의 verified backup과
+같았고 marker·write-probe residue는 없었습니다: **(c) reconstructed operator observation**. JHS 안에
+보존된 daemon artifact 자체의 앞 addendum 등급 **(b)**는 그대로입니다.
+
+JHC에 보존된 exited legacy root user `9`개 중 public recovery 하나를 남기고 `8`개를 각각 직전
+exited 상태를 확인한 뒤 `docker rm` **without `-v`**로 제거했습니다. root link는 `9 → 1`로만
+감소했고 각 단계의 size·전체 volume set과 제거 완료 뒤 root tar digest는 불변이었습니다. recovery 하나가 잡는 `LINKS=1`에서
+exact pinned migration service를 딱 한 번 provision했고, 결과는 `status=provisioned`, actual identity
+SHA `d72417f1…28aef`였습니다: **(c) reconstructed operator observation**.
+
+tar root header를 제외한 기존 entry `29`개는 pre-backup과 bytes·metadata exact이고 추가된 것은
+canonical marker 하나뿐이었습니다. post-state를 owner-only artifact
+`JHS-277c9ad91dde49feff67f713`로 보존했습니다. archive는 `1092096` bytes, SHA-256
+`c0c9e0b63ffe41fd237c9b563e1bcc5a372da76d6d5899a3e6d8fe8666c995a9`이고 marker는 `61` bytes,
+mode `0600`, uid/gid `100:101`, identity SHA `d72417f1…28aef`입니다. `.write-probe.*`와 다른 추가
+entry는 `0`입니다: **(b)**.
+
+recovery가 남아 있는 동안 exact read-only holder를 먼저 기동해 root `LINKS=2`와 pinned image,
+`/bin/sleep infinity`, network none, read-only filesystem/mount, `/tmp`·`/data` tmpfs, cap-drop,
+no-new-privileges, identity env 부재를 확인했습니다. 그 뒤에만 recovery를 `docker rm` **without
+`-v`**로 제거했고, holder 하나가 running인 `LINKS=1`로 끝났습니다. holder를 유지한 default
+verify의 실제 실행은 한 번이며 `status=verified`와 같은 actual identity SHA를 반환했습니다:
+**(c)**.
+
+holder 생성 뒤 첫 inspect는 tmpfs가 `Mounts`가 아니라 `HostConfig.Tmpfs`에 나타나는 Docker 표현을
+잘못 가정해 recovery 제거 전에 fail-closed했고, corrected read-only inspect가 계약을 확인했습니다.
+첫 verify 시도도 malformed Go-template precheck에서 container 생성 전에 거부됐습니다. 따라서
+provision은 한 번, 실제 default verify도 한 번뿐이며 두 사전 오류는 marker나 root bytes를 다시
+쓰지 않았습니다.
+
+verify 뒤 live tar SHA는 `740421625ee680dfc3c2dcd02b9849dc7bf0c63b6941c5760d2a7e08f9090387`로
+post-backup wrapper SHA와 달랐지만, 분해 대조에서 root header mtime만
+`2026-09-07T13:40:44Z → 13:49:08Z`로 바뀌고 marker를 포함한 non-root entry `30`개의 bytes와
+metadata는 모두 exact했습니다. temporary probe residue는 `0`입니다. 이는 runtime verify의
+writability probe와 정합하지만 장비나 daemon semantic artifact의 새 claim으로 쓰지 않습니다.
+
+개수 단위는 같은 tree에서 migration 전 `25` regular files + tar root header를 제외한 non-root
+directories `4`개 = non-root entries `29`개, marker 뒤 `26 + 4 = 30`개입니다. tar root directory
+header는 별도입니다. 같은 방식으로 만든 pre/post tar의 `1091072 → 1092096` bytes 차이 `1024`
+bytes도 `61`-byte marker의 tar header `512` bytes + 한 payload block `512` bytes와 정확히 같습니다.
+Docker volume usage `1.071MB`와 tar byte 수는 대상과 오버헤드가 달라 직접 비교하지 않습니다.
+verify probe는 temporary entry의 생성·write·fsync·unlink와 parent fsync로 root directory mtime을
+갱신하므로, 이후 exact 비교에서는 root directory header의 mtime 한 필드만 제외하고 root의 나머지
+metadata·모든 non-root entry·residue `0`을 계속 exact하게 요구합니다.
+
+이 migration은 앞서 보존한 parked disposition을 성공으로 바꾸지 않았습니다. tombstone,
+disposition, parked journal snapshot과 permanent finalization의 기존 bytes는 exact하게 보존됐고,
+success receipt·qualified bundle은 여전히 없습니다. recovery supervisor, exact-restore `status`·
+`park`, device network/read/write, 앱과 Home Assistant 접촉은 `0`입니다. exact holder는 이제 actual
+root의 상시 sanctioned reference이며, 부재하거나 running이 아니면 이후 hardware와 root open은
+`NO-GO`입니다. actual A와 B1 이후 별도 승인 전까지 이 run의 판정과 전체 hardware 판정은 계속
+**`NO-GO / BLOCKING`**이고 Q2는 `UNKNOWN`입니다.

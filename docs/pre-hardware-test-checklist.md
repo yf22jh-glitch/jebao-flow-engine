@@ -623,6 +623,20 @@ disposition ↔ journal ↔ finalization binding이 exact하고, canonical marke
 `.write-probe.*`나 그 밖의 새 entry가 하나라도 남거나 기존 entry가 다르면 recovery를 제거하지 않고
 STOP합니다.
 
+이 개수는 같은 tree를 서로 다른 단위로 센 값과 혼동하지 않습니다. migration 전 `25` regular
+files + tar root header를 제외한 non-root directories `4`개 = non-root entries `29`개이고, marker
+설치 뒤에는 `26 + 4 = 30`개입니다. tar root directory header는 이 합계와 별도입니다. 같은 방식으로
+만든 pre/post tar의 `1091072 → 1092096` bytes 차이 `1024` bytes는 `61`-byte marker의 tar header
+`512` bytes + 한 payload block `512` bytes와 정확히 같습니다. 이 개수·크기 산술은 기존 non-root
+entry 전부의 exact bytes·metadata 비교와 residue `0` 확인을 대체하지 않습니다.
+
+runtime `verify`의 writability probe는 root 안에 `.write-probe.<hex>`를 생성·write·fsync한 뒤
+unlink하고 parent를 fsync하므로 root directory mtime을 갱신합니다. 이후 pre/post tar exact 비교는
+**root directory header의 mtime 한 필드만** 비교 대상에서 제외하고, root의 나머지 metadata와 모든
+non-root entry의 bytes·type·mode·uid/gid·size·mtime·link 및 probe residue `0`은 계속 exact해야
+합니다. Docker가 보고하는 volume usage `1.071MB`와 tar archive 크기 `1092096` bytes는 대상과
+오버헤드가 다르므로 서로 직접 비교하지 않습니다. tar-to-tar 비교는 같은 생성 방식일 때만 합니다.
+
 마지막 recovery를 먼저 지워 actual root를 `LINKS=0`으로 만들지 않습니다. recovery가 남아 있을 때
 exact holder를 먼저 생성·기동하고 위 holder 속성을 `docker inspect`로 모두 확인해 root
 `LINKS=2`를 확인합니다. 그 뒤에만 recovery를 `docker rm` **without `-v`**로 제거해 holder 하나의

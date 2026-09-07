@@ -811,3 +811,81 @@ packet에 포함하지 않습니다. holder 생성과 새 실행 순서, 실제 
 계획의 C 재정의·dead-end 재수락은 repository maintainer의 새 명시 결정 전에는 행사하지 않습니다.
 그 전까지 legacy container removal과 marker provisioning은 재개하지 않으며 hardware는
 **`NO-GO / BLOCKING`**입니다.
+
+## 2026-09-07 actual deployment marker migration 실행 결과 — 완료
+
+repository maintainer는 직전 packet에 직접 답해 cross-engine image config-digest 결속,
+actual C를 parked tombstone successor 범위로 되돌리는 결정, 참인 전제의 post-`PREPARED`
+dead-end 수락, exact holder와 위 superseding mutation 순서를 모두 승인했습니다. 이 승인은
+device·앱·Home Assistant, exact-restore `status`·`park`, recovery supervisor 또는 actual A를
+포함하지 않습니다.
+
+mutation 직전 `JHS-9aff85b2b0a852e2741ef48e`, `JHC-3edcb721461feacea6b1fc6b`,
+`JHD-375309b20810d49ff8530205`를 다시 열어 digest·owner-only metadata와 tar/JSON 구조를
+검증했습니다. local backup과 remote carrier의 actual identity 원문은 출력 없이 exact match했고
+SHA-256은 `d72417f1…28aef`였습니다. remote image는 exact config ID
+`b8f35abb…37484 / linux/amd64`, root user는 JHC와 같은 `9`개 모두 exited, public recovery는
+정확히 하나였습니다. root는 `LINKS=9 | 1.071MB`, stopped recovery의 live `docker cp` tar는
+pre-backup `1091072` bytes·SHA-256 `741f0823…25bcf`와 exact match했고 marker·write-probe
+residue는 없었습니다. `/data` `9` mounts/`6` unique volume, 전체 volume `28`개와 set digest,
+running Jebao와 TCP `12416` established `0`도 precommit과 같았습니다:
+**(c) reconstructed operator observation**.
+
+승인된 순서는 다음과 같이 실행됐습니다.
+
+1. public recovery 하나를 남기고 나머지 exited legacy container `8`개를 각각 직전 상태 확인 뒤
+   `docker rm` **without `-v`**로 제거했습니다. 각 단계에서 root link는 `8 → 1`로만 감소했고
+   size·전체 volume set은 불변이었습니다. 8개 제거 뒤 root tar digest도 pre-backup과 exact했습니다.
+2. recovery 하나가 root를 잡는 `LINKS=1`에서 migration service를 딱 한 번 `provision`했습니다.
+   결과는 `status=provisioned`, identity SHA `d72417f1…28aef`, output SHA-256
+   `8d40139abc6f3daedc2a91702b909075ad93dc5fe0ba17b83b453f86bda12498`였습니다.
+   `already_provisioned`, owner/mode 오류, ACK 불명, retry·`chmod`·`chown`은 없었습니다.
+3. tar root header를 제외한 기존 `29` entry의 bytes·type·mode·uid/gid·size·mtime·link metadata가
+   pre-backup과 exact했고, 추가된 것은 `61` bytes·mode `0600`·uid/gid `100:101`의 canonical
+   marker 하나뿐이었습니다. `.write-probe.*` residue는 `0`입니다. 이 post-state를 새 owner-only
+   artifact `JHS-277c9ad91dde49feff67f713`로 보존했고 archive는 `1092096` bytes, SHA-256
+   `c0c9e0b63ffe41fd237c9b563e1bcc5a372da76d6d5899a3e6d8fe8666c995a9`입니다:
+   **(b) preserved structured/durable daemon artifact**.
+4. recovery가 남은 동안 holder를 기동해 exact config ID, `/bin/sleep infinity`,
+   `restart=unless-stopped`, network none, read-only root filesystem와 safety mount, `/tmp`·`/data`
+   tmpfs, cap-drop `ALL`, no-new-privileges와 identity env 부재를 inspect했습니다. 이때 root는
+   recovery+holder의 `LINKS=2`였습니다. 그 뒤 public recovery를 `docker rm` **without `-v`**로
+   제거해 holder 하나의 `LINKS=1`로 전환했습니다.
+5. holder를 유지한 채 default `verify`를 실제로 한 번 실행했습니다. 결과는
+   `status=verified`, identity SHA `d72417f1…28aef`, output SHA-256
+   `5b1a991924ba249dbf2c327c1ad71f2d5ad2ae12b9cd1c62c4c3f8514b26c21c`였습니다. 종료 뒤
+   migration one-shot·legacy recovery는 부재하고 exact holder만 running, root는
+   `LINKS=1 | 1.071MB`, 전체 volume은 기존 `28`개와 같은 set digest였습니다.
+
+두 사전 검사 오류는 state 판정과 분리합니다. holder 생성 뒤 첫 inspect는 이 Docker가 tmpfs를
+`Mounts`가 아니라 `HostConfig.Tmpfs`에 보고한다는 차이를 잘못 가정해 recovery 제거 전에
+fail-closed했고, corrected read-only inspect가 exact 계약을 확인했습니다. 첫 verify 시도는 verify
+container를 만들기 전 malformed Go-template precheck에서 거부됐습니다. 따라서 실제 default
+`verify` 실행 횟수는 위 성공한 한 번뿐입니다.
+
+verify 뒤 다시 받은 live tar는 post-backup과 길이는 같지만 SHA-256은
+`740421625ee680dfc3c2dcd02b9849dc7bf0c63b6941c5760d2a7e08f9090387`였습니다. 분해 대조에서
+root header의 mtime만 `2026-09-07T13:40:44Z → 13:49:08Z`로 바뀌었고, marker를 포함한 non-root
+entry `30`개의 bytes와 metadata는 모두 exact했습니다. 이는 verify의 create/delete writability
+probe와 정합하며 durable semantic entry 변화나 residue로 해석하지 않습니다. legacy `/data`
+volume `6`개는 삭제되지 않고 모두 `LINKS=0`으로 남았고, 다섯 `0B`와 하나 `78.92kB`, name-set
+digest `e937b18a…08c98`, final tuple digest
+`0519339082d6e1a214f4bfeb338f50e612daafffb9ca7ccd64d87b221c783fb3`을 확인했습니다. 그 보존
+권위는 계속 `JHD-...`입니다: **(c)**.
+
+위 개수는 같은 tree의 다른 단위를 다음처럼 결속합니다. migration 전 `25` regular files + tar
+root header를 제외한 non-root directories `4`개 = non-root entries `29`개였고, marker 설치 뒤에는
+`26 + 4 = 30`개였습니다. tar root directory header는 별도입니다. 같은 방식으로 만든 pre tar
+`1091072` bytes와 post tar `1092096` bytes의 차이 `1024` bytes도 `61`-byte marker의 tar header
+`512` bytes + 한 payload block `512` bytes와 정확히 같습니다. Docker volume usage `1.071MB`와
+tar archive byte 수는 대상과 오버헤드가 달라 직접 비교하지 않습니다.
+
+runtime verify는 `.write-probe.<hex>`의 생성·write·fsync·unlink와 parent fsync를 수행하므로 root
+directory mtime을 필연적으로 갱신합니다. 이후 exact 비교에서는 root directory header의 mtime
+한 필드만 제외하고, root의 나머지 metadata와 모든 non-root entry 및 residue `0`은 계속 exact해야
+합니다.
+
+marker migration과 holder invariant는 닫혔지만 qualification 성공이나 hardware GO가 아닙니다.
+actual A는 이 topology에서 처음부터 별도 승인·통과해야 하며, 그 뒤에도 B1·B2·B3와 exact C·D의
+각 승인 순서를 지킵니다. recovery supervisor, `status`·`park`, device network/read/write, 앱과
+Home Assistant 접촉은 이번 실행에서 `0`입니다. 현재 판정은 계속 **`NO-GO / BLOCKING`**입니다.
