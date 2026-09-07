@@ -1445,3 +1445,36 @@ identity 재확립은 A 밖의 별도 device-contact·현장 binding 승인과 �
 않으며, 승인된 복구 뒤에도 A 전체를 처음부터 다시 통과해야 합니다. 그 전에는 B1을 요청하거나
 실행하지 않습니다.
 **현재 판정은 standalone exact restore와 Q2 모두 `NO-GO / BLOCKING`, Q2는 `UNKNOWN`입니다.**
+
+## 2026-09-07 보존 private config 복구 — A 재실행 전
+
+maintainer는 원복을 맡은 실행자가 현재 상태 백업과 그 선행 복구를 직접 수행하라고 정정했습니다.
+장비 discovery나 기억·example identity를 쓰기 전에 이 host의 private operator/session log를 원문
+비출력으로 조사했고, device `6`개의 완전한 identity를 가진 과거 runtime config YAML payload를
+찾았습니다. payload 자체가 `runtime.mode=observer`, `runtime.dry_run=true`, 모든 device의
+`allow_hardware_writes=false`였고, 보존 payload와 복구 파일 SHA-256은
+`ec2b7af0e6bf2476a92d274602e36968b4622babeabf1a886966fe8c12840e30`으로 일치했습니다.
+
+그 config의 두 Pro `physical_identity_key` 집합은 2026-08-28~09-04에 기록된 historical pair 집합과
+exact match했습니다. 이 집합 확인은 같은 두 controller의 보존 config임을 지지하지만 public bullet
+순서를 role mapping으로 바꾸지 않으며, physical left/right나 future asymmetric role assignment를
+새로 증명하지 않습니다. current baseline은 identifier별 자기 상태로 결속하고, 비대칭 값을 쓰기
+전에는 별도 현장 role 확인을 둡니다.
+
+runtime config는 보존 bytes 그대로 owner-only no-clobber·file fsync·parent fsync로 복구했습니다.
+소실된 hardware-test bytes는 복원했다고 주장하지 않고, committed template에 보존된 두 Pro identity·
+logical id·observer target만 결합한 새 locked config를 만들었습니다. 이 파일은
+`runtime.dry_run=true`, write-enabled device `0`, template safety limit를 유지하며 SHA-256은
+`609a718edb126ab2f72adb780b5ff0a04f00a8d6463dbd38afb571ff0d031022`입니다.
+
+primary 두 파일과 owner-only private backup `JBC-3ebded791398dd52beedf140`의 두 복사본은 모두
+mode `0600`·`nlink=1`, byte-exact reload를 통과했습니다. attested image
+`sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`의
+network-none·read-only validation에서 production `AppConfig`·`load_locked_config`·
+`select_capture_pair`가 runtime `6` device와 exact two-Pro pair를 받아들였고 write-enabled count는
+각각 `0`이었습니다: **(c) reconstructed operator observation**.
+
+raw identifier·private path를 console이나 repository에 기록하지 않았고 safety root·journal·archive·
+device·앱·Home Assistant·supervisor 접촉은 `0`입니다. private-config blocker는 보존 원본으로
+해소됐지만 승인 A는 처음부터 다시 통과해야 합니다. 그 전에는 B1을 실행하지 않으며 현재 판정은
+standalone exact restore와 Q2 모두 **`NO-GO / BLOCKING`**, Q2는 `UNKNOWN`입니다.

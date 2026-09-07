@@ -2225,3 +2225,40 @@ recovery supervisor·`status`·`park` 접촉은 모두 `0`입니다.
 identity를 재작성하지 않습니다. 승인된 경로로 복구한 뒤에도 승인 A를 처음부터 다시 실행해 모든
 gate를 통과하기 전에는 B1 승인을 요청하지 않습니다. 현재 판정은 계속 **NO-GO / BLOCKING**이고
 Q2는 `UNKNOWN`입니다.
+
+## 2026-09-07 보존된 운영 로그에서 private config 복구
+
+repository maintainer는 원복을 맡은 실행자가 현재 상태의 백업과 그 선행 private config 복구까지
+책임져야 한다고 정정했습니다. 이에 장비를 재탐색하거나 기억·example identity를 사용하지 않고,
+이 host에 남은 private operator/session log를 원문 비출력 방식으로 다시 조사했습니다. 그 안에서
+과거 runtime config의 완전한 YAML payload 하나를 찾았습니다. 이 payload는 device `6`개 모두의
+`device_id`·MAC·product key를 포함하고, `runtime.mode=observer`, `runtime.dry_run=true`, 모든
+`control.allow_hardware_writes=false`였습니다. 보존 payload와 복구된 runtime config의 SHA-256은
+`ec2b7af0e6bf2476a92d274602e36968b4622babeabf1a886966fe8c12840e30`으로 exact match합니다.
+
+그 payload의 두 Pro가 만드는 `physical_identity_key` **집합**은 2026-08-28~09-04 run들에 반복 기록된
+두 historical binding의 집합과 exact match했습니다. corpus 전체에서 각 binding의 raw identifier
+조합은 하나씩만 일치했지만, public run의 두 bullet 순서를 역할 귀속으로 사용하지는 않습니다.
+이 확인은 같은 물리 pair의 보존 config임을 지지할 뿐 physical left/right나 future asymmetric role
+assignment를 새로 증명하지 않습니다. 이번 current baseline은 각 identifier에 그 장비 자신의 raw를
+결속하며, 서로 다른 값을 쓰는 첫 단계 전에는 별도 현장 role 확인이 필요합니다.
+
+runtime config는 보존 payload bytes를 owner-only `0600`·`nlink=1` 파일로 no-clobber 설치하고 file과
+parent를 fsync했습니다. hardware-test config는 소실된 과거 bytes라고 가장하지 않습니다. committed
+hardware-test template에 보존 runtime payload의 두 Pro identity·기존 logical id·observer target을
+넣고, `runtime.dry_run=true`, 두 device의 `allow_hardware_writes=false`, template safety limit를 유지해
+새 locked config로 만들었습니다. 그 SHA-256은
+`609a718edb126ab2f72adb780b5ff0a04f00a8d6463dbd38afb571ff0d031022`입니다.
+
+두 primary 파일은 worktree 밖 owner-only private backup `JBC-3ebded791398dd52beedf140`에도
+byte-exact하게 보존했고, 네 파일 모두 mode `0600`·`nlink=1`과 exact reload를 확인했습니다. attested
+image `sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`를
+network-none·read-only·`/tmp`·`/data` tmpfs·cap-drop ALL·no-new-privileges로 실행해 production
+`AppConfig`, owner-only `load_locked_config`, `select_capture_pair` 검증을 통과했습니다. runtime은
+`6` device, hardware-test는 exact two-Pro pair, write-enabled device는 양쪽 모두 `0`이었습니다.
+
+raw MAC·device id·private path는 console이나 저장소에 출력하지 않았습니다. 이 복구와 검증은
+container-local offline validation뿐이며 safety root·journal·archive·device·앱·Home Assistant·
+recovery supervisor 접촉은 `0`입니다. 앞의 private-config blocker는 보존 원본 경로로 해소됐지만,
+승인 A는 이월하지 않고 처음부터 다시 실행합니다. A가 전부 통과하기 전에는 B1을 실행하지 않으며,
+현재 판정은 계속 **NO-GO / BLOCKING**, Q2는 `UNKNOWN`입니다.
