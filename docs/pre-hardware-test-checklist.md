@@ -238,6 +238,13 @@ container inspection은 running·exited 전체를 검사합니다. provisioning 
 `running`·`restarting`·`paused` 등 root를 사용할 수 있는 상태가 하나라도 있으면 별도 승인된 정지와
 재검증 전에는 provisioning을 실행하지 않습니다.
 
+volume-identity provisioning 외에도 승인 sequence와 실패 terminalization에서 `/hardware-safety`를
+mount하는 **모든 one-shot**(A 재검증, B1·B3 collector, `prepare`, attended `qualify` 안의
+`arm`·`execute`, `finalize`, `status`, `park-verify`, `park` 포함)은 위 상시 허용 집합에 들어가지
+않습니다. 각 one-shot은 **시작 전과 종료 후** 이 전체-container 열거로 부재를 확인합니다. one-shot이
+살아 있는 동안에는 **그 exact 승인된 one-shot 자체의 한 줄만** 위반으로 세지 않되, 그 열거가 전후
+부재 검사를 대체하지 않으며 다른 container의 line이 하나라도 함께 나오면 그대로 `NO-GO`입니다.
+
 volume identity를 최초 provisioning하는 별도 one-shot은 이 허용 집합에 들어가지 않습니다. 위
 preflight를 통과하고 별도 host-state 승인을 받은 경우에만 network-none service를 **명시적으로**
 `provision` mode로 한 번 실행합니다. 이미 provisioned인 정상 운영에서는 이 단계를 반복하지 않습니다.
