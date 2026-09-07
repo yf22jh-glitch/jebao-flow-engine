@@ -2313,3 +2313,28 @@ A의 machine-verifiable host·private-state·empty-root gate는 통과했지만,
 on-site approver가 직접 확인해야 합니다. 그 진술과 **B1 `2 series × 2 pair`의 device read +
 owner-only collector durable write를 exact하게 발급하는 별도 승인** 전에는 device contact를 시작하지
 않습니다. 현재 판정은 계속 **NO-GO / BLOCKING**, Q2는 `UNKNOWN`입니다.
+
+## 2026-09-07 B1 실행 결과 — primary identity-resolution 실패에서 중단
+
+repository maintainer/on-site approver는 직전 exact packet에 직접 답해 quiescence 전제를 확인하고,
+두 series 각각 predeclared pair `2`, cadence `30초`, timeout `5초`, retry `0`, `explicit_only`,
+device/control write `0`, owner-only primary와 별도 private backup의 B1을 승인했습니다. B1 직전
+machine gate는 clean commit·runtime source·private config·write-lock 값·exact pair·context·volume·
+image·process·TCP·safety-root metadata를 모두 다시 통과했습니다.
+
+primary series는 ordinal `0`, `1`을 한 번씩 실행했지만 두 role의 네 sample이 모두
+`failure_phase=identity_before`, `failure_code=identity_not_exactly_resolved`로 끝났습니다. accepted
+pair `0`, predicate-rejected pair `0`, read-failure pair `2`이고 raw frame·decoded state·authenticated
+TCP state read는 `0`입니다. 이 결과는 zero response, duplicate response, 다른 binding 중 어느
+세부 원인인지는 구분하지 않습니다.
+
+따라서 이 계획의 B1 stop rule에 따라 corroborating series와 자동 retry를 실행하지 않았고, B1 승인
+범위는 종료됐습니다. primary의 plan·series·pair·sample file과 별도 private backup은 reload·digest·
+owner-only metadata 대조를 통과했습니다. exact id·digest·UTC span과 증거 등급은
+[`docs/runs/2026-09-07-b1-identity-resolution-stop-7746b28a.md`](runs/2026-09-07-b1-identity-resolution-stop-7746b28a.md)가
+단일 출처입니다.
+
+device/control write와 safety-root semantic mutation은 `0`, 종료 후 process·TCP·container·volume
+snapshot은 실행 전과 같습니다. current baseline과 exact-restore candidate는 만들지 않았습니다.
+추가 device contact는 이 실행의 retry가 아니며, 먼저 offline 분석과 보고를 거친 뒤 새 exact B1
+승인이 필요합니다. 현재 판정은 계속 **NO-GO / BLOCKING**, Q2는 `UNKNOWN`입니다.

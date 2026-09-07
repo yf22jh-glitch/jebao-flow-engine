@@ -1514,3 +1514,31 @@ machine-verifiable A gate는 통과했습니다. 다만 첫 device contact 직�
 B1 `2 series × 2 pair`의 bounded device read와 owner-only collector durable write는 별도 exact
 승인을 받아야 합니다. 그 전의 현재 판정은 standalone exact restore와 Q2 모두
 **`NO-GO / BLOCKING`**, Q2는 `UNKNOWN`입니다.
+
+## 2026-09-07 B1 primary identity-resolution 실패 — stop rule 적용
+
+repository maintainer/on-site approver는 직전 exact packet에 직접 답해 앱의 background·다른
+client 포함 완전 종료와 Home Assistant detach를 확인하고, `2 series × 2 pair`, cadence `30초`,
+timeout `5초`, retry `0`, `explicit_only`, device/control write `0`, owner-only primary와 별도 private
+backup의 B1을 승인했습니다. 승인 범위는 짧은 답문이 아니라 그 직전 packet에 결속됩니다:
+**(c) reconstructed operator observation**.
+
+첫 장비 접촉 직전에는 clean commit `c0a8be68e62cf88affb3a918aa0529f8da3fc698`, collector runtime
+source digest `9402a1ac9bb170fecdada0a0ea487286ba4e545db74ca8d76a483492b54e165a`, 두 private config의
+기록된 digest와 write-lock 값, exact two-Pro pair, context·volume·image, safety-root user `0`, Jebao
+writer/container `0`, established TCP `12416` `0`, safety volume `LINKS=0 | 61B`를 다시
+확인했습니다.
+
+primary는 두 predeclared ordinal을 한 번씩 완료했지만 accepted pair `0`, read-failure pair `2`로
+끝났습니다. 네 role sample 모두 `identity_before / identity_not_exactly_resolved`였고 raw frame,
+decoded state, authenticated TCP state read는 `0`입니다. 승인된 stop rule에 따라 corroborating,
+자동 retry, B2 이후 단계는 실행하지 않았습니다. 구조화 산출물과 별도 backup은 실제 file reload와
+digest 대조를 통과했습니다. 자세한 evidence는
+[`docs/runs/2026-09-07-b1-identity-resolution-stop-7746b28a.md`](runs/2026-09-07-b1-identity-resolution-stop-7746b28a.md)에
+있습니다.
+
+종료 후 safety-root user·running Jebao container·established TCP `12416`은 각각 `0`, volume set은
+`54`개와 기존 digest 그대로, safety volume도 `LINKS=0 | 61B`였습니다. device/control write는
+`0`이고 current baseline은 확보되지 않았습니다. 추가 discovery나 수집은 자동 retry로 실행하지
+않습니다. **현재 판정은 standalone exact restore와 Q2 모두 `NO-GO / BLOCKING`, Q2는
+`UNKNOWN`입니다.**
