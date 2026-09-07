@@ -148,8 +148,9 @@ def test_existing_volume_migration_compose_is_external_and_offline() -> None:
     assert compose["name"] == "jebao-flow-hardware-safety-migration"
     assert service["profiles"] == ["hardware-safety-migration"]
     assert service["image"] == (
-        "${JEBAO_FLOW_HARDWARE_SAFETY_IMAGE:?set exact reviewed image before migration}"
+        "sha256:b8f35abb0ac5a31f8173e78585eedb183c548eb104369ec2ee9f4f6b63437484"
     )
+    assert service["platform"] == "linux/amd64"
     assert "build" not in service
     assert service["restart"] == "no"
     assert service["pull_policy"] == "never"
@@ -172,6 +173,33 @@ def test_existing_volume_migration_compose_is_external_and_offline() -> None:
         "name": "jebao-flow-hardware-safety",
         "external": True,
     }
+
+
+def test_existing_volume_holder_is_exact_pinned_read_only_and_not_a_writer() -> None:
+    compose = yaml.safe_load(
+        (ROOT / "docker-compose.hardware-safety-migration.yml").read_text(encoding="utf-8")
+    )
+    service = compose["services"]["jebao-flow-hardware-safety-holder"]
+
+    assert service["profiles"] == ["hardware-safety-holder"]
+    assert service["image"] == (
+        "sha256:b8f35abb0ac5a31f8173e78585eedb183c548eb104369ec2ee9f4f6b63437484"
+    )
+    assert service["platform"] == "linux/amd64"
+    assert "build" not in service
+    assert service["container_name"] == "jebao-flow-hardware-safety-holder"
+    assert service["restart"] == "unless-stopped"
+    assert service["pull_policy"] == "never"
+    assert service["network_mode"] == "none"
+    assert "environment" not in service
+    assert service["volumes"] == ["jebao-flow-hardware-safety:/hardware-safety:ro"]
+    assert service["read_only"] is True
+    assert service["tmpfs"] == ["/tmp", "/data"]
+    assert service["cap_drop"] == ["ALL"]
+    assert service["security_opt"] == ["no-new-privileges:true"]
+    assert service["entrypoint"] == ["/bin/sleep"]
+    assert service["command"] == ["infinity"]
+    assert "depends_on" not in service
 
 
 def test_identity_console_script_is_installed() -> None:

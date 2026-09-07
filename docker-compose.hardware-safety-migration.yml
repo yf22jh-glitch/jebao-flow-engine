@@ -3,7 +3,8 @@ name: jebao-flow-hardware-safety-migration
 services:
   jebao-flow-hardware-safety-migrate:
     profiles: ["hardware-safety-migration"]
-    image: ${JEBAO_FLOW_HARDWARE_SAFETY_IMAGE:?set exact reviewed image before migration}
+    image: sha256:b8f35abb0ac5a31f8173e78585eedb183c548eb104369ec2ee9f4f6b63437484
+    platform: linux/amd64
     container_name: jebao-flow-hardware-safety-migrate
     restart: "no"
     pull_policy: never
@@ -22,6 +23,27 @@ services:
       - no-new-privileges:true
     entrypoint: ["jebao-flow-hardware-safety"]
     command: ["verify"]
+
+  jebao-flow-hardware-safety-holder:
+    profiles: ["hardware-safety-holder"]
+    image: sha256:b8f35abb0ac5a31f8173e78585eedb183c548eb104369ec2ee9f4f6b63437484
+    platform: linux/amd64
+    container_name: jebao-flow-hardware-safety-holder
+    restart: unless-stopped
+    pull_policy: never
+    network_mode: none
+    volumes:
+      - jebao-flow-hardware-safety:/hardware-safety:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["/bin/sleep"]
+    command: ["infinity"]
 
 volumes:
   jebao-flow-hardware-safety:

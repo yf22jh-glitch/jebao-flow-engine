@@ -478,3 +478,33 @@ Config/History projection은 source와 exact match했지만, 이 해석은 사�
 legacy container 삭제·root mount·probe·marker와 device·앱·Home Assistant 접촉은 `0`입니다. root는
 계속 `LINKS=9 | 1.071MB`이고 container-id set·volume-set digest도 위 preflight와 같습니다. 새 image
 transport 결속 결정 전까지 migration과 hardware는 `NO-GO / BLOCKING`입니다.
+
+### 2026-09-07 current-state backup 보강 — legacy `/data` 보존과 실행 전 정지
+
+actual root user `9`개가 참조하는 `/data` mount를 container를 시작하지 않은 read-only Docker
+metadata로 다시 확인했습니다. unique legacy volume은 `6`개이고, 하나는 `LINKS=4 | 78.92kB`, 다섯은
+`LINKS=1 | 0B`였습니다. Docker anonymous label은 모두 부재했습니다. name multiset·unique set·
+`name|links|size` tuple SHA-256은 각각
+`a0d1fcdd7aef63444a88f4c84d21882819458a5243de078251647be16f3a9323`,
+`e937b18a50c19095972a1e4055c4e552ae52b94ff96949354933afb93f308c98`,
+`3ad84ee51e42b4fa54d5fa8d7144416af4964474edba849c2316819ea79f2de0`입니다.
+
+되돌릴 수 없는 legacy container 삭제 전에 각 volume을 hash 정렬 ordinal로 골라, 그것을 참조하는
+stopped container의 `/data`를 container 시작 없이 `docker cp ... -` byte stream으로 읽었습니다.
+owner-only private artifact `JHD-375309b20810d49ff8530205`에는 유효한 tar `6`개, inventory, index와
+manifest가 있습니다. tar 합계는 `148480` bytes, transfer stderr는 모두 `0` bytes, index SHA-256은
+`7107dd96ff2c178c6f6d37ea939a82073429e126d56cde4c402e9229ed355b38`, manifest는 `4439` bytes와
+SHA-256 `e1da04cf812a9f9be68f429981ac090786fd2796fb2dc38283b4b572d4e446ac`입니다. raw container ID·volume
+name·private path는 출력하거나 repository에 기록하지 않았습니다: **(c) reconstructed operator
+observation**.
+
+backup 뒤 actual root user `9`개는 모두 exited, root는 `LINKS=9 | 1.071MB`, 전체 volume은 `28`개와
+기존 set SHA-256 `da2a46d3…ddba`, running Jebao와 TCP `12416` established는 각각 `0`으로 실행 전과
+같았습니다. 실제 safety-root bytes, marker, container, volume, device·앱·Home Assistant는 변경하지
+않았습니다.
+
+actual deployment에 사용할 identity는 `d72417f1…28aef`이고, 앞 local `colima` 검증의
+`fa99e3b9…df10`은 **비배포 marker-only root**의 값입니다. 둘을 서로 대체하지 않습니다. image config
+digest pin, root holder와 parked-tombstone successor C는 아직 plan·contract 변경일 뿐이고 remote
+mutation 승인이 아닙니다. 이 addendum은 새 hardware run이나 Sep-04 qualification success를 주장하지
+않으며 marker migration과 hardware는 계속 **`NO-GO / BLOCKING`**입니다.

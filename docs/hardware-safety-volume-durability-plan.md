@@ -670,3 +670,144 @@ validation command의 agent console 오류에 한 번 노출됐지만 repository
 remote runtime image ID의 결속과 두 projection exact match를 repository maintainer가 명시적으로
 수용한 뒤에만, migration Compose의 image 값을 remote runtime ID `sha256:b8f35abb…37484`로 결속해
 위 4단계부터 재개합니다. 그 전까지 marker와 container에는 손대지 않습니다.
+
+## 2026-09-07 continuation 재발행 — `/data` backup, config-ID pin, root holder
+
+### Image 결속과 두 safety-root identity의 분리
+
+cross-engine transport의 load-bearing 결속은 local descriptor 문자열 자체가 아니라 다음 한 사슬입니다.
+
+1. local descriptor `d67998b3…a139b`의 saved manifest가 config blob
+   `b8f35abb0ac5a31f8173e78585eedb183c548eb104369ec2ee9f4f6b63437484`를 가리킵니다.
+2. 그 blob bytes의 SHA-256이 같은 `b8f35abb…37484`입니다.
+3. remote overlay2 runtime image ID도 `sha256:b8f35abb…37484`입니다.
+
+image config가 ordered `rootfs.diff_ids`를 포함하므로 이 config digest는 layer content를 전이적으로
+결속합니다. ordered RootFS projection `0683fee3…7745f`와
+`{Architecture,Os,Config,RootFS,History}` projection `9ec40619…ba03`의 exact match는 중복 확증이며,
+projection 산식 자체를 load-bearing identity로 사용하지 않습니다. local 검증은 arm64 host의 QEMU였고
+actual remote는 `x86_64`에서 `linux/amd64` image를 native로 실행합니다. migration Compose는
+`sha256:b8f35abb…37484`와 `linux/amd64`를 literal로 고정하고 `build`·pull·tag resolution을 허용하지
+않습니다. 이미 load된 image를 그대로 쓰며 새 save/load는 하지 않습니다.
+
+identity도 root별로 구분합니다.
+
+- local `colima`의 비배포 marker-only root: `fa99e3b9…df10`
+- actual remote deployment root에 설치할 identity: `d72417f1…28aef`
+
+앞선 local A/B1 기록의 `fa99e3b9…df10`을 actual deployment expected identity로 사용하지 않습니다.
+actual identity는 remote owner-only carrier와 별도 host의 owner-only backup에서 원문을 출력하지 않고
+길이·lowercase 32-hex·원문·SHA-256을 다시 대조해야 합니다. marker 설치 뒤에는 marker가 권위이며,
+carrier 분실 시 새 값을 만들거나 marker를 지우지 않고 승인된 read-only 회수 절차만 사용합니다.
+Compose CLI와 `--env-file` 해석은 remote shell에서 수행하고 local은 reviewed YAML bytes만 stdin으로
+보냅니다. remote private 경로와 raw identity는 local command line·기록에 넣지 않습니다.
+
+### Legacy `/data` volume current-state backup
+
+root-user container를 되돌릴 수 없게 제거하기 전에 그 `9`개가 참조하는 `/data` volume도 별도로
+보존했습니다. Docker metadata에는 `6`개의 unique volume이 있고 name multiset·unique set·
+`name|links|size` tuple SHA-256은 각각
+`a0d1fcdd7aef63444a88f4c84d21882819458a5243de078251647be16f3a9323`,
+`e937b18a50c19095972a1e4055c4e552ae52b94ff96949354933afb93f308c98`,
+`3ad84ee51e42b4fa54d5fa8d7144416af4964474edba849c2316819ea79f2de0`입니다. 다섯 volume은
+`LINKS=1 | 0B`, 하나는 `LINKS=4 | 78.92kB`이고 mount count도 각각 `1`과 `4`입니다. Docker의
+anonymous label은 여섯 모두 없으므로 **legacy `/data` volume**이라고만 부릅니다.
+
+각 volume은 hash 정렬 ordinal로 고르고, 그것을 mount한 stopped container 하나의 `/data`를 container를
+시작하지 않은 `docker cp ... -` byte stream으로 읽었습니다. raw container ID·volume name·private
+경로는 출력하거나 repository에 기록하지 않았습니다. owner-only artifact
+`JHD-375309b20810d49ff8530205`에는 유효한 tar `6`개, 안전하게 축약한 inventory, index와 manifest가
+있습니다. tar 합계는 `148480` bytes이고 모든 transfer stderr는 `0` bytes입니다. index SHA-256은
+`7107dd96ff2c178c6f6d37ea939a82073429e126d56cde4c402e9229ed355b38`, manifest는 `4439` bytes와
+SHA-256 `e1da04cf812a9f9be68f429981ac090786fd2796fb2dc38283b4b572d4e446ac`입니다.
+
+| ordinal | volume-name SHA-256 | live metadata | tar bytes / members | tar SHA-256 |
+|---|---|---|---|---|
+| 1 | `4813701bd214eb7d4c23570a8b66e530a54fdb27bc85a7a5b04ca8cc9da20730` | `LINKS=4`, `78.92kB`, mounts `4` | `140800 / 96` (`62` file, `34` dir) | `73de72a652f27ab8340046a7c31eb4e704cf02fdb1e3b0aaa6d48233633c4166` |
+| 2 | `5ac96cec5fea3c3711e3b2dd8a71b8700c1f37c26b599f8d27a33743c743f6bd` | `LINKS=1`, `0B`, mounts `1` | `1536 / 1` (dir only) | `c1c33b0958238fae413a99721669a23c4e4b55c5fcb394113dd85b0bbc961d1c` |
+| 3 | `917603f8ad3c080397cbf85bc9b7abcb503bf671ad0e4ec5cb6af09db8dcce89` | `LINKS=1`, `0B`, mounts `1` | `1536 / 1` (dir only) | `c1c33b0958238fae413a99721669a23c4e4b55c5fcb394113dd85b0bbc961d1c` |
+| 4 | `9f1d2dc04d61f4387361773c46f900294e376fa650dd561f7331980e3989c05b` | `LINKS=1`, `0B`, mounts `1` | `1536 / 1` (dir only) | `bc5bd35d1ac9a5a622189299f70b5cbcfbafe65810fd0bd61558bf2a308c240b` |
+| 5 | `cb6d186720fb292f5ad5b82c272b049a2998291011b292752fbd0e68990b726e` | `LINKS=1`, `0B`, mounts `1` | `1536 / 1` (dir only) | `09ef17741dc0f863cb5fd2ffb9efba14a7f2f39af10ca04908f9dba6e5e4fad5` |
+| 6 | `f162f02c31008037194bae2a4bbb44e7ef40d08b8d4a1961959f3df437c7e615` | `LINKS=1`, `0B`, mounts `1` | `1536 / 1` (dir only) | `a0ef4866e3e07889759b11acdd74caeda6d6756190af4f1f3b69ad7d326b2a8e` |
+
+위 volume-name SHA-256은 private manifest에서 exact reload한 값이며 ordinal과 함께 판정 입력으로
+사용합니다. 첫 local wrapper는 delimiter를 잘못 해석해 remote `docker cp` 전에
+fail-closed했고, 같은 private artifact의 해당 0-byte output과 stderr를 성공 실행이 교체했습니다.
+성공 뒤 remote는 root user `9`개 모두 exited, root `LINKS=9 | 1.071MB`, 전체 volume `28`개와
+volume-set SHA-256 `da2a46d3…ddba`, running Jebao·TCP `12416` established 각각 `0`으로 실행 전과
+같았습니다: **(c) reconstructed operator observation**. 이 backup은 device·앱·Home Assistant와
+safety-root bytes를 변경하지 않았습니다.
+
+`docker rm`에는 계속 `-v`를 쓰지 않으므로 이 여섯 volume은 즉시 삭제되지 않지만 마지막 reference가
+사라지면 dangling·prune 대상입니다. packet은 prune을 실행하지 않습니다. 보존 판단은 dangling
+volume의 계속된 생존이 아니라 `JHD-...` tar와 manifest에 둡니다.
+
+### Root를 `LINKS=0`으로 만들지 않는 holder 계약
+
+actual safety root는 Sep-04 barrier의 유일한 live deployment copy이므로 마지막 legacy recovery
+container를 먼저 지워 `LINKS=0`으로 만들지 않습니다. post-marker backup과 기존 bytes exact 비교가
+끝난 뒤, recovery container가 아직 root를 참조하는 동안 Compose service
+`jebao-flow-hardware-safety-holder`를 먼저 생성·기동합니다. holder는 다음 exact 형상을 모두 만족할
+때만 non-writer reference로 인정합니다.
+
+- exact name `/jebao-flow-hardware-safety-holder`
+- exact image ID `sha256:b8f35abb…37484`, `platform: linux/amd64`, `pull_policy: never`, `build` 없음
+- `entrypoint=["/bin/sleep"]`, `command=["infinity"]`; Jebao module·CLI entrypoint 없음
+- `restart: unless-stopped`, `network_mode: none`, root filesystem read-only
+- safety root 하나만 named volume로 `/hardware-safety:ro`에 mount; `/tmp`와 `/data`는 tmpfs
+- identity environment 부재, cap-drop `ALL`, `no-new-privileges:true`, dependency service 없음
+
+local byte-identical image에서 `/bin/sleep` entrypoint를 volume-set 변화 없이 확인했습니다. 위 속성 중
+하나라도 다르면 holder가 아니라 unsanctioned root user로 보고 `NO-GO`입니다. holder가 exact할 때만
+stage 0의 writer/running-container predicate에서 예외로 두며, root user inventory에서는 계속 한 줄로
+세고 숨기지 않습니다. holder는 root identity를 증명하거나 lock·journal을 해석하지 않고 prune
+reference만 유지합니다.
+
+migration 완료 뒤 holder는 선택적 migration 잔여물이 아니라 **상시 sanctioned root reference**입니다.
+부재하거나 running이 아니면 actual root가 다시 `LINKS=0` 노출로 갈 수 있으므로 hardware와 root open은
+`NO-GO`입니다. 일반 container cleanup·`docker container prune` 대상으로 제거하지 않고, 부재 상태에서
+volume prune도 실행하지 않습니다.
+
+### Superseding continuation 순서
+
+아래 순서가 앞의 옛 1~7단계를 actual continuation에 대해 대체합니다.
+
+1. `JHS-...` root backup, `JHC-...` container metadata와 `JHD-...` `/data` backup을 모두 reload하고
+   digest·owner-only metadata를 확인합니다. 두 identity carrier도 무출력 exact match하고 remote에서
+   read-only recovery command를 구성할 수 있음을 확인합니다. raw inventory는 loop 안에서 count와
+   SHA-256으로 줄인 뒤에만 출력합니다.
+2. remote image ID가 exact `sha256:b8f35abb…37484`이고 `linux/amd64`인지 확인합니다. Compose에는
+   literal ID가 있고 build·pull·tag가 없어야 합니다. image save/load를 반복하지 않습니다.
+3. 각 legacy container마다 `JHC-...`에 그 exact full metadata가 있음을 확인하고 **각 `docker rm`
+   직전** status가 `exited`인지 다시 읽습니다. public recovery 하나를 남기고 `8`개만 한 개씩
+   `docker rm` **without `-v`**로 제거합니다. 하나라도 어긋나거나 삭제가 부분 실패하면 marker
+   provisioning `0`으로 중단합니다. 이 비가역 삭제가 marker 검증보다 먼저인 이유는 legacy exited
+   container가 old source로 root를 다시 열 수 있기 때문이며, JHS·JHC·JHD의 사전 보존이 삭제를
+   감수할 근거입니다.
+4. root user가 남긴 recovery 하나뿐이고 root size·critical artifact와 `/data` aggregate가 그대로일
+   때만 remote shell의 Compose CLI를 `--env-file`과 stdin YAML로 실행해 migration service를
+   `--rm --no-deps --pull never`로 한 번 `provision`합니다. expected result는 처음이자 유일한
+   `status=provisioned`와 identity SHA `d72417f1…28aef`입니다. `already_provisioned`, 다른 digest,
+   owner/mode 오류, ACK 불명은 즉시 STOP이며 retry·marker 삭제·reprovision·`chmod`·`chown`은 모두
+   금지합니다. ACK만 불명이고 migration one-shot과 다른 root user가 부재함을 확인할 수 있으면
+   `provision`을 반복하지 않고 default `verify`를 한 번 실행해 실제 상태를 확인합니다. 이는 retry가
+   아니며 verify 실패·container residue면 mutation을 더 하지 않습니다.
+5. recovery container를 시작하지 않고 post-migration `docker cp` byte stream을 새 owner-only private
+   artifact로 보존합니다. 이 artifact는 private deployment state의 두 번째 copy임을 기록합니다.
+   pre-backup의 기존 `25` regular file과 전체 tree bytes·metadata·barrier cross-binding은 exact하고,
+   추가된 것은 canonical marker 하나뿐이어야 합니다. `.write-probe.*` 또는 그 밖의 entry가 하나라도
+   남거나 기존 항목이 다르면 recovery를 지우지 않고 STOP합니다.
+6. recovery가 남아 있는 상태에서 exact holder를 생성·기동하고 inspect로 위 모든 속성을 확인합니다.
+   root link 수는 recovery+holder `2`여야 합니다. holder가 running이고 non-writer임을 확인한 뒤에만
+   recovery를 `docker rm` **without `-v`**로 제거합니다. 이 전환 동안 actual root link 수는 한 번도
+   `0`이 되지 않으며 종료 시 holder 하나로 `LINKS=1`입니다.
+7. holder를 유지한 채 migration service의 default `verify`를 딱 한 번 실행합니다. running 중 허용되는
+   root user는 exact holder와 exact verify one-shot 두 줄뿐이고 종료 뒤 one-shot은 `0`, holder는
+   running, root는 `LINKS=1`이어야 합니다. verify는 `status=verified`와 같은
+   `d72417f1…28aef`만 허용합니다. 실패하면 위와 같이 marker mutation을 시도하지 않고 STOP합니다.
+
+exact-restore `status`·`park`, recovery supervisor, device network/read/write, 앱과 Home Assistant는 이
+packet에 포함하지 않습니다. holder 생성과 새 실행 순서, 실제 tombstone topology에 맞춘 qualification
+계획의 C 재정의·dead-end 재수락은 repository maintainer의 새 명시 결정 전에는 행사하지 않습니다.
+그 전까지 legacy container removal과 marker provisioning은 재개하지 않으며 hardware는
+**`NO-GO / BLOCKING`**입니다.

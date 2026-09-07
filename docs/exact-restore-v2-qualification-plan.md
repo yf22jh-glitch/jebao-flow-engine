@@ -2370,3 +2370,48 @@ actual volume에는 marker가 없고 기존 journal·archive가 있으므로 cur
 barrier를 보존하는 marker migration을 설계·offline 검증하고 maintainer가 결정한 뒤, actual
 deployment에서 승인 A를 처음부터 재실행하는 것입니다. 이 정정은 A·B1·B2·B3·C·D 중 어느 승인도
 발급하지 않으며 hardware는 **NO-GO / BLOCKING**, Q2는 `UNKNOWN`입니다.
+
+## 2026-09-07 actual deployment 실행 override — parked successor와 holder
+
+이 절은 위 local marker-only root에서 얻은 fresh-create 실행 대입을 **actual remote deployment에
+대해서만 대체**합니다. local `colima` root의 marker identity `fa99e3b9…df10`, `61B`, empty journal과
+lock 부재는 actual A·C·B1의 입력이 아닙니다. actual root의 expected identity는
+`d72417f1…28aef`이고, migration 전 기준은 owner-only backup
+`JHS-9aff85b2b0a852e2741ef48e` 및 그 안에서 exact reload한 Sep-04 parked chain입니다.
+
+marker migration 뒤 actual 승인 A의 stage 0은 다음을 확인합니다.
+
+- expected identity `d72417f1…28aef`로 runtime marker verify를 통과하고, migration 전 기존 tree가
+  `JHS-...`와 byte·metadata·barrier cross-binding에서 같으며 canonical marker 하나만 추가됐습니다.
+- live journal은 `None`이 아니라 documented parked-unqualified tombstone입니다. disposition,
+  journal snapshot과 permanent v2 finalization은 Sep-04 기록의 digest·operation binding과 exact
+  match해야 합니다. **empty journal·archive 부재·persistent lock 네 종 부재를 요구하지 않습니다.**
+- exact holder `/jebao-flow-hardware-safety-holder`는 pinned image ID
+  `sha256:b8f35abb…37484`, non-Jebao `/bin/sleep infinity`, identity environment 부재,
+  network-none, root read-only, safety mount read-only, `/tmp`·`/data` tmpfs, cap-drop `ALL`,
+  no-new-privileges와 단독 named-root mount를 모두 만족할 때만 writer/running-Jebao predicate에서
+  제외합니다. 속성 하나라도 다르면 예외가 아니며 `NO-GO`입니다. holder는 root-user inventory에는
+  계속 한 줄로 나타나야 합니다.
+
+actual 승인 C에서 sentinel 시작 경로는 fresh `ExactRestoreJournalStore.create()`가 아닙니다. 새 v2
+manifest, `SENTINEL_QUALIFICATION`·`PREPARED` record,
+`max_final_acquisition_duration_seconds is not None`, 다른 operation id와 guard 허용을 모두 확인한 뒤
+production `_create_prepared()`의
+`_is_parked_unqualified_tombstone` → `_confirm_parked_tombstone` → `_save_exact` →
+`reload_and_confirm_successor` 분기로 parked tombstone을 fresh `PREPARED` successor로 교체합니다.
+first-use coordination lock과 temporary install lifecycle을 포함한 나머지 C write set은 앞의 C 범위를
+그대로 따릅니다. `ExactRestoreJournalStore.create()`는 기존 first record가 있으므로 이 topology에서
+성공 경로가 아니며 실행하지 않습니다.
+
+예산·digest·candidate·승인 중 하나라도 tombstone 교체 전에 실패하면 manifest를 임의로 수정하지 않고
+live parked tombstone을 그대로 둔 채 중단합니다. 반대로 `_save_exact`가 ACK되어 live
+`PREPARED`로 교체된 뒤 `BASELINE_EXPIRED`·digest mismatch가 나면, permanent predecessor barrier와
+parked snapshot이 archive에 남아 있어도 live `PREPARED`를 sanctioned하게 clear·재prepare하거나 옛
+tombstone으로 되돌리는 경로는 없습니다. 이것이 actual topology의 정확한 dead-end 전제입니다.
+
+따라서 과거의 **C=fresh first-record** 재정의는 actual deployment에 대해 철회하고
+**C=parked tombstone → fresh `PREPARED` successor**로 되돌려야 합니다. 또한 dead-end 수락은
+“tombstone이 없는 empty root”라는 잘못된 전제가 아니라 바로 위의 실제 교체 경계로 다시 받아야
+합니다. 두 결정은 maintainer의 새 명시 확인 전에는 효력이 없고, 이 절 자체는 C나 다른 실행 승인을
+발급하지 않습니다. marker migration·actual A·새 B1도 각각 앞선 별도 경계를 통과해야 하며 현재
+hardware는 **NO-GO / BLOCKING**, Q2는 `UNKNOWN`입니다.

@@ -1621,3 +1621,49 @@ migration 절을 따릅니다.
 이 계획과 Compose/test 착지는 remote mutation 승인이 아닙니다. actual root marker migration과 그 뒤
 actual deployment A가 별도 승인·통과하기 전까지 exact restore와 Q2는 **`NO-GO / BLOCKING`**, Q2는
 `UNKNOWN`입니다.
+
+## 2026-09-07 migration continuation 판정 — current-state backup과 parked C 복원
+
+actual root를 참조하는 exited container `9`개의 `/data` mount는 unique legacy volume `6`개였습니다.
+하나는 `LINKS=4 | 78.92kB`, 다섯은 `LINKS=1 | 0B`이고 Docker anonymous label은 모두 부재했습니다.
+container를 제거하기 전에 stopped container의 `/data`를 시작하지 않은 `docker cp` byte stream으로
+각각 읽어 owner-only private artifact `JHD-375309b20810d49ff8530205`에 tar `6`개로 보존했습니다.
+index SHA-256은
+`7107dd96ff2c178c6f6d37ea939a82073429e126d56cde4c402e9229ed355b38`, manifest SHA-256은
+`e1da04cf812a9f9be68f429981ac090786fd2796fb2dc38283b4b572d4e446ac`이고 transfer stderr는 모두
+`0` bytes였습니다. backup 뒤 root user `9`개 모두 exited, actual root `LINKS=9 | 1.071MB`, 전체
+volume `28`개와 기존 set digest, running Jebao·TCP `12416` established `0`은 실행 전과 같았습니다:
+**(c) reconstructed operator observation**. device·앱·Home Assistant와 actual safety-root bytes는
+접촉하거나 변경하지 않았습니다.
+
+cross-engine image continuation의 load-bearing 결속은 local saved manifest가 가리킨 config blob의
+content SHA-256과 remote overlay2 runtime image ID가 모두
+`b8f35abb0ac5a31f8173e78585eedb183c548eb104369ec2ee9f4f6b63437484`라는 것입니다. config의 ordered
+`rootfs.diff_ids`가 layer content를 전이적으로 결속합니다. 두 projection digest는 중복 확증일 뿐
+load-bearing identity가 아닙니다. actual remote는 `x86_64`에서 `linux/amd64`를 native로 실행하고,
+migration Compose는 이 exact image ID와 platform을 literal로 고정하며 build·pull·tag resolution을
+허용하지 않습니다.
+
+actual deployment identity는 `d72417f1…28aef`이고 local non-deployment marker-only root의
+`fa99e3b9…df10`과 구분합니다. actual root에는 intact parked tombstone·disposition·journal snapshot·
+permanent finalization이 있으므로, local empty-root를 근거로 한 fresh-create stage 0와 C 재정의는
+actual 실행에 적용하지 않습니다. actual C는 production의 reviewed parked-tombstone successor 분기로
+**tombstone → fresh `PREPARED`**를 교체하는 범위로 되돌아갑니다.
+
+actual root를 마지막 legacy container 삭제 뒤 `LINKS=0`으로 두지 않습니다. marker와 post-backup
+exact 비교가 끝난 뒤 legacy recovery가 아직 참조하는 동안 exact pinned, network-none,
+read-only `/bin/sleep` holder를 먼저 기동하고, 모든 속성을 inspect한 뒤에만 마지막 recovery를
+`docker rm` without `-v`로 제거합니다. holder는 그 exact 형상일 때만 stage 0의 writer와 running-Jebao
+count에서 제외하지만 root-user inventory에는 계속 남깁니다. root identity·journal을 해석하거나
+hardware 권한을 갖지는 않습니다.
+
+migration 완료 뒤 exact holder는 선택적 잔여물이 아니라 actual root의 상시 sanctioned reference입니다.
+holder가 부재하거나 running이 아니면 root가 다시 `LINKS=0`에 노출될 수 있으므로 hardware와 root
+open은 `NO-GO`이고, 일반 cleanup·container prune 대상으로 제거하지 않습니다.
+
+다만 live tombstone을 `PREPARED`로 교체한 뒤 expiry·digest mismatch가 나면 predecessor barrier가
+남아 있어도 현재 source에는 live record를 sanctioned하게 clear·재prepare하거나 tombstone으로
+되돌리는 경로가 없습니다. maintainer는 이 **실제 전제의 dead-end**, actual C의 원래 범위 복원,
+holder 생성과 revised migration packet을 각각 명시적으로 결정해야 합니다. 그 전에는 legacy
+container removal·marker write·holder 생성·actual A를 실행하지 않습니다. 현재 판정은 standalone
+exact restore와 Q2 모두 **`NO-GO / BLOCKING`**, Q2는 `UNKNOWN`입니다.

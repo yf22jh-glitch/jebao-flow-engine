@@ -212,13 +212,40 @@ docker context show
 docker volume inspect --format '{{.Name}}' jebao-flow-hardware-safety
 
 bash -eu -o pipefail <<'BASH'
+if command -v sha256sum >/dev/null 2>&1; then
+  digest_stdin() { sha256sum | awk '{print $1}'; }
+elif command -v openssl >/dev/null 2>&1; then
+  digest_stdin() { openssl dgst -sha256 | awk '{print $NF}'; }
+else
+  printf '%s\n' 'no SHA-256 implementation available' >&2
+  exit 1
+fi
+
 container_ids="$(docker container ls --all --quiet)"
 for container_id in $container_ids; do
   mount_lines="$(docker inspect --format \
-    '{{range .Mounts}}{{if eq .Destination "/hardware-safety"}}{{printf "%s %s %s %s %s\n" $.Name $.State.Status .Type .Name .Destination}}{{end}}{{end}}' \
+    '{{range .Mounts}}{{if eq .Destination "/hardware-safety"}}{{printf "%s\t%s\t%s\t%s\t%s\n" $.Name $.State.Status .Type .Name .Destination}}{{end}}{{end}}' \
     "$container_id")"
   if [[ -n "$mount_lines" ]]; then
-    printf '%s\n' "$mount_lines"
+    while IFS=$'\t' read -r container_name state mount_type volume_name destination; do
+      case "$container_name" in
+        /jebao-flow-recovery|/jebao-flowd|/jebao-flow-hardware-safety-holder|/jebao-flow-hardware-safety-migrate)
+          container_label="name=$container_name"
+          ;;
+        *)
+          container_sha256="$(printf '%s' "$container_name" | digest_stdin)"
+          container_label="name_sha256=$container_sha256"
+          ;;
+      esac
+      if [[ "$volume_name" == "jebao-flow-hardware-safety" ]]; then
+        volume_label="name=$volume_name"
+      else
+        volume_sha256="$(printf '%s' "$volume_name" | digest_stdin)"
+        volume_label="name_sha256=$volume_sha256"
+      fi
+      printf '%s %s %s %s %s\n' \
+        "$container_label" "$state" "$mount_type" "$volume_label" "$destination"
+    done <<< "$mount_lines"
   fi
 done
 BASH
@@ -229,14 +256,34 @@ inspection 출력은 정확히 `jebao-flow-hardware-safety` 한 줄이어야 합
 실패하면 provisioning command가 그것을 암묵적으로 만들게 두지 않고, 별도 volume-creation 승인과
 확인 전까지 `NO-GO`입니다.
 
+inventory·검증 명령은 opaque raw container ID나 volume ID를 출력하지 않습니다. loop 안에서 exact
+predicate를 판정하고 count·SHA-256으로 축약한 뒤에만 출력하며, 원문 명령 치환 결과를 `echo`하거나
+raw id를 통과시키는 pipe 출력으로 기록하지 않습니다. sanctioned public service·named volume 이름은
+계약 대조용으로만 표시합니다.
+
 container inspection은 running·exited 전체를 검사합니다. provisioning 전에는 container가 하나도
-없어 출력이 0줄인 것이 허용됩니다. 줄이 있다면 container 이름은 `/jebao-flow-recovery` 또는
-`/jebao-flowd`만 허용하고, type·volume name·destination은 정확히
-`volume jebao-flow-hardware-safety /hardware-safety`여야 합니다. 다른 container가 한 줄이라도
+없어 출력이 0줄인 것이 허용됩니다. 줄이 있다면 container label은 `name=/jebao-flow-recovery` 또는
+`name=/jebao-flowd`만 허용하고, type·volume name·destination은 정확히
+`volume name=jebao-flow-hardware-safety /hardware-safety`여야 합니다. 다른 container가 한 줄이라도
 나오면 이번 incident와 같은 unsanctioned root 사용이므로 `NO-GO`입니다. marker provisioning이
 필요한 경우에는 두 sanctioned container도 부재하거나 `created`·`exited` 상태여야 하며,
 `running`·`restarting`·`paused` 등 root를 사용할 수 있는 상태가 하나라도 있으면 별도 승인된 정지와
 재검증 전에는 provisioning을 실행하지 않습니다.
+
+pre-marker existing-volume migration의 승인된 holder 전환 단계부터, 그리고 완료된 뒤에는 exact holder
+`/jebao-flow-hardware-safety-holder` 한 줄도 예외로 허용할 수 있습니다. 단 이름만으로 허용하지 않고
+image ID `sha256:b8f35abb…37484`와 `linux/amd64`, `/bin/sleep infinity`, identity environment 부재,
+`network_mode: none`, root filesystem read-only, `/hardware-safety:ro` 단독 named-volume mount,
+`/tmp`·`/data` tmpfs, cap-drop `ALL`, no-new-privileges, `restart: unless-stopped`, `build` 부재,
+`pull_policy: never`, dependency 부재가 모두 exact해야 합니다. 이 holder만 stage 0의 writer와
+running-Jebao predicate에서 제외하며, root-user inventory에서는 계속 한 줄로 세고 숨기지 않습니다.
+하나라도 다르면 unsanctioned root user로 보고 `NO-GO`입니다.
+
+migration 완료 뒤 exact holder는 선택적 잔여물이 아니라 actual root의 상시 sanctioned reference입니다.
+holder가 부재하거나 running이 아니면 root가 `LINKS=0`으로 되돌아갈 수 있으므로 `NO-GO`이고,
+hardware 단계나 root를 여는 one-shot을 시작하지 않습니다. holder를 일반 container cleanup이나
+`docker container prune`으로 제거하지 않고, holder가 사라진 상태에서 volume prune도 실행하지
+않습니다.
 
 volume-identity provisioning 외에도 승인 sequence와 실패 terminalization에서 `/hardware-safety`를
 mount하는 **모든 one-shot**(A 재검증, B1·B3 collector, `prepare`, attended `qualify` 안의
@@ -535,27 +582,60 @@ schedule fingerprint가 일치하는지 교차 확인합니다. 마지막으로 
 ## 2026-09-07 pre-marker existing deployment volume migration
 
 marker 도입 전부터 journal·archive가 있는 non-empty volume에는 위 fresh-volume provisioning 명령을
-그대로 대입하지 않습니다. 먼저 actual root의 byte-exact private backup과 그 root를 참조하는 모든
-container의 private metadata backup을 만들고 digest를 확인합니다. current provisioner가 그 exact
-backup의 disposable copy에서 기존 entry를 바꾸지 않고 marker 하나만 추가하는지도 offline으로 먼저
-검증합니다.
+그대로 대입하지 않습니다. 먼저 actual root의 byte-exact private backup, 그 root를 참조하는 모든
+container의 full metadata backup과 각 container가 참조하는 legacy `/data` volume의 current-state
+backup을 만들고 digest·owner-only metadata를 확인합니다. 현재 packet의 precommit은 각각
+`JHS-9aff85b2b0a852e2741ef48e`, `JHC-3edcb721461feacea6b1fc6b`,
+`JHD-375309b20810d49ff8530205`입니다. current provisioner가 exact JHS backup의 disposable copy에서
+기존 entry를 바꾸지 않고 marker 하나만 추가하는지도 offline으로 먼저 검증합니다.
 
 실행에는 repository의 `docker-compose.hardware-safety-migration.yml`만 사용합니다. 이 파일은 volume을
-`external: true`로 요구하고 build·pull·network·restart·anonymous `/data` volume을 닫습니다. exact
-reviewed image id와 deployment 전용 identity가 없으면 Compose config 자체가 실패해야 합니다. old
-deployment checkout의 Compose나 image, raw `docker run`으로 우회하지 않습니다.
+`external: true`로 요구하고 network·restart·anonymous `/data` volume을 닫습니다. migrate와 holder는
+모두 exact image ID `sha256:b8f35abb…37484`, `platform: linux/amd64`, `pull_policy: never`, build 부재를
+literal로 고정합니다. actual deployment identity의 두 owner-only carrier는 원문 비출력으로 길이·
+lowercase 32-hex·원문·SHA-256을 대조하고 `d72417f1…28aef`와 일치해야 합니다. local non-deployment
+root의 `fa99e3b9…df10`은 이 migration 입력으로 쓰지 않습니다. old deployment checkout의 Compose나
+image, raw `docker run`으로 우회하지 않습니다.
 
 legacy exited container는 running이 아니어도 old source로 root를 다시 열 수 있으므로 migration 뒤에
-남기지 않습니다. full inspect metadata를 private backup한 exact ID set과 직전 read-only 재검사가
-일치할 때만, post-migration copy에 사용할 public recovery container 하나를 제외한 나머지를 먼저
-`docker rm` **without `-v`**로 제거합니다. marker 설치·post-backup·기존 file exact 비교 뒤에만 마지막
-recovery container도 같은 방식으로 제거합니다. partial removal이나 set mismatch면 marker를 설치하지
-않습니다.
+남기지 않습니다. full inspect metadata가 **container별로** JHC backup에 있는지 확인하고, 각 삭제
+직전에 그 container가 여전히 `exited`인지 다시 읽습니다. `/data` volume name·links·size 집합도 JHD
+manifest와 일치해야 합니다. post-migration copy에 사용할 public recovery container 하나를 제외한
+나머지 `8`개를 한 개씩 `docker rm` **without `-v`**로 제거합니다. partial removal, metadata·status·
+`/data` aggregate mismatch면 marker를 설치하지 않습니다. 제거 뒤 legacy `/data` volume은 dangling·
+prune 대상일 수 있으므로 prune하지 않으며, 보존 판단은 JHD tar와 manifest에 둡니다.
+
+검증보다 먼저 이 비가역 삭제를 하는 순서는 legacy exited container가 old source로 root를 다시 열 수
+있다는 규칙이 강제합니다. 삭제를 감수할 수 있는 근거는 JHS root bytes, JHC container metadata와
+JHD `/data` current state를 모두 사전에 owner-only로 보존하고 exact reload한 사실입니다.
+
+public recovery 하나가 actual root를 계속 참조해 `LINKS=1`인 상태에서만 migration one-shot을 딱 한 번
+`provision`으로 실행합니다. expected result는 `status=provisioned`와
+`identity_sha256=d72417f1…28aef`입니다. `already_provisioned`, 다른 digest, non-zero, owner·mode 오류,
+ACK 불명은 즉시 STOP입니다. retry·marker 삭제·reprovision·`chmod`·`chown`을 하지 않습니다.
+ACK만 불명이고 migration one-shot·다른 root user가 모두 부재함을 확인할 수 있으면 `provision`을
+반복하지 않고 default `verify`를 한 번 실행해 실제 marker 상태를 확인합니다. 이는 provisioning
+retry가 아니며, verify도 실패하거나 container residue가 있으면 어떤 mutation도 더 하지 않습니다.
+
+recovery container를 시작하지 않은 `docker cp` byte stream으로 post-migration root를 새 owner-only
+private artifact에 보존합니다. JHS의 기존 regular file `25`개와 전체 tree bytes·metadata·tombstone ↔
+disposition ↔ journal ↔ finalization binding이 exact하고, canonical marker 하나만 추가돼야 합니다.
+`.write-probe.*`나 그 밖의 새 entry가 하나라도 남거나 기존 entry가 다르면 recovery를 제거하지 않고
+STOP합니다.
+
+마지막 recovery를 먼저 지워 actual root를 `LINKS=0`으로 만들지 않습니다. recovery가 남아 있을 때
+exact holder를 먼저 생성·기동하고 위 holder 속성을 `docker inspect`로 모두 확인해 root
+`LINKS=2`를 확인합니다. 그 뒤에만 recovery를 `docker rm` **without `-v`**로 제거해 holder 하나의
+`LINKS=1`로 전환합니다. packet 전체에서 root link count가 한 번이라도 `0`이면 즉시 STOP입니다.
+holder를 유지한 채 migration service의 default `verify`를 한 번 실행하고 `status=verified`와 같은
+`d72417f1…28aef`를 요구합니다. 실패해도 marker·owner·mode를 수정하지 않습니다.
 
 이 migration의 exact 실행 packet, stop condition과 현재 artifact digest는
 [`docs/hardware-safety-volume-durability-plan.md`](hardware-safety-volume-durability-plan.md)의
-2026-09-07 actual deployment marker migration 절을 따릅니다. 그 별도 승인이 있기 전에는 image load,
-private carrier 생성, container removal, probe와 marker write를 실행하지 않습니다.
+2026-09-07 continuation 재발행 절을 따릅니다. config digest → remote runtime ID 결속, actual
+C=tombstone successor 복원, 실제 전제의 post-`PREPARED` dead-end 수락, holder와 revised mutation
+packet의 별도 승인이 있기 전에는 container removal·root mount·probe·marker·holder를 실행하지
+않습니다.
 
 ### Cross-engine image transport ID
 
