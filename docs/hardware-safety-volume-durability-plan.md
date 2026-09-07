@@ -508,3 +508,26 @@ validation probe만 접촉했고 exact-restore `status`·journal·archive·recov
 않았습니다. device·앱·Home Assistant 접촉도 `0`입니다. marker는 safety-root 정체성을 증명하는
 한 선행조건만 닫았으며 fresh Phase 0·A·B1·B2·B3·C·D를 대신하지 않습니다.
 **hardware는 계속 `NO-GO / BLOCKING`입니다.**
+
+## 2026-09-07 marker-only root 이후 실행 경계 재판정
+
+named volume의 host-reported `61B`는 canonical identity marker 한 개의 길이와 일치하고 runtime
+`verify`는 canonical bytes, `nlink=1`, same-device, mode·owner, mount identity를 통과했습니다. 현재
+종결할 live journal이 없으므로 `status`나 `park`을 한 번 더 실행해 얻을 새 정보가 없고, 이 둘을
+incident 복구의 성공 증명으로 사용하지 않습니다. 옛 journal·archive bytes는 복원되지 않았으며
+2026-09-04 operation의 결과는 run 기록과 이 incident 문서로만 판단합니다.
+
+reviewed source는 옛 public operation digest와 embedded predecessor chain을 device contact 전에
+revocation으로 거부하고, empty live journal에는 fresh `PREPARED` first record를 no-clobber로 만들 수
+있습니다. v2 qualification 계획은 이 fresh-create 경로로 다시 대입했으며, C의 범위에 first-use
+persistent locks와 same-directory temporary entry까지 포함했습니다. 이 변경은 marker가 과거 barrier를
+복원했다는 뜻이 아닙니다.
+
+repository maintainer는 C 재정의와 `PREPARED` 이후 dead-end 위험을 수락했고, on-site hardware
+approver는 옛 volume 소실 당시 emergency-stop latch가 걸려 있지 않았음을 확인했습니다. 세 결정
+모두 방향·과거 상태 진술이며 실행 승인 A·B1·B2·B3·C·D를 발급하지 않습니다.
+
+다음 경계는 별도 승인 A의 exact named-volume·carrier·marker·empty-root·process/config/source
+재검증입니다. 그것이 통과한 뒤에만 B1 승인 검토로 넘어갑니다. 이 정적 검토 중 container·volume
+mutation, recovery supervisor·exact-restore `status`·`park`, private journal·archive, device·앱·Home
+Assistant 접촉은 `0`이고 hardware는 계속 **`NO-GO / BLOCKING`**입니다.

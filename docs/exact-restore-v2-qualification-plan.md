@@ -1179,6 +1179,24 @@ hardware는 계속 **NO-GO**이고 이 절을 쓰는 동안 장비·앱·Home As
 장비 read 또는 write, 앱·Q2 live GO 중 **어느 것도 이 선택으로 발급되지 않습니다.** 각 단계는
 아래 표가 요구하는 승인을 실행 직전에 따로 받아야 합니다.
 
+### 2026-09-07 durable-root incident 이후 재결정
+
+repository maintainer와 on-site hardware approver는 새 named safety root와 source revocation을
+정적으로 다시 대입한 뒤 다음 세 가지를 명시적으로 결정했습니다.
+
+1. 승인 축 **C를 폐지하지 않습니다.** 옛 tombstone 교체 대신 **empty live journal에 fresh
+   `PREPARED` first record를 설치하는 host-state mutation**으로 재정의합니다. 이 방향 결정은
+   exact candidate를 보기 전의 C 승인이 아니며, 실제 C는 5단계에서 별도로 받아야 합니다.
+2. fresh `PREPARED` 설치 뒤 freshness·digest 실패가 나면 clear·재prepare·park로 빠져나갈 수 없고
+   durable journal을 남긴 채 중단해야 하는 **비가역 dead-end 위험을 maintainer가 알고 수락**했습니다.
+   실제 C packet에도 이 결과를 다시 직접 적습니다.
+3. 옛 safety volume이 소실될 당시 **emergency-stop latch는 걸려 있지 않았음**을 on-site hardware
+   approver가 확인했습니다. 이것은 소실된 파일에서 복원한 증거가 아니라 **사람의 명시 진술**이며,
+   새 root에 latch 파일이 없다는 사실만으로 과거 상태를 추론하지 않습니다.
+
+이 결정도 A·B1·B2·B3·C·D 중 어느 실행 승인을 발급하지 않으며 device·앱·Home Assistant 접촉을
+허용하지 않습니다.
+
 ## 시도 예산 — 이 계획은 **B1 한 세트**만 허용합니다
 
 `AGENTS.md` §7은 **같은 질문에 실기 2회 또는 1일을 넘기면** 코드를 쓰지 말고 멈춰 repository
@@ -1209,7 +1227,7 @@ maintainer에게 보고하라고 요구합니다. 보고서에는 (1) 지금까�
 
 | 축 | 범위 | 주체 |
 |---|---|---|
-| **A** | private state read + 고정 root를 여는 것만으로 발생하는 **일시 host-store writability probe**. durable semantic mutation `0`, device write `0`. **이 축은 0단계에 한정되지 않고 전체 승인 sequence 동안의 모든 expected fixed-root open에 수반되는 probe를 포괄합니다** — 아래 참조 | repository maintainer |
+| **A** | private state read + 고정 root를 여는 것만으로 발생하는 **일시 host-store writability probe** + 이를 실행하는 reviewed network-none `--rm` one-shot의 생성·자동 제거와 transient Docker bookkeeping. durable semantic mutation `0`, device contact·write `0`. **이 축은 0단계에 한정되지 않고 전체 승인 sequence 동안의 모든 expected fixed-root open에 수반되는 probe를 포괄합니다** — 아래 참조 | repository maintainer |
 | **B1** | 1단계 Phase 0의 device **read**, 그리고 그 operation이 **반드시 남기는** owner-only collector plan·series·raw artifact의 **durable host write**. Phase 0은 읽기만 하는 단계가 아닙니다 | repository maintainer |
 | **B2** | **7·8단계의 최초 실행과, 아래 재개표로 승인된 continuation에서** controller가 계약상 수행하는 모든 device read — 각 action 이전의 fresh read, already-satisfied 분기의 두 번째 read, write 이후의 explicit verification·reconciliation 관측, 그리고 마지막 final pair capture. 여기에 딸린 discovery·identity 트래픽을 포함합니다. 재개용 B2는 **이름만 같은 별도 권한이 아니라 같은 축**이며, 재개할 때마다 그 범위로 다시 확인·승인합니다. **수량 상한은 아래 "B2의 상한"으로 유한하게 고정됩니다** | repository maintainer |
 | **B3** | 실패 후 park을 선택했을 때에 한해, 마지막 completion 뒤의 새 strict artifact 수집(device read)과 그 collector durable write. **범위는 아래 park 소절의 표로 유한하게 고정됩니다** — 수량·retry·timeout이 정해지지 않은 open-ended device contact가 아닙니다 | repository maintainer |
@@ -1227,7 +1245,13 @@ maintainer에게 보고하라고 요구합니다. 보고서에는 (1) 지금까�
 write set 전체**입니다. 최소한 다음을 포함합니다.
 
 - 새 v2 manifest의 owner-only 경로 persist와 exact reload
-- **tombstone → `PREPARED` 교체** — 이 항목은 **독립 명시 승인 없이는 실행하지 않습니다**
+- 첫 사용에서 생기는 `hardware-operation.lock`, `.exact-restore.json.lock`,
+  `.exact-restore-receipts.lock`, `.exact-restore-q2-qualified.lock`의 생성·open과, source가 정의한
+  같은 디렉터리 no-clobber temporary entry의 create·write·fsync·link·unlink·parent-fsync lifecycle.
+  이것들은 A의 일시 writability probe가 아니라 **지속되는 coordination state 또는 durable install
+  과정의 mutation**이므로 C에 속합니다
+- **empty live journal → `ExactRestoreJournalStore.create()`의 fresh `PREPARED` first-record 설치** —
+  이 항목은 **독립 명시 승인 없이는 실행하지 않습니다**
 - attended authority와 그 activation의 기록, `ARMED` 전이
 - **action별 inflight intent의 durable 기록**(wire 경계 이전)과 그 해소
 - completed-action prefix의 누적 기록
@@ -1274,17 +1298,40 @@ archive의 root open, guard의 lease 획득이 각각 그 경로를 지나므로
 **횟수를 미리 고정하지 않습니다** — 범위는 "expected open에 수반되는 probe"로 닫고, 그 밖의 경로나
 그 밖의 write가 관측되면 위의 중단·보고 규칙이 그대로 적용됩니다.
 
+검증을 위해 만드는 one-shot은 reviewed image·network-none·`--no-deps`·`--rm`으로 한정하고
+recovery supervisor나 다른 service를 시작하지 않습니다. container와 transient `/data` volume은 명령
+종료 뒤 모두 부재해야 합니다. `--rm` 실패나 잔여가 있으면 자동 삭제하지 않고 `NO-GO`로 보고합니다.
+
 ---
 
 ## 0단계 — 사전 재검증 · **승인 A**
 
-permanent barrier·tombstone·archive 교차확인, `_require_operation_not_parked()`가 parked
-operation id를 계속 거부하는지, recovery supervisor exited, **Home Assistant가 장비에 붙어 있지
-않음**, 앱 완전 종료(background와 다른 폰·태블릿·클라이언트 포함), 모든 code writer 부재
-(`jebao-flowd`·one-shot writer 포함), 미완 recovery journal·비terminal intent·emergency latch 부재,
-실행 UID/GID가 store owner·mode와 호환되고 owner-only store가 writable한지, **실제로 import된
+active Docker context와 exact named volume, running·exited 전체의 `/hardware-safety` mount를 다시
+검사하고, 두 private identity carrier의 길이·lowercase 32-hex·원문·SHA-256 exact match를 원문 출력
+없이 확인합니다. reviewed image의 runtime marker verify가 통과하고 public identity SHA-256이
+`fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`인지 확인합니다.
+
+그 다음 승인 A 아래에서 **empty-root 전제**를 확인합니다. claim을 잡지 않는 live exact-restore
+journal load는 `None`이어야 하고, read-only dirfd inventory에는 canonical marker 외의 entry가 없어야
+합니다. 따라서 receipt·operation finalization·parked disposition·coordination lock·temporary entry·
+비terminal intent와 현재 `emergency-stop.latch`는 모두 부재하고, host-reported volume 총량은 canonical
+marker만 있는 `61B` 상태와 정합해야 합니다. **receipt·archive loader처럼 조회 과정에서 persistent
+lock을 만드는 API는 0단계에서 호출하지 않습니다** — 그 lock은 승인 C 전에는 만들 수 없습니다.
+`status`나 `park`도 성공 증명으로 사용하지 않습니다. 하나라도 존재하거나 불일치하면 **fresh create를
+시도하지 않고 `NO-GO`**입니다.
+
+옛 operation은 archive 부재를 근거로 안전하다고 보지 않습니다. reviewed source와 실제 import된
+image bytes가 public digest
+`4dcd8364b272644ac883faca9494c7884b045e387970e9a38601df6d5bf4baa0`와 그 digest를 embedded
+predecessor chain에 가진 후손을 device contact 전에 거부하는지 static source·회귀·provenance로
+결속합니다. 사라진 bytes를 재구성하거나 옛 operation을 load·resume하지 않습니다.
+
+recovery supervisor exited, **Home Assistant가 장비에 붙어 있지 않음**, 앱 완전 종료(background와
+다른 폰·태블릿·클라이언트 포함), 모든 code writer 부재(`jebao-flowd`·one-shot writer 포함), 실행
+UID/GID가 store owner·mode와 호환되고 owner-only store가 writable한지, **실제로 import된
 `jebao_flow`의 경로와 bytes가 reviewed commit과 일치**(마운트 digest만으로는 부족), reviewed
-source/image attestation.
+source/image attestation을 확인합니다. 과거 latch 상태는 새 root의 부재에서 추론하지 않고 위
+2026-09-07 on-site 진술에 결속합니다.
 
 **private config의 두 값을 digest가 아니라 값으로 확인합니다.** `docs/hardware-readiness.md`의
 phase 0 계약이 요구하는 것이고, 상위 안전 문서가 이 실행 절보다 우선합니다. "reviewed config"라는
@@ -1353,7 +1400,7 @@ writer의 등장, 단일 제어권 상실, power·reboot, 예상 밖 pause·inte
 
 **위반했을 때의 분기 — 어디까지 진행됐는지에 따라 다릅니다.**
 
-- **tombstone 교체(`prepare`) 이전**이면 artifact·candidate·두 plan을 폐기하고 **새 B1부터** 다시
+- **fresh `PREPARED` 설치(`prepare`) 이전**이면 artifact·candidate·두 plan을 폐기하고 **새 B1부터** 다시
   시작합니다. 새 `operation_nonce`로 세 operation id가 바뀌므로 **B2·C·D도 다시 받습니다.**
 - **`PREPARED` 이후, 첫 wire 이전**이면 **recapture·clear·재prepare·계속 실행 모두 금지**입니다.
   exact state를 남기고 **중단·보고**합니다. **코드가 drift를 판정하지 못하므로 challenge 재발급
@@ -1408,7 +1455,7 @@ B1에서 보존된 raw artifact를 **승인 A 아래 read-only로 읽고**, 순�
 - **final pre-persist checkpoint deadline** = **`captured_at + 1060초`** — 실제 predicate는 6단계
   2번의 pre-persist checkpoint이고 `prepare`는 그 뒤 `60초` cap 안에서 일어납니다
 - 최소 잔여 first-wire 예산 = **`720초`**
-- 잔여 `< 720초`이면 **tombstone을 건드리지 않고 종료·보고**합니다. 재수집은 **새 승인 B1**.
+- 잔여 `< 720초`이면 **`PREPARED`를 설치하지 않고 종료·보고**합니다. 재수집은 **새 승인 B1**.
 - 이 계산은 **1차**입니다. 승인 상의에 시간이 걸리므로 **6단계에서 `prepare` 직전에 다시
   계산합니다.** 여기서 통과했다는 것이 그때도 통과한다는 뜻이 아닙니다.
 - **첫 challenge가 `300초`를 전부 소모해 만료된 뒤에도 재발급 여유를 *보장*하려면** — 측정
@@ -1510,17 +1557,22 @@ write)를 받습니다. 셋은 서로를
 
 ## 6단계 — manifest persist와 `prepare` · **승인 C**
 
+**이 단계가 비가역 경계입니다.** fresh `PREPARED`가 설치된 뒤 `BASELINE_EXPIRED` 또는 digest
+mismatch가 나면 sanctioned clear·재prepare·park 경로가 없습니다. maintainer가 2026-09-07 이
+dead-end를 방향상 수락했지만, **실제 C packet도 exact candidate·두 plan과 함께 이 결과를 다시
+직접 열거하고 승인받아야 합니다.** 이 문장은 C 자체를 선발급하지 않습니다.
+
 1. 직전에 source·config·manifest·artifact digest를 **exact로 재확인**합니다. 이 확인에는
    **0단계의 두 config 값 — `runtime.dry_run` 이 `true`, 모든 configured device의
    `control.allow_hardware_writes` 가 `false` — 을 값으로 다시 보는 것이 포함**됩니다. digest만
    맞추고 값을 건너뛰지 않습니다.
 
-   **하나라도 어긋나면 manifest persist `0` · `prepare` `0` · tombstone 불변 · `NO-GO`**입니다.
+   **하나라도 어긋나면 manifest persist `0` · `prepare` `0` · live journal 부재 유지 · `NO-GO`**입니다.
    기록하고 보고하며, **그 자리에서 파일이나 값을 고쳐 계속하지 않습니다.** 이후의 새 시도는 위
    "시도 예산"을 따릅니다.
 2. **예산을 다시 계산합니다.** 4단계에서 충분했더라도 5단계의 승인 상의가 길어졌다면 지금은
    부족할 수 있습니다. `now < captured_at + 1060초`이고 first-wire 잔여가 `≥ 720초`인지 **다시
-   계산해 표시**합니다. **하나라도 실패하면 manifest save `0`, `prepare` `0`, tombstone 불변으로
+   계산해 표시**합니다. **하나라도 실패하면 manifest save `0`, `prepare` `0`, live journal 부재로
    중단·보고**합니다. **되돌아갈 수 있는 진짜 마지막 predicate가 여기입니다** — `prepare` 뒤에는
    recapture·clear·재prepare가 모두 불가능합니다.
 
@@ -1538,7 +1590,7 @@ write)를 받습니다. 셋은 서로를
    4. 그 뒤 `load_operation_manifest()`로 **exact reload와 digest identity**를 확인합니다.
 
    **이 durable ACK 이전에는 `prepare` `0`입니다.** write·fsync·reload 오류이거나 ACK가 불확실하면
-   **`prepare` `0` · tombstone 불변**으로 닫고, candidate와 부분 상태의 exact inventory를 남겨
+   **`prepare` `0` · live journal 부재 유지**로 닫고, candidate와 부분 상태의 exact inventory를 남겨
    보존·보고합니다. **자동 retry·삭제·overwrite는 `0`**이며, **bytes가 보인다는 이유로 fsync 실패를
    성공으로 취급하지 않습니다.**
 
@@ -1547,7 +1599,9 @@ write)를 받습니다. 셋은 서로를
    `PREPARED`/`RESTORING` journal만 남고 **continuation에 필요한 manifest를 로드할 수 없어 rollback
    권한이 좌초**합니다. 이 경계는 10단계 spec의 `persist·fsync·exact reload`보다 약해서는 안
    됩니다.
-4. **별도의 행위로** tombstone → `PREPARED` prepare를 실행합니다(독립 명시 승인 항목).
+4. **별도의 행위로** empty live journal에 `ExactRestoreJournalStore.create()`를 통해 fresh
+   `PREPARED` first record를 설치합니다(독립 명시 승인 항목). 이 첫 open에서 만들어지는 persistent
+   coordination lock과 no-clobber temporary entry도 위에 열거한 C 범위 안이어야 합니다.
 5. **위 2번의 예산 확인 시점부터 첫 challenge 표시까지 전체가 `60초`를 넘지 않습니다.** cap의
    시작점은 `prepare` 완료가 아니라 **2번의 최종 예산 확인**입니다 — 그 확인 이후의
    manifest persist·exact reload, `prepare`, qualify process 시작, 첫 challenge 표시가 모두 예산을
@@ -1561,7 +1615,8 @@ write)를 받습니다. 셋은 서로를
    기록할 것은 **cycle·depth·phase, 첫 challenge가 실제로 표시됐는지, 그리고 challenge 실패
    횟수**입니다. 그 다음은 상태에 따라 갈립니다.
 
-   - **journal이 아직 tombstone**이면 journal·tombstone은 불변이므로 재개가 가능합니다. 다만
+   - **journal이 아직 absent**면 `PREPARED` semantic transition은 일어나지 않았으므로 재개가
+     가능합니다. 다만
      **1단계로 돌아가야 합니다** — 새 승인 **B1**으로 fresh artifact를 다시 수집하고, 새
      `operation_nonce`로 새 candidate와 두 plan을 만든 뒤, **5단계의 B2·C·D를 전부 다시
      받습니다.** 새 artifact와 새 nonce는 manifest digest와 **세 operation id를 모두 바꾸므로**,
@@ -1835,7 +1890,7 @@ host·container 이름은 기록하지 않습니다. 계획과 실행을 나중�
 위 표의 "reauthorize 후 resume"은 자동 재개가 아니라 **사람이 새 grant를 발급한 뒤의 재개**입니다.
 
 `prepare` 이후에는 **재수집으로 돌아갈 수 없습니다.** challenge는 `PREPARED` 설치 뒤에 발급되므로
-그 시점에는 tombstone이 이미 교체됐고, 새 Phase 0을 얻어도 live record에 막히며 park 대상도
+그 시점에는 fresh first record가 이미 설치됐고, 새 Phase 0을 얻어도 live record에 막히며 park 대상도
 아닙니다. 위 표의 challenge 행이 그 유일한 예외이며, 그것도 조건부 1회입니다.
 
 ### 재개 경로의 승인 결속 — "reauthorize"는 세 축을 대신하지 않습니다
@@ -2067,9 +2122,10 @@ rollback·durable journal 범주에 직접 닿습니다. 새 code gate를 만들
 보존 산출물에서 읽지 않은 값은 재구성으로 적고, 재구성에 기대어 새 값을 고를 때는 그 선택이
 무엇에 근거했는지를 함께 적습니다.
 
-## 2026-09-06 중단 — durable safety root 전제 상실
+## 2026-09-06 역사적 중단 — durable safety root 전제 상실
 
-이 계획의 현행 실행 절은 **실행에 사용하지 않습니다.** 승인된 0단계에서 `/hardware-safety`가 빈
+그 시점에는 이 계획의 현행 실행 절을 **실행에 사용하지 않았습니다.** 승인된 0단계에서
+`/hardware-safety`가 빈
 Docker 익명 volume이고, 2026-09-04 parked disposition의 journal snapshot·disposition·tombstone·
 operation finalization이 2026-09-06 범위 한정 forensic에서 발견되지 않음을 확인했습니다.
 삭제 시각·주체와 현재 volume이 그 run의 exact volume이었는지는 `UNKNOWN`입니다.
@@ -2081,3 +2137,29 @@ operation finalization이 2026-09-06 범위 한정 forensic에서 발견되지 �
 전제에서 다시 검토합니다. 상세는
 [`Hardware-safety volume durability incident and remediation`](hardware-safety-volume-durability-plan.md)을
 따릅니다.
+
+## 2026-09-07 재검증 — identified empty root의 fresh-create 경로로 재발행
+
+named volume `jebao-flow-hardware-safety`에는 reviewed marker가 provision·verify됐고, public identity
+SHA-256은 `fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`입니다.
+host metadata의 `61B`는 canonical marker 크기와 일치하며, 옛 journal·receipt·finalization·disposition
+bytes가 복원됐다는 뜻은 아닙니다. 그 산출물은 계속 부재하고 이 계획의 입력이나 성공 증거로 쓰지
+않습니다.
+
+reviewed source에서 empty live journal은 tombstone replacement가 아니라
+`ExactRestoreJournalStore.create()`의 fresh `PREPARED` first-record 설치로만 시작합니다. 옛 public
+operation digest와 그것을 품은 predecessor chain은 source-level revocation이 device contact 전에
+거부합니다. 따라서 현행 절의 0·4·6단계와 C 범위를 위 fresh-create 전제로 정정했습니다. `371`은
+사라진 artifact가 아니라 `P=1800`, `S=300`, requested cadence `30초`에서 나온 **nominal precommit**
+이므로 유지하며 runtime boundary 수나 reject 내성을 보장하지 않습니다. timing evidence는 반드시
+이번 fresh B1의 primary·corroborating series에서 채웁니다.
+
+repository maintainer는 C를 fresh first-record 설치로 재정의하고 `PREPARED` 이후 dead-end 위험을
+수락했습니다. on-site hardware approver는 옛 root 소실 당시 emergency-stop latch가 걸려 있지
+않았음을 확인했습니다. 이 세 결정은 방향·과거 상태 진술일 뿐 **A·B1·B2·B3·C·D 중 어느 실행
+승인도 아닙니다.**
+
+따라서 이 문서는 다시 **PLAN ONLY**로 검토할 수 있지만 hardware는 계속 **NO-GO / BLOCKING**입니다.
+다음 실행 경계는 별도 승인 A의 host/private-state 재검증이고, 그것이 통과한 뒤에만 첫 device
+접촉인 B1 `2 series × 2 pair`에 대한 exact 승인을 요청합니다. recovery supervisor·`status`·`park`,
+device·앱·Home Assistant 접촉은 이 재검증에서 `0`입니다.

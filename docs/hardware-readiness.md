@@ -1372,3 +1372,34 @@ carrier는 mode `0600`·`nlink=1`과 exact match를 유지했습니다. 중간 �
 정체성 선행조건은 충족했지만 recovery supervisor·exact-restore `status`·park·fresh Phase 0·
 A·B1·B2·B3·C·D·qualification·앱 live-write·device I/O를 실행하거나 승인하지 않았습니다.
 **현재 판정은 계속 모든 hardware operation `NO-GO / BLOCKING`입니다.**
+
+## 2026-09-07 marker-only root에서 v2 qualification 계획 정적 재검증
+
+reviewed named safety root는 public identity SHA-256
+`fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`의 marker를 verify했고 host
+metadata는 canonical marker 하나의 크기와 같은 `61B`입니다. 옛 journal·receipt·finalization·parked
+disposition은 복원되지 않았고 앞으로도 입력이나 성공 증거로 쓰지 않습니다. 옛 public operation
+digest와 그것을 embedded predecessor chain에 가진 후손은 reviewed source의 revocation이 device
+contact 전에 거부합니다.
+
+source trace에서 empty live journal의 시작 경로는 tombstone replacement가 아니라
+`ExactRestoreJournalStore.create()`의 fresh `PREPARED` first-record 설치임을 확인했습니다. 이에 따라
+repository maintainer는 여섯 승인 축을 그대로 유지하면서 **C를 fresh first-record와 최초 persistent
+coordination lock·temporary 설치를 포함하는 host-state mutation으로 재정의**했습니다. 이 결정은
+exact candidate를 보기 전의 C 승인으로 쓰지 않습니다.
+
+maintainer는 `PREPARED` 뒤 freshness·digest 실패가 나면 clear·재prepare·park 없이 durable journal을
+남기고 중단해야 하는 dead-end를 알고 수락했습니다. on-site hardware approver는 옛 safety volume
+소실 당시 emergency-stop latch가 걸려 있지 않았음을 확인했습니다. 이 latch 진술은 소실된 파일의
+대체 artifact가 아니며, 새 root의 latch 부재에서 과거 상태를 추론한 것도 아닙니다.
+
+Q2의 `planned_pair_count=371`, cadence `30초`는 incident artifact가 아니라 계약 상수에서 나온
+**nominal precommit**으로 유지합니다. 실제 boundary 수와 reject 내성은 fresh B1 device-time
+evidence로만 판정하며, timing evidence는 이번 primary·corroborating series의 exact id·digest로만
+채웁니다.
+
+**현재 판정은 standalone exact restore와 Q2 모두 계속 `NO-GO / BLOCKING`이며 Q2 답은
+`UNKNOWN`입니다.** 위 결정은 A·B1·B2·B3·C·D를 발급하지 않습니다. 다음 경계는 별도 승인 A의
+host/private-state 재검증이고, 그것이 통과한 뒤에만 첫 device 접촉 B1 `2 series × 2 pair`의 exact
+승인을 요청합니다. 이번 정적 재검증에서 recovery supervisor·exact-restore `status`·`park`, private
+journal·archive, device·앱·Home Assistant 접촉은 `0`입니다.
