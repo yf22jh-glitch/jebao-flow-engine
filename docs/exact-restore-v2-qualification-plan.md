@@ -2262,3 +2262,54 @@ container-local offline validation뿐이며 safety root·journal·archive·devic
 recovery supervisor 접촉은 `0`입니다. 앞의 private-config blocker는 보존 원본 경로로 해소됐지만,
 승인 A는 이월하지 않고 처음부터 다시 실행합니다. A가 전부 통과하기 전에는 B1을 실행하지 않으며,
 현재 판정은 계속 **NO-GO / BLOCKING**, Q2는 `UNKNOWN`입니다.
+
+## 2026-09-07 승인 A 재실행 — machine gate 통과, on-site quiescence 확인 전
+
+private config 복구 commit `d807128baddaf5eb234d327dc9f865c8b13113cf`의 clean worktree에서
+승인 A를 처음부터 다시 실행했습니다. active Docker context는 `colima`, exact named safety volume은
+driver·scope `local`, `/hardware-safety` mount container·Jebao process·established TCP `12416`은
+각각 `0`이었습니다. attested image id는
+`sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`로 그대로였습니다.
+
+deployment `.env`의 primary identity와 macOS Keychain backup은 원문을 출력하지 않고
+길이·lowercase 32-hex·원문을 대조했고, public SHA-256은
+`fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`으로 exact match했습니다.
+runtime과 hardware-test config는 각각 mode `0600`·`nlink=1`, 기록된 SHA-256
+`ec2b7af0e6bf2476a92d274602e36968b4622babeabf1a886966fe8c12840e30`·
+`609a718edb126ab2f72adb780b5ff0a04f00a8d6463dbd38afb571ff0d031022`로 일치했습니다. 앞서
+attested image의 production validator로 확인한 `runtime.dry_run=true`와 전체 configured device의
+`allow_hardware_writes=false`도 변경 없는 exact bytes에 결속됩니다.
+
+재실행 시점의 Docker volume set은 `54`개·SHA-256
+`9575efb771b1f781b8a9ac652e2b4a7a497cefd17b97af6bf680e3f1b14e0d0b`입니다. 이전에 기록한
+`51`개와의 차이는 committed Compose의 empty `jebao-flow-data` named volume `1`개와,
+exited non-Jebao test container의 `/certs`·`/data`에 연결된 `0B` anonymous volume `2`개로
+metadata 상 분리했습니다. 세 volume 중 `/hardware-safety`를 mount한 것은 없고 이 순서에서
+생성·삭제·수정하지 않았습니다. 이 provenance는 safety-root 증거가 아니며 A one-shot의
+즉시 전·후 set 동일성을 판정하기 위한 시작 snapshot입니다: **(c) reconstructed
+operator observation**.
+
+첫 one-shot 명령은 현재 Docker Compose `5.5.0`이 `compose run --no-build`를 지원하지 않아
+container 생성 전에 non-zero로 거부됐습니다. 그 결과는 A 검증으로 쓰지 않았고,
+root user `0`, safety volume `LINKS=0 | 61B`, volume set 동일을 즉시 확인했습니다. help로
+`run`은 `--build`를 명시한 경우에만 build함을 확인한 뒤, 지원되는
+`--pull never`·`--no-deps`·`--rm`·network-none만 유지해 같은 attested image로 재실행했습니다.
+
+재실행한 one-shot에서 runtime marker verify와 temporary writability probe가 통과했고,
+claim을 잡지 않은 `ExactRestoreJournalStore.load()`는 `None`이었습니다. retained dirfd inventory는
+canonical `.hardware-safety-identity` 한 개뿐이었고 marker는 same-device regular file,
+mode `0600`, owner match, `nlink=1`, size `61`; root는 mode `0700`·owner match였습니다. 따라서
+coordination lock 네 종·journal·receipt·finalization·parked disposition·temporary·
+`emergency-stop.latch`는 모두 부재했습니다. receipt/archive loader·`status`·`park`는 호출하지
+않았습니다.
+
+one-shot 전·후 `/hardware-safety` mount container는 `0`, safety volume은 `LINKS=0 | 61B`, volume
+set은 위 `54`개·digest로 byte-for-byte 동일했습니다. container와 transient volume 잔여도
+없습니다. root에 남은 durable semantic mutation은 `0`이고 device·앱·Home Assistant·
+recovery supervisor 접촉은 `0`입니다: **(c) reconstructed operator observation**.
+
+A의 machine-verifiable host·private-state·empty-root gate는 통과했지만, B1 첫 device read 직전에
+앱이 background·다른 client를 포함해 완전 종료되었고 Home Assistant가 detach 상태임을
+on-site approver가 직접 확인해야 합니다. 그 진술과 **B1 `2 series × 2 pair`의 device read +
+owner-only collector durable write를 exact하게 발급하는 별도 승인** 전에는 device contact를 시작하지
+않습니다. 현재 판정은 계속 **NO-GO / BLOCKING**, Q2는 `UNKNOWN`입니다.

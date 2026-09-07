@@ -1478,3 +1478,39 @@ raw identifier·private path를 console이나 repository에 기록하지 않았�
 device·앱·Home Assistant·supervisor 접촉은 `0`입니다. private-config blocker는 보존 원본으로
 해소됐지만 승인 A는 처음부터 다시 통과해야 합니다. 그 전에는 B1을 실행하지 않으며 현재 판정은
 standalone exact restore와 Q2 모두 **`NO-GO / BLOCKING`**, Q2는 `UNKNOWN`입니다.
+
+## 2026-09-07 승인 A 기술 재검증 결과
+
+private config 복구 commit `d807128baddaf5eb234d327dc9f865c8b13113cf`의 clean worktree에서
+승인 A를 처음부터 재실행했습니다. context `colima`, exact local named safety volume,
+`/hardware-safety` mount container·Jebao process·established TCP `12416` 각각 `0`, attested image
+`sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`를 다시
+확인했습니다. identity 두 carrier는 원문 출력 없이 exact match했고 public SHA-256은
+`fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`이었습니다. 두 private
+config도 mode `0600`·`nlink=1`·기록된 digest와 일치했습니다.
+
+이전 `51`개와 달라진 Docker volume set은 `54`개·SHA-256
+`9575efb771b1f781b8a9ac652e2b4a7a497cefd17b97af6bf680e3f1b14e0d0b`입니다. 증가분은 empty
+`jebao-flow-data` named volume 하나와 exited non-Jebao test container에 연결된 `/certs`·`/data`
+anonymous `0B` volume 둘이었습니다. 셋 모두 safety root mount가 아니고 이 순서에서
+수정하지 않았습니다. A one-shot 직전·직후에는 이 exact set과 safety volume
+`LINKS=0 | 61B`가 그대로였습니다.
+
+첫 command는 Docker Compose `5.5.0`에 없는 `run --no-build` option 때문에 container 생성
+전 non-zero로 거부됐습니다. 이 실패는 판정 근거에서 제외했고, help로 `run`은
+`--build`를 명시한 때만 build함을 확인한 후 `--pull never`·`--no-deps`·`--rm`·network-none
+구속은 그대로 유지해 같은 image로 재실행했습니다.
+
+성공한 one-shot에서 marker verify·temporary probe가 통과했고, claim-free journal load는
+`None`, retained root inventory는 canonical marker 한 개였습니다. marker와 root의
+owner·mode·device·link·size 계약을 모두 통과했고 coordination lock 네 종·journal·receipt·
+finalization·parked disposition·temporary·current latch는 부재했습니다. receipt/archive loader,
+`status`, `park`는 호출하지 않았습니다. container·transient volume 잔여·durable semantic
+mutation·device·앱·Home Assistant·supervisor 접촉은 모두 `0`입니다: **(c) reconstructed
+operator observation**.
+
+machine-verifiable A gate는 통과했습니다. 다만 첫 device contact 직전에 on-site approver가
+앱의 background·다른 client 포함 완전 종료와 Home Assistant detach를 직접 확인해야 하며,
+B1 `2 series × 2 pair`의 bounded device read와 owner-only collector durable write는 별도 exact
+승인을 받아야 합니다. 그 전의 현재 판정은 standalone exact restore와 Q2 모두
+**`NO-GO / BLOCKING`**, Q2는 `UNKNOWN`입니다.
