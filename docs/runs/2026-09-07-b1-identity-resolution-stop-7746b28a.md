@@ -88,3 +88,25 @@
 - 다음에 이 지점을 다시 만나지 않으려면 필요한 것: 보존된 artifact와 attested source만으로 원인을
   먼저 오프라인 분석합니다. 추가 device discovery나 새 B1은 자동 retry가 아니며, 분석·보고와 새
   exact B1 승인이 있기 전에는 실행하지 않습니다.
+
+## 2026-09-07 정정 — local runner에 한정된 identity-resolution 결과
+
+위 B1은 macOS local runner와 Docker context `colima`를 기준으로 실행됐습니다. 후속 offline 분석에서
+과거 성공 collector의 보존 실행 기록을 다시 추적한 결과, 해당 실행은 별도 remote Linux deployment
+host에서 SSH와 `systemd-run`으로 수행됐습니다. 따라서 위 실행 경로는 과거 sanctioned deployment
+runner와 같지 않았습니다: **(c) reconstructed operator observation**.
+
+위 primary는 승인된 실제 UDP device contact였고 durable plan·series·pair·sample artifact와 별도
+private backup의 bytes·digest·owner-only metadata도 그대로 유효합니다. 다만 네 sample의
+`identity_not_exactly_resolved`는 **local runner와 그 network path에서 exact identity를 resolve하지
+못했다는 사실에만** 결속됩니다. 이 결과로 actual deployment path에서도 장비가 offline이거나
+identity binding이 잘못됐다고 추론하지 않습니다.
+
+같은 분석에서 actual remote deployment의 별도 Docker daemon과 기존 safety volume이 확인됐습니다.
+그 root와 2026-09-04 parked barrier의 byte-exact backup·검증은
+[`2026-09-04 run의 2026-09-07 정정`](2026-09-04-exact-restore-qualification-4dcd8364.md)에
+기록합니다. local `colima`의 marker-only root를 actual deployment root의 대리물로 사용하지 않습니다.
+
+이 정정은 실패한 primary를 재시도하거나 corroborating series를 여는 승인이 아닙니다. 추가 device
+contact는 actual deployment topology에서 새 A를 처음부터 통과하고 새 exact B1 승인을 받은 뒤에만
+가능합니다. Q2는 계속 `UNKNOWN`입니다.

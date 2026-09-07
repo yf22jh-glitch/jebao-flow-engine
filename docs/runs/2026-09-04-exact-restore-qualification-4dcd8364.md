@@ -391,3 +391,59 @@ digest로 keying되어 journal provenance를 보존하지 않으므로, 같은 d
 unit `1899 passed`, 변경 파일 ruff lint·format 통과를 확인했습니다: **(c) console observation**.
 diff SHA-256은 commit에서 재계산 가능한 source property이며 증거등급을 붙이지 않습니다. 이
 검증에서 실제 safety volume·private durable state·device·앱·Home Assistant 접촉은 `0`이었습니다.
+
+## 2026-09-07 정정 — actual deployment safety root 발견과 byte-exact backup
+
+2026-09-06 정정의 forensic 범위는 그 절에 적은 대로 당시 local machine과 그 Docker daemon·VM에
+한정됐고, 외부 매체·다른 머신·backup은 명시적으로 조사하지 않았습니다. 후속 offline 분석에서 과거
+성공 collector의 보존 실행 기록을 추적해 별도 remote Linux deployment host를 식별했고, 그 host의
+read-only Docker metadata에서 actual deployment용 named volume `jebao-flow-hardware-safety`를
+확인했습니다. 따라서 2026-09-06 절의 artifact 부재와 barrier 상실 판정은 local `colima`에만
+적용되며 actual deployment에는 적용되지 않습니다.
+
+actual deployment volume은 host report 기준 `1.071MB`이고 `/hardware-safety`에서 이 volume을 쓰는
+container는 `9`개 모두 exited, running은 `0`이었습니다. 전체 volume은 `28`개이고 정렬된 name set의
+SHA-256은 `da2a46d39e0ea3bbd6ebd70a2f622fb7fe5d0970cdf16fea1b15a6031cd1ddba`였습니다.
+기존 exited recovery container를 시작하거나 새 container·mount를 만들지 않고, 해당 container가 보는
+root를 read-only byte stream으로 복사해 별도 owner-only private storage에 보존했습니다. 백업 직후 같은
+metadata를 다시 읽었을 때 size·사용자 수·running 수·volume count·name-set digest가 모두 같았습니다:
+**(c) reconstructed operator observation**.
+
+- private backup id: `JHS-9aff85b2b0a852e2741ef48e`
+- archive SHA-256: `741f08233fc36ced3d7458cbd51bcf464b37af97c7f0fea940876db8a7525bcf`
+- archive bytes / payload bytes: `1091072` / `1070529`
+- regular file / directory / symlink / other: `25` / `5` / `0` / `0`
+- member-name set SHA-256:
+  `bcc7f698e4e77e1d7076501c089cfdd5b6db99b04a09a38aca7be50eb4c3f505`
+
+backup 안의 daemon artifact를 current production model과 canonical serializer로 offline reload했습니다.
+live tombstone, parked disposition, parked journal snapshot과 permanent version `2` finalization이 모두
+존재했고 다음 content digest가 이 run에 기록된 값과 exact match했습니다:
+**(b) preserved structured/durable daemon artifact**.
+
+- live tombstone:
+  `f899c8117106cd5286d764d5c6663246bb7fe7e9a426c7186d86990dba829301`
+- parked disposition (`ERD-26abc5aa31d509a3ddb49f497114e8fd`):
+  `712a725ada86796f112631fdbcfb251350d92f470a4ff076cee5083a9758497f`
+- parked journal snapshot:
+  `273a7f38638033dd0030a268279bb67b8451b985936051a83f42f605c8486bcf`
+- permanent finalization content:
+  `05304ff970df521b64da2c61641e8dc12f2edb7c45dce73f1b3966011fc5d11c`
+- finalization operation-key:
+  `76880fc3cd8a462bcadcdd1f4231dc0c16f61b0896dbbe00c8e486576fefe154`
+- public operation SHA-256:
+  `4dcd8364b272644ac883faca9494c7884b045e387970e9a38601df6d5bf4baa0`
+
+네 artifact는 canonical validation, filename-to-digest binding, tombstone ↔ disposition ↔ journal ↔
+finalization의 cross-binding과 current production `_require_disposition_binds_journal`을 통과했습니다.
+journal은 `sentinel_qualification` cycle과 completed action `8`개를 담고, finalization은
+`outcome=parked_unqualified`, `qualification_achieved=false`, `device_network_access=false`,
+`device_write_count=0`입니다. success receipt는 없습니다. 즉 이 operation의 permanent v2 replay
+barrier는 **actual deployment root에 존재**하며 qualification 성공을 주장하지 않습니다.
+
+actual deployment backup에는 `.hardware-safety-identity` marker가 없습니다. marker 도입 전부터 쓰던
+비어 있지 않은 volume이므로 current marker-enforcing source로 `status`·`park`·provision을 곧바로
+실행하지 않습니다. 기존 artifact와 barrier를 보존하는 migration을 별도로 설계·검토하고 actual
+deployment 기준 A를 새로 승인받기 전에는 이 root를 더 열거나 수정하지 않습니다. 이 발견과 backup은
+remote root mutation·device·앱·Home Assistant 접촉을 만들지 않았고 hardware는 계속
+`NO-GO / BLOCKING`입니다.

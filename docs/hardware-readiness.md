@@ -1542,3 +1542,37 @@ digest 대조를 통과했습니다. 자세한 evidence는
 `0`이고 current baseline은 확보되지 않았습니다. 추가 discovery나 수집은 자동 retry로 실행하지
 않습니다. **현재 판정은 standalone exact restore와 Q2 모두 `NO-GO / BLOCKING`, Q2는
 `UNKNOWN`입니다.**
+
+## 2026-09-07 deployment topology 정정 — remote safety root와 parked barrier 보존 확인
+
+B1 중단 뒤 과거 성공 collector의 보존 실행 기록을 offline 추적한 결과, 그 collector는 local macOS가
+아니라 별도 remote Linux deployment host에서 SSH와 `systemd-run`으로 실행됐습니다. 위 B1의
+`identity_not_exactly_resolved`는 local runner·network path에만 결속되며 actual deployment path의
+장비 offline이나 binding 실패를 증명하지 않습니다. durable B1 failure artifact 자체는 유효하지만 새
+device contact는 자동 retry하지 않습니다.
+
+actual deployment Docker daemon에는 marker 도입 전 named volume `jebao-flow-hardware-safety`가
+남아 있었습니다. host report는 `1.071MB`, volume 사용자 `9`개 모두 exited·running `0`이고, read-only
+byte stream으로 보존한 owner-only private backup `JHS-9aff85b2b0a852e2741ef48e`의 SHA-256은
+`741f08233fc36ced3d7458cbd51bcf464b37af97c7f0fea940876db8a7525bcf`입니다. backup은 regular file
+`25`개·directory `5`개이고 symlink·special entry는 없습니다. backup 직후 metadata도 변하지
+않았습니다.
+
+backup에서 2026-09-04 live tombstone·parked disposition·journal snapshot·permanent version `2`
+finalization을 current model로 exact reload하고 canonical bytes·filename·cross-binding을 검증했습니다.
+operation SHA-256은
+`4dcd8364b272644ac883faca9494c7884b045e387970e9a38601df6d5bf4baa0`, finalization은
+`parked_unqualified`·qualification false·device network/write `0`이며 receipt는 없습니다. 따라서
+permanent replay barrier는 **actual deployment에 존재**합니다. 세부 digest와 증거등급은
+[`2026-09-04 run 정정`](runs/2026-09-04-exact-restore-qualification-4dcd8364.md)이 단일 출처입니다.
+
+local `colima`의 marker-only `61B` volume은 actual deployment root가 아닙니다. 따라서 local empty-root
+fresh-create 전제, 그 전제에 맞춘 C 재정의와 local A 통과는 actual deployment 실행에 적용하지
+않습니다. source의 hardcoded revocation은 defense-in-depth로 남지만, actual deployment에 대한
+lost-barrier 전제는 철회합니다.
+
+actual remote root에는 identity marker가 없고 기존 durable state가 있으므로 current provisioning을
+실행하거나 `status`·`park`으로 열지 않습니다. 다음 경계는 기존 bytes를 변경하지 않는 marker migration
+설계·offline 검증에 대한 maintainer 결정과, 그 설계가 착지한 뒤 actual deployment topology에서의 새
+A 승인입니다. 그 뒤에만 새 exact B1을 요청합니다. 그 전까지 standalone exact restore와 Q2는 모두
+**`NO-GO / BLOCKING`**, Q2는 `UNKNOWN`입니다.

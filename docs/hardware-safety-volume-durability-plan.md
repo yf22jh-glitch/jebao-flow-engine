@@ -531,3 +531,35 @@ approver는 옛 volume 소실 당시 emergency-stop latch가 걸려 있지 않�
 재검증입니다. 그것이 통과한 뒤에만 B1 승인 검토로 넘어갑니다. 이 정적 검토 중 container·volume
 mutation, recovery supervisor·exact-restore `status`·`park`, private journal·archive, device·앱·Home
 Assistant 접촉은 `0`이고 hardware는 계속 **`NO-GO / BLOCKING`**입니다.
+
+## 2026-09-07 topology 정정 — local incident 범위와 actual deployment 분리
+
+이 문서의 2026-09-06 forensic은 당시 local machine·Docker daemon·VM을 조사했고 다른 머신을
+명시적으로 제외했습니다. 후속 offline 분석에서 과거 successful collector의 실행 기록이 별도 remote
+Linux deployment host의 SSH·`systemd-run` 경로에 결속됐고, 그 host의 Docker daemon에 marker 도입
+전 named volume `jebao-flow-hardware-safety`가 남아 있음을 확인했습니다. local `colima`의 empty
+anonymous volume과 새 marker-only `61B` volume은 actual deployment root가 아니었습니다.
+
+actual volume은 host report `1.071MB`, root 사용자 `9`개 모두 exited·running `0`이었습니다. 기존
+exited recovery container가 보는 root를 시작·생성·새 mount 없이 read-only byte stream으로 복사한
+owner-only private backup `JHS-9aff85b2b0a852e2741ef48e`의 archive SHA-256은
+`741f08233fc36ced3d7458cbd51bcf464b37af97c7f0fea940876db8a7525bcf`입니다. regular file `25`개,
+directory `5`개, symlink·other `0`이고 backup 전후 size·사용자·전체 volume set은 같았습니다.
+
+backup 안에는 2026-09-04의 live tombstone, parked disposition, journal snapshot과 permanent v2
+finalization이 모두 있습니다. current production model의 canonical reload, documented digest,
+filename과 cross-binding 검증을 통과했고 finalization은 `parked_unqualified`, qualification false,
+device network/write `0`, receipt 부재입니다. 세부 digest와 증거등급은
+[`2026-09-04 run 정정`](runs/2026-09-04-exact-restore-qualification-4dcd8364.md)을 따릅니다. 즉 actual
+deployment에서 lost-barrier 전제는 성립하지 않습니다.
+
+Dockerfile의 anonymous `/hardware-safety` 제거, marker 계약과 hardcoded operation revocation은
+잘못된 새 root를 fail-closed하고 replay를 이중 차단하는 defense-in-depth로 계속 유효합니다. 다만
+그 source containment를 actual remote barrier의 대체물이나 empty-root fresh-create의 근거로 쓰지
+않습니다. actual root에는 marker가 없고 기존 durable state가 있으므로 current provisioning,
+`status`, `park`을 실행하지 않습니다.
+
+다음 경계는 existing bytes를 보존하는 marker migration의 설계·offline 검증과 maintainer 결정,
+그 뒤 actual deployment 기준의 새 승인 A입니다. local empty-root에 맞춘 C 재정의와 A/B1 결과는
+remote execution 승인이 아닙니다. 이 정정 중 remote root mutation·device·앱·Home Assistant 접촉은
+`0`이고 hardware는 계속 **`NO-GO / BLOCKING`**, Q2는 `UNKNOWN`입니다.

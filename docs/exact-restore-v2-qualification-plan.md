@@ -2338,3 +2338,35 @@ device/control write와 safety-root semantic mutation은 `0`, 종료 후 process
 snapshot은 실행 전과 같습니다. current baseline과 exact-restore candidate는 만들지 않았습니다.
 추가 device contact는 이 실행의 retry가 아니며, 먼저 offline 분석과 보고를 거친 뒤 새 exact B1
 승인이 필요합니다. 현재 판정은 계속 **NO-GO / BLOCKING**, Q2는 `UNKNOWN`입니다.
+
+## 2026-09-07 topology 정정 — actual deployment에는 parked chain이 남아 있음
+
+후속 offline 분석으로 과거 successful collector가 별도 remote Linux deployment host에서 SSH와
+`systemd-run`으로 실행됐음을 확인했습니다. local macOS/`colima`에서 수행한 직전 B1의
+identity-resolution 실패는 local runner와 그 network path에만 적용되고, actual deployment path에
+대한 실패 판정이 아닙니다. 새 B1은 자동 retry하지 않습니다.
+
+actual deployment의 pre-marker named safety volume은 host report `1.071MB`, `/hardware-safety`
+사용자 `9`개 모두 exited·running `0`으로 남아 있었습니다. 시작·생성·새 mount 없이 얻은 byte-exact
+private backup `JHS-9aff85b2b0a852e2741ef48e`은 regular file `25`개와 directory `5`개를 담고,
+archive SHA-256은
+`741f08233fc36ced3d7458cbd51bcf464b37af97c7f0fea940876db8a7525bcf`입니다. backup 뒤 remote
+volume size·user·전체 volume set은 이전과 같았습니다.
+
+backup의 live tombstone, parked disposition, parked journal snapshot과 permanent v2 finalization을
+current production model로 canonical reload했으며 documented digest·filename·operation binding과
+artifact 간 cross-binding이 모두 일치했습니다. finalization은 `parked_unqualified`, qualification
+false, device network/write `0`이고 receipt는 없습니다. 따라서 이 plan이 원래 전제로 둔 2026-09-04
+permanent replay barrier는 actual deployment에 **존재**합니다. exact digest와 증거등급은
+[`2026-09-04 run 정정`](runs/2026-09-04-exact-restore-qualification-4dcd8364.md)을 따릅니다.
+
+그러므로 2026-09-07의 local marker-only empty-root fresh-create 대입과 그에 맞춘 C 범위는 actual
+deployment에는 적용하지 않습니다. hardcoded source revocation은 같은 operation을 device-capable
+경로에서 막는 defense-in-depth로 유지하지만, remote deployment의 barrier가 소실됐다는 근거로 쓰지
+않습니다.
+
+actual volume에는 marker가 없고 기존 journal·archive가 있으므로 current marker provisioning,
+`status`, `park` 또는 fresh `create`를 실행하지 않습니다. 다음 실행 경계는 기존 bytes와 replay
+barrier를 보존하는 marker migration을 설계·offline 검증하고 maintainer가 결정한 뒤, actual
+deployment에서 승인 A를 처음부터 재실행하는 것입니다. 이 정정은 A·B1·B2·B3·C·D 중 어느 승인도
+발급하지 않으며 hardware는 **NO-GO / BLOCKING**, Q2는 `UNKNOWN`입니다.
