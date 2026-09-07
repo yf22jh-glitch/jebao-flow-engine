@@ -1403,3 +1403,45 @@ evidence로만 판정하며, timing evidence는 이번 primary·corroborating se
 host/private-state 재검증이고, 그것이 통과한 뒤에만 첫 device 접촉 B1 `2 series × 2 pair`의 exact
 승인을 요청합니다. 이번 정적 재검증에서 recovery supervisor·exact-restore `status`·`park`, private
 journal·archive, device·앱·Home Assistant 접촉은 `0`입니다.
+
+## 2026-09-07 승인 A 발급 후 private config 부재로 pre-one-shot 중단
+
+commit `1d54534a235bd84964c073f2fe0e6d2ef4a8962f` 착지 뒤 repository maintainer는 다음 경계로
+명시된 승인 A에 직접 “ㅇㅇㅇ 진행하자”라고 답했고, host reboot 뒤 같은 작업을 “이어서 하자”라고
+재개했습니다. 이 발급은 A만 포함하며 B1·B2·B3·C·D 또는 device·앱·Home Assistant·supervisor
+접촉 권한을 만들지 않습니다. 승인 범위는 짧은 답문 자체가 아니라 직전 메시지가 명시한 exact A
+경계에 결속됩니다.
+
+reboot 후 container 이전 host-only 검사에서 context `colima`, exact local named volume,
+`/hardware-safety` mount container `0`, attested image id exact match, established TCP `12416`과 writer
+process 각각 `0`, volume `LINKS=0 | 61B`, 전체 volume set `51`개와 기존 digest exact match를
+확인했습니다. deployment `.env`의 mode `0600`·`nlink=1` primary identity와 Keychain backup도 원문
+출력 없이 대조해 public SHA-256
+`fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`과 일치했습니다: **(c)
+reconstructed operator observation**.
+
+하지만 `.env`가 가리키는 private runtime config와 hardware-test config 대상 파일이 현재 host의
+두 live checkout에 모두 없음을 독립 실행자와 함께 확인했습니다. hardware-test config basename은
+등록 worktree, 사용자 홈 depth `7`(`Library`·`node_modules`·`.git`·`.Trash`·cache 제외),
+`/private/tmp`·`/tmp` depth `5`, mount된
+`/Volumes` depth `4`까지 검색했지만 없었습니다. 일반 runtime config는 exact 두 참조 밖으로 넓혀
+검색하지 않았고, 별도 backup system·다른 머신과 제외 경로도 조사하지 않았으므로 부재 판정은 이
+범위에만 한정합니다. reboot 뒤 별도의 `/private/tmp` worktree 하나가 `prunable`인 사실은 temporary worktree
+소실 가능성을 실제로 보여 주지만, 이번 config의 과거 위치나 삭제 원인을 확정하지는 않습니다.
+committed `docs/devices/*.yaml`에는 MAC-address 형태 값이 `0`건이라 physical identity 복구 원본으로
+쓸 수 없습니다. Compose의 `:-` 기본값을 발동시키려고 `.env`의 config 참조를 지우거나 example
+config를 대신 쓰는 것도 금지합니다.
+
+따라서 `runtime.dry_run=true`와 모든 configured device의
+`control.allow_hardware_writes=false`를 값으로 확인하지 못했습니다. example config 대체·파일 생성·
+참조 수정 없이 중단했습니다. reviewed one-shot, safety-root mount·marker verify·journal load·root
+inventory·probe, persistent lock·journal·archive 조회는 실행하지 않았고 container·transient `/data`,
+device·앱·Home Assistant·recovery supervisor·`status`·`park` 접촉도 `0`입니다. 따라서 exact
+empty-root 전제와 lock 네 종 부재를 이번 시도에서 재검증했다고 주장하지 않습니다.
+
+maintainer가 exact private 운영 원본을 갖고 있으면 그 원본에서만 복구합니다. 원본이 없다면 physical
+identity 재확립은 A 밖의 별도 device-contact·현장 binding 승인과 등급 (c) 기록이 필요합니다. 둘 다
+불가능하면 B1은 계속 중단합니다. 기억·추정·committed device 문서·example config로 재작성하지
+않으며, 승인된 복구 뒤에도 A 전체를 처음부터 다시 통과해야 합니다. 그 전에는 B1을 요청하거나
+실행하지 않습니다.
+**현재 판정은 standalone exact restore와 Q2 모두 `NO-GO / BLOCKING`, Q2는 `UNKNOWN`입니다.**

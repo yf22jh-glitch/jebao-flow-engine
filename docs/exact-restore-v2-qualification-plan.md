@@ -2163,3 +2163,65 @@ repository maintainer는 C를 fresh first-record 설치로 재정의하고 `PREP
 다음 실행 경계는 별도 승인 A의 host/private-state 재검증이고, 그것이 통과한 뒤에만 첫 device
 접촉인 B1 `2 series × 2 pair`에 대한 exact 승인을 요청합니다. recovery supervisor·`status`·`park`,
 device·앱·Home Assistant 접촉은 이 재검증에서 `0`입니다.
+
+## 2026-09-07 승인 A 발급과 reboot 후 pre-one-shot 중단
+
+위 재발행 문서가 commit `1d54534a235bd84964c073f2fe0e6d2ef4a8962f`로 착지하고 다음 경계가
+승인 A라고 명시된 직후, repository maintainer는 직접 “ㅇㅇㅇ 진행하자”라고 답해 **승인 A를
+발급**했습니다. 이어 host reboot를 먼저 하겠다고 중단시켰고, reboot 뒤 “이어서 하자”라고 같은
+범위의 재개를 지시했습니다. 이 승인은 이 문서의 A 범위에만 해당하며 B1·B2·B3·C·D, device
+접촉·write, 앱·Home Assistant 조작이나 recovery supervisor 기동을 발급하지 않습니다.
+승인 범위는 짧은 답문 자체가 아니라 그 직전 메시지가 명시한 exact A 경계에 결속됩니다.
+
+reboot 뒤 `AGENTS.md`, `docs/runs/` 전체, readiness 현재 판정과 동결 상태를 다시 확인하고 A의
+container 전 host-only gate부터 시작했습니다. active Docker context는 `colima`, exact named volume은
+driver·scope가 `local`, running·exited 전체의 `/hardware-safety` mount는 `0`, attested image id는
+`sha256:d67998b3717f77006823153cce7b3a50cc5c61741c1facec0b031ba0636a139b`, established TCP
+`12416` connection과 검출된 writer process는 각각 `0`이었습니다. named volume은 host metadata에서
+`LINKS=0 | 61B`, 전체 volume set은 `51`개와 기존 SHA-256
+`e7409e65b71ba0dc6b18bd6d02ce12310b407cce757f28b4b18aee31b3c0a16f`로 일치했습니다: **(c)
+reconstructed operator observation**.
+
+deployment `.env`의 primary identity는 owner-only mode `0600`·`nlink=1`이고 current clean build
+worktree 밖에 있었습니다. macOS Keychain backup과 길이·lowercase 32-hex·원문을 출력 없이 대조했고
+public SHA-256은 기존
+`fa99e3b9dc92e3d0690e21014e920357effb073a52722485a246bb011785df10`과 exact match했습니다.
+`MQTT_PASSWORD`도 계속 비어 있었습니다: **(c)**.
+
+그러나 같은 deployment `.env`가 가리키는 standard private runtime config와 hardware-test config의
+exact 대상 파일은 두 live checkout에서 둘 다 존재하지 않았고, 독립 실행자도 이 부재를
+확인했습니다. hardware-test config의 exact basename은 등록된 worktree, 사용자 홈 depth `7`
+(`Library`·`node_modules`·`.git`·`.Trash`·cache 제외), `/private/tmp`·`/tmp` depth `5`와 현재 mount된
+`/Volumes` depth `4`에서 추가 검색했지만 찾지 못했습니다. 일반적인 runtime config basename은 다른
+제품 파일과 구분할 안전한 기준이 없어 두 exact 참조 밖으로 넓혀 검색하지 않았습니다. 별도 backup
+system·다른 머신과 위 제외 경로는 조사하지 않았으므로, 부재 결론은 **이 확인 범위에만** 한정합니다.
+별도의 `/private/tmp` worktree 한 개가 reboot 뒤 `prunable`로 남아 temporary worktree directory가 실제로
+소실될 수 있다는 host 증거는 있지만, 이번 두 config가 그 worktree에 있었거나 reboot가 직접
+삭제했다는 인과는 주장하지 않습니다. 앞 기록은 identity `.env`를 durable checkout으로 옮긴 사실만
+보존하며 두 config를 같은 방식으로 옮겼다는 기록은 없습니다.
+
+committed `docs/devices/*.yaml`의 MAC-address 형태 값은 `0`건이므로 그 문서는 private physical
+identity의 복구 원본이 아닙니다. Compose의 두 config mount는 환경변수가 없으면 `:-` 문법으로
+각 example config를 선택하므로, blocker를 넘기려고 `.env`에서 참조를 지우거나 example을 대체
+입력으로 쓰는 것도 금지합니다. 그렇게 하면 실제 physical binding 없이 A가 진행된 것처럼 보일 수
+있습니다. 따라서 `runtime.dry_run=true`와 모든 configured device의
+`control.allow_hardware_writes=false`를 **값으로** 확인할 수 없으며 A는 통과하지 못했습니다.
+example config를 대신 쓰거나 파일·참조를 만들거나 고치지 않고 즉시 중단했습니다.
+
+이 중단은 reviewed one-shot보다 앞입니다. safety root를 container에 mount하지 않았고 marker verify,
+claim-free journal load, root inventory와 writability probe도 실행하지 않았습니다. persistent lock 네
+종·journal·archive의 정확한 부재는 이번 시도에서 아직 재검증하지 않았으며, host의 `61B` 관측만으로
+그 사실을 과대 주장하지 않습니다. container·transient `/data` 생성, device·앱·Home Assistant·
+recovery supervisor·`status`·`park` 접촉은 모두 `0`입니다.
+
+다음 경계는 maintainer가 private config의 보존 원본 유무를 확인하는 결정입니다.
+
+1. exact 값을 보존한 승인된 private 운영 기록이 있으면 그 원본에서만 두 config를 복구합니다.
+2. 그런 기록이 없으면 physical identity 재확립은 A가 아니라 **별도 device-contact·현장 binding
+   승인**을 요구하며, 옛 결속과 동일하다는 artifact가 없다는 사실을 등급 (c)로 남깁니다.
+3. 어느 경로도 없으면 B1은 계속 `NO-GO`입니다.
+
+기억·재스캔 추정, committed device 문서, example config 또는 소실된 artifact digest로 private
+identity를 재작성하지 않습니다. 승인된 경로로 복구한 뒤에도 승인 A를 처음부터 다시 실행해 모든
+gate를 통과하기 전에는 B1 승인을 요청하지 않습니다. 현재 판정은 계속 **NO-GO / BLOCKING**이고
+Q2는 `UNKNOWN`입니다.
