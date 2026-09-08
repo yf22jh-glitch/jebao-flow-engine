@@ -378,6 +378,41 @@ reconnect, or other evidence of drift must call `invalidate_applied()` before th
 may be treated as already applied. This runtime contract and its fault-injection tests do not claim
 that a service loop is currently running or that any device accepted a group write.
 
+### Write-disarmed group supervisor lifecycle
+
+`LocalControlGroupSupervisor` is an offline-tested lifecycle boundary around one `GroupManager` and
+one `PlanAtomicGroupDispatchRuntime`. Construction and diagnostic ticks are structurally
+write-disarmed: before a valid explicit `GroupRuntime` command, the supervisor may calculate plans
+but never calls `PlanAtomicGroupDispatchRuntime.submit()`. This remains true when the configured
+group is enabled, disabled, or contains a disabled member; each of those configurations can produce
+a physical dispatch and is therefore not itself a no-write guard.
+
+Every submitted plan is the exact object returned by `GroupManager.plan_tick()`. The supervisor
+never constructs a `GroupTickPlan` or a target independently. Fresh-state cycles, explicit desired
+runtime updates, planning, and submission share one operation lock. A current fresh observation
+maps to `online=true`; any failed fresh observation remains `online=unknown`, because the current
+read path does not prove that a device is offline. If manager state changes after a plan is produced
+but before submission, the plan runtime rejects that generation and a later tick recomputes from
+current state.
+
+The plan runtime intentionally bypasses ordinary deduplication for mandatory OFF. The supervisor
+therefore suppresses unchanged periodic resubmission only while the runtime either confirms that
+semantic plan as applied or still owns its mandatory-OFF token. Invalidating the runtime's applied
+cache also invalidates this suppression. A new explicit command may request the same OFF again. If
+an earlier safety token is still unresolved, that explicit request is reported as
+`deferred_safety_off`, not as a submitted physical operation. The supervisor does not weaken the
+runtime safety-token bypass, invent a retry, or turn an uncertain delivery into success. Ordinary
+unchanged plans still use the runtime's confirmed applied-plan deduplication. If a latched ordinary
+failure suppresses a later plan, the cycle is `suppressed_after_failure` rather than `submitted`.
+An unresolved safety OFF remains a sticky shutdown error on every `aclose()` call; repeated
+shutdown observers cannot turn it into a clean return.
+
+This slice does not run a background tick, construct the supervisor from a daemon or CLI, expose a
+group Home Assistant entity, or accept an MQTT group command. It also cannot yet compare projected
+fresh scalar state with a typed group target, so external target drift remains `UNKNOWN` rather than
+becoming a speculative write gate. Production construction and any broker, Home Assistant, or live
+hardware activation require a separate reviewed scope and the hardware-readiness preconditions.
+
 ## Product audit mapping
 
 `ENC` means deterministic bytes exist. `DEC` means deterministic status decoding exists. Neither

@@ -99,6 +99,7 @@ def test_write_runtime_and_cli_import_closure_still_excludes_the_frozen_harness(
         "jebao_flow.local_control.coordinator",
         "jebao_flow.local_control.device_writer",
         "jebao_flow.local_control.group",
+        "jebao_flow.local_control.group_supervisor",
         "jebao_flow.local_control.lease",
         "jebao_flow.local_control.mqtt",
         "jebao_flow.local_control_cli",
