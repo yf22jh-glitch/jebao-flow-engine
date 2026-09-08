@@ -1,4 +1,4 @@
-"""Shared deployment and stable-device leases for local-control writes."""
+"""Shared deployment and stable-device leases for local-control operations."""
 
 from __future__ import annotations
 
@@ -12,6 +12,9 @@ from pathlib import Path
 
 from jebao_flow.exact_restore_guard import ExactRestoreGuard
 from jebao_flow.hardware_safety import (
+    HardwareSafetyRootError,
+    _open_hardware_safety_mount,
+    _validate_hardware_safety_root_descriptor,
     exact_restore_journal_path,
     native_linkage_intent_path,
     native_linkage_journal_path,
@@ -71,14 +74,7 @@ class LocalControlLease:
     @contextmanager
     def acquire(self, physical_identity_keys: tuple[str, ...]) -> Iterator[ActiveLocalControlLease]:
         keys = tuple(sorted(physical_identity_keys))
-        if not keys or len(keys) != len(set(keys)):
-            raise ValueError("local-control lease requires distinct physical identities")
-        if any(
-            len(key) != 64
-            or any(character not in "0123456789abcdef" for character in key)
-            for key in keys
-        ):
-            raise ValueError("local-control lease keys must be lowercase SHA-256")
+        _validate_physical_identity_keys(keys)
 
         with ExitStack() as stack:
             try:
@@ -94,10 +90,82 @@ class LocalControlLease:
                 raise LocalControlLeaseBusyError(
                     "another durable write workflow is unfinished"
                 )
-            stack.enter_context(_acquire_device_locks(self._device_lock_directory, keys))
+            stack.enter_context(
+                _acquire_device_locks(
+                    self._device_lock_directory,
+                    keys,
+                    operation=fcntl.LOCK_EX,
+                    busy_message="a physical controller is owned by another write workflow",
+                )
+            )
             active = ActiveLocalControlLease(self._guard)
             active.require_permitted()
             yield active
+
+
+class LocalControlReadLease:
+    """Take the existing stable-device lock in shared mode for one fresh state read.
+
+    This deliberately does not acquire the deployment-wide write lease or inspect rollback
+    journals.  The shared per-device lock only prevents a read from observing an intermediate
+    local-control or legacy-write state; it does not turn polling into write admission.
+    """
+
+    def __init__(self, *, device_lock_directory: Path | None = None) -> None:
+        self._validate_fixed_root = device_lock_directory is None
+        self._device_lock_directory = (
+            physical_lock_directory()
+            if device_lock_directory is None
+            else Path(device_lock_directory)
+        )
+
+    @contextmanager
+    def acquire(self, physical_identity_key: str) -> Iterator[None]:
+        _validate_physical_identity_keys((physical_identity_key,))
+        with ExitStack() as stack:
+            root_descriptor = (
+                stack.enter_context(_validated_read_root())
+                if self._validate_fixed_root
+                else None
+            )
+            stack.enter_context(
+                _acquire_device_locks(
+                    self._device_lock_directory,
+                    (physical_identity_key,),
+                    operation=fcntl.LOCK_SH,
+                    busy_message="a physical controller is currently inside a write workflow",
+                    create_parent_directories=not self._validate_fixed_root,
+                )
+            )
+            if root_descriptor is not None:
+                _validate_read_root(root_descriptor)
+            yield
+            if root_descriptor is not None:
+                _validate_read_root(root_descriptor)
+
+
+@contextmanager
+def _validated_read_root() -> Iterator[int]:
+    """Bind a poll to the current identified mount without running its write probe."""
+
+    descriptor = -1
+    try:
+        descriptor = _open_hardware_safety_mount()
+        _validate_read_root(descriptor)
+        yield descriptor
+    except HardwareSafetyRootError as error:
+        raise LocalControlLeaseError(
+            "identified hardware-safety root is unavailable for a fresh read"
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _validate_read_root(descriptor: int) -> None:
+    """Recheck mount and marker identity without creating or unlinking a probe."""
+
+    _validate_hardware_safety_root_descriptor(descriptor)
 
 
 def _legacy_write_workflows_idle() -> bool:
@@ -197,10 +265,23 @@ def _terminal_intent_or_absent(path: Path) -> bool:
 
 
 @contextmanager
-def _acquire_device_locks(directory: Path, keys: tuple[str, ...]) -> Iterator[None]:
+def _acquire_device_locks(
+    directory: Path,
+    keys: tuple[str, ...],
+    *,
+    operation: int,
+    busy_message: str,
+    create_parent_directories: bool = True,
+) -> Iterator[None]:
+    if operation not in {fcntl.LOCK_EX, fcntl.LOCK_SH}:
+        raise ValueError("physical-device lock operation must be shared or exclusive")
     descriptors: list[int] = []
     try:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.mkdir(
+            mode=0o700,
+            parents=create_parent_directories,
+            exist_ok=True,
+        )
         metadata = directory.lstat()
         if (
             directory.is_symlink()
@@ -212,13 +293,11 @@ def _acquire_device_locks(directory: Path, keys: tuple[str, ...]) -> Iterator[No
         for key in keys:
             descriptor = _open_device_lock(directory / f"{key}.lock")
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
                 _validate_lock_descriptor(descriptor, directory / f"{key}.lock")
             except BlockingIOError as error:
                 os.close(descriptor)
-                raise LocalControlLeaseBusyError(
-                    "a physical controller is owned by another write workflow"
-                ) from error
+                raise LocalControlLeaseBusyError(busy_message) from error
             except BaseException:
                 os.close(descriptor)
                 raise
@@ -247,6 +326,16 @@ def _open_device_lock(path: Path) -> int:
         raise
 
 
+def _validate_physical_identity_keys(keys: tuple[str, ...]) -> None:
+    if not keys or len(keys) != len(set(keys)):
+        raise ValueError("local-control lease requires distinct physical identities")
+    if any(
+        len(key) != 64 or any(character not in "0123456789abcdef" for character in key)
+        for key in keys
+    ):
+        raise ValueError("local-control lease keys must be lowercase SHA-256")
+
+
 def _validate_lock_descriptor(descriptor: int, path: Path) -> None:
     opened = os.fstat(descriptor)
     try:
@@ -272,4 +361,5 @@ __all__ = [
     "LocalControlLease",
     "LocalControlLeaseBusyError",
     "LocalControlLeaseError",
+    "LocalControlReadLease",
 ]

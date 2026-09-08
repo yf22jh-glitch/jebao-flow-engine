@@ -68,6 +68,8 @@ def test_read_only_local_control_import_closure_excludes_write_and_frozen_module
         "jebao_flow.local_control.schedule",
         "jebao_flow.local_control.ha",
         "jebao_flow.local_control.qualification",
+        "jebao_flow.local_control.service",
+        "jebao_flow.local_control.state",
     )
     script = (
         "import importlib,json,sys;"
@@ -124,6 +126,7 @@ def test_per_device_lock_uses_the_stable_physical_key_filename() -> None:
     source = (PACKAGE / "lease.py").read_text(encoding="utf-8")
 
     assert 'directory / f"{key}.lock"' in source
+    assert "_probe_hardware_safety_root" not in source
     assert "configuration_fingerprint" not in source
     assert "getpid" not in source
     assert "hostname" not in source

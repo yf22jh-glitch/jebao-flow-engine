@@ -83,13 +83,11 @@ class HomeAssistantEntityDescriptor:
     def mqtt_discovery_payload(self) -> dict[str, object]:
         """Return a native MQTT-discovery payload without private device identifiers."""
 
+        global_availability = _global_availability_topic(self.state_topic)
         payload: dict[str, object] = {
             "name": self.name,
             "unique_id": self.unique_id,
             "state_topic": self.state_topic,
-            "availability_topic": _availability_topic(self.state_topic),
-            "payload_available": "online",
-            "payload_not_available": "offline",
             "device": {
                 "identifiers": [f"jebao_flow_local_{self.logical_member}"],
                 "name": _english_member_name(self.logical_member),
@@ -97,6 +95,35 @@ class HomeAssistantEntityDescriptor:
                 "model": "Local Control",
             },
         }
+        if self.logical_member == "local_system":
+            payload.update(
+                {
+                    "availability_topic": global_availability,
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "availability": [
+                        {
+                            "topic": global_availability,
+                            "payload_available": "online",
+                            "payload_not_available": "offline",
+                        },
+                        {
+                            "topic": _device_availability_topic(
+                                self.state_topic,
+                                self.logical_member,
+                            ),
+                            "payload_available": "online",
+                            "payload_not_available": "offline",
+                        },
+                    ],
+                    "availability_mode": "all",
+                }
+            )
         if self.command_topic is not None:
             payload["command_topic"] = self.command_topic
             payload["qos"] = 0
@@ -162,6 +189,18 @@ class HomeAssistantProjection:
         }
         _require_ascii(payload)
         return payload
+
+    @property
+    def global_availability_topic(self) -> str:
+        return f"{self.topic_prefix}/local/availability"
+
+    def device_availability_topic(self, logical_member: str) -> str:
+        if not any(
+            entity.logical_member == logical_member and logical_member != "local_system"
+            for entity in self.entities
+        ):
+            raise KeyError("logical member is not in the Home Assistant device projection")
+        return f"{self.topic_prefix}/local/devices/{logical_member}/availability"
 
 
 def project_home_assistant(
@@ -328,9 +367,14 @@ def _validate_unique_schedule_topology(
         raise ValueError("one slave cannot belong to multiple current schedule topologies")
 
 
-def _availability_topic(state_topic: str) -> str:
+def _global_availability_topic(state_topic: str) -> str:
     prefix, _separator, _tail = state_topic.partition("/local/")
     return f"{prefix}/local/availability"
+
+
+def _device_availability_topic(state_topic: str, logical_member: str) -> str:
+    prefix, _separator, _tail = state_topic.partition("/local/")
+    return f"{prefix}/local/devices/{logical_member}/availability"
 
 
 def _english_member_name(logical_member: str) -> str:

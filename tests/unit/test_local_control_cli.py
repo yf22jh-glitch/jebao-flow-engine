@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -170,6 +171,10 @@ def test_prepare_install_prints_only_fresh_summary(monkeypatch, capsys) -> None:
     assert result == 0
     assert payload["previous_values_reused"] is False
     assert payload["private_paths_exposed"] is False
+    assert payload["template_binding_complete"] is False
+    assert payload["qualification_status"] == (
+        "no_current_template_binding_controls_remain_diagnostic"
+    )
     assert "/private" not in output.out
     assert output.err == ""
 
@@ -253,3 +258,358 @@ def test_production_cli_has_no_journal_root_override() -> None:
                 "/stale/root",
             ]
         )
+
+
+def test_prepare_service_uses_only_current_inputs_and_keeps_write_off_by_default(
+    monkeypatch,
+    capsys,
+) -> None:
+    current = SimpleNamespace(
+        config=SimpleNamespace(mqtt=SimpleNamespace(password_env=None)),
+        manifest=_manifest(),
+        config_path=local_control_cli.Path("/current/private/config.yaml"),
+        manifest_path=local_control_cli.Path("/current/private/install.json"),
+        template_roots=(local_control_cli.Path("/current/private/templates"),),
+    )
+    captured = {}
+    monkeypatch.setenv("JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID", "0" * 32)
+    monkeypatch.setenv(
+        "JEBAO_FLOW_LOCAL_QUALIFICATIONS",
+        "/stale/missing/qualification",
+    )
+    monkeypatch.setattr(local_control_cli, "_prepare_current", lambda args: current)
+    monkeypatch.setattr(
+        local_control_cli,
+        "load_current_qualifications",
+        lambda path: (_ for _ in ()).throw(
+            AssertionError("read-only service inspected write qualification")
+        ),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "resolve_current_executable",
+        lambda path: local_control_cli.Path("/current/bin/jebao-flow-local"),
+    )
+
+    class _Artifact:
+        def public_dict(self):
+            return {
+                "status": "service_prepared",
+                "previous_unit_values_reused": False,
+                "private_paths_exposed": False,
+            }
+
+    def replace(output, spec, *, hardware_safety_volume_id):
+        captured["output"] = output
+        captured["spec"] = spec
+        captured["hardware_safety_volume_id"] = hardware_safety_volume_id
+        return _Artifact()
+
+    monkeypatch.setattr(local_control_cli, "replace_prepared_service", replace)
+
+    result = local_control_cli.main(
+        [
+            "prepare-service",
+            "--config",
+            "/current/private/config.yaml",
+            "--manifest",
+            "/current/private/install.json",
+            "--role-attested-by",
+            "operator",
+            "--output",
+            "/current/private/jebao-flow-local.service",
+        ]
+    )
+
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert result == 0
+    assert captured["spec"].write_enabled is False
+    assert captured["hardware_safety_volume_id"] == "0" * 32
+    assert captured["spec"].hardware_safety_volume_id_file == local_control_cli.Path(
+        "/current/private/.jebao-flow-local.service.hardware-safety-volume-id"
+    )
+    assert captured["spec"].qualifications is None
+    assert captured["spec"].template_roots == current.template_roots
+    assert captured["spec"].mqtt_password_file is None
+    assert captured["spec"].role_attested_at == current.manifest.devices[0].role_attested_at
+    assert len(captured["spec"].role_binding_sha256) == 64
+    assert payload["previous_unit_values_reused"] is False
+    assert "/current/private" not in output.out
+    assert output.err == ""
+
+
+def test_prepare_service_requires_a_current_password_file_when_config_names_password_env(
+    monkeypatch,
+    capsys,
+) -> None:
+    current = SimpleNamespace(
+        config=SimpleNamespace(mqtt=SimpleNamespace(password_env="CURRENT_MQTT_PASSWORD")),
+        manifest=_manifest(),
+        config_path=local_control_cli.Path("/current/private/config.yaml"),
+        manifest_path=local_control_cli.Path("/current/private/install.json"),
+        template_roots=(),
+    )
+    monkeypatch.setattr(local_control_cli, "_prepare_current", lambda args: current)
+    monkeypatch.setattr(local_control_cli, "load_current_qualifications", lambda path: ())
+
+    result = local_control_cli.main(
+        [
+            "prepare-service",
+            "--config",
+            "/current/private/config.yaml",
+            "--role-attested-by",
+            "operator",
+            "--output",
+            "/current/private/jebao-flow-local.service",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert result == 2
+    assert output.out == ""
+    assert output.err == "jebao-flow-local: current_operation_failed_closed\n"
+
+
+def test_prepare_service_ignores_stale_password_path_when_current_config_has_no_password(
+    monkeypatch,
+    capsys,
+) -> None:
+    current = SimpleNamespace(
+        config=SimpleNamespace(mqtt=SimpleNamespace(password_env=None)),
+        manifest=_manifest(),
+        config_path=local_control_cli.Path("/current/private/config.yaml"),
+        manifest_path=local_control_cli.Path("/current/private/install.json"),
+        template_roots=(),
+    )
+    captured = {}
+    monkeypatch.setenv("JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID", "0" * 32)
+    monkeypatch.setenv(
+        "JEBAO_FLOW_LOCAL_MQTT_PASSWORD_FILE",
+        "/stale/missing/password",
+    )
+    monkeypatch.setattr(local_control_cli, "_prepare_current", lambda args: current)
+    monkeypatch.setattr(local_control_cli, "load_current_qualifications", lambda path: ())
+    monkeypatch.setattr(
+        local_control_cli,
+        "resolve_current_executable",
+        lambda path: local_control_cli.Path("/current/bin/jebao-flow-local"),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "require_current_mqtt_password_file",
+        lambda path: (_ for _ in ()).throw(AssertionError("stale path was inspected")),
+    )
+
+    class _Artifact:
+        def public_dict(self):
+            return {"status": "service_prepared"}
+
+    def replace(output, spec, *, hardware_safety_volume_id):
+        captured["spec"] = spec
+        return _Artifact()
+
+    monkeypatch.setattr(local_control_cli, "replace_prepared_service", replace)
+
+    result = local_control_cli.main(
+        [
+            "prepare-service",
+            "--config",
+            "/current/private/config.yaml",
+            "--role-attested-by",
+            "operator",
+            "--output",
+            "/current/private/jebao-flow-local.service",
+        ]
+    )
+
+    assert result == 0
+    assert captured["spec"].mqtt_password_file is None
+    assert capsys.readouterr().err == ""
+
+
+def test_prepare_service_requires_the_current_stable_safety_volume_identity(
+    monkeypatch,
+    capsys,
+) -> None:
+    current = SimpleNamespace(
+        config=SimpleNamespace(mqtt=SimpleNamespace(password_env=None)),
+        manifest=_manifest(),
+        config_path=local_control_cli.Path("/current/private/config.yaml"),
+        manifest_path=local_control_cli.Path("/current/private/install.json"),
+        template_roots=(),
+    )
+    monkeypatch.delenv("JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID", raising=False)
+    monkeypatch.setattr(local_control_cli, "_prepare_current", lambda args: current)
+    monkeypatch.setattr(
+        local_control_cli,
+        "resolve_current_executable",
+        lambda path: local_control_cli.Path("/current/bin/jebao-flow-local"),
+    )
+
+    result = local_control_cli.main(
+        [
+            "prepare-service",
+            "--config",
+            "/current/private/config.yaml",
+            "--role-attested-by",
+            "operator",
+            "--output",
+            "/current/private/jebao-flow-local.service",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert result == 2
+    assert output.out == ""
+    assert output.err == "jebao-flow-local: current_operation_failed_closed\n"
+
+
+def test_current_mqtt_password_prefers_the_current_service_password_file(
+    monkeypatch,
+) -> None:
+    config = SimpleNamespace(
+        mqtt=SimpleNamespace(
+            password_env="MQTT_PASSWORD",
+            resolve_password=lambda: "stale-shell-value",
+        )
+    )
+    monkeypatch.setenv(
+        "JEBAO_FLOW_LOCAL_MQTT_PASSWORD_FILE",
+        "/current/private/mqtt-password",
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "read_current_mqtt_password",
+        lambda path: "current-file-value",
+    )
+
+    assert local_control_cli._current_mqtt_password(config) == "current-file-value"
+
+
+def test_generated_service_identity_file_replaces_a_stale_raw_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID_FILE",
+        "/current/private/hardware-safety-volume-id",
+    )
+    monkeypatch.setenv("JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID", "0" * 32)
+    monkeypatch.setattr(
+        local_control_cli,
+        "read_current_hardware_safety_volume_id",
+        lambda path: "1" * 32,
+    )
+
+    local_control_cli._activate_current_hardware_safety_volume_identity()
+
+    assert os.environ["JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID"] == "1" * 32
+
+
+def test_default_runtime_does_not_project_receipts_as_controls(monkeypatch) -> None:
+    captured = []
+
+    def build(qualifications, *, current_content):
+        captured.append((qualifications, current_content))
+        return "catalog"
+
+    monkeypatch.setattr(local_control_cli, "build_local_control_catalog", build)
+
+    assert (
+        local_control_cli._runtime_catalog(
+            ("current-receipt",),
+            "current-content",
+            write_enabled=False,
+        )
+        == "catalog"
+    )
+    assert captured == [((), "current-content")]
+
+
+def test_default_runtime_does_not_read_a_retained_qualification_path(monkeypatch) -> None:
+    monkeypatch.setattr(
+        local_control_cli,
+        "load_current_qualifications",
+        lambda path: (_ for _ in ()).throw(AssertionError("qualification path was read")),
+    )
+
+    assert (
+        local_control_cli._runtime_qualifications(
+            local_control_cli.Path("/stale/qualification"),
+            write_enabled=False,
+        )
+        == ()
+    )
+
+
+def test_default_runtime_does_not_construct_a_write_coordinator(monkeypatch) -> None:
+    monkeypatch.setattr(
+        local_control_cli,
+        "_coordinator",
+        lambda config, catalog: (_ for _ in ()).throw(
+            AssertionError("read-only service opened its write runtime")
+        ),
+    )
+
+    assert (
+        local_control_cli._runtime_coordinator(
+            "current-config",
+            "diagnostic-catalog",
+            write_enabled=False,
+        )
+        is None
+    )
+
+def test_write_enabled_runtime_uses_only_current_receipts(monkeypatch) -> None:
+    captured = []
+
+    def build(qualifications, *, current_content):
+        captured.append((qualifications, current_content))
+        return "catalog"
+
+    monkeypatch.setattr(local_control_cli, "build_local_control_catalog", build)
+
+    local_control_cli._runtime_catalog(
+        ("current-receipt",),
+        "current-content",
+        write_enabled=True,
+    )
+
+    assert captured == [(('current-receipt',), "current-content")]
+
+
+def test_service_restart_binding_mismatch_fails_before_replacing_manifest(
+    monkeypatch,
+) -> None:
+    manifest = _manifest()
+    replaced = []
+    args = SimpleNamespace(
+        config=local_control_cli.Path("/current/config"),
+        manifest=local_control_cli.Path("/current/manifest"),
+        role_attested_by="operator",
+        role_attested_at=datetime(2026, 9, 8, tzinfo=UTC),
+        role_binding_sha256="f" * 64,
+        template_root=(),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "current_service_path",
+        lambda value, description: local_control_cli.Path(value),
+    )
+    monkeypatch.setattr(local_control_cli, "load_current_private_config", lambda path: object())
+    monkeypatch.setattr(local_control_cli, "hash_current_template_contents", lambda roots: ())
+    monkeypatch.setattr(
+        local_control_cli,
+        "build_fresh_install_manifest",
+        lambda *args, **kwargs: manifest,
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "replace_install_manifest",
+        lambda *args: replaced.append(args),
+    )
+
+    with pytest.raises(ValueError, match="stable role binding"):
+        local_control_cli._prepare_current(args)
+
+    assert replaced == []

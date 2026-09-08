@@ -106,6 +106,13 @@ def test_qualified_scalar_uses_native_clamped_number_contract() -> None:
     assert flow.mqtt_discovery_payload()["max"] == 75
     assert flow.mqtt_discovery_payload()["qos"] == 0
     assert flow.mqtt_discovery_payload()["optimistic"] is False
+    assert flow.mqtt_discovery_payload()["availability_mode"] == "all"
+    assert [
+        item["topic"] for item in flow.mqtt_discovery_payload()["availability"]
+    ] == [
+        "jebao-flow/main/local/availability",
+        "jebao-flow/main/local/devices/wavemaker_master/availability",
+    ]
 
 
 def test_qualified_schedule_reset_is_an_explicit_nonoptimistic_button() -> None:

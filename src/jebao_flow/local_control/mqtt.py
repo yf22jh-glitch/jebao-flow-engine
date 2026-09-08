@@ -28,6 +28,7 @@ from jebao_flow.local_control.models import (
     LocalDeviceBinding,
 )
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan
+from jebao_flow.local_control.state import FreshDeviceState, FreshStatePoller
 
 
 class LocalControlMqttError(RuntimeError):
@@ -35,6 +36,7 @@ class LocalControlMqttError(RuntimeError):
 
 
 COMMAND_QOS = 0
+_PASSWORD_FROM_CONFIG = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,9 +73,11 @@ class LocalControlMqttRouter:
         manifest: FreshInstallManifest,
         catalog: LocalControlCatalog,
         schedule_plans: tuple[FreshMasterSchedulePlan, ...],
-        coordinator: LocalControlCoordinator,
+        coordinator: LocalControlCoordinator | None,
+        operation_lock: asyncio.Lock | None = None,
     ) -> None:
         self._coordinator = coordinator
+        self._operation_lock = operation_lock
         device_by_member = {device.logical_member: device for device in manifest.devices}
         self._routes: dict[str, _ScalarRoute | _ScheduleRoute] = {}
         plans_by_topic: dict[str, tuple[FreshMasterSchedulePlan, int]] = {}
@@ -112,12 +116,23 @@ class LocalControlMqttRouter:
                 plan,
                 slave_index,
             )
+        if self._routes and self._coordinator is None:
+            raise ValueError("qualified MQTT controls require a write coordinator")
 
     @property
     def command_topics(self) -> tuple[str, ...]:
         return tuple(sorted(self._routes))
 
     async def handle(self, topic: str, payload: bytes | str) -> RoutedCommandResult:
+        if self._operation_lock is None:
+            return await self._handle(topic, payload)
+        async with self._operation_lock:
+            return await self._handle(topic, payload)
+
+    async def _handle(self, topic: str, payload: bytes | str) -> RoutedCommandResult:
+        coordinator = self._coordinator
+        if coordinator is None:
+            raise LocalControlMqttError("read-only MQTT runtime has no command executor")
         try:
             route = self._routes[topic]
         except KeyError as error:
@@ -133,9 +148,9 @@ class LocalControlMqttRouter:
                 function=route.entity.function,
                 value=value,
             )
-            result = await self._coordinator.execute(intent)
+            result = await coordinator.execute(intent)
         else:
-            result = await self._coordinator.execute_schedule_flow(
+            result = await coordinator.execute_schedule_flow(
                 request_id=request_id,
                 linkage_mode=route.plan.linkage_mode,
                 master=route.plan.master,
@@ -160,15 +175,29 @@ class LocalControlMqttAdapter:
         *,
         projection: HomeAssistantProjection,
         router: LocalControlMqttRouter,
+        state_poller: FreshStatePoller,
+        password: str | None | object = _PASSWORD_FROM_CONFIG,
     ) -> None:
+        if password is not _PASSWORD_FROM_CONFIG and not (
+            password is None or isinstance(password, str)
+        ):
+            raise TypeError("MQTT password override must be text or null")
         self._config = config
         self._projection = projection
         self._router = router
-        self._availability = f"{projection.topic_prefix}/local/availability"
+        self._state_poller = state_poller
+        self._password = password
+        self._availability = projection.global_availability_topic
         self._status = f"{projection.topic_prefix}/local/status"
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        password = self._config.resolve_password()
+        password = (
+            self._config.resolve_password()
+            if self._password is _PASSWORD_FROM_CONFIG
+            else self._password
+        )
+        if password is not None and not isinstance(password, str):
+            raise TypeError("MQTT password must be text or null")
         will = aiomqtt.Will(self._availability, "offline", qos=1, retain=True)
         async with aiomqtt.Client(
             self._config.host,
@@ -178,6 +207,16 @@ class LocalControlMqttAdapter:
             identifier=f"jebao-flow-local-{secrets.token_hex(8)}",
             will=will,
         ) as client:
+            # Clear availability before subscriptions or discovery. Retained state from a previous
+            # process must never look current during this process's initial read.
+            await client.publish(self._availability, "offline", qos=1, retain=True)
+            for logical_member in self._state_poller.logical_members:
+                await client.publish(
+                    self._projection.device_availability_topic(logical_member),
+                    "offline",
+                    qos=1,
+                    retain=True,
+                )
             for topic in self._router.command_topics:
                 # At-most-once command delivery is intentional: losing one command is safer than
                 # a broker replay applying an old value after a newer physical operation.
@@ -209,19 +248,34 @@ class LocalControlMqttAdapter:
 
             stop_waiter = asyncio.create_task(stop_event.wait())
             consumer = asyncio.create_task(self._consume(client))
+            state_sync = asyncio.create_task(
+                self._state_poller.run(
+                    lambda result: self._publish_fresh_state(client, result),
+                    stop_event,
+                )
+            )
             try:
                 done, _pending = await asyncio.wait(
-                    {stop_waiter, consumer},
+                    {stop_waiter, consumer, state_sync},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if consumer in done:
                     await consumer
-                else:
-                    await client.publish(self._availability, "offline", qos=1, retain=True)
+                if state_sync in done:
+                    await state_sync
             finally:
-                consumer.cancel()
-                stop_waiter.cancel()
-                await asyncio.gather(consumer, stop_waiter, return_exceptions=True)
+                try:
+                    await client.publish(self._availability, "offline", qos=1, retain=True)
+                finally:
+                    consumer.cancel()
+                    state_sync.cancel()
+                    stop_waiter.cancel()
+                    await asyncio.gather(
+                        consumer,
+                        state_sync,
+                        stop_waiter,
+                        return_exceptions=True,
+                    )
 
     async def _consume(self, client: aiomqtt.Client) -> None:
         async for message in client.messages:
@@ -257,6 +311,36 @@ class LocalControlMqttAdapter:
                     qos=1,
                     retain=True,
                 )
+
+    async def _publish_fresh_state(
+        self,
+        client: aiomqtt.Client,
+        result: FreshDeviceState,
+    ) -> None:
+        availability = self._projection.device_availability_topic(result.logical_member)
+        if not result.available:
+            await client.publish(availability, "offline", qos=1, retain=True)
+            await client.publish(
+                self._status,
+                _canonical_json(
+                    {
+                        "status": "state_unavailable",
+                        "logical_member": result.logical_member,
+                        "reason": result.diagnostic_reason,
+                    }
+                ),
+                qos=1,
+                retain=False,
+            )
+            return
+        for publication in result.publications:
+            await client.publish(
+                publication.topic,
+                publication.payload,
+                qos=1,
+                retain=True,
+            )
+        await client.publish(availability, "online", qos=1, retain=True)
 
     async def _publish_rejection(self, client: aiomqtt.Client, reason: str) -> None:
         await client.publish(

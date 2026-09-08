@@ -146,6 +146,18 @@ _ENGLISH_NAME_BY_PRODUCT_FUNCTION = {
     ): "Schedule Enable (Detaches Slave)",
 }
 
+_PUBLIC_VALUE_BY_PRODUCT_FUNCTION = {
+    (
+        "50dbc92221fd4d33ae69a1fedd43b555",
+        "manual_mode",
+        "circulation",
+    ): "Cross-flow",
+}
+_INTERNAL_VALUE_BY_PRODUCT_FUNCTION = {
+    (product_key, function, public): internal
+    for (product_key, function, internal), public in _PUBLIC_VALUE_BY_PRODUCT_FUNCTION.items()
+}
+
 
 @dataclass(frozen=True, slots=True)
 class LocalFunctionDescriptor:
@@ -413,6 +425,22 @@ def _english_name(function: str, product_key: str | None = None) -> str:
     return " ".join(part.capitalize() for part in function.split("_"))
 
 
+def public_function_value(product_key: str, function: str, value: object) -> object:
+    """Translate a stable internal enum identity only at the public presentation boundary."""
+
+    if not isinstance(value, str):
+        return value
+    return _PUBLIC_VALUE_BY_PRODUCT_FUNCTION.get((product_key, function, value), value)
+
+
+def internal_function_value(product_key: str, function: str, value: object) -> object:
+    """Translate an English presentation value back to its durable protocol identity."""
+
+    if not isinstance(value, str):
+        return value
+    return _INTERNAL_VALUE_BY_PRODUCT_FUNCTION.get((product_key, function, value), value)
+
+
 def _validate_value(descriptor: LocalFunctionDescriptor, value: object) -> None:
     kind = descriptor.kind
     if kind is AppFunctionKind.BOOLEAN:
@@ -463,4 +491,6 @@ __all__ = [
     "LocalControlCatalog",
     "LocalFunctionDescriptor",
     "build_local_control_catalog",
+    "internal_function_value",
+    "public_function_value",
 ]

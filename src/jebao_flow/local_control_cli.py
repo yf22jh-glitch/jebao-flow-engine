@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from jebao_flow.hardware_safety import HARDWARE_SAFETY_VOLUME_ID_ENV
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.coordinator import LocalControlCoordinator
 from jebao_flow.local_control.dosing import (
@@ -32,6 +33,18 @@ from jebao_flow.local_control.mqtt import LocalControlMqttAdapter, LocalControlM
 from jebao_flow.local_control.qualification import load_current_qualifications
 from jebao_flow.local_control.resolver import CurrentEndpointResolver
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan, FreshSlaveSchedule
+from jebao_flow.local_control.service import (
+    HARDWARE_SAFETY_VOLUME_ID_FILE_ENV,
+    LocalControlServiceSpec,
+    current_service_path,
+    read_current_hardware_safety_volume_id,
+    read_current_mqtt_password,
+    replace_prepared_service,
+    require_current_mqtt_password_file,
+    resolve_current_executable,
+    stable_role_binding_sha256,
+)
+from jebao_flow.local_control.state import FreshStatePoller, LocalControlStateProjector
 from jebao_flow.operator_capture.app_catalog import public_app_catalog
 from jebao_flow.operator_capture.schedule_model import NativeLinkageMode
 from jebao_flow.protocol.discovery import GizwitsDiscovery
@@ -40,6 +53,9 @@ _CONFIG_ENV = "JEBAO_FLOW_CONFIG"
 _MANIFEST_ENV = "JEBAO_FLOW_LOCAL_INSTALL_MANIFEST"
 _QUALIFICATION_ENV = "JEBAO_FLOW_LOCAL_QUALIFICATIONS"
 _TEMPLATE_ROOTS_ENV = "JEBAO_FLOW_APP_TEMPLATE_ROOTS"
+_MQTT_PASSWORD_FILE_ENV = "JEBAO_FLOW_LOCAL_MQTT_PASSWORD_FILE"
+_ROLE_ATTESTED_AT_ENV = "JEBAO_FLOW_ROLE_ATTESTED_AT"
+_ROLE_BINDING_ENV = "JEBAO_FLOW_ROLE_BINDING_SHA256"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,23 +90,48 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, help_text in (
         ("prepare-install", "replace the install manifest from current inputs"),
+        ("prepare-service", "replace an owner-only systemd staging unit from current inputs"),
         ("ha-schema", "show the current Home Assistant projection"),
         ("serve", "run the qualified Home Assistant/MQTT command service"),
     ):
         command = subparsers.add_parser(name, help=help_text)
         _add_install_arguments(command)
-        if name in {"ha-schema", "serve"}:
+        if name in {"prepare-service", "ha-schema", "serve"}:
             command.add_argument(
                 "--qualifications",
                 type=Path,
                 default=_environment_path(_QUALIFICATION_ENV),
             )
+        if name in {"ha-schema", "serve"}:
             command.add_argument(
                 "--schedule-pair",
                 action="append",
                 default=[],
                 metavar="MODE:MASTER:SLAVE",
                 help="current stable logical topology; repeat for additional slaves",
+            )
+        if name == "prepare-service":
+            command.add_argument("--output", type=Path, required=True)
+            command.add_argument("--executable", type=Path)
+            command.add_argument(
+                "--hardware-safety-volume-id-file",
+                type=Path,
+                default=_environment_path(HARDWARE_SAFETY_VOLUME_ID_FILE_ENV),
+                help=(
+                    "owner-only destination for the current hardware-safety volume identity; "
+                    "defaults beside the staged unit"
+                ),
+            )
+            command.add_argument(
+                "--mqtt-password-file",
+                type=Path,
+                default=_environment_path(_MQTT_PASSWORD_FILE_ENV),
+                help="current owner-only file containing only the MQTT password",
+            )
+            command.add_argument(
+                "--write-enabled",
+                action="store_true",
+                help="include the separately gated live-write opt-in in the staged unit",
             )
         if name == "serve":
             command.add_argument(
@@ -116,6 +157,15 @@ def _add_install_arguments(parser: argparse.ArgumentParser) -> None:
         default=_environment_path(_MANIFEST_ENV) or _default_manifest_path(),
     )
     parser.add_argument("--role-attested-by", required=True)
+    parser.add_argument(
+        "--role-attested-at",
+        type=_parse_attestation_time,
+        default=os.environ.get(_ROLE_ATTESTED_AT_ENV),
+    )
+    parser.add_argument(
+        "--role-binding-sha256",
+        default=os.environ.get(_ROLE_BINDING_ENV),
+    )
     parser.add_argument(
         "--template-root",
         action="append",
@@ -152,9 +202,72 @@ def _run(args: argparse.Namespace) -> int:
         )
         _print_json(plan.public_dict())
         return 0
+    if args.command in {"serve", "recover"}:
+        _activate_current_hardware_safety_volume_identity()
+    service_volume_id = (
+        _current_hardware_safety_volume_id()
+        if args.command == "prepare-service"
+        else None
+    )
     prepared = _prepare_current(args)
     if args.command == "prepare-install":
         _print_json(_public_install_summary(prepared.manifest))
+        return 0
+    if args.command == "prepare-service":
+        if service_volume_id is None:
+            raise AssertionError("prepare-service volume identity was not read")
+        service_output = current_service_path(
+            args.output,
+            description="local-control service staging file",
+        )
+        hardware_safety_volume_id_file = current_service_path(
+            args.hardware_safety_volume_id_file
+            or service_output.with_name(
+                f".{service_output.name}.hardware-safety-volume-id"
+            ),
+            description="hardware-safety volume identity file",
+        )
+        mqtt_password_file = None
+        if prepared.config.mqtt.password_env is not None:
+            if args.mqtt_password_file is None:
+                raise ValueError("current MQTT password requires --mqtt-password-file")
+            mqtt_password_file = require_current_mqtt_password_file(args.mqtt_password_file)
+        qualifications = None
+        if args.write_enabled:
+            # Write authority is current input only. A default read-only service does not inspect,
+            # retain, or fail because of a qualification path left in the launch environment.
+            load_current_qualifications(args.qualifications)
+            qualifications = (
+                None
+                if args.qualifications is None
+                else current_service_path(
+                    args.qualifications,
+                    description="local-control qualification file",
+                )
+            )
+        artifact = replace_prepared_service(
+            service_output,
+            LocalControlServiceSpec(
+                executable=resolve_current_executable(args.executable),
+                config=prepared.config_path,
+                manifest=prepared.manifest_path,
+                hardware_safety_volume_id_file=hardware_safety_volume_id_file,
+                role_attested_by=args.role_attested_by,
+                role_attested_at=prepared.manifest.devices[0].role_attested_at,
+                role_binding_sha256=stable_role_binding_sha256(prepared.manifest),
+                qualifications=qualifications,
+                template_roots=prepared.template_roots,
+                mqtt_password_file=mqtt_password_file,
+                write_enabled=args.write_enabled,
+            ),
+            hardware_safety_volume_id=service_volume_id,
+        )
+        payload = artifact.public_dict()
+        payload["install_generation"] = prepared.manifest.generation
+        payload["template_binding_complete"] = bool(
+            prepared.manifest.content.template_sha256
+        )
+        _print_json(payload)
         return 0
     if args.command == "recover":
         coordinator = _coordinator(prepared.config, build_local_control_catalog())
@@ -162,10 +275,15 @@ def _run(args: argparse.Namespace) -> int:
         _print_json(result.public_dict())
         return 0
     if args.command in {"ha-schema", "serve"}:
-        qualifications = load_current_qualifications(args.qualifications)
-        catalog = build_local_control_catalog(
+        runtime_write_enabled = args.command == "ha-schema" or args.write_enabled
+        qualifications = _runtime_qualifications(
+            args.qualifications,
+            write_enabled=runtime_write_enabled,
+        )
+        catalog = _runtime_catalog(
             qualifications,
-            current_content=prepared.manifest.content,
+            prepared.manifest.content,
+            write_enabled=runtime_write_enabled,
         )
         schedule_plans = _schedule_plans(
             prepared.manifest,
@@ -183,13 +301,32 @@ def _run(args: argparse.Namespace) -> int:
             _print_json(projection.public_dict())
             return 0
         _require_live_opt_in(args, prepared.config, projection)
-        coordinator = _coordinator(prepared.config, catalog)
+        operation_lock = asyncio.Lock()
+        coordinator = _runtime_coordinator(
+            prepared.config,
+            catalog,
+            write_enabled=runtime_write_enabled,
+        )
         router = LocalControlMqttRouter(
             projection=projection,
             manifest=prepared.manifest,
             catalog=catalog,
             schedule_plans=schedule_plans,
             coordinator=coordinator,
+            operation_lock=operation_lock,
+        )
+        state_poller = FreshStatePoller(
+            manifest=prepared.manifest,
+            resolver=_resolver(prepared.config),
+            projector=LocalControlStateProjector(
+                manifest=prepared.manifest,
+                projection=projection,
+                catalog=catalog,
+            ),
+            poll_interval_seconds=prepared.config.observer.poll_interval_seconds,
+            reconnect_initial_seconds=prepared.config.observer.reconnect_initial_seconds,
+            reconnect_max_seconds=prepared.config.observer.reconnect_max_seconds,
+            operation_lock=operation_lock,
         )
         asyncio.run(
             _serve(
@@ -197,6 +334,8 @@ def _run(args: argparse.Namespace) -> int:
                     prepared.config.mqtt,
                     projection=projection,
                     router=router,
+                    state_poller=state_poller,
+                    password=_current_mqtt_password(prepared.config),
                 )
             )
         )
@@ -205,46 +344,142 @@ def _run(args: argparse.Namespace) -> int:
 
 
 class _PreparedCurrent:
-    def __init__(self, *, config, manifest) -> None:
+    def __init__(
+        self,
+        *,
+        config,
+        manifest,
+        config_path: Path,
+        manifest_path: Path,
+        template_roots: tuple[Path, ...],
+    ) -> None:
         self.config = config
         self.manifest = manifest
+        self.config_path = config_path
+        self.manifest_path = manifest_path
+        self.template_roots = template_roots
 
 
 def _prepare_current(args: argparse.Namespace) -> _PreparedCurrent:
     if args.config is None:
         raise ValueError(f"--config or {_CONFIG_ENV} is required")
-    config = load_current_private_config(args.config)
+    config_path = current_service_path(
+        args.config,
+        description="local-control private config",
+    )
+    manifest_path = current_service_path(
+        args.manifest,
+        description="local-control install manifest",
+    )
+    if config_path == manifest_path:
+        raise ValueError("current config and generated manifest must use different files")
+    config = load_current_private_config(config_path)
     rederived_at = datetime.now(UTC)
-    template_roots = (
+    role_attested_at = args.role_attested_at or rederived_at
+    selected_template_roots = (
         tuple(args.template_root)
         if args.template_root is not None
         else tuple(_environment_paths(_TEMPLATE_ROOTS_ENV))
+    )
+    template_roots = tuple(
+        current_service_path(root, description="app template audit root")
+        for root in selected_template_roots
     )
     template_sha256 = hash_current_template_contents(template_roots)
     manifest = build_fresh_install_manifest(
         config,
         role_attested_by=args.role_attested_by,
-        role_attested_at=rederived_at,
+        role_attested_at=role_attested_at,
         template_sha256=template_sha256,
         now=rederived_at,
     )
-    replace_install_manifest(args.manifest, manifest)
-    return _PreparedCurrent(config=config, manifest=manifest)
+    current_role_binding = stable_role_binding_sha256(manifest)
+    if (
+        args.role_binding_sha256 is not None
+        and args.role_binding_sha256 != current_role_binding
+    ):
+        raise ValueError("current stable role binding differs from the recorded attestation")
+    replace_install_manifest(manifest_path, manifest)
+    return _PreparedCurrent(
+        config=config,
+        manifest=manifest,
+        config_path=config_path,
+        manifest_path=manifest_path,
+        template_roots=template_roots,
+    )
 
 
 def _coordinator(config, catalog) -> LocalControlCoordinator:
-    resolver = CurrentEndpointResolver(
+    return LocalControlCoordinator(
+        catalog=catalog,
+        resolver=_resolver(config),
+        journal=LocalControlJournalStore(),
+        lease=LocalControlLease(),
+    )
+
+
+def _runtime_coordinator(config, catalog, *, write_enabled: bool):
+    """Keep a read-only runtime from opening a writer journal or write lease."""
+
+    return _coordinator(config, catalog) if write_enabled else None
+
+
+def _runtime_catalog(qualifications, current_content, *, write_enabled: bool):
+    """Keep a default service read-only even when current write receipts exist."""
+
+    selected = qualifications if write_enabled else ()
+    return build_local_control_catalog(selected, current_content=current_content)
+
+
+def _runtime_qualifications(path, *, write_enabled: bool):
+    """A read-only service never depends on retained write-authority files."""
+
+    return load_current_qualifications(path) if write_enabled else ()
+
+
+def _resolver(config) -> CurrentEndpointResolver:
+    return CurrentEndpointResolver(
         GizwitsDiscovery(
             targets=config.observer.targets,
             bind_address=config.observer.bind_address,
         ),
         timeout_seconds=config.observer.discovery_timeout_seconds,
     )
-    return LocalControlCoordinator(
-        catalog=catalog,
-        resolver=resolver,
-        journal=LocalControlJournalStore(),
-        lease=LocalControlLease(),
+
+
+def _current_mqtt_password(config) -> str | None:
+    """Resolve the current secret without copying it into generated service bytes."""
+
+    if config.mqtt.password_env is None:
+        return None
+    password_file = _environment_path(_MQTT_PASSWORD_FILE_ENV)
+    if password_file is not None:
+        return read_current_mqtt_password(password_file)
+    password = config.mqtt.resolve_password()
+    if password is None:
+        raise ValueError("current MQTT password is unavailable")
+    return password
+
+
+def _current_hardware_safety_volume_id() -> str:
+    """Read the current stable volume authority without exposing it in public output."""
+
+    value = os.environ.get(HARDWARE_SAFETY_VOLUME_ID_ENV)
+    if value is None or len(value) != 32 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError("current hardware-safety volume identity is unavailable")
+    return value
+
+
+def _activate_current_hardware_safety_volume_identity() -> None:
+    """Load a generated service's private authority file after process start."""
+
+    identity_file = _environment_path(HARDWARE_SAFETY_VOLUME_ID_FILE_ENV)
+    if identity_file is None:
+        return
+    os.environ[HARDWARE_SAFETY_VOLUME_ID_ENV] = read_current_hardware_safety_volume_id(
+        identity_file
     )
 
 
@@ -323,12 +558,19 @@ async def _serve(adapter: LocalControlMqttAdapter) -> None:
 
 
 def _public_install_summary(manifest) -> dict[str, object]:
+    template_binding_complete = bool(manifest.content.template_sha256)
     return {
         "status": "prepared",
         "generation": manifest.generation,
         "rederived_at": manifest.rederived_at.isoformat(),
         "device_count": len(manifest.devices),
         "template_count": len(manifest.content.template_sha256),
+        "template_binding_complete": template_binding_complete,
+        "qualification_status": (
+            "current_template_binding_available"
+            if template_binding_complete
+            else "no_current_template_binding_controls_remain_diagnostic"
+        ),
         "app_catalog_sha256": manifest.content.app_catalog_sha256,
         "protocol_schema_sha256": manifest.content.protocol_schema_sha256,
         "previous_values_reused": False,
@@ -361,6 +603,16 @@ def _environment_path(name: str) -> Path | None:
 def _environment_paths(name: str) -> list[Path]:
     value = os.environ.get(name)
     return [Path(item) for item in value.split(os.pathsep) if item] if value else []
+
+
+def _parse_attestation_time(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("role attestation time must use ISO 8601") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise argparse.ArgumentTypeError("role attestation time must include a UTC offset")
+    return parsed
 
 
 def _xdg_base(variable: str, fallback: tuple[str, ...]) -> Path:

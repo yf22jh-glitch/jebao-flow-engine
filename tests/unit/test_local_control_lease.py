@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from jebao_flow.local_control.lease import (
     LocalControlLease,
     LocalControlLeaseBusyError,
     LocalControlLeaseError,
+    LocalControlReadLease,
 )
 
 
@@ -155,3 +157,75 @@ def test_lease_rejects_duplicate_or_non_digest_identity(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="SHA-256"):
         with lease.acquire(("not-a-digest",)):
             pass
+
+
+def test_shared_state_reads_coexist_but_never_overlap_an_exclusive_writer(
+    tmp_path: Path,
+) -> None:
+    key = "d" * 64
+    directory = tmp_path / "physical-locks"
+    first_reader = LocalControlReadLease(device_lock_directory=directory)
+    second_reader = LocalControlReadLease(device_lock_directory=directory)
+
+    with first_reader.acquire(key):
+        with second_reader.acquire(key):
+            pass
+        with pytest.raises(LocalControlLeaseBusyError, match="owned"):
+            with _lease(tmp_path).acquire((key,)):
+                raise AssertionError("writer overlapped a fresh state read")
+
+    with _lease(tmp_path).acquire((key,)):
+        with pytest.raises(LocalControlLeaseBusyError, match="write workflow"):
+            with first_reader.acquire(key):
+                raise AssertionError("state read observed an intermediate write")
+
+
+def test_default_read_lease_validates_the_identified_root_before_creating_locks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "hardware-safety"
+    root.mkdir(mode=0o700)
+    directory = root / "physical-locks"
+    validations: list[bool] = []
+    monkeypatch.setattr(lease_module, "physical_lock_directory", lambda: directory)
+    monkeypatch.setattr(
+        lease_module,
+        "_open_hardware_safety_mount",
+        lambda: os.open(root, os.O_RDONLY),
+    )
+    monkeypatch.setattr(
+        lease_module,
+        "_validate_hardware_safety_root_descriptor",
+        lambda _descriptor: validations.append(directory.exists()),
+    )
+
+    with LocalControlReadLease().acquire("e" * 64):
+        assert (directory / f"{'e' * 64}.lock").is_file()
+
+    assert validations == [False, True, True]
+
+
+def test_default_read_lease_never_creates_an_absent_safety_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "absent-hardware-safety"
+    monkeypatch.setattr(
+        lease_module,
+        "physical_lock_directory",
+        lambda: root / "physical-locks",
+    )
+    monkeypatch.setattr(
+        lease_module,
+        "_open_hardware_safety_mount",
+        lambda: (_ for _ in ()).throw(
+            lease_module.HardwareSafetyRootError("root unavailable")
+        ),
+    )
+
+    with pytest.raises(LocalControlLeaseError, match="identified hardware-safety root"):
+        with LocalControlReadLease().acquire("f" * 64):
+            raise AssertionError("an absent safety root admitted a fresh read")
+
+    assert not root.exists()

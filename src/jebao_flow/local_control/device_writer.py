@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
+from jebao_flow.local_control.catalog import internal_function_value
 from jebao_flow.local_control.lease import ActiveLocalControlLease
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.resolver import ResolvedEndpoint
@@ -125,13 +126,6 @@ _SCALAR_FIELD_BY_PRODUCT: dict[str, dict[str, str]] = {
     "5b3c136fd4b74f3fb2a366a254c76c9a": {},
 }
 _FLOW_FUNCTIONS = frozenset({"manual_flow", "slave_common_flow"})
-_INTERNAL_ENUM_VALUE_BY_PRODUCT_FUNCTION = {
-    (
-        LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
-        "manual_mode",
-        "Cross-flow",
-    ): "circulation",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,12 +214,11 @@ class ConnectedDeviceWriter:
 
         schema = get_product_schema(intent.target.product_key)
         values = schema.decode_status(current_status)
-        internal_value = intent.value
-        if isinstance(internal_value, str):
-            internal_value = _INTERNAL_ENUM_VALUE_BY_PRODUCT_FUNCTION.get(
-                (intent.target.product_key, intent.function, internal_value),
-                internal_value,
-            )
+        internal_value = internal_function_value(
+            intent.target.product_key,
+            intent.function,
+            intent.value,
+        )
         expected: dict[str, Any] = {field_name: internal_value}
         if (
             intent.target.product_key == LOCAL_WAVEMAKER_PRO_PRODUCT_KEY

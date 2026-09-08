@@ -18,14 +18,38 @@ the legacy native-linkage harness. It includes:
 - exact Local Wavemaker Pro schedule-image writes;
 - Sync and Async schedule composition in which every slave receives the current master's exact
   48-slot timing/mode image and may independently override Flow for each active slot;
-- English Home Assistant/MQTT entity contracts and a sequential command adapter;
-- a fresh install command that replaces, rather than merges, the previous generated manifest.
+- English Home Assistant/MQTT entity contracts, fresh read-only state polling, and a sequential
+  command adapter;
+- fresh install and service-staging commands that replace, rather than merge, prior generated
+  artifacts.
 
 This is a local-first controller plus a passive observatory, not an inline transparent relay. The
 observatory can retain app/device traffic from a mirror without becoming a writer, while Home
 Assistant commands terminate at the local controller. The current implementation does not arbitrate
 simultaneous vendor-app and local-controller writes through one MITM data path; an approved live
 local-control operation therefore still requires the vendor app and other writers to be quiescent.
+
+Home Assistant current state does not depend on the passive mirror. None of the five registered
+devices has an observed unsolicited status push, so a mirror can go quiet while a device remains
+online. The primary state source is instead one fresh discovery followed by one authenticated
+read-only LAN session per device. That session type has no control-send method. Each session reads
+once and closes; it neither imports the control encoder nor reuses a previous endpoint. A passive
+capture remains useful corroborating evidence about which client caused a change, but never makes a
+cached value current.
+
+Fresh reads share the existing stable per-device lock in read mode. They do not take the
+deployment-wide write lease and therefore do not turn polling into write admission. A writer's
+exclusive device lock prevents a poll from observing its intermediate state. Polling is
+single-flight with one connection attempt per device and cycle. Failure causes bounded backoff,
+publishes no old state, and marks only fresh-confirmed devices available; it is not retried in a
+tight loop. Concurrent vendor-app session capacity remains unknown, so inability to authenticate is
+reported as unavailable rather than being hidden by reconnect churn.
+
+Before that shared lock namespace is used, the poller opens the fixed safety mount and verifies its
+existing identity marker without running the writable mount probe. An absent or mismatched root is
+reported unavailable before any directory can be created. Once the current mount is identified, a
+missing per-device lock may be created there as coordination state; its existence is never treated
+as prior device evidence or an installation input.
 
 This is implementation status, not a claim of device acceptance. At the time of this document,
 the five retained device records contain **zero accepted write capabilities**. An encoder being
@@ -94,6 +118,17 @@ audited app version, it is ignored and reported as `qualification_not_current`; 
 diagnostics still start, while the old receipt cannot expose a control or turn into an install
 failure.
 
+If no current template root is supplied, preparation still succeeds with an empty template binding
+and reports `no_current_template_binding_controls_remain_diagnostic`. It does not guess a cache
+directory and it does not inherit a root from an older manifest. `--role-attested-by` remains an
+explicit operator statement; it is never filled from a username, hostname, or another machine
+attribute. A generated service carries the operator's actual attestation time instead of inventing
+a new confirmation time on every automatic restart. It also carries a private content digest of
+only the stable logical-member, logical-role, product, and physical-identity bindings. Each restart
+rederives those facts from the current config and refuses to reuse the attestation if that stable
+role mapping changed. Runtime address, PID, hostname, path, mtime, and service generation are absent
+from that digest.
+
 ## Installation variables
 
 The entry point is `jebao-flow-local`. Private paths can be supplied by environment so they do not
@@ -116,6 +151,48 @@ The write-ahead journal has no command-line or environment override: production 
 fixed `local-control` directory inside the identity-verified hardware-safety root. A process cannot
 hide an unfinished transaction by changing an XDG variable or launch context.
 
+`prepare-service` builds a complete owner-only systemd staging unit from the same current inputs:
+
+```bash
+jebao-flow-local prepare-service \
+  --role-attested-by on_site_operator \
+  --output "${CURRENT_SERVICE_STAGING:?set a durable staging destination}" \
+  --mqtt-password-file "${CURRENT_MQTT_PASSWORD_FILE:?set the current 0600 password file}"
+```
+
+The command never reads or merges an older unit, never writes a system service directory, and never
+invokes `systemctl`. The generated unit contains the current executable, config, manifest, and
+template paths as execution settings only; write-enabled generation additionally carries the
+current qualification path. They are not device identity inputs and their digest is not added to
+the install manifest. Run `prepare-service` again when those current install locations change, and
+explicitly re-attest if the stable logical-role mapping changes. The MQTT password value is never
+copied into the unit
+or a command argument. At service start it is read from the named current owner-only `0600` regular
+file, while an arbitrary environment file is never sourced. If the private config does not request
+an MQTT password, omit `--mqtt-password-file`; a stale password-file setting then has no effect.
+The current `JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID` is copied by replacement into a separate
+owner-only `0600` value file beside the staged unit (or at the explicit
+`--hardware-safety-volume-id-file` destination). The unit contains only that file path and clears
+any manager-level raw value. The service reads the file after process start, so the raw authority is
+not present in the unit or initial service environment. It is never printed, inherited from an old
+unit, or regenerated from a missing or mismatched marker.
+
+The generated bare-host unit declares `RequiresMountsFor=/hardware-safety`. The identified safety
+volume must already be mounted there before systemd starts the service. The current production
+topology instead supplies `/hardware-safety` as a Docker named volume, so this bare unit is not the
+current deployment adapter and will not operate there merely by being copied into systemd. A
+compose-specific adapter must mount the same identified volume before this service shape is used in
+that topology; absence remains an explicit dependency failure rather than permanent unknown state.
+
+The generated service omits `--write-enabled` by default. In that mode a qualification path is not
+retained, writer journals and write leases are not opened, and retained qualifications are neither
+read nor projected as commands. The service therefore remains a useful read-only state and
+diagnostic surface instead of failing merely because receipt files exist or later move. Adding the
+flag to the staging command uses only the current verified receipts and records the separately
+selected runtime opt-in; it does not
+install or start the service and it does not replace the qualification, private-config, lease,
+journal, or on-site live-write gates.
+
 `ha-schema` accepts repeatable current topology declarations:
 
 ```bash
@@ -126,8 +203,11 @@ jebao-flow-local ha-schema \
 
 If a current config already contains an explicit native pair, the command derives the same
 topology directly and `--schedule-pair` is unnecessary. No previous generated topology is read.
-The script records the role-attestation time from the current invocation; an old timestamp is not
-an installation input.
+An interactive invocation without `--role-attested-at` records a new role-attestation time. A
+generated service deliberately reuses the attestation created by its own current preparation and
+checks its stable role-binding digest on every restart; it does not read a timestamp from an older
+manifest or unit. An interactive `serve` without that digest is a new explicit operator attestation,
+not the generated-service continuity gate.
 
 `serve --write-enabled` only exposes controls when current qualifications match the current app
 audit version, app-catalog digest, template content digest, protocol source digest, and discovered
