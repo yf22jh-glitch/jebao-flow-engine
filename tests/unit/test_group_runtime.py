@@ -22,11 +22,15 @@ from jebao_flow.groups.runtime import (
     DeliveryCertainty,
     GroupDispatchError,
     GroupDispatchRuntime,
+    GroupPlanSupersededError,
+    PlanAtomicGroupDispatchRuntime,
     PreWriteDispatchError,
     RuntimeClosedError,
     StaleDispatchError,
     UncertainDispatchError,
+    UnresolvedGroupSafetyStopError,
     UnresolvedSafetyStopError,
+    group_plan_identity_sha256,
 )
 from jebao_flow.protocol.models import DeviceTarget, LinkageRole
 
@@ -266,6 +270,121 @@ class _PhysicalBinding:
         return self.current
 
 
+class _RecordingPlanPort:
+    def __init__(self, *member_ids: str) -> None:
+        self.group_id = "main_flow"
+        self.member_ids = member_ids
+        self.calls: list[tuple[GroupTickPlan, str, str, object]] = []
+        self.writes: list[GroupTickPlan] = []
+
+    def validate_plan(self, plan: GroupTickPlan) -> None:
+        del plan
+
+    async def write_plan(
+        self,
+        plan: GroupTickPlan,
+        *,
+        request_id: str,
+        generation: int,
+        plan_identity_sha256: str,
+        guard=None,
+        safety_token: object,
+    ) -> None:
+        assert generation == plan.generation
+        assert plan_identity_sha256 == group_plan_identity_sha256(plan)
+        self.calls.append((plan, request_id, plan_identity_sha256, safety_token))
+        if guard is None or guard() is not True:
+            raise GroupPlanSupersededError("test port durably stopped before its first frame")
+        self.writes.append(plan)
+
+
+class _BlockingPlanPort(_RecordingPlanPort):
+    def __init__(self, *member_ids: str) -> None:
+        super().__init__(*member_ids)
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def write_plan(self, plan: GroupTickPlan, **kwargs) -> None:
+        if not self.calls:
+            request_id = kwargs["request_id"]
+            identity = kwargs["plan_identity_sha256"]
+            safety_token = kwargs["safety_token"]
+            self.calls.append((plan, request_id, identity, safety_token))
+            self.first_started.set()
+            await self.release_first.wait()
+            guard = kwargs["guard"]
+            if guard() is not True:
+                raise GroupPlanSupersededError(
+                    "test port durably stopped before its remaining frames"
+                )
+            self.writes.append(plan)
+            return
+        await super().write_plan(plan, **kwargs)
+
+
+class _PostWriteFailingPlanPort(_RecordingPlanPort):
+    def __init__(self, *member_ids: str) -> None:
+        super().__init__(*member_ids)
+        self.first_written = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def write_plan(self, plan: GroupTickPlan, **kwargs) -> None:
+        request_id = kwargs["request_id"]
+        identity = kwargs["plan_identity_sha256"]
+        safety_token = kwargs["safety_token"]
+        self.calls.append((plan, request_id, identity, safety_token))
+        guard = kwargs["guard"]
+        if guard() is not True:
+            raise GroupPlanSupersededError("test port stopped before its first frame")
+        self.writes.append(plan)
+        if len(self.calls) == 1:
+            self.first_written.set()
+            await self.release_first.wait()
+            raise _AckLost("test plan crossed the write boundary before its ACK was lost")
+
+
+class _PostWriteBlockingPlanPort(_RecordingPlanPort):
+    def __init__(self, *member_ids: str) -> None:
+        super().__init__(*member_ids)
+        self.first_written = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def write_plan(self, plan: GroupTickPlan, **kwargs) -> None:
+        request_id = kwargs["request_id"]
+        identity = kwargs["plan_identity_sha256"]
+        safety_token = kwargs["safety_token"]
+        self.calls.append((plan, request_id, identity, safety_token))
+        guard = kwargs["guard"]
+        if guard() is not True:
+            raise GroupPlanSupersededError("test port stopped before its first frame")
+        self.writes.append(plan)
+        if len(self.calls) == 1:
+            self.first_written.set()
+            await self.release_first.wait()
+
+
+class _FailingPlanPort(_RecordingPlanPort):
+    def __init__(self, *member_ids: str, error: BaseException) -> None:
+        super().__init__(*member_ids)
+        self.error = error
+        self.failures_remaining = 1
+
+    async def write_plan(self, plan: GroupTickPlan, **kwargs) -> None:
+        request_id = kwargs["request_id"]
+        identity = kwargs["plan_identity_sha256"]
+        safety_token = kwargs["safety_token"]
+        self.calls.append((plan, request_id, identity, safety_token))
+        if self.failures_remaining:
+            self.failures_remaining -= 1
+            if not isinstance(self.error, PreWriteDispatchError):
+                self.writes.append(plan)
+            raise self.error
+        guard = kwargs["guard"]
+        if guard() is not True:
+            raise GroupPlanSupersededError("test retry became stale")
+        self.writes.append(plan)
+
+
 class _BindingFlipPort(_RecordingPort):
     def __init__(self, device_id: str, binding: _PhysicalBinding) -> None:
         super().__init__(device_id)
@@ -380,6 +499,10 @@ def _runtime(
         device_limits=limits,
         identity_guards=guards,
     )
+
+
+def _plan_runtime(port: _RecordingPlanPort) -> PlanAtomicGroupDispatchRuntime:
+    return PlanAtomicGroupDispatchRuntime("main_flow", port.member_ids, port)
 
 
 @pytest.mark.asyncio
@@ -1677,6 +1800,353 @@ async def test_same_generation_may_only_be_replayed_with_the_same_plan() -> None
     await runtime.wait_idle()
     assert port.writes == [_target(40)]
     await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_plan_atomic_runtime_replaces_complete_plans_without_member_mixing() -> None:
+    port = _BlockingPlanPort("left", "right")
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    first = _plan(
+        1,
+        (_decision("left", _target(40)), _decision("right", _target(50))),
+    )
+    middle = _plan(
+        2,
+        (_decision("left", _target(50)), _decision("right", _target(60))),
+    )
+    latest = _plan(
+        3,
+        (_decision("left", _target(60)), _decision("right", _target(70))),
+    )
+
+    runtime.submit(first, is_current=current)
+    await port.first_started.wait()
+    current.value = 2
+    runtime.submit(middle, is_current=current)
+    current.value = 3
+    runtime.submit(latest, is_current=current)
+    port.release_first.set()
+
+    snapshot = await runtime.wait_idle()
+    assert [call[0].generation for call in port.calls] == [1, 3]
+    assert port.writes == [latest]
+    assert port.calls[0][1] != port.calls[1][1]
+    assert snapshot.applied_plan_identity_sha256 == group_plan_identity_sha256(latest)
+    assert snapshot.superseded_count == 2
+    assert snapshot.failure is None
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_newer_generation_with_same_physical_plan_keeps_inflight_owner() -> None:
+    port = _BlockingPlanPort("left")
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    first = _plan(1, (_decision("left", _target(40)),))
+    same_intent = _plan(2, (_decision("left", _target(40)),))
+
+    runtime.submit(first, is_current=current)
+    await port.first_started.wait()
+    current.value = 2
+    runtime.submit(same_intent, is_current=current)
+    port.release_first.set()
+
+    snapshot = await runtime.wait_idle()
+    assert len(port.calls) == 1
+    assert port.writes == [first]
+    assert snapshot.latest_generation == 2
+    assert snapshot.deduplicated_count == 1
+    assert snapshot.applied_plan_identity_sha256 == group_plan_identity_sha256(same_intent)
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_plan_atomic_runtime_rejects_same_generation_with_different_plan() -> None:
+    port = _RecordingPlanPort("left")
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    original = _plan(1, (_decision("left", _target(40)),))
+    runtime.submit(original, is_current=current)
+
+    with pytest.raises(GroupDispatchError, match="two different plans"):
+        runtime.submit(_plan(1, (_decision("left", _target(50)),)), is_current=current)
+
+    await runtime.wait_idle()
+    assert port.writes == [original]
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_plan_atomic_runtime_rejects_incomplete_emergency_stop_before_no_dispatch() -> None:
+    port = _RecordingPlanPort("left", "right")
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+
+    with pytest.raises(GroupDispatchError, match="canonical OFF for every member"):
+        runtime.submit(
+            _plan(
+                1,
+                (
+                    _skip_decision(
+                        "left",
+                        control_epoch=1,
+                        action=MemberAction.SKIP_OFFLINE,
+                    ),
+                    _skip_decision(
+                        "right",
+                        control_epoch=1,
+                        action=MemberAction.SKIP_UNKNOWN,
+                    ),
+                ),
+                derived_status=GroupState.EMERGENCY_STOP,
+            ),
+            is_current=current,
+        )
+
+    assert port.calls == []
+    assert runtime.snapshot().submitted_count == 0
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_plan_atomic_failure_stop_allows_only_unavailable_skips_beside_off() -> None:
+    port = _RecordingPlanPort("left", "right")
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    plan = _plan(
+        1,
+        (
+            _decision("left", _off_target(), control_epoch=1),
+            _skip_decision(
+                "right",
+                control_epoch=1,
+                action=MemberAction.SKIP_OFFLINE,
+            ),
+        ),
+        derived_status=GroupState.ERROR,
+        failure_policy_stopped=True,
+    )
+
+    runtime.submit(plan, is_current=current)
+    snapshot = await runtime.wait_idle()
+
+    assert port.writes == [plan]
+    assert snapshot.safety_off_succeeded_count == 1
+    assert snapshot.safety_off_required is False
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_plan_atomic_invalidation_forgets_applied_dedupe_state() -> None:
+    port = _RecordingPlanPort("left")
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    first = _plan(1, (_decision("left", _target(40), control_epoch=1),))
+
+    runtime.submit(first, is_current=current)
+    await runtime.wait_idle()
+    runtime.invalidate_applied()
+    current.value = 2
+    repeated = _plan(2, (_decision("left", _target(40), control_epoch=1),))
+    runtime.submit(repeated, is_current=current)
+    snapshot = await runtime.wait_idle()
+
+    assert port.writes == [first, repeated]
+    assert snapshot.applied_generation == 2
+    assert snapshot.failure is None
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_plan_atomic_invalidation_during_write_latches_uncertain_delivery() -> None:
+    port = _PostWriteBlockingPlanPort("left")
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    plan = _plan(1, (_decision("left", _target(40)),))
+
+    runtime.submit(plan, is_current=current)
+    await port.first_written.wait()
+    runtime.invalidate_applied()
+    port.release_first.set()
+    snapshot = await runtime.wait_idle()
+
+    assert port.writes == [plan]
+    assert snapshot.applied_plan_identity_sha256 is None
+    assert snapshot.failure is not None
+    assert snapshot.failure.exception_type == "_PlanAppliedStateInvalidatedDuringWrite"
+    assert snapshot.failure.delivery_certainty is DeliveryCertainty.UNCERTAIN
+    assert snapshot.succeeded_count == 0
+    with pytest.raises(UncertainDispatchError):
+        runtime.retry_latest()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_plan_atomic_uncertain_delivery_is_never_retried() -> None:
+    port = _FailingPlanPort("left", error=_AckLost("lost acknowledgement"))
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    runtime.submit(_plan(1, (_decision("left", _target(40)),)), is_current=current)
+
+    failed = await runtime.wait_idle()
+    assert failed.failure is not None
+    assert failed.failure.delivery_certainty is DeliveryCertainty.UNCERTAIN
+    assert failed.failure.retry_safe is False
+    with pytest.raises(UncertainDispatchError):
+        runtime.retry_latest()
+
+    current.value = 2
+    runtime.submit(_plan(2, (_decision("left", _target(50)),)), is_current=current)
+    await asyncio.sleep(0)
+    assert len(port.calls) == 1
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_plan_atomic_not_sent_failure_retries_same_request_once() -> None:
+    port = _FailingPlanPort("left", error=PreWriteDispatchError("not sent"))
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    plan = _plan(1, (_decision("left", _target(40)),))
+    runtime.submit(plan, is_current=current)
+
+    failed = await runtime.wait_idle()
+    assert failed.failure is not None
+    assert failed.failure.delivery_certainty is DeliveryCertainty.NOT_SENT
+    first_request_id = failed.failure.request_id
+    runtime.retry_latest()
+    recovered = await runtime.wait_idle()
+
+    assert [call[1] for call in port.calls] == [first_request_id, first_request_id]
+    assert port.writes == [plan]
+    assert recovered.failure is None
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mandatory_group_off_is_not_superseded_by_later_ordinary_plan() -> None:
+    port = _BlockingPlanPort("left", "right")
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    stop = _plan(
+        1,
+        (_decision("left", _off_target()), _decision("right", _off_target())),
+        derived_status=GroupState.EMERGENCY_STOP,
+    )
+    later = _plan(
+        2,
+        (_decision("left", _target(60)), _decision("right", _target(70))),
+    )
+
+    runtime.submit(stop, is_current=current)
+    await port.first_started.wait()
+    current.value = 2
+    runtime.submit(later, is_current=current)
+    port.release_first.set()
+
+    stopped = await runtime.wait_idle()
+    assert port.writes == [stop]
+    assert stopped.safety_off_deferred_count == 1
+    assert stopped.safety_off_succeeded_count == 1
+    assert stopped.safety_off_required is False
+
+    current.value = 3
+    resumed = _plan(
+        3,
+        (_decision("left", _target(60)), _decision("right", _target(70))),
+    )
+    runtime.submit(resumed, is_current=current)
+    await runtime.wait_idle()
+    assert port.writes == [stop, resumed]
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mandatory_group_off_retains_the_failure_it_recovered_from() -> None:
+    port = _PostWriteFailingPlanPort("left")
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    ordinary = _plan(1, (_decision("left", _target(40)),))
+    stop = _plan(
+        2,
+        (_decision("left", _off_target(), control_epoch=1),),
+        derived_status=GroupState.EMERGENCY_STOP,
+    )
+
+    runtime.submit(ordinary, is_current=current)
+    await port.first_written.wait()
+    current.value = 2
+    runtime.submit(stop, is_current=current)
+    port.release_first.set()
+
+    snapshot = await runtime.wait_idle()
+
+    assert port.writes == [ordinary, stop]
+    assert snapshot.failure is None
+    assert snapshot.safety_off_required is False
+    assert snapshot.safety_off_succeeded_count == 1
+    assert snapshot.last_safety_recovered_failure is not None
+    assert snapshot.last_safety_recovered_failure.generation == 1
+    assert snapshot.last_safety_recovered_failure.delivery_certainty is DeliveryCertainty.UNCERTAIN
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_retries_not_sent_mandatory_group_off_once() -> None:
+    port = _FailingPlanPort(
+        "left",
+        "right",
+        error=PreWriteDispatchError("pre-send stop failure"),
+    )
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    stop = _plan(
+        1,
+        (_decision("left", _off_target()), _decision("right", _off_target())),
+        derived_status=GroupState.STOPPED,
+    )
+    runtime.submit(stop, is_current=current)
+
+    await runtime.aclose()
+
+    snapshot = runtime.snapshot()
+    assert [call[0] for call in port.calls] == [stop, stop]
+    assert port.writes == [stop]
+    assert snapshot.shutdown_safety_retry_count == 1
+    assert snapshot.safety_off_required is False
+
+
+@pytest.mark.asyncio
+async def test_shutdown_reports_uncertain_mandatory_group_off() -> None:
+    port = _FailingPlanPort("left", error=_AckLost("uncertain stop"))
+    current = _CurrentGeneration(1)
+    runtime = _plan_runtime(port)
+    runtime.submit(
+        _plan(
+            1,
+            (_decision("left", _off_target()),),
+            derived_status=GroupState.STOPPED,
+        ),
+        is_current=current,
+    )
+
+    with pytest.raises(UnresolvedGroupSafetyStopError):
+        await runtime.aclose()
+
+    assert runtime.snapshot().safety_off_required is True
+    assert len(port.calls) == 1
+
+
+def test_plan_identity_excludes_generation_and_timestamp_but_binds_control_epoch() -> None:
+    first = _plan(1, (_decision("left", _target(40), control_epoch=2),))
+    later = _plan(9, (_decision("left", _target(40), control_epoch=2),))
+    changed_epoch = _plan(9, (_decision("left", _target(40), control_epoch=3),))
+    changed_target = _plan(9, (_decision("left", _target(41), control_epoch=2),))
+
+    assert group_plan_identity_sha256(first) == group_plan_identity_sha256(later)
+    assert group_plan_identity_sha256(first) != group_plan_identity_sha256(changed_epoch)
+    assert group_plan_identity_sha256(first) != group_plan_identity_sha256(changed_target)
 
 
 def test_runtime_import_graph_has_no_device_or_transport_dependency() -> None:

@@ -38,6 +38,7 @@ class ActionPhase(StrEnum):
     ROLLBACK_ATTEMPTING = "rollback_attempting"
     ROLLED_BACK = "rolled_back"
     ROLLBACK_UNCERTAIN = "rollback_uncertain"
+    SUPERSEDED = "superseded"
 
 
 class TransactionPhase(StrEnum):
@@ -46,6 +47,7 @@ class TransactionPhase(StrEnum):
     VERIFIED = "verified"
     RECOVERY_REQUIRED = "recovery_required"
     ROLLED_BACK = "rolled_back"
+    SUPERSEDED = "superseded"
 
 
 class JournalAction(BaseModel):
@@ -111,6 +113,25 @@ class LocalControlJournalRecord(BaseModel):
             for action in self.actions
         ):
             raise ValueError("rolled-back transaction contains an unrecovered action")
+        if self.phase is not TransactionPhase.SUPERSEDED and any(
+            action.phase is ActionPhase.SUPERSEDED for action in self.actions
+        ):
+            raise ValueError("superseded action requires a superseded transaction")
+        if self.phase is TransactionPhase.SUPERSEDED:
+            if any(
+                action.phase
+                not in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE, ActionPhase.SUPERSEDED}
+                for action in self.actions
+            ):
+                raise ValueError("superseded transaction contains an uncertain action")
+            if not any(action.phase is ActionPhase.SUPERSEDED for action in self.actions):
+                raise ValueError("superseded transaction contains no superseded action")
+            if any(
+                action.phase is ActionPhase.SUPERSEDED
+                and action.acknowledgement_sha256 is not None
+                for action in self.actions
+            ):
+                raise ValueError("superseded action cannot contain an acknowledgement")
         return self
 
     def evolve(
@@ -256,7 +277,11 @@ class LocalControlJournalStore:
             record = self.load(request_id)
             if record is None:
                 raise LocalControlJournalError("journal operation disappeared during inventory")
-            if record.phase not in {TransactionPhase.VERIFIED, TransactionPhase.ROLLED_BACK}:
+            if record.phase not in {
+                TransactionPhase.VERIFIED,
+                TransactionPhase.ROLLED_BACK,
+                TransactionPhase.SUPERSEDED,
+            }:
                 records.append(record)
         return tuple(records)
 

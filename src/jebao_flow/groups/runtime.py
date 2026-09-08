@@ -1,19 +1,24 @@
 """Protocol-neutral asynchronous dispatch for software-independent groups.
 
-The planner owns safety normalization.  This module owns only concurrency and delivery:
-one worker and one replaceable pending slot per logical device, whole-target de-duplication,
-generation fencing, and explicit recovery from write failures.  Every non-deduplicated
-planner-canonical OFF gets a per-device barrier: identity fencing remains active, but later ordinary
-generations cannot cancel the stop.
+The planner owns safety normalization. This module owns only concurrency and delivery. The
+existing :class:`GroupDispatchRuntime` keeps one worker and replaceable pending slot per logical
+device. The additive :class:`PlanAtomicGroupDispatchRuntime` instead keeps one pending slot and one
+in-flight operation for a complete immutable plan so a durable multi-device port never has to
+reconstruct a transaction from independent callbacks. Both preserve explicit mandatory-OFF
+barriers and distinguish writes proven not sent from uncertain delivery. A later ordinary
+generation can never cancel an accepted mandatory OFF.
 
-There is deliberately no import from :mod:`jebao_flow.devices` or a transport module.  A caller
-must inject ports whose ``write_target`` implementation performs its own bounded I/O and checks
-the supplied guard immediately before changing the physical device.
+There is deliberately no import from :mod:`jebao_flow.devices` or a transport module. A caller
+must inject ports whose ``write_target`` or ``write_plan`` implementation performs its own bounded
+I/O and checks the supplied guard immediately before changing a physical device.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import secrets
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -47,6 +52,31 @@ class GroupDevicePort(Protocol):
         """Write once, checking ``guard`` immediately before the physical change."""
 
 
+class GroupPlanPort(Protocol):
+    """Plan-wide boundary used by the durable atomic group dispatcher."""
+
+    @property
+    def group_id(self) -> str: ...
+
+    @property
+    def member_ids(self) -> tuple[str, ...]: ...
+
+    def validate_plan(self, plan: GroupTickPlan) -> None:
+        """Reject an invalid immutable plan before it can supersede current work."""
+
+    async def write_plan(
+        self,
+        plan: GroupTickPlan,
+        *,
+        request_id: str,
+        generation: int,
+        plan_identity_sha256: str,
+        guard: WriteGuard,
+        safety_token: object,
+    ) -> None:
+        """Apply one complete plan or raise with an explicit delivery classification."""
+
+
 class GroupDispatchError(RuntimeError):
     """A plan or runtime operation violates the dispatch contract."""
 
@@ -57,6 +87,10 @@ class RuntimeClosedError(GroupDispatchError):
 
 class StaleDispatchError(GroupDispatchError):
     """A generation lost ownership before its device write."""
+
+
+class GroupPlanSupersededError(GroupDispatchError):
+    """A port durably terminalized a known-not-sent plan remainder."""
 
 
 class PreWriteDispatchError(GroupDispatchError):
@@ -77,6 +111,14 @@ class UnresolvedSafetyStopError(GroupDispatchError):
     def __init__(self, device_ids: tuple[str, ...]) -> None:
         self.device_ids = device_ids
         super().__init__("mandatory safety OFF remains unresolved for: " + ", ".join(device_ids))
+
+
+class UnresolvedGroupSafetyStopError(GroupDispatchError):
+    """Shutdown ended while a mandatory plan-wide OFF still lacked a known outcome."""
+
+    def __init__(self, group_id: str) -> None:
+        self.group_id = group_id
+        super().__init__(f"mandatory group safety OFF remains unresolved for: {group_id}")
 
 
 class DeliveryCertainty(StrEnum):
@@ -145,6 +187,68 @@ class GroupDispatchSnapshot:
     @property
     def failures(self) -> tuple[DispatchFailure, ...]:
         return tuple(device.failure for device in self.devices if device.failure is not None)
+
+
+@dataclass(frozen=True, slots=True)
+class GroupPlanDispatchFailure:
+    """Redacted failure for one plan-wide physical transaction."""
+
+    group_id: str
+    request_id: str
+    generation: int
+    plan_identity_sha256: str
+    exception_type: str
+    delivery_certainty: DeliveryCertainty
+    mandatory_off: bool
+
+    @property
+    def retry_safe(self) -> bool:
+        return self.delivery_certainty is DeliveryCertainty.NOT_SENT
+
+
+@dataclass(frozen=True, slots=True)
+class GroupPlanDispatchSnapshot:
+    """Public in-memory state for the separate plan-atomic runtime."""
+
+    group_id: str
+    closed: bool
+    latest_generation: int
+    latest_plan_identity_sha256: str | None
+    applied_generation: int | None
+    applied_plan_identity_sha256: str | None
+    pending_generation: int | None
+    pending_plan_identity_sha256: str | None
+    in_flight_generation: int | None
+    in_flight_plan_identity_sha256: str | None
+    failure: GroupPlanDispatchFailure | None
+    submitted_count: int
+    succeeded_count: int
+    deduplicated_count: int
+    superseded_count: int
+    stale_dropped_count: int
+    failure_count: int
+    failure_suppressed_count: int
+    no_dispatch_count: int
+    safety_off_deferred_count: int
+    safety_off_bypass_count: int
+    safety_off_succeeded_count: int
+    safety_off_required: bool
+    safety_off_origin_failure: GroupPlanDispatchFailure | None
+    last_safety_recovered_failure: GroupPlanDispatchFailure | None
+    shutdown_dropped_count: int
+    shutdown_safety_retry_count: int
+    worker_running: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PlanDispatch:
+    plan: GroupTickPlan
+    request_id: str
+    plan_identity_sha256: str
+    owner_revision: int
+    safety_token: object
+    mandatory_off: bool
+    cache_revision: int
 
 
 _DedupeKey = tuple[int, DeviceTarget]
@@ -1014,6 +1118,670 @@ class GroupDispatchRuntime:
         return all(slot.pending is None and slot.in_flight is None for slot in self._slots.values())
 
 
+class _PlanAppliedStateInvalidatedDuringWrite(RuntimeError):
+    """Internal redacted marker for an invalidated plan-wide result."""
+
+
+class PlanAtomicGroupDispatchRuntime:
+    """Dispatch one complete group plan at a time through a durable plan-wide port.
+
+    This is deliberately separate from :class:`GroupDispatchRuntime`. The existing dispatcher is
+    device-slot based, while this runtime owns one pending slot and one in-flight transaction for
+    the complete plan. Supersession can stop only frames proven not sent; a port must report that
+    outcome through :class:`GroupPlanSupersededError` after durably terminalizing its remainder.
+    """
+
+    def __init__(
+        self,
+        group_id: str,
+        member_ids: Iterable[str],
+        port: GroupPlanPort,
+    ) -> None:
+        if not isinstance(group_id, str) or not group_id:
+            raise GroupDispatchError("group id must be a non-empty string")
+        members = tuple(member_ids)
+        if not members or any(
+            not isinstance(device_id, str) or not device_id for device_id in members
+        ):
+            raise GroupDispatchError("member ids must be non-empty strings")
+        if len(set(members)) != len(members):
+            raise GroupDispatchError("member ids must be unique")
+        try:
+            port_group_id = port.group_id
+            port_member_ids = port.member_ids
+        except Exception as error:
+            raise GroupDispatchError("plan port did not expose its stable group binding") from error
+        if port_group_id != group_id:
+            raise GroupDispatchError("plan port group id does not match the runtime")
+        if tuple(port_member_ids) != members:
+            raise GroupDispatchError("plan port members do not match the runtime order")
+        if not callable(getattr(port, "validate_plan", None)):
+            raise GroupDispatchError("plan port does not provide validate_plan")
+        if not callable(getattr(port, "write_plan", None)):
+            raise GroupDispatchError("plan port does not provide write_plan")
+
+        self._group_id = group_id
+        self._member_ids = members
+        self._port = port
+        self._latest_generation = 0
+        self._latest_plan: GroupTickPlan | None = None
+        self._latest_plan_identity_sha256: str | None = None
+        self._latest_is_current: GenerationPredicate | None = None
+        self._owner_revision = 0
+        self._cache_revision = 0
+        self._applied: _PlanDispatch | None = None
+        self._pending: _PlanDispatch | None = None
+        self._in_flight: _PlanDispatch | None = None
+        self._latest_job: _PlanDispatch | None = None
+        self._failed_job: _PlanDispatch | None = None
+        self._invalidated_in_flight: _PlanDispatch | None = None
+        self._failure: GroupPlanDispatchFailure | None = None
+        self._mandatory_off_token: object | None = None
+        self._safety_off_origin_failure: GroupPlanDispatchFailure | None = None
+        self._last_safety_recovered_failure: GroupPlanDispatchFailure | None = None
+        self._submitted_count = 0
+        self._succeeded_count = 0
+        self._deduplicated_count = 0
+        self._superseded_count = 0
+        self._stale_dropped_count = 0
+        self._failure_count = 0
+        self._failure_suppressed_count = 0
+        self._no_dispatch_count = 0
+        self._safety_off_deferred_count = 0
+        self._safety_off_bypass_count = 0
+        self._safety_off_succeeded_count = 0
+        self._shutdown_dropped_count = 0
+        self._shutdown_safety_retry_count = 0
+        self._wake = asyncio.Event()
+        self._changed = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+        self._close_waiter: asyncio.Task[None] | None = None
+        self._closed = False
+
+    @property
+    def group_id(self) -> str:
+        return self._group_id
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def submit(
+        self,
+        plan: GroupTickPlan,
+        *,
+        is_current: GenerationPredicate,
+    ) -> GroupPlanDispatchSnapshot:
+        """Atomically accept one complete plan and replace only a non-mandatory pending plan."""
+
+        loop, identity = self._validate_plan_submission(plan, is_current)
+        previous_identity = self._latest_plan_identity_sha256
+        if plan.generation > self._latest_generation:
+            self._latest_generation = plan.generation
+            self._latest_plan = plan
+            self._latest_plan_identity_sha256 = identity
+            self._latest_is_current = is_current
+            if identity != previous_identity:
+                self._owner_revision += 1
+                self._invalidate_applied_cache()
+        else:
+            self._latest_is_current = is_current
+
+        self._ensure_plan_worker(loop)
+        self._submitted_count += 1
+
+        if self._mandatory_off_token is not None:
+            self._safety_off_deferred_count += 1
+            self._changed.set()
+            return self.snapshot()
+
+        if not plan.dispatch_decisions:
+            self._latest_job = None
+            self._no_dispatch_count += 1
+            if self._pending is not None:
+                self._record_plan_superseded(self._pending)
+                self._pending = None
+            self._wake.set()
+            self._changed.set()
+            return self.snapshot()
+
+        mandatory_off = _is_mandatory_group_off(plan)
+        if (
+            not mandatory_off
+            and self._failure is None
+            and self._applied is not None
+            and self._applied.plan_identity_sha256 == identity
+        ):
+            self._deduplicated_count += 1
+            self._changed.set()
+            return self.snapshot()
+        if (
+            not mandatory_off
+            and self._failure is None
+            and self._in_flight is not None
+            and self._in_flight.plan_identity_sha256 == identity
+        ):
+            self._deduplicated_count += 1
+            self._changed.set()
+            return self.snapshot()
+        if (
+            not mandatory_off
+            and self._failure is None
+            and self._pending is not None
+            and self._pending.plan_identity_sha256 == identity
+        ):
+            self._deduplicated_count += 1
+            self._changed.set()
+            return self.snapshot()
+
+        safety_token = object()
+        job = _PlanDispatch(
+            plan=plan,
+            request_id=f"group_{secrets.token_hex(16)}",
+            plan_identity_sha256=identity,
+            owner_revision=self._owner_revision,
+            safety_token=safety_token,
+            mandatory_off=mandatory_off,
+            cache_revision=self._cache_revision,
+        )
+        self._latest_job = job
+
+        if mandatory_off:
+            if self._pending is not None:
+                self._record_plan_superseded(self._pending)
+                self._pending = None
+            self._arm_plan_mandatory_off(job)
+            self._pending = job
+            self._wake.set()
+            self._changed.set()
+            return self.snapshot()
+
+        if self._failure is not None:
+            self._failure_suppressed_count += 1
+            self._changed.set()
+            return self.snapshot()
+        if self._pending is not None:
+            self._record_plan_superseded(self._pending)
+        self._pending = job
+        self._wake.set()
+        self._changed.set()
+        return self.snapshot()
+
+    def retry_latest(self) -> GroupPlanDispatchSnapshot:
+        """Retry only a complete plan proven to have sent no physical frame."""
+
+        self._require_plan_runtime_open()
+        if self._failure is None:
+            raise GroupDispatchError("group plan runtime has no latched failure")
+        if not self._failure.retry_safe:
+            raise UncertainDispatchError(
+                "group plan delivery is uncertain; retry would violate single-write"
+            )
+        mandatory_off = self._mandatory_off_token is not None
+        job = self._failed_job if mandatory_off else self._latest_job
+        if job is None:
+            raise GroupDispatchError("group plan runtime has no plan to retry")
+        if mandatory_off and (
+            job.safety_token is not self._mandatory_off_token or not job.mandatory_off
+        ):
+            raise GroupDispatchError("group safety OFF requires reconciliation")
+        if not mandatory_off and self._plan_guard(job)() is not True:
+            raise StaleDispatchError("group retry plan is stale")
+        if self._pending is not None or self._in_flight is not None:
+            raise GroupDispatchError("group plan runtime already has work")
+        if not mandatory_off:
+            self._failure = None
+            self._failed_job = None
+        self._pending = job
+        self._wake.set()
+        self._changed.set()
+        return self.snapshot()
+
+    def invalidate_applied(self) -> GroupPlanDispatchSnapshot:
+        """Forget the complete applied-plan cache after reconnect or external drift."""
+
+        self._require_plan_runtime_open()
+        if self._pending is not None and not self._pending.mandatory_off:
+            self._record_plan_superseded(self._pending)
+            self._pending = None
+        if self._in_flight is not None:
+            self._invalidated_in_flight = self._in_flight
+        self._owner_revision += 1
+        self._invalidate_applied_cache()
+        self._wake.set()
+        self._changed.set()
+        return self.snapshot()
+
+    def snapshot(self) -> GroupPlanDispatchSnapshot:
+        return GroupPlanDispatchSnapshot(
+            group_id=self._group_id,
+            closed=self._closed,
+            latest_generation=self._latest_generation,
+            latest_plan_identity_sha256=self._latest_plan_identity_sha256,
+            applied_generation=None if self._applied is None else self._applied.plan.generation,
+            applied_plan_identity_sha256=(
+                None if self._applied is None else self._applied.plan_identity_sha256
+            ),
+            pending_generation=None if self._pending is None else self._pending.plan.generation,
+            pending_plan_identity_sha256=(
+                None if self._pending is None else self._pending.plan_identity_sha256
+            ),
+            in_flight_generation=(
+                None if self._in_flight is None else self._in_flight.plan.generation
+            ),
+            in_flight_plan_identity_sha256=(
+                None if self._in_flight is None else self._in_flight.plan_identity_sha256
+            ),
+            failure=self._failure,
+            submitted_count=self._submitted_count,
+            succeeded_count=self._succeeded_count,
+            deduplicated_count=self._deduplicated_count,
+            superseded_count=self._superseded_count,
+            stale_dropped_count=self._stale_dropped_count,
+            failure_count=self._failure_count,
+            failure_suppressed_count=self._failure_suppressed_count,
+            no_dispatch_count=self._no_dispatch_count,
+            safety_off_deferred_count=self._safety_off_deferred_count,
+            safety_off_bypass_count=self._safety_off_bypass_count,
+            safety_off_succeeded_count=self._safety_off_succeeded_count,
+            safety_off_required=self._mandatory_off_token is not None,
+            safety_off_origin_failure=self._safety_off_origin_failure,
+            last_safety_recovered_failure=self._last_safety_recovered_failure,
+            shutdown_dropped_count=self._shutdown_dropped_count,
+            shutdown_safety_retry_count=self._shutdown_safety_retry_count,
+            worker_running=self._task is not None and not self._task.done(),
+        )
+
+    async def wait_idle(self) -> GroupPlanDispatchSnapshot:
+        while self._pending is not None or self._in_flight is not None:
+            self._changed.clear()
+            if self._pending is None and self._in_flight is None:
+                break
+            await self._changed.wait()
+        return self.snapshot()
+
+    async def aclose(self) -> None:
+        """Drain an accepted mandatory OFF, but never synthesize one during shutdown."""
+
+        if not self._closed:
+            self._closed = True
+            if (
+                self._mandatory_off_token is not None
+                and self._failure is not None
+                and self._failure.retry_safe
+                and self._failed_job is not None
+                and self._failed_job.mandatory_off
+                and self._shutdown_safety_retry_count < 1
+                and self._pending is None
+                and self._in_flight is None
+            ):
+                self._shutdown_safety_retry_count += 1
+                self._pending = self._failed_job
+            if self._pending is not None and not self._pending.mandatory_off:
+                self._shutdown_dropped_count += 1
+                self._pending = None
+            self._wake.set()
+            self._changed.set()
+
+        if self._task is None:
+            self._raise_unresolved_group_safety_off()
+            return
+        if self._close_waiter is None:
+            self._close_waiter = asyncio.create_task(
+                self._await_plan_worker(self._task),
+                name=f"group-plan-dispatch-close:{self._group_id}",
+            )
+        cancellation_requested = False
+        while not self._close_waiter.done():
+            try:
+                await asyncio.shield(self._close_waiter)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+        self._close_waiter.result()
+        self._raise_unresolved_group_safety_off()
+        if cancellation_requested:
+            raise asyncio.CancelledError
+
+    def _validate_plan_submission(
+        self,
+        plan: GroupTickPlan,
+        is_current: GenerationPredicate,
+    ) -> tuple[asyncio.AbstractEventLoop, str]:
+        self._require_plan_runtime_open()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError as error:
+            raise GroupDispatchError("submit requires a running event loop") from error
+        if not isinstance(plan, GroupTickPlan):
+            raise GroupDispatchError("plan must be a GroupTickPlan")
+        if plan.group_id != self._group_id:
+            raise GroupDispatchError("plan group id does not match this runtime")
+        if type(plan.generation) is not int or plan.generation < 1:
+            raise GroupDispatchError("plan generation must be a positive integer")
+        if not callable(is_current):
+            raise GroupDispatchError("is_current must be callable")
+        try:
+            current = is_current(plan.generation)
+        except Exception as error:
+            raise GroupDispatchError("is_current failed during plan validation") from error
+        if current is not True:
+            raise StaleDispatchError("plan generation is not current")
+        if plan.generation < self._latest_generation:
+            raise StaleDispatchError("plan generation precedes the latest accepted plan")
+        if plan.generation == self._latest_generation and (
+            self._latest_plan is None or plan != self._latest_plan
+        ):
+            raise GroupDispatchError("one generation cannot describe two different plans")
+        decision_ids = tuple(decision.device for decision in plan.decisions)
+        if len(decision_ids) != len(set(decision_ids)):
+            raise GroupDispatchError("plan contains duplicate member decisions")
+        if set(decision_ids) != set(self._member_ids):
+            raise GroupDispatchError("plan decisions must match plan-port members")
+        _validate_plan_level_safety_semantics(plan)
+        try:
+            self._port.validate_plan(plan)
+        except Exception as error:
+            raise GroupDispatchError("plan port rejected the immutable plan") from error
+        return loop, group_plan_identity_sha256(plan)
+
+    def _ensure_plan_worker(self, loop: asyncio.AbstractEventLoop) -> None:
+        if self._task is None:
+            self._task = loop.create_task(
+                self._run_plans(),
+                name=f"group-plan-dispatch:{self._group_id}",
+            )
+
+    def _plan_guard(self, job: _PlanDispatch) -> WriteGuard:
+        def guard() -> bool:
+            try:
+                if self._mandatory_off_token is job.safety_token:
+                    return True
+                predicate = self._latest_is_current
+                return (
+                    job.owner_revision == self._owner_revision
+                    and predicate is not None
+                    and predicate(self._latest_generation) is True
+                )
+            except Exception:
+                return False
+
+        return guard
+
+    async def _run_plans(self) -> None:
+        while True:
+            await self._wake.wait()
+            self._wake.clear()
+            while True:
+                if self._closed and self._pending is None and self._in_flight is None:
+                    self._changed.set()
+                    return
+                job = self._pending
+                self._pending = None
+                if job is None:
+                    break
+                mandatory_off = self._mandatory_off_token is job.safety_token
+                if self._failure is not None and not mandatory_off:
+                    self._failure_suppressed_count += 1
+                    continue
+                if (
+                    not mandatory_off
+                    and self._applied is not None
+                    and self._applied.plan_identity_sha256 == job.plan_identity_sha256
+                ):
+                    self._deduplicated_count += 1
+                    continue
+
+                self._in_flight = job
+                self._changed.set()
+                guard = self._plan_guard(job)
+                try:
+                    if self._port.group_id != self._group_id:
+                        raise PreWriteDispatchError("plan port group identity changed")
+                    if tuple(self._port.member_ids) != self._member_ids:
+                        raise PreWriteDispatchError("plan port member binding changed")
+                    if guard() is not True:
+                        raise StaleDispatchError("plan generation lost ownership before dispatch")
+                    await self._port.write_plan(
+                        job.plan,
+                        request_id=job.request_id,
+                        generation=job.plan.generation,
+                        plan_identity_sha256=job.plan_identity_sha256,
+                        guard=guard,
+                        safety_token=job.safety_token,
+                    )
+                except GroupPlanSupersededError as error:
+                    if mandatory_off:
+                        self._latch_plan_failure(
+                            job,
+                            error,
+                            delivery_certainty=DeliveryCertainty.UNCERTAIN,
+                        )
+                    else:
+                        self._record_plan_superseded(job)
+                except StaleDispatchError as error:
+                    if mandatory_off:
+                        self._latch_plan_failure(
+                            job,
+                            error,
+                            delivery_certainty=DeliveryCertainty.NOT_SENT,
+                        )
+                    else:
+                        self._stale_dropped_count += 1
+                        self._record_plan_superseded(job)
+                except asyncio.CancelledError as error:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
+                    self._latch_plan_failure(
+                        job,
+                        error,
+                        delivery_certainty=DeliveryCertainty.UNCERTAIN,
+                    )
+                except PreWriteDispatchError as error:
+                    self._latch_plan_failure(
+                        job,
+                        error,
+                        delivery_certainty=DeliveryCertainty.NOT_SENT,
+                    )
+                except Exception as error:
+                    self._latch_plan_failure(
+                        job,
+                        error,
+                        delivery_certainty=DeliveryCertainty.UNCERTAIN,
+                    )
+                else:
+                    if self._invalidated_in_flight is job:
+                        self._latch_plan_failure(
+                            job,
+                            _PlanAppliedStateInvalidatedDuringWrite(),
+                            delivery_certainty=DeliveryCertainty.UNCERTAIN,
+                        )
+                    else:
+                        if mandatory_off:
+                            self._last_safety_recovered_failure = self._safety_off_origin_failure
+                            self._failure = None
+                            self._failed_job = None
+                            self._mandatory_off_token = None
+                            self._safety_off_origin_failure = None
+                            self._safety_off_succeeded_count += 1
+                            self._applied = job
+                        elif job.cache_revision == self._cache_revision:
+                            self._applied = job
+                        self._succeeded_count += 1
+                finally:
+                    if self._invalidated_in_flight is job:
+                        self._invalidated_in_flight = None
+                    self._in_flight = None
+                    self._changed.set()
+
+                if self._closed:
+                    if self._pending is not None and self._pending.mandatory_off:
+                        continue
+                    if (
+                        mandatory_off
+                        and self._failure is not None
+                        and self._failure.retry_safe
+                        and self._failed_job is not None
+                        and self._shutdown_safety_retry_count < 1
+                    ):
+                        self._shutdown_safety_retry_count += 1
+                        self._pending = self._failed_job
+                        continue
+                    if self._pending is not None:
+                        self._shutdown_dropped_count += 1
+                        self._pending = None
+                    return
+
+    def _latch_plan_failure(
+        self,
+        job: _PlanDispatch,
+        error: BaseException,
+        *,
+        delivery_certainty: DeliveryCertainty,
+    ) -> None:
+        self._failure_count += 1
+        self._failed_job = job
+        failure = GroupPlanDispatchFailure(
+            group_id=self._group_id,
+            request_id=job.request_id,
+            generation=job.plan.generation,
+            plan_identity_sha256=job.plan_identity_sha256,
+            exception_type=type(error).__name__,
+            delivery_certainty=delivery_certainty,
+            mandatory_off=job.mandatory_off,
+        )
+        self._failure = failure
+        if (
+            self._safety_off_origin_failure is None
+            and self._mandatory_off_token is not None
+            and not job.mandatory_off
+        ):
+            self._safety_off_origin_failure = failure
+        self._invalidate_applied_cache()
+        if self._pending is not None and not self._pending.mandatory_off:
+            self._failure_suppressed_count += 1
+            self._pending = None
+
+    def _arm_plan_mandatory_off(self, job: _PlanDispatch) -> None:
+        self._invalidate_applied_cache()
+        self._mandatory_off_token = job.safety_token
+        self._safety_off_origin_failure = self._failure
+        self._safety_off_bypass_count += 1
+
+    def _record_plan_superseded(self, job: _PlanDispatch) -> None:
+        del job
+        self._superseded_count += 1
+
+    def _invalidate_applied_cache(self) -> None:
+        self._applied = None
+        self._cache_revision += 1
+
+    def _require_plan_runtime_open(self) -> None:
+        if self._closed:
+            raise RuntimeClosedError("plan-atomic group runtime is closed")
+
+    def _raise_unresolved_group_safety_off(self) -> None:
+        if self._mandatory_off_token is not None:
+            raise UnresolvedGroupSafetyStopError(self._group_id)
+
+    @staticmethod
+    async def _await_plan_worker(task: asyncio.Task[None]) -> None:
+        await task
+
+
+def group_plan_identity_sha256(plan: GroupTickPlan) -> str:
+    """Hash only the physical plan semantics, excluding generation and timestamp provenance."""
+
+    if not isinstance(plan, GroupTickPlan):
+        raise GroupDispatchError("plan identity requires a GroupTickPlan")
+    if not isinstance(plan.derived_status, GroupState):
+        raise GroupDispatchError("plan derived status must be a GroupState")
+    if type(plan.failure_policy_stopped) is not bool:
+        raise GroupDispatchError("plan failure-policy stop marker must be boolean")
+    members: list[dict[str, object]] = []
+    for decision in sorted(plan.decisions, key=lambda item: item.device):
+        if not isinstance(decision.action, MemberAction):
+            raise GroupDispatchError("decision action must be a MemberAction")
+        if type(decision.control_epoch) is not int or decision.control_epoch < 0:
+            raise GroupDispatchError("decision control epoch must be non-negative")
+        if decision.action is MemberAction.DISPATCH:
+            if not isinstance(decision.target, DeviceTarget):
+                raise GroupDispatchError("dispatch decisions require a DeviceTarget")
+            target: object = decision.target.model_dump(mode="json")
+        else:
+            if decision.target is not None:
+                raise GroupDispatchError("skip decisions must not contain a target")
+            target = None
+        members.append(
+            {
+                "device": decision.device,
+                "action": decision.action.value,
+                "control_epoch": decision.control_epoch,
+                "target": target,
+            }
+        )
+    payload = {
+        "group_id": plan.group_id,
+        "members": members,
+        "derived_status": plan.derived_status.value,
+        "failure_policy_stopped": plan.failure_policy_stopped,
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _is_mandatory_group_off(plan: GroupTickPlan) -> bool:
+    dispatches = plan.dispatch_decisions
+    return bool(dispatches) and all(
+        decision.target == DeviceTarget(enabled=False, power=0) for decision in dispatches
+    ) and (
+        plan.derived_status in {GroupState.STOPPED, GroupState.EMERGENCY_STOP}
+        or plan.failure_policy_stopped
+    )
+
+
+def _validate_plan_level_safety_semantics(plan: GroupTickPlan) -> None:
+    """Reject a false stop claim before a no-dispatch plan can bypass its physical port."""
+
+    dispatches = plan.dispatch_decisions
+    if plan.derived_status in {GroupState.STOPPED, GroupState.EMERGENCY_STOP}:
+        if len(dispatches) != len(plan.decisions) or any(
+            decision.target != DeviceTarget(enabled=False, power=0)
+            for decision in dispatches
+        ):
+            raise GroupDispatchError(
+                "stopped and emergency-stopped plans require canonical OFF for every member"
+            )
+    if plan.derived_status in {GroupState.STARTING, GroupState.MAINTENANCE} and any(
+        decision.target != DeviceTarget(enabled=False, power=0) for decision in dispatches
+    ):
+        raise GroupDispatchError("held group states may only dispatch canonical OFF targets")
+    if plan.failure_policy_stopped:
+        allowed_unavailable_skips = {
+            MemberAction.SKIP_OFFLINE,
+            MemberAction.SKIP_UNKNOWN,
+        }
+        if any(
+            (
+                decision.action is MemberAction.DISPATCH
+                and decision.target != DeviceTarget(enabled=False, power=0)
+            )
+            or (
+                decision.action is not MemberAction.DISPATCH
+                and decision.action not in allowed_unavailable_skips
+            )
+            for decision in plan.decisions
+        ):
+            raise GroupDispatchError(
+                "failure-policy stopped plans require canonical OFF or unavailable skips"
+            )
+
+
 __all__ = [
     "DeliveryCertainty",
     "DeviceDispatchSnapshot",
@@ -1022,10 +1790,17 @@ __all__ = [
     "GroupDispatchError",
     "GroupDispatchRuntime",
     "GroupDispatchSnapshot",
+    "GroupPlanDispatchFailure",
+    "GroupPlanDispatchSnapshot",
+    "GroupPlanPort",
+    "GroupPlanSupersededError",
+    "PlanAtomicGroupDispatchRuntime",
     "PreWriteDispatchError",
     "RuntimeClosedError",
     "StaleDispatchError",
     "UncertainDispatchError",
+    "UnresolvedGroupSafetyStopError",
     "UnresolvedSafetyStopError",
     "WriteGuard",
+    "group_plan_identity_sha256",
 ]

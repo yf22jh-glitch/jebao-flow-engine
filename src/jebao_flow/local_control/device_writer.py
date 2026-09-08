@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from jebao_flow.local_control.catalog import internal_function_value
-from jebao_flow.local_control.lease import ActiveLocalControlLease
+from jebao_flow.local_control.lease import LocalControlSendPermit
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.resolver import ResolvedEndpoint
 from jebao_flow.local_control.schedule import CompiledSlaveSchedule
@@ -319,7 +319,7 @@ class ConnectedDeviceWriter:
     async def send_once(
         self,
         payload: bytes,
-        lease: ActiveLocalControlLease,
+        lease: LocalControlSendPermit,
     ) -> bytes:
         if not self._connected:
             raise LocalDeviceWriteError("writer session is not connected")
@@ -327,7 +327,7 @@ class ConnectedDeviceWriter:
         digest = hashlib.sha256(exact).hexdigest()
         if digest in self._attempted_payloads:
             raise LocalDeviceWriteError("one connected writer never resends a control payload")
-        lease.require_permitted()
+        lease.require_pre_send_permitted()
         self._attempted_payloads.add(digest)
         try:
             acknowledgement = await self._session.send_raw_control(exact)
@@ -338,7 +338,7 @@ class ConnectedDeviceWriter:
         lease.require_permitted()
         return acknowledgement
 
-    async def readback(self, lease: ActiveLocalControlLease) -> bytes:
+    async def readback(self, lease: LocalControlSendPermit) -> bytes:
         if not self._connected:
             raise LocalDeviceWriteError("writer session is not connected")
         lease.require_permitted()

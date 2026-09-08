@@ -18,8 +18,8 @@ the legacy native-linkage harness. It includes:
 - exact Local Wavemaker Pro schedule-image writes;
 - Sync and Async schedule composition in which every slave receives the current master's exact
   48-slot timing/mode image and may independently override Flow for each active slot;
-- one-shot software-independent group actuation under one all-member lease and one durable
-  transaction;
+- one-shot and recurring plan-atomic software-independent group actuation under one all-member
+  lease and one durable transaction;
 - English Home Assistant/MQTT entity contracts, fresh read-only state polling, and a sequential
   command adapter;
 - fresh install, systemd staging, and standalone Docker Compose commands that replace, rather than
@@ -299,14 +299,16 @@ this implementation and its tests did not start the service.
 
 ## Software-independent group actuation
 
-The first group-control slice accepts one already-built `GroupTickPlan`; it does not start the
-recurring `GroupDispatchRuntime` or expose a new Home Assistant/MQTT command. That boundary is
-intentional. The current per-member runtime port does not carry a plan generation or transaction
-token, so collecting independent callbacks into one transaction could mix two superseding plans.
-Runtime wiring is deferred until that identity can reach the write edge while preserving the
-mandatory-OFF safety-token path.
-`EMERGENCY_STOP` in this slice is only a one-shot plan-consistency check; it is not the dispatcher's
-mandatory-OFF barrier and does not claim its safety-token semantics.
+The actuator accepts one already-built `GroupTickPlan` and can be called directly for a one-shot
+operation. Recurring concurrency is handled by the separate `PlanAtomicGroupDispatchRuntime`, not
+by modifying the existing per-device `GroupDispatchRuntime`. The plan-level runtime passes the
+complete immutable plan, its generation, a semantic plan digest, one pre-send guard, and an opaque
+safety token through a single port call. It never collects independent member callbacks into a
+transaction, so two generations cannot be mixed by a callback barrier. The runtime and durable
+actuator are connected in code, but no daemon tick source or new Home Assistant/MQTT group command
+is exposed yet. The port's pure plan validator runs before the runtime accepts generation ownership,
+so a malformed or out-of-envelope replacement cannot first supersede valid current work and fail
+only afterward.
 
 For one explicit plan, the actuator uses only existing qualified scalar operations. An enabled
 member is represented by a `manual_flow` frame followed by a separate `power=true` frame. Flow is
@@ -340,10 +342,41 @@ remain blocked for operator resolution. A `ROLLED_BACK` group record can therefo
 retained-safe and baseline-present members; consumers must use each action's diagnostic rather than
 assuming the record phase means every member returned to its original state.
 
-The request id is the durable journal idempotency identity. Reusing it for the same physical intent
-returns the terminal record without another discovery or send; reusing it for a different intent
-is rejected. It is not a device identity or qualification gate. Planner generation and timestamp
-remain execution provenance and are not substituted for the stable physical binding.
+For recurring dispatch, a newer generation replaces only the one pending complete plan. A different
+plan already in flight may finish the frame whose pre-send guard passed, including its ACK and exact
+readback, but the guard stops the next frame before it can leave. The journal then terminalizes the
+known-not-sent remainder as `SUPERSEDED` without rollback: earlier verified actions remain explicit,
+and every superseded action has neither an ACK nor uncertain delivery. A transaction with any
+uncertain action cannot enter that terminal phase. A missing ACK, unavailable readback, or any other
+post-send ambiguity remains `RECOVERY_REQUIRED`; the runtime never retries it and suppresses later
+ordinary plans until operator reconciliation.
+
+The recurring runtime treats a complete STOPPED or EMERGENCY_STOP plan, and a failure-policy stop,
+as mandatory OFF when every dispatched target is canonical OFF. That plan's safety token bypasses
+ordinary generation supersession, later ordinary plans are deferred rather than retained, and
+shutdown drains an already accepted stop. Shutdown never invents a new OFF plan. It retries a
+mandatory stop at most once only when the port proved that no frame was sent; uncertain delivery
+causes shutdown to report an unresolved safety stop instead of claiming a clean close. Because a
+STOPPED or EMERGENCY_STOP whole-group plan requires canonical OFF and qualification for every
+member, one unreachable member still makes that explicit stop attempt send zero frames. A
+failure-policy stop may instead carry only `SKIP_OFFLINE` or `SKIP_UNKNOWN` for unavailable members;
+it locks the whole group while stopping every reachable dispatched member. If another durable
+transaction is already `RECOVERY_REQUIRED`, neither form can bypass its journal authority and the
+stop remains unresolved until the operator reconciles that record.
+
+The request id is the durable journal idempotency identity. Direct one-shot reuse with the same
+physical intent returns the terminal record without another discovery or send; reuse with a
+different intent is rejected. The recurring runtime allocates one request id per accepted physical
+plan operation and reuses that exact id only for an explicit retry proven `NOT_SENT`. It is not a
+device identity or qualification gate. Planner generation and timestamp remain execution
+provenance and are excluded from both the durable physical-intent identity and the semantic plan
+digest. A changed control epoch, member action, target, derived group status, or failure-stop marker
+does change that digest.
+
+The applied-plan cache is only a confirmed in-process optimization. A fresh external observation,
+reconnect, or other evidence of drift must call `invalidate_applied()` before the same semantic plan
+may be treated as already applied. This runtime contract and its fault-injection tests do not claim
+that a service loop is currently running or that any device accepted a group write.
 
 ## Product audit mapping
 

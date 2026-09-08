@@ -1,13 +1,14 @@
-"""One-shot, evidence-gated actuation for a software-independent group plan.
+"""Evidence-gated actuation for one complete software-independent group plan.
 
-This module deliberately does not adapt :class:`GroupDispatchRuntime` yet. Its port contract does
-not carry a plan identity, so grouping concurrent member callbacks into one durable transaction
-would permit two generations to be mixed. The first slice instead proves the physical contract for
-one explicit plan: one current resolution, one all-member lease, and one plan-wide journal record.
+The actuator remains useful as a one-shot boundary and also implements the complete-plan port used
+by :class:`PlanAtomicGroupDispatchRuntime`. It never reconstructs a transaction from the existing
+per-device runtime callbacks: one immutable plan reaches one current resolution, one all-member
+lease, and one plan-wide journal record with its generation guard intact.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,12 +21,19 @@ from jebao_flow.groups.plan import (
     MemberAction,
     MemberDecision,
 )
+from jebao_flow.groups.runtime import (
+    GroupPlanSupersededError,
+    PreWriteDispatchError,
+    WriteGuard,
+    group_plan_identity_sha256,
+)
 from jebao_flow.local_control.coordinator import (
     LocalControlBatchTarget,
     LocalControlCoordinator,
     LocalControlExecutionError,
     LocalControlResult,
 )
+from jebao_flow.local_control.journal import TransactionPhase
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.protocol.models import DeviceTarget
 from jebao_flow.protocol.profiles import DC_PUMP_PRO, LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
@@ -48,6 +56,7 @@ class GroupActuationOutcome(StrEnum):
     """Terminal result returned by the one-shot group actuator."""
 
     NO_DISPATCH = "no_dispatch"
+    SUPERSEDED = "superseded"
     VERIFIED = "verified"
 
 
@@ -136,11 +145,25 @@ class SoftwareIndependentGroupActuator:
         self._device_limits = copied_limits
         self._coordinator = coordinator
 
+    @property
+    def group_id(self) -> str:
+        return self._group_id
+
+    @property
+    def member_ids(self) -> tuple[str, ...]:
+        return self._member_ids
+
+    def validate_plan(self, plan: GroupTickPlan) -> None:
+        """Validate the complete plan without resolving endpoints or creating durable state."""
+
+        self._validate_plan(plan)
+
     async def execute(
         self,
         *,
         request_id: str,
         plan: GroupTickPlan,
+        pre_send_guard: WriteGuard | None = None,
     ) -> GroupActuationResult:
         """Execute one immutable plan without starting a recurring tick loop."""
 
@@ -167,7 +190,18 @@ class SoftwareIndependentGroupActuator:
             intent_binding=self._intent_binding(request_id, plan, ordered_decisions),
             lease_targets=tuple(self._bindings[member] for member in self._member_ids),
             targets=targets,
+            pre_send_guard=pre_send_guard,
         )
+        if transaction.phase is TransactionPhase.SUPERSEDED:
+            return GroupActuationResult(
+                request_id=request_id,
+                group_id=self._group_id,
+                generation=plan.generation,
+                member_count=len(self._member_ids),
+                dispatched_member_count=len(targets),
+                outcome=GroupActuationOutcome.SUPERSEDED,
+                transaction=transaction,
+            )
         if not transaction.accepted:
             raise LocalControlExecutionError(
                 "a terminal non-verified group request cannot be reported as accepted"
@@ -181,6 +215,55 @@ class SoftwareIndependentGroupActuator:
             outcome=GroupActuationOutcome.VERIFIED,
             transaction=transaction,
         )
+
+    async def write_plan(
+        self,
+        plan: GroupTickPlan,
+        *,
+        request_id: str,
+        generation: int,
+        plan_identity_sha256: str,
+        guard: WriteGuard,
+        safety_token: object,
+    ) -> None:
+        """Adapt one complete runtime job to the durable plan-wide transaction boundary."""
+
+        try:
+            if generation != plan.generation:
+                raise ValueError("plan port generation does not match the immutable plan")
+            if plan_identity_sha256 != group_plan_identity_sha256(plan):
+                raise ValueError("plan port identity does not match the immutable plan")
+            if safety_token is None:
+                raise ValueError("plan port safety token must be opaque and non-null")
+            if not callable(guard):
+                raise TypeError("plan port guard must be callable")
+        except (TypeError, ValueError) as error:
+            raise PreWriteDispatchError("plan port rejected invalid execution context") from error
+
+        try:
+            result = await self.execute(
+                request_id=request_id,
+                plan=plan,
+                pre_send_guard=guard,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            try:
+                definitely_not_sent = self._coordinator.request_has_no_durable_state(request_id)
+            except Exception:
+                definitely_not_sent = False
+            if definitely_not_sent:
+                raise PreWriteDispatchError(
+                    "group plan failed before durable state or any physical frame"
+                ) from error
+            raise
+        if result.outcome is GroupActuationOutcome.SUPERSEDED:
+            raise GroupPlanSupersededError(
+                "group plan was durably superseded before its remaining frames"
+            )
+        if not result.accepted:
+            raise LocalControlExecutionError("group plan port returned a non-verified result")
 
     def _validate_plan(self, plan: GroupTickPlan) -> tuple[MemberDecision, ...]:
         if not isinstance(plan, GroupTickPlan):

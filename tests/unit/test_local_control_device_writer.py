@@ -46,6 +46,9 @@ class _Lease:
     def require_permitted(self) -> None:
         pass
 
+    def require_pre_send_permitted(self) -> None:
+        self.require_permitted()
+
 
 class _Session:
     def __init__(self, address: str) -> None:

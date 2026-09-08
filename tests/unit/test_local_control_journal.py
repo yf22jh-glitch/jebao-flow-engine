@@ -118,6 +118,79 @@ def test_unfinished_inventory_exposes_recovery_requirement(tmp_path: Path) -> No
         store.unfinished_records()
 
 
+def test_superseded_record_is_terminal_only_for_known_not_sent_actions(
+    tmp_path: Path,
+) -> None:
+    store = LocalControlJournalStore.for_test(tmp_path / "journal")
+    record = _record(store)
+    store.create(record)
+    superseded_action = record.actions[0].model_copy(
+        update={
+            "phase": ActionPhase.SUPERSEDED,
+            "diagnostic": "generation_guard_rejected_before_send",
+        }
+    )
+    replacement = record.evolve(
+        phase=TransactionPhase.SUPERSEDED,
+        actions=(superseded_action,),
+    )
+
+    store.save(record, replacement)
+
+    assert store.unfinished_records() == ()
+    assert store.load(record.request_id) == replacement
+
+
+def test_superseded_phase_cannot_swallow_uncertain_or_acknowledged_actions(
+    tmp_path: Path,
+) -> None:
+    store = LocalControlJournalStore.for_test(tmp_path / "journal")
+    action = _record(store).actions[0]
+
+    with pytest.raises(ValueError, match="uncertain action"):
+        LocalControlJournalRecord.model_validate(
+            {
+                **_record(store).model_dump(),
+                "phase": TransactionPhase.SUPERSEDED,
+                "actions": (
+                    action.model_copy(update={"phase": ActionPhase.UNCERTAIN}),
+                ),
+            }
+        )
+
+    with pytest.raises(ValueError, match="cannot contain an acknowledgement"):
+        LocalControlJournalRecord.model_validate(
+            {
+                **_record(store).model_dump(),
+                "phase": TransactionPhase.SUPERSEDED,
+                "actions": (
+                    action.model_copy(
+                        update={
+                            "phase": ActionPhase.SUPERSEDED,
+                            "acknowledgement_sha256": "4" * 64,
+                        }
+                    ),
+                ),
+            }
+        )
+
+
+def test_superseded_action_cannot_hide_inside_a_nonterminal_record(tmp_path: Path) -> None:
+    store = LocalControlJournalStore.for_test(tmp_path / "journal")
+    record = _record(store)
+
+    with pytest.raises(ValueError, match="requires a superseded transaction"):
+        LocalControlJournalRecord.model_validate(
+            {
+                **record.model_dump(),
+                "phase": TransactionPhase.RECOVERY_REQUIRED,
+                "actions": (
+                    record.actions[0].model_copy(update={"phase": ActionPhase.SUPERSEDED}),
+                ),
+            }
+        )
+
+
 def test_request_id_is_no_clobber_and_raw_record_has_no_runtime_endpoint(tmp_path: Path) -> None:
     store = LocalControlJournalStore.for_test(tmp_path / "journal")
     record = _record(store)

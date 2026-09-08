@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -14,6 +15,13 @@ from jebao_flow.groups.plan import (
     MemberAction,
     MemberDecision,
     PatternEpoch,
+)
+from jebao_flow.groups.runtime import (
+    DeliveryCertainty,
+    GroupDispatchError,
+    PlanAtomicGroupDispatchRuntime,
+    UnresolvedGroupSafetyStopError,
+    group_plan_identity_sha256,
 )
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.coordinator import (
@@ -162,6 +170,20 @@ class _Session:
         self.quarantined = True
 
 
+class _BlockingFirstSendSession(_Session):
+    def __init__(self, statuses: list[bytes]) -> None:
+        super().__init__(statuses)
+        self.first_sent = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def send_raw_control(self, control_payload: bytes) -> bytes:
+        self.sent.append(bytes(control_payload))
+        if len(self.sent) == 1:
+            self.first_sent.set()
+            await self.release_first.wait()
+        return b"ack"
+
+
 class _SessionFactory:
     def __init__(self, sessions: dict[str, list[_Session]]) -> None:
         self.sessions = sessions
@@ -191,12 +213,32 @@ class _Resolver:
         return self.endpoints
 
 
+class _BlockingResolver(_Resolver):
+    def __init__(self, endpoints: tuple[ResolvedEndpoint, ...]) -> None:
+        super().__init__(endpoints)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def resolve_many(
+        self,
+        targets: tuple[LocalDeviceBinding, ...],
+    ) -> tuple[ResolvedEndpoint, ...]:
+        self.calls += 1
+        self.requested_many.append(targets)
+        self.started.set()
+        await self.release.wait()
+        return self.endpoints
+
+
 class _ActiveLease:
     def __init__(self) -> None:
         self.checks = 0
 
     def require_permitted(self) -> None:
         self.checks += 1
+
+    def require_pre_send_permitted(self) -> None:
+        self.require_permitted()
 
 
 class _RecordingLease:
@@ -217,9 +259,10 @@ def _coordinator(
     sessions: _SessionFactory,
     qualified_keys: frozenset[str],
     functions: tuple[str, ...] = ("manual_flow", "power"),
+    resolver: _Resolver | None = None,
 ) -> tuple[LocalControlCoordinator, LocalControlJournalStore, _Resolver, _RecordingLease]:
     journal = LocalControlJournalStore.for_test(tmp_path / "journal")
-    resolver = _Resolver(endpoints)
+    current_resolver = _Resolver(endpoints) if resolver is None else resolver
     lease = _RecordingLease()
     catalog = build_local_control_catalog(
         tuple(_qualification(function) for function in functions),
@@ -232,13 +275,13 @@ def _coordinator(
     )
     coordinator = LocalControlCoordinator(
         catalog=catalog,
-        resolver=resolver,  # type: ignore[arg-type]
+        resolver=current_resolver,  # type: ignore[arg-type]
         journal=journal,
         lease=lease,  # type: ignore[arg-type]
         session_factory=sessions,
         qualification_verifier=lambda _item: qualified_keys,
     )
-    return coordinator, journal, resolver, lease
+    return coordinator, journal, current_resolver, lease
 
 
 def _actuator(
@@ -857,3 +900,351 @@ async def test_optional_mode_is_rejected_before_resolution_or_journalling(tmp_pa
     assert resolver.calls == 0
     assert lease.calls == []
     assert tuple(journal.operations.iterdir()) == ()
+
+
+@pytest.mark.asyncio
+async def test_plan_runtime_validates_the_port_before_accepting_generation_ownership(
+    tmp_path: Path,
+) -> None:
+    left = _binding("left", "a")
+    coordinator, journal, resolver, lease = _coordinator(
+        tmp_path,
+        endpoints=(),
+        sessions=_SessionFactory({}),
+        qualified_keys=frozenset(),
+        functions=(),
+    )
+    actuator = SoftwareIndependentGroupActuator(
+        group_id="main_flow",
+        member_ids=("left",),
+        bindings={"left": left},
+        device_limits={"left": LIMITS},
+        coordinator=coordinator,
+    )
+    runtime = PlanAtomicGroupDispatchRuntime("main_flow", ("left",), actuator)
+    invalid = _plan(
+        (
+            _decision(
+                "left",
+                DeviceTarget(enabled=True, power=50, mode="sine"),
+            ),
+        )
+    )
+
+    with pytest.raises(GroupDispatchError, match="port rejected"):
+        runtime.submit(invalid, is_current=lambda _generation: True)
+
+    snapshot = runtime.snapshot()
+    assert snapshot.latest_generation == 0
+    assert snapshot.submitted_count == 0
+    assert resolver.calls == 0
+    assert lease.calls == []
+    assert tuple(journal.operations.iterdir()) == ()
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_plan_port_preserves_cancellation_before_durable_state(
+    tmp_path: Path,
+) -> None:
+    left = _binding("left", "a")
+    endpoint = ResolvedEndpoint(left, "left", wifi_firmware_version="wifi-current")
+    resolver = _BlockingResolver((endpoint,))
+    sessions = _SessionFactory({})
+    coordinator, journal, _resolver, lease = _coordinator(
+        tmp_path,
+        endpoints=(endpoint,),
+        sessions=sessions,
+        qualified_keys=frozenset({left.physical_identity_key}),
+        resolver=resolver,
+    )
+    actuator = SoftwareIndependentGroupActuator(
+        group_id="main_flow",
+        member_ids=("left",),
+        bindings={"left": left},
+        device_limits={"left": LIMITS},
+        coordinator=coordinator,
+    )
+    plan = _plan((_decision("left", DeviceTarget(enabled=True, power=50)),))
+    request_id = "group_cancel_0001"
+
+    task = asyncio.create_task(
+        actuator.write_plan(
+            plan,
+            request_id=request_id,
+            generation=plan.generation,
+            plan_identity_sha256=group_plan_identity_sha256(plan),
+            guard=lambda: True,
+            safety_token=object(),
+        )
+    )
+    await asyncio.wait_for(resolver.started.wait(), timeout=1.0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert resolver.calls == 1
+    assert lease.calls == []
+    assert sessions.created == []
+    assert journal.load(request_id) is None
+
+
+@pytest.mark.asyncio
+async def test_generation_guard_terminalizes_only_the_known_not_sent_remainder(
+    tmp_path: Path,
+) -> None:
+    left = _binding("left", "a")
+    session = _Session(
+        [
+            _status(enabled=False, flow=40),
+            _status(enabled=False, flow=50),
+        ]
+    )
+    sessions = _SessionFactory({"left": [session]})
+    endpoint = ResolvedEndpoint(left, "left", wifi_firmware_version="wifi-current")
+    coordinator, journal, _resolver, _lease = _coordinator(
+        tmp_path,
+        endpoints=(endpoint,),
+        sessions=sessions,
+        qualified_keys=frozenset({left.physical_identity_key}),
+    )
+    actuator = SoftwareIndependentGroupActuator(
+        group_id="main_flow",
+        member_ids=("left",),
+        bindings={"left": left},
+        device_limits={"left": LIMITS},
+        coordinator=coordinator,
+    )
+    guard_results = iter((True, False))
+
+    result = await actuator.execute(
+        request_id="group_supersede_0001",
+        plan=_plan((_decision("left", DeviceTarget(enabled=True, power=50)),)),
+        pre_send_guard=lambda: next(guard_results),
+    )
+
+    assert result.outcome is GroupActuationOutcome.SUPERSEDED
+    assert result.accepted is False
+    assert result.transaction is not None
+    assert result.transaction.phase is TransactionPhase.SUPERSEDED
+    assert result.transaction.physical_write_count == 1
+    assert session.sent == [build_control_payload(LOCAL_WAVEMAKER_PRO, {"Flow": 50})]
+    record = journal.load("group_supersede_0001")
+    assert record is not None
+    assert record.phase is TransactionPhase.SUPERSEDED
+    assert [action.phase for action in record.actions] == [
+        ActionPhase.VERIFIED,
+        ActionPhase.SUPERSEDED,
+    ]
+    assert [action.diagnostic for action in record.actions] == [
+        None,
+        "generation_guard_rejected_before_send",
+    ]
+    with pytest.raises(LocalControlExecutionError, match="must not be rolled back"):
+        await coordinator.recover("group_supersede_0001")
+    assert session.sent == [build_control_payload(LOCAL_WAVEMAKER_PRO, {"Flow": 50})]
+
+
+@pytest.mark.asyncio
+async def test_generation_guard_before_first_frame_sends_nothing_and_is_terminal(
+    tmp_path: Path,
+) -> None:
+    left = _binding("left", "a")
+    session = _Session([_status(enabled=False, flow=40)])
+    sessions = _SessionFactory({"left": [session]})
+    endpoint = ResolvedEndpoint(left, "left", wifi_firmware_version="wifi-current")
+    coordinator, journal, _resolver, _lease = _coordinator(
+        tmp_path,
+        endpoints=(endpoint,),
+        sessions=sessions,
+        qualified_keys=frozenset({left.physical_identity_key}),
+    )
+    actuator = SoftwareIndependentGroupActuator(
+        group_id="main_flow",
+        member_ids=("left",),
+        bindings={"left": left},
+        device_limits={"left": LIMITS},
+        coordinator=coordinator,
+    )
+
+    result = await actuator.execute(
+        request_id="group_supersede_0002",
+        plan=_plan((_decision("left", DeviceTarget(enabled=True, power=50)),)),
+        pre_send_guard=lambda: False,
+    )
+
+    assert result.outcome is GroupActuationOutcome.SUPERSEDED
+    assert result.transaction is not None
+    assert result.transaction.physical_write_count == 0
+    assert session.sent == []
+    record = journal.load("group_supersede_0002")
+    assert record is not None
+    assert record.phase is TransactionPhase.SUPERSEDED
+    assert [action.phase for action in record.actions] == [
+        ActionPhase.SUPERSEDED,
+        ActionPhase.SUPERSEDED,
+    ]
+    assert [action.diagnostic for action in record.actions] == [
+        "generation_guard_rejected_before_send",
+        "generation_superseded_before_attempt",
+    ]
+    assert journal.unfinished_records() == ()
+
+
+@pytest.mark.asyncio
+async def test_plan_runtime_supersedes_between_frames_without_mixing_generations(
+    tmp_path: Path,
+) -> None:
+    left = _binding("left", "a")
+    first_session = _BlockingFirstSendSession(
+        [
+            _status(enabled=False, flow=40),
+            _status(enabled=False, flow=50),
+        ]
+    )
+    latest_session = _Session(
+        [
+            _status(enabled=False, flow=50),
+            _status(enabled=False, flow=60),
+            _status(enabled=True, flow=60),
+        ]
+    )
+    sessions = _SessionFactory({"left": [first_session, latest_session]})
+    endpoint = ResolvedEndpoint(left, "left", wifi_firmware_version="wifi-current")
+    coordinator, journal, _resolver, _lease = _coordinator(
+        tmp_path,
+        endpoints=(endpoint,),
+        sessions=sessions,
+        qualified_keys=frozenset({left.physical_identity_key}),
+    )
+    actuator = SoftwareIndependentGroupActuator(
+        group_id="main_flow",
+        member_ids=("left",),
+        bindings={"left": left},
+        device_limits={"left": LIMITS},
+        coordinator=coordinator,
+    )
+    runtime = PlanAtomicGroupDispatchRuntime("main_flow", ("left",), actuator)
+    current_generation = {"value": 1}
+
+    first_plan = _plan(
+        (_decision("left", DeviceTarget(enabled=True, power=50), control_epoch=1),),
+        generation=1,
+    )
+    latest_plan = _plan(
+        (_decision("left", DeviceTarget(enabled=True, power=60), control_epoch=2),),
+        generation=2,
+    )
+
+    def is_current(generation: int) -> bool:
+        return generation == current_generation["value"]
+
+    runtime.submit(first_plan, is_current=is_current)
+    await asyncio.wait_for(first_session.first_sent.wait(), timeout=1.0)
+    current_generation["value"] = 2
+    runtime.submit(latest_plan, is_current=is_current)
+    first_session.release_first.set()
+    snapshot = await asyncio.wait_for(runtime.wait_idle(), timeout=2.0)
+    await runtime.aclose()
+
+    assert first_session.sent == [
+        build_control_payload(LOCAL_WAVEMAKER_PRO, {"Flow": 50})
+    ]
+    assert latest_session.sent == [
+        build_control_payload(LOCAL_WAVEMAKER_PRO, {"Flow": 60}),
+        build_control_payload(LOCAL_WAVEMAKER_PRO, {"SwitchON": True}),
+    ]
+    assert snapshot.applied_generation == 2
+    assert snapshot.failure is None
+    assert snapshot.superseded_count == 1
+    assert snapshot.succeeded_count == 1
+    records = tuple(
+        record
+        for path in journal.operations.glob("*.json")
+        if (record := journal.load(path.stem)) is not None
+    )
+    assert len(records) == 2
+    superseded = next(
+        record for record in records if record.phase is TransactionPhase.SUPERSEDED
+    )
+    verified = next(record for record in records if record.phase is TransactionPhase.VERIFIED)
+    assert [action.phase for action in superseded.actions] == [
+        ActionPhase.VERIFIED,
+        ActionPhase.SUPERSEDED,
+    ]
+    assert all(action.phase is ActionPhase.VERIFIED for action in verified.actions)
+    assert journal.unfinished_records() == ()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_plan_blocks_mandatory_off_without_claiming_a_stop(
+    tmp_path: Path,
+) -> None:
+    left = _binding("left", "a")
+    uncertain_session = _Session(
+        [_status(enabled=False, flow=40)],
+        send_errors=[TimeoutError("ack lost")],
+    )
+    sessions = _SessionFactory({"left": [uncertain_session]})
+    endpoint = ResolvedEndpoint(left, "left", wifi_firmware_version="wifi-current")
+    coordinator, journal, _resolver, _lease = _coordinator(
+        tmp_path,
+        endpoints=(endpoint,),
+        sessions=sessions,
+        qualified_keys=frozenset({left.physical_identity_key}),
+    )
+    actuator = SoftwareIndependentGroupActuator(
+        group_id="main_flow",
+        member_ids=("left",),
+        bindings={"left": left},
+        device_limits={"left": LIMITS},
+        coordinator=coordinator,
+    )
+    runtime = PlanAtomicGroupDispatchRuntime("main_flow", ("left",), actuator)
+    current_generation = {"value": 1}
+
+    def is_current(generation: int) -> bool:
+        return generation == current_generation["value"]
+
+    runtime.submit(
+        _plan(
+            (_decision("left", DeviceTarget(enabled=True, power=50), control_epoch=1),),
+            generation=1,
+        ),
+        is_current=is_current,
+    )
+    uncertain = await asyncio.wait_for(runtime.wait_idle(), timeout=1.0)
+    assert uncertain.failure is not None
+    assert uncertain.failure.delivery_certainty is DeliveryCertainty.UNCERTAIN
+
+    current_generation["value"] = 2
+    runtime.submit(
+        _plan(
+            (_decision("left", DeviceTarget(enabled=False, power=0), control_epoch=2),),
+            generation=2,
+            state=GroupState.EMERGENCY_STOP,
+        ),
+        is_current=is_current,
+    )
+    blocked_stop = await asyncio.wait_for(runtime.wait_idle(), timeout=1.0)
+    assert blocked_stop.safety_off_required is True
+    assert blocked_stop.failure is not None
+    assert blocked_stop.failure.mandatory_off is True
+    assert blocked_stop.failure.delivery_certainty is DeliveryCertainty.NOT_SENT
+
+    with pytest.raises(UnresolvedGroupSafetyStopError):
+        await runtime.aclose()
+
+    assert uncertain_session.sent == [
+        build_control_payload(LOCAL_WAVEMAKER_PRO, {"Flow": 50})
+    ]
+    records = tuple(
+        record
+        for path in journal.operations.glob("*.json")
+        if (record := journal.load(path.stem)) is not None
+    )
+    assert len(records) == 1
+    assert records[0].phase is TransactionPhase.RECOVERY_REQUIRED
+    assert records[0].actions[0].phase is ActionPhase.UNCERTAIN
+    assert runtime.snapshot().shutdown_safety_retry_count == 1

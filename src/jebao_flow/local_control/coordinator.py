@@ -26,7 +26,12 @@ from jebao_flow.local_control.journal import (
     LocalControlJournalStore,
     TransactionPhase,
 )
-from jebao_flow.local_control.lease import ActiveLocalControlLease, LocalControlLease
+from jebao_flow.local_control.lease import (
+    GenerationGuardedLocalControlPermit,
+    LocalControlLease,
+    LocalControlPreSendSupersededError,
+    LocalControlSendPermit,
+)
 from jebao_flow.local_control.models import (
     CapabilityStage,
     LocalControlIntent,
@@ -170,6 +175,7 @@ class LocalControlCoordinator:
         intent_binding: object,
         lease_targets: tuple[LocalDeviceBinding, ...],
         targets: tuple[LocalControlBatchTarget, ...],
+        pre_send_guard: Callable[[], bool] | None = None,
     ) -> LocalControlResult:
         """Execute one precomposed multi-device scalar transaction under one lease.
 
@@ -183,6 +189,8 @@ class LocalControlCoordinator:
             raise ValueError("batch execution requires at least one lease target")
         if not targets:
             raise ValueError("batch execution requires at least one action target")
+        if pre_send_guard is not None and not callable(pre_send_guard):
+            raise TypeError("batch pre-send guard must be callable")
         lease_logical = tuple(target.logical_member for target in lease_targets)
         lease_physical = tuple(target.physical_identity_key for target in lease_targets)
         if len(lease_logical) != len(set(lease_logical)):
@@ -260,10 +268,15 @@ class LocalControlCoordinator:
                     intent_sha256=intent_sha256,
                     prepared=tuple(prepared for _, prepared in prepared_pairs),
                 )
+                send_permit = (
+                    active_lease
+                    if pre_send_guard is None
+                    else GenerationGuardedLocalControlPermit(active_lease, pre_send_guard)
+                )
                 return await self._execute_prepared(
                     record,
                     tuple(prepared_pairs),
-                    active_lease,
+                    send_permit,
                 )
             finally:
                 for writer in reversed(tuple(writers.values())):
@@ -430,6 +443,10 @@ class LocalControlCoordinator:
             raise LocalControlExecutionError(
                 "verified transaction is terminal and does not require recovery"
             )
+        if record.phase is TransactionPhase.SUPERSEDED:
+            raise LocalControlExecutionError(
+                "superseded transaction is terminal and must not be rolled back"
+            )
         if record.phase is TransactionPhase.ROLLED_BACK:
             return self._result(record, physical_write_count=0)
 
@@ -588,7 +605,7 @@ class LocalControlCoordinator:
         self,
         record: LocalControlJournalRecord,
         pairs: tuple[tuple[ConnectedDeviceWriter, PreparedDeviceWrite], ...],
-        lease: ActiveLocalControlLease,
+        lease: LocalControlSendPermit,
     ) -> LocalControlResult:
         writes = 0
         for index, (writer, prepared) in enumerate(pairs):
@@ -610,6 +627,9 @@ class LocalControlCoordinator:
             try:
                 acknowledgement = await writer.send_once(prepared.forward_payload, lease)
                 writes += 1
+            except LocalControlPreSendSupersededError:
+                record = self._terminalize_superseded(record, index)
+                return self._result(record, physical_write_count=writes)
             except BaseException as error:
                 record = self._save_action(
                     record,
@@ -657,6 +677,49 @@ class LocalControlCoordinator:
             )
         record = self._save_transaction_phase(record, TransactionPhase.VERIFIED)
         return self._result(record, physical_write_count=writes)
+
+    def _terminalize_superseded(
+        self,
+        record: LocalControlJournalRecord,
+        current_index: int,
+    ) -> LocalControlJournalRecord:
+        """Persist a known-not-sent remainder without rolling back verified actions."""
+
+        actions = list(record.actions)
+        if actions[current_index].phase is not ActionPhase.FORWARD_ATTEMPTING:
+            raise LocalControlExecutionError(
+                "superseded action was not at the guarded pre-send boundary"
+            )
+        if any(
+            action.phase not in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
+            for action in actions[:current_index]
+        ):
+            raise LocalControlExecutionError(
+                "superseded transaction has an unresolved earlier action"
+            )
+        if any(action.phase is not ActionPhase.PREPARED for action in actions[current_index + 1 :]):
+            raise LocalControlExecutionError(
+                "superseded transaction has an advanced later action"
+            )
+        for index in range(current_index, len(actions)):
+            action = actions[index]
+            actions[index] = JournalAction.model_validate(
+                {
+                    **action.model_dump(),
+                    "phase": ActionPhase.SUPERSEDED,
+                    "diagnostic": (
+                        "generation_guard_rejected_before_send"
+                        if index == current_index
+                        else "generation_superseded_before_attempt"
+                    ),
+                }
+            )
+        replacement = record.evolve(
+            phase=TransactionPhase.SUPERSEDED,
+            actions=tuple(actions),
+        )
+        self._journal.save(record, replacement)
+        return replacement
 
     def _create_record(
         self,
@@ -776,9 +839,23 @@ class LocalControlCoordinator:
             return None
         if record.intent_sha256 != intent_sha256:
             raise LocalControlExecutionError("request id is already bound to a different intent")
-        if record.phase in {TransactionPhase.VERIFIED, TransactionPhase.ROLLED_BACK}:
+        if record.phase in {
+            TransactionPhase.VERIFIED,
+            TransactionPhase.ROLLED_BACK,
+            TransactionPhase.SUPERSEDED,
+        }:
             return self._result(record, physical_write_count=0)
         raise LocalControlExecutionError("request has unfinished durable state; recover it first")
+
+    def request_has_no_durable_state(self, request_id: str) -> bool:
+        """Return whether a failed call definitely stopped before journal creation.
+
+        A port adapter may classify only this state as retryable ``NOT_SENT``. Once a journal
+        exists, even a PREPARED record must be reconciled through its durable operation rather
+        than retried under a new runtime assumption.
+        """
+
+        return self._journal.load(request_id) is None
 
     def _require_no_other_unfinished(self, request_id: str) -> None:
         if any(

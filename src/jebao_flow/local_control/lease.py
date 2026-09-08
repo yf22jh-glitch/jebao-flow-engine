@@ -9,6 +9,7 @@ import stat
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import Protocol
 
 from jebao_flow.exact_restore_guard import ExactRestoreGuard
 from jebao_flow.hardware_safety import (
@@ -37,6 +38,18 @@ class LocalControlLeaseBusyError(LocalControlLeaseError):
     """Another workflow or unfinished exact-restore state owns write admission."""
 
 
+class LocalControlPreSendSupersededError(LocalControlLeaseError):
+    """A plan generation lost ownership before its next frame could be sent."""
+
+
+class LocalControlSendPermit(Protocol):
+    """Permit surface checked before and after a local-control frame send."""
+
+    def require_permitted(self) -> None: ...
+
+    def require_pre_send_permitted(self) -> None: ...
+
+
 class ActiveLocalControlLease:
     """Capability checked immediately before every physical send."""
 
@@ -47,6 +60,40 @@ class ActiveLocalControlLease:
     def require_permitted(self) -> None:
         if not self._guard.permitted or self._guard.epoch != self._epoch:
             raise LocalControlLeaseError("local-control write lease is no longer permitted")
+
+    def require_pre_send_permitted(self) -> None:
+        """Check the permit at the exact boundary before a frame can leave the process."""
+
+        self.require_permitted()
+
+
+class GenerationGuardedLocalControlPermit:
+    """Compose one in-memory plan guard with an already-held physical write lease.
+
+    The plan guard is checked only at the pre-send boundary. Once a frame may have crossed the
+    wire, acknowledgement and readback are allowed to finish under the physical lease so a later
+    generation cannot turn a known outcome into an artificial uncertainty.
+    """
+
+    def __init__(self, active: ActiveLocalControlLease, guard: Callable[[], bool]) -> None:
+        if not callable(guard):
+            raise TypeError("generation guard must be callable")
+        self._active = active
+        self._generation_guard = guard
+
+    def require_permitted(self) -> None:
+        self._active.require_permitted()
+
+    def require_pre_send_permitted(self) -> None:
+        self._active.require_pre_send_permitted()
+        try:
+            current = self._generation_guard()
+        except Exception:
+            current = False
+        if current is not True:
+            raise LocalControlPreSendSupersededError(
+                "group plan lost ownership before the next control frame"
+            )
 
 
 class LocalControlLease:
@@ -358,8 +405,11 @@ def _validate_lock_descriptor(descriptor: int, path: Path) -> None:
 
 __all__ = [
     "ActiveLocalControlLease",
+    "GenerationGuardedLocalControlPermit",
     "LocalControlLease",
     "LocalControlLeaseBusyError",
     "LocalControlLeaseError",
+    "LocalControlPreSendSupersededError",
     "LocalControlReadLease",
+    "LocalControlSendPermit",
 ]
