@@ -862,6 +862,57 @@ namespace를 만들지 않으며 기존 경로와 신규 경로가 같은 물리
 신규 local-control 제품 경로를 지속적으로 구현·검토할 권한이며, 기존 frozen 하네스를 되살리거나
 과거 단회 해제를 재사용할 권한은 아닙니다.
 
+### 2026-09-08 plan-atomic 그룹 런타임 범위 확장
+
+repository maintainer는 atomic software group actuation과 power-off recovery 정정을 각각 담은
+commit `da647e3a5c727a7bc93b6039f85989d583619a71`과
+`cac0535199a63d623f18fad04cf928b1f475e69a`의 완료 보고 뒤 “다음 단계 진행하자”로
+**plan-atomic recurring group runtime의 source·test·offline 검증 진행을 명시 승인**했습니다.
+이 짧은 답문의 범위는 두 commit의 완료 보고와 함께 제시된 다음 단계의 plan-level runtime,
+full-plan port, journal·generation 경계 제안에 결속합니다.
+이번 작업이 닫을 질문은 서로 다른 generation의 target을 하나의 물리 transaction으로 섞지 않고,
+delivery가 불확정인 write를 재시도하지 않으며, mandatory canonical OFF를 supersede·shutdown에서도
+보존할 수 있는가입니다. 근거는 firmware 가설이 아니라 plan identity·journal·동시성의 static trace와
+fault injection입니다.
+
+`src/jebao_flow/groups/runtime.py`는 §1 동결 대상이 아니므로 이 승인은 §1 동결 해제가 아닙니다.
+commit `c40e6b33462640a349326d88fd50c92b46f551a6`가 부여한 local-first 제품 경로의 구현 범위를
+다음 파일로만 확장합니다.
+
+- `src/jebao_flow/local_control/`
+- `src/jebao_flow/local_control_cli.py`
+- `src/jebao_flow/groups/runtime.py`와 그 직접 단위 테스트
+- `tests/unit/test_local_control_*`
+- `docs/local-control.md`
+
+기존 여섯 frozen source와 그 직접 테스트, `src/jebao_flow/protocol/*`,
+`src/jebao_flow/devices/*`, `docs/runs/*`는 수정하지 않습니다. 기존 per-device
+`GroupDispatchRuntime`의 callback을 물리 write barrier로 묶지 않고, 완전한 plan identity를 받는
+별도 plan-level runtime/port 계약을 사용합니다. 물리 적용은 기존 `execute_batch`의 one lease,
+one durable journal record, physical-identity-keyed resolution, reverse recovery와 qualification 경계를
+재사용하며, generation·timestamp를 장비 identity나 승인 gate로 승격하지 않습니다.
+기존 per-device `GroupDispatchRuntime`의 generation fencing, `(control_epoch, target)` dedupe,
+mandatory canonical OFF 보존, drain·shutdown retry 동작과 이를 고정한 기존 단위 테스트 단정은
+유지합니다. `groups/runtime.py` 변경은 별도 plan-level 계약을 추가하는 가산적 변경에 한정하며,
+기존 단정을 완화하거나 삭제하려면 별도 repository maintainer 승인이 필요합니다.
+
+supersede는 rollback으로 구현하지 않습니다. superseded transaction은 이미 확인된 물리 상태를
+되돌리지 않고 종결하며, recovery는 실패했거나 delivery가 불확정인 transaction을 위한 별도
+operation으로 남깁니다. durable record는 물리 frame 이전의 guard 거부와 delivery 불확정을
+구분합니다. 전자는 이후 transaction을 차단하지 않는 terminal이고, 후자는
+`RECOVERY_REQUIRED`로 운영자 해결을 요구합니다. 불확정 action이 하나라도 있는 record는
+superseded terminal로 종결할 수 없습니다.
+
+commit `cac0535`의 power-off recovery 의미 정정은 safety gate 완화가 아닙니다. 이미 OFF인 장비를
+덜 안전한 이전 ON 상태로 되돌리는 것은 recovery가 아니므로 재활성화 frame을 보내지 않되, fresh
+read가 forward safe state나 baseline 어느 쪽도 증명하지 못하면 transaction을 terminal로 가장하지
+않고 `RECOVERY_REQUIRED`로 유지합니다.
+
+실제 장비 write·앱 조작·Home Assistant 연결은 이 범위 확장에 포함되지 않습니다. 각각
+`docs/hardware-readiness.md`의 fresh preflight·exact restore·on-site 승인·현장 감시·중단 수단을
+별도로 갖춰야 합니다.
+같은 동시성·journal 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
