@@ -810,6 +810,58 @@ qualification은 영구 replay 장벽을 재검증한 reviewed tombstone 교체,
 id와 별도의 on-site hardware 승인을 다시 요구합니다. parked tombstone 구간에는 현재 exited인
 recovery supervisor를 재기동하지 않으며 Home Assistant는 계속 건드리지 않습니다.
 
+### 2026-09-08 local-first 제품 경로 부분 해제
+
+repository maintainer는 write-free packet observatory와 inert Sync/Async schedule 모델을 담은
+commit `e2ae787b1b5fe649b52d82475940a1d10711327d`의 완료 보고와 아래 범위를 확인한 뒤
+“ㅇㅇㅇ 확인 했어 진행하자”로 **신규 local-control 제품 경로의 구현 재개를 명시 승인**했습니다.
+짧은 답문의 범위는 그 직전 메시지가 제시한 아래 경계에 결속합니다.
+
+이번 부분 해제는 다음 신규 경로에만 적용합니다.
+
+- `src/jebao_flow/local_control/`과 그 직접 CLI·Home Assistant/MQTT adapter 및 직접 테스트
+- 등록된 다섯 제품군에서 정적 catalog와 보존 capture로 확인된 앱 기능의 local equivalent
+- Local Wavemaker Pro의 Sync/Async desired state: master의 48-position schedule vector를 각
+  slave가 그대로 상속하고, active slot마다 slave별 Flow override를 독립 적용하는 경로
+- 설치 시 현재 환경에서 변수를 다시 수집하고 이전 manifest를 읽거나 병합하지 않는 배포 경로
+
+기존 §1의 여섯 frozen source 파일과 그 단위 테스트는 **계속 동결**합니다. 신규 경로는 그
+하네스를 import·호출·복제하지 않으며, `operator_capture`의 write-free import boundary도 유지합니다.
+새 write edge는 별도 `local_control/device_writer.py`에 격리하고 control encoder/session import는
+그 파일과 직접 transport adapter 밖으로 퍼뜨리지 않습니다.
+신규 write는 별도의 local-control write-ahead transaction journal을 사용합니다. 기존
+exact-restore journal의 내용을 읽거나 교체·진행하지 않으며, shared operation lease 아래에서 그
+workflow가 이미 terminalize되어 live journal이 부재함을 확인하기 전에는 local-control write를
+시작하지 않습니다. `local_control`의 transitive import-closure 회귀는 기존 여섯 frozen 파일이
+없고 control encoder/session import가 `device_writer.py`와 지정 transport adapter에만 있음을
+기계적으로 고정합니다.
+여기서 shared lease는 기존과 같은 `global_operation_lock_path()`의 deployment-wide lock과
+`physical_lock_directory()` 아래의 `physical_identity_key(binding)` 장비별 lock입니다. 새 lock
+namespace를 만들지 않으며 기존 경로와 신규 경로가 같은 물리 장비에 대해 같은 key를 유도하는지
+회귀로 고정합니다. `configuration_fingerprint`나 그 scope 문자열은 `physical_identity_key`의
+입력이 아니므로 lock identity 제약으로 승격하지 않습니다.
+
+구현 재개 조건은 다음과 같습니다.
+
+1. 영구 장비 결속은 `physical_identity_key`·`product_key`·operator-confirmed logical role만
+   사용합니다. PID, IP, ephemeral port, hostname, container/session/cache path, file mtime과 이전
+   자동탐지 결과는 mapping·승인 gate로 사용하지 않습니다. logical role의 현장 확인은 증거등급
+   (c)와 확인 역할·시점을 기록합니다.
+2. 앱이나 firmware 의미는 preserved raw capture 또는 기존 audited protocol fact에 결속합니다.
+   근거 없는 firmware 가설은 거부 조건이나 fake 동작으로 만들지 않고 `UNKNOWN` 진단으로 둡니다.
+3. Flow write는 저장소 안전 envelope `30..75`, physical identity, single-write, durable journal과
+   rollback authority를 계속 지킵니다. Home Assistant의 native range도 `30..75`로 공개해 UI가
+   더 넓은 앱 범위를 지원한다고 주장하지 않습니다. 이 부분 해제는 해당 안전 규칙의 완화가
+   아닙니다.
+4. 앱 표현 가능성과 device support를 분리합니다. control은 승인된 ACK·readback 증거로
+   qualification된 capability만 승격하며, 앱의 optimistic UI를 성공 증거로 쓰지 않습니다.
+5. 실제 장비 write·앱 조작·Home Assistant 연결은 이 구현 승인에 포함되지 않습니다. 각각
+   `docs/hardware-readiness.md`의 fresh preflight, exact restore, on-site 승인과 중단 수단이 필요합니다.
+
+정보 0 실기 또는 같은 미확정 질문의 반복은 §7 예산을 그대로 적용해 park합니다. 이번 해제는
+신규 local-control 제품 경로를 지속적으로 구현·검토할 권한이며, 기존 frozen 하네스를 되살리거나
+과거 단회 해제를 재사용할 권한은 아닙니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
