@@ -28,6 +28,9 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 
 ## 구조
 
+패킷 관측과 local-first 제어 승격 경계는
+[`docs/operator-packet-observatory.md`](docs/operator-packet-observatory.md)를 따릅니다.
+
 ```text
 Home Assistant ── MQTT ──> jebao-flowd ── Jebao LAN protocol ──> pumps
                             ├─ group/pattern engine

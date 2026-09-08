@@ -663,3 +663,29 @@ exact match해야 합니다.
 이 결속을 load 전에 precommit하지 않았거나 어느 값이든 다르면 container 생성·volume mount 전에
 즉시 중단합니다. 실행 중의 해석으로 기존 exact-ID 조건을 완화하지 않고, 관측을 append-only로
 기록한 뒤 continuation 범위를 다시 승인받습니다. 예상 밖 image object도 자동 삭제하지 않습니다.
+
+## Passive operator packet observatory
+
+`jebao-flow-observe ingest-pcap`은 stdin의 **이미 존재하는** classic PCAP을 offline으로 읽을 뿐
+interface·device·앱·Home Assistant·safety root를 열지 않습니다. offline ingest는 hardware
+operation이 아니지만 input과 output은 사설 주소·identifier를 포함하는 private artifact이므로
+repository 밖의 durable owner-only `0700` root에서만 다룹니다. `/tmp`, `/private/tmp`, `/var/tmp`,
+worktree와 cloud-synced note는 artifact root로 쓰지 않습니다.
+
+live passive mirror 또는 router capture는 data path 밖의 read-only 관측이어도 실제 장비가 만든
+traffic을 접촉하는 **새 live run**입니다. 시작 전에 이 문서의 quiescence, on-site approval,
+기존 TCP session과 writer 부재를 다시 확인하고 새 `docs/runs/YYYY-MM-DD-<run-id>.md`를 만듭니다.
+앱과 장비 사이에 relay, ARP spoofing, DNAT, discovery spoofing 또는 packet injection을 끼우지
+않습니다. capture 실패·TCP gap·overlap·fragment·snaplen truncation은 조용히 재동기화하지 않고
+raw prefix를 `INCOMPLETE` 또는 `DESYNCHRONIZED`로 보존한 뒤 STOP합니다.
+
+공개 출력은 영문 ASCII의 opaque id, count, bounded semantic과 digest만 허용합니다. raw packet,
+사설 주소, MAC, device id, passcode, credential, private path와 vendor resource의 한자 label을
+console·문서·Home Assistant에 출력하지 않습니다. 앱 capability evidence는 app version, runtime이
+실제로 선택한 template version/digest, firmware version을 함께 결속하며 newest cached template를
+active라고 추정하지 않습니다.
+
+wire capture는 exact-restore collector artifact, operation manifest, durable rollback journal 또는
+write authority가 아닙니다. 앱 화면의 낙관적 상태도 ACK/readback이 아닙니다. 향후 device write,
+HA control, replay와 slave per-slot Flow 적용은 별도 `unfreeze:` commit과 live-write approval 전에는
+실행하지 않습니다.

@@ -42,6 +42,7 @@ jebao-flow-schedule-flow-test = "jebao_flow.schedule_flow_experiment_cli:main"
 jebao-flow-exact-restore = "jebao_flow.exact_restore_cli:main"
 jebao-flow-q2-epoch = "jebao_flow.q2_epoch_cli:main"
 jebao-flow-hardware-safety = "jebao_flow.hardware_safety_cli:main"
+jebao-flow-observe = "jebao_flow.operator_capture_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/yf22jh-glitch/jebao-flow-engine"

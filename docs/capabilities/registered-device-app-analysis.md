@@ -19,8 +19,9 @@ slot별 편집기는 노출하지 않습니다. 그래서 앱에서는 slave 출
 - 방식: vendor 제품 정의와 로컬에 내려받아진 plain JavaScript UI 템플릿의 read-only 정적 분석
 - 장비·앱 변경: UI click 0회, 장비 write 0회, packet injection 0회
 - 제외: SDK log, HTTP storage, crash cache, credential·token 저장소
-- 버전 한계: 아래 `U` 결과는 조사 당시 제품별 **숫자상 newest cached template** 기준이며,
-  vendor 서버의 전역 최신 또는 앱이 선택한 활성 버전이라는 뜻은 아닙니다.
+- 버전 한계: 아래 `U` 결과의 template identity는 조사한 JavaScript **내용 SHA-256**에만
+  결속합니다. cache directory 이름·숫자 정렬·mtime·size는 active 선택이나 영구 mapping의
+  근거가 아니며, vendor 서버의 전역 최신 또는 앱이 선택한 활성 버전도 아직 아닙니다.
 
 표기는 capability evidence tier와 별개인 출처 축입니다.
 
@@ -353,3 +354,79 @@ native mode와 Linkage는 없고 네 채널이 고정입니다.
 - 제품별 globally latest 또는 실제 활성 UI template 버전
 
 위 항목은 이번 정적 분석으로 닫혔다고 보고하지 않습니다.
+
+## 2026-09-08 local-first 제품 설계용 정적 재검토
+
+새 packet observatory와 local-first Home Assistant 경계를 설계하기 전에 등록된 앱을 다시
+read-only로 확인했습니다. 앱을 실행하거나 로그인하지 않았고 UI click, network, 장비 접촉과
+write는 모두 `0`입니다. credential·HTTP storage는 조사 범위에서 제외했습니다. product-file
+위치를 찾는 최초 basename 미제한 probe가 SDK log 한 파일의 product-key byte pattern을
+검색했지만 내용은 출력·해석·사용하지 않았고, 즉시 exact `productFile` 경로 범위로 좁혔습니다.
+
+- 설치 artifact: identifier `com.jebao.appstore`, Jebao Aqua `3.4.18`, build `341800000`, arm64
+  iPhoneOS application
+- executable SHA-256: `1564820038635faba071560b55b0d1d84c2c5a5538ad31b5954e380619fe1753`
+- local cached plain-JS template: `14`개. `module basename<TAB>byte-size<TAB>file-SHA-256`
+  행을 정렬하고 마지막 newline을 유지한 집합 SHA-256은
+  `dfa425d36bfdd1c04c87b2a7c49a0400458476988da3055da1230975bd557119`
+- 등록 다섯 product definition: 기존 문서의 product-key 순서와 무관하게
+  `product-key<TAB>byte-size<TAB>file-SHA-256` 행을 정렬한 집합 SHA-256은
+  `e19393ed6d67a325319e3d83c194669089c9d1eaf0ee6762ba2302e33c709d67`
+
+이번 재검토는 기존 표의 제품별 datapoint 수와 slot 경계를 다시 확인했습니다. Pro는 id
+`0..69` 중 `13..60`이 48개의 9-byte slot이고, bar는 48×8, DC Pump Pro는 48×8, Aquarium
+Pump는 48×6, dosing은 네 채널 각각 96-byte(`24×4`) schedule입니다. Pro template 세 판본의
+Linkage/AutoTime/partial `sendCmd` 구조도 기존 2026-09-02 추적과 모순되지 않았습니다.
+
+이 값들은 local artifact 결속과 정적 UI/vendor declaration을 재현하기 위한 source property일
+뿐 live firmware evidence가 아닙니다. extracted JavaScript와 vendor JSON 원문, sandbox 경로는
+저장소에 복사하지 않습니다. 앱에서 노출된 이름·범위와 wire에서 확인된 의미를 분리하고,
+capability control은 preserved capture와 differential evidence 뒤에만 승격합니다. 구현 경계는
+[`operator-packet-observatory.md`](../operator-packet-observatory.md)를 따릅니다.
+
+### 2026-09-08 앱 본체와 14개 template 전체 host surface 추적
+
+위 설치 artifact와 같은 바이트의 Hermes bundle을 read-only로 disassemble/decompile하고,
+cache의 plain-JS template `14`개 전부에서 host bridge 호출 이름과 navigation surface를
+기계적으로 열거했습니다. 임시 분석 산출물은 저장소에 넣지 않았으며 credential·token store,
+앱 로그인, UI 실행, network와 장비는 접촉하지 않았습니다.
+
+14개 template의 unique host call surface는 아래와 같습니다. 이 목록은 호출 이름의 존재만
+확정하며 각 등록 제품에서의 지원이나 firmware acceptance를 뜻하지 않습니다.
+
+```text
+checkHomeOwner
+deleteDevice
+deviceGroup
+editGroup
+getDeviceStatus
+getSwitchNames
+getUniversalMenu
+goEditRooms
+goToDeviceScenes
+goToUpdate
+isSupportUniversalMenu
+renameDevice
+sendCmd
+toast
+```
+
+영문 navigation token으로는 `Calibration`, `Channel`, `IntervalTime`, `More`, `Timer`,
+`Timers`, `HomeScreen`, `Linkage`, `ManualMode`, `Schedule`, `ScheduleDetail`, `ManualDetail`,
+`ModeList`, `Program`, `Feeding`이 확인됐습니다. public catalog는 이 파생 영문 명칭만 쓰고
+vendor resource의 한자 title은 노출하거나 복사하지 않습니다.
+
+Hermes 본체에서는 template의 `sendCmd`가 native module에 직접 packet bytes를 전달하는 것이
+아니라 host `callService("sendCmd", payload)`로 위임되는 wrapper임을 확인했습니다. wrapper는
+host call을 약 `100ms` 뒤 예약하면서 제안 payload를 먼저 local `data`에 합치고
+`dontUpdateKey`를 기록합니다. 이후 약 `2000ms` 안의 `updateDeviceData`는 그 key의 incoming
+값으로 local 표시를 덮지 않습니다. 따라서 앱 UI가 새 값을 표시했다는 사실은 장비 ACK 또는
+readback 증거가 아니며, future control qualification은 outgoing intent·device response·별도
+readback을 각각 보존해야 합니다. `APP2DEV` 이름의 SDK notification도 그 이름만으로 ACK로
+판정하지 않습니다.
+
+앱 본체가 사용하는 native module 이름과 template cache manager도 확인했지만, cache 안의
+가장 큰 version number가 runtime active template임을 증명하지는 못했습니다. 따라서 현재
+`app 3.4.18 / active template / firmware` 결속 중 active template는 `unresolved`입니다. active
+선택 경로, save/reset dataflow(reset이 write인지 포함), Linkage 진입·이탈 write sequence는
+남은 정적 감사 항목이며 확인 전에는 추측으로 catalog 상태를 올리지 않습니다.
