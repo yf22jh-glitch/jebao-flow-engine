@@ -913,6 +913,60 @@ read가 forward safe state나 baseline 어느 쪽도 증명하지 못하면 tran
 별도로 갖춰야 합니다.
 같은 동시성·journal 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
 
+### 2026-09-08 명시 명령 전 write-disarmed 그룹 supervisor 범위 확장
+
+repository maintainer는 plan-atomic recurring runtime commit
+`4f34447d09329f7c627b264831b2dd025ae4e1c8`의 완료 보고와 다음 supervisor 경계 제안에
+“ㅇㅇㅇ 끝까지 일단 진행해”로 **source·test·offline 검증 진행을 명시 승인**했습니다. 이번 작업이
+닫을 질문은 config의 group·member `enabled` 값과 무관하게 supervisor 객체 구성 뒤 명시
+command 전 physical write를 0회로 유지하면서, fresh availability와 명시 command를 한 순서로
+반영하고 변화 없는 mandatory OFF를 주기적으로 재전송하지 않는 supervisor lifecycle을
+만들 수 있는가입니다. 근거는 firmware 가설이 아니라 planner generation·runtime submit 경계의
+static trace와 fault injection입니다. 이 slice에서는 어떤 daemon이나 CLI도 supervisor를 구성하지
+않으며 서비스 기동 lifecycle은 주장하지 않습니다.
+
+이 확장은 다음 파일에 한정합니다.
+
+- `src/jebao_flow/local_control/` 아래의 별도 group supervisor
+- `tests/unit/test_local_control_*`
+- `docs/local-control.md`
+
+`src/jebao_flow/groups/manager.py`, `src/jebao_flow/groups/plan.py`,
+`src/jebao_flow/groups/runtime.py`와 기존 직접 테스트, `src/jebao_flow/mqtt/*`,
+`src/jebao_flow/app.py`, `custom_components/*`, `src/jebao_flow/protocol/*`,
+`src/jebao_flow/devices/*`, 기존 여섯 frozen source와 그 직접 테스트, `docs/runs/*`는 수정하지
+않습니다. supervisor는 기존 `GroupManager`, `PlanAtomicGroupDispatchRuntime`,
+`SoftwareIndependentGroupActuator`를 조합하되 planner나 dispatcher 의미를 바꾸지 않습니다.
+supervisor가 submit하는 모든 plan은 `GroupManager.plan_tick()`이 반환한 그 객체여야 하며,
+`GroupTickPlan`을 직접 구성하지 않습니다.
+
+명시 command가 supervisor의 ownership을 활성화하기 전에는 `plan_tick()`으로 진단용 plan을
+계산할 수 있어도 `PlanAtomicGroupDispatchRuntime.submit()`을 호출하지 않습니다. 이 불변식은
+config의 `enabled: false`, group state `STOPPED` 또는 member `enabled: false`에 기대지 않습니다.
+이 값들은 모두 canonical OFF dispatch를 만들 수 있기 때문입니다. 활성화 뒤에는 대기 중인
+availability와 command를 먼저 직렬 반영하고 그 다음 `plan_tick()`·`submit()`을 한 순서로
+수행합니다. freshness 실패는 device offline 주장으로 바꾸지 않고 `online=None`으로 유지합니다.
+
+변화 없는 mandatory-OFF plan은 주기 tick마다 다시 submit하지 않고, 명시 command 또는
+ownership 전이에서만 제출합니다. 이 규칙을 위해 mandatory-OFF의 runtime 내부 dedupe 우회를
+약화하지 않습니다. availability가 plan identity와 control epoch를 이미 바꾸는 경우 별도의
+applied-cache invalidation을 중복 적용하지 않으며, fresh read와 applied target의 불일치처럼 아직
+탐지 경로가 없는 외부 drift는 새 gate로 만들지 않고 `UNKNOWN`으로 문서화합니다. group 외부의
+개별 control은 이 slice에서 supervisor command로 연결하지 않습니다.
+
+회귀는 최소한 (1) group enabled, group disabled, member disabled 구성 각각에서 명시 command 전
+여러 tick의 `GroupPlanPort.write_plan()` 호출 0회, (2) 명시 command 뒤 최초 plan의 같은 호출
+정확히 1회, (3) 동일 일반 plan과 동일 mandatory-OFF의 반복 tick에서 추가
+`GroupPlanPort.write_plan()` 호출 0회, (4) `plan_tick()`과 submit 사이의
+availability 변경이 stale plan을 폐기하고 다음 tick으로 수렴함을 고정합니다. supervisor 자체는
+Home Assistant entity나 MQTT command를 노출하지 않으며, 그 transport 연결은 별도 검토·승인
+slice로 남깁니다.
+
+실제 장비 write·앱 조작·broker 또는 Home Assistant 연결은 이 구현 승인에 포함되지 않습니다.
+실제 활성화에는 `docs/hardware-readiness.md`의 fresh preflight·exact restore·on-site 승인·현장
+감시·중단 수단이 별도로 필요하고, 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`은 유지합니다.
+같은 lifecycle·submit 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
