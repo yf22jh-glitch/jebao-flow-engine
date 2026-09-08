@@ -18,6 +18,8 @@ the legacy native-linkage harness. It includes:
 - exact Local Wavemaker Pro schedule-image writes;
 - Sync and Async schedule composition in which every slave receives the current master's exact
   48-slot timing/mode image and may independently override Flow for each active slot;
+- one-shot software-independent group actuation under one all-member lease and one durable
+  transaction;
 - English Home Assistant/MQTT entity contracts, fresh read-only state polling, and a sequential
   command adapter;
 - fresh install, systemd staging, and standalone Docker Compose commands that replace, rather than
@@ -294,6 +296,43 @@ qualification directory; a missing, changed, mismatched, reused-request, or wron
 cannot expose a control. A singleton receipt for a device remains insufficient without invalidating
 another device's complete pair. Running it against live hardware is a separate approved operation;
 this implementation and its tests did not start the service.
+
+## Software-independent group actuation
+
+The first group-control slice accepts one already-built `GroupTickPlan`; it does not start the
+recurring `GroupDispatchRuntime` or expose a new Home Assistant/MQTT command. That boundary is
+intentional. The current per-member runtime port does not carry a plan generation or transaction
+token, so collecting independent callbacks into one transaction could mix two superseding plans.
+Runtime wiring is deferred until that identity can reach the write edge while preserving the
+mandatory-OFF safety-token path.
+`EMERGENCY_STOP` in this slice is only a one-shot plan-consistency check; it is not the dispatcher's
+mandatory-OFF barrier and does not claim its safety-token semantics.
+
+For one explicit plan, the actuator uses only existing qualified scalar operations. An enabled
+member is represented by a `manual_flow` frame followed by a separate `power=true` frame. Flow is
+sent first so a currently stopped member is not briefly enabled at its old value. The frames are
+not combined into a new payload shape: each keeps its own per-device, two-receipt qualification.
+Canonical OFF is exactly `DeviceTarget(enabled=false, power=0)` and sends only `power=false`, so it
+preserves Flow and needs no invented composite qualification. A stopped or emergency-stopped group
+requires canonical OFF and current power qualification for every member before any frame is sent.
+If even one member is currently unreachable, that whole-group stop attempt sends no frames and is
+reported as unavailable rather than claiming a partial stop.
+
+Every operation resolves all dispatched targets from one current observation and associates them
+by `physical_identity_key`, never discovery order. A deliberately unavailable member does not have
+to appear in discovery merely to be skipped. Complete stable bindings and every dispatched
+component qualification are checked before a session or lease is opened. It still acquires every
+group member key in one lease call, then reads all dispatched device baselines, creates one journal
+record, and sends the ordered actions. The transaction becomes `VERIFIED` only after every
+non-no-change action has exact readback. A partial failure remains one `RECOVERY_REQUIRED` record
+whose actions are restored in reverse order; it is never synthesized into group success.
+Deliberately skipped members are visible through the total and dispatched member counts rather than
+being reported as physical writes.
+
+The request id is the durable journal idempotency identity. Reusing it for the same physical intent
+returns the terminal record without another discovery or send; reusing it for a different intent
+is rejected. It is not a device identity or qualification gate. Planner generation and timestamp
+remain execution provenance and are not substituted for the stable physical binding.
 
 ## Product audit mapping
 

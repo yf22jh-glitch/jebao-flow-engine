@@ -98,6 +98,7 @@ def test_write_runtime_and_cli_import_closure_still_excludes_the_frozen_harness(
     modules = (
         "jebao_flow.local_control.coordinator",
         "jebao_flow.local_control.device_writer",
+        "jebao_flow.local_control.group",
         "jebao_flow.local_control.lease",
         "jebao_flow.local_control.mqtt",
         "jebao_flow.local_control_cli",
@@ -121,6 +122,7 @@ def test_write_runtime_and_cli_import_closure_still_excludes_the_frozen_harness(
     closure = set(json.loads(completed.stdout))
     assert closure.isdisjoint(FROZEN_MODULES)
     assert "jebao_flow.hardware_test" not in closure
+    assert not any(name.startswith("jebao_flow.devices") for name in closure)
 
 
 def test_per_device_lock_uses_the_stable_physical_key_filename() -> None:

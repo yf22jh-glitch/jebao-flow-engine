@@ -81,6 +81,23 @@ class LocalControlResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class LocalControlBatchTarget:
+    """Ordered scalar actions for one stable device inside one transaction."""
+
+    target: LocalDeviceBinding
+    intents: tuple[LocalControlIntent, ...]
+
+    def __post_init__(self) -> None:
+        if not self.intents:
+            raise ValueError("batch targets require at least one scalar intent")
+        if any(intent.target != self.target for intent in self.intents):
+            raise ValueError("batch scalar intents must use their declared stable target")
+        functions = tuple(intent.function for intent in self.intents)
+        if len(functions) != len(set(functions)):
+            raise ValueError("batch targets cannot repeat one scalar function")
+
+
 class LocalControlCoordinator:
     """Run scalar and priority schedule transactions under the same durable contract."""
 
@@ -144,6 +161,112 @@ class LocalControlCoordinator:
                 )
             finally:
                 await writer.close()
+
+    async def execute_batch(
+        self,
+        *,
+        request_id: str,
+        intent_binding: object,
+        lease_targets: tuple[LocalDeviceBinding, ...],
+        targets: tuple[LocalControlBatchTarget, ...],
+    ) -> LocalControlResult:
+        """Execute one precomposed multi-device scalar transaction under one lease.
+
+        Every endpoint and every component function is resolved and qualified before the first
+        session is opened. All device baselines are then read before the journal is created and
+        before any frame is sent. The caller composes only existing scalar intents; this method
+        never combines their datapoints into a new control payload.
+        """
+
+        if not lease_targets:
+            raise ValueError("batch execution requires at least one lease target")
+        if not targets:
+            raise ValueError("batch execution requires at least one action target")
+        lease_logical = tuple(target.logical_member for target in lease_targets)
+        lease_physical = tuple(target.physical_identity_key for target in lease_targets)
+        if len(lease_logical) != len(set(lease_logical)):
+            raise ValueError("batch lease targets must have distinct logical members")
+        if len(lease_physical) != len(set(lease_physical)):
+            raise ValueError("batch lease targets must have distinct physical identities")
+        batch_physical = tuple(item.target.physical_identity_key for item in targets)
+        if len(batch_physical) != len(set(batch_physical)):
+            raise ValueError("batch action targets must have distinct physical identities")
+        if not set(batch_physical) <= set(lease_physical):
+            raise ValueError("every batch action target must be covered by the group lease")
+        lease_target_by_key = {target.physical_identity_key: target for target in lease_targets}
+        if any(
+            lease_target_by_key[item.target.physical_identity_key] != item.target
+            for item in targets
+        ):
+            raise ValueError("batch action target does not match its complete group lease binding")
+        if any(intent.request_id != request_id for item in targets for intent in item.intents):
+            raise ValueError("every batch scalar intent must use the group request id")
+
+        intent_sha256 = _canonical_sha256(intent_binding)
+        existing = self._existing_result(request_id, intent_sha256)
+        if existing is not None:
+            return existing
+
+        endpoints = await self._resolver.resolve_many(tuple(item.target for item in targets))
+        endpoint_by_key: dict[str, ResolvedEndpoint] = {}
+        for endpoint in endpoints:
+            key = endpoint.target.physical_identity_key
+            if key in endpoint_by_key:
+                raise ValueError("current batch endpoints must have distinct identities")
+            endpoint_by_key[key] = endpoint
+        if set(endpoint_by_key) != set(batch_physical):
+            raise ValueError("current batch endpoints do not match every action target")
+        batch_target_by_key = {
+            item.target.physical_identity_key: item.target for item in targets
+        }
+        if any(
+            endpoint_by_key[key].target != target for key, target in batch_target_by_key.items()
+        ):
+            raise ValueError("current batch endpoint changed its complete stable binding")
+
+        for item in targets:
+            endpoint = endpoint_by_key[item.target.physical_identity_key]
+            if endpoint.target != item.target:
+                raise ValueError("batch action target does not match the current endpoint")
+            for intent in item.intents:
+                descriptor = self._catalog.validate_intent(intent)
+                self._require_current_qualification(descriptor, endpoint)
+
+        with self._lease.acquire(lease_physical) as active_lease:
+            self._require_no_other_unfinished(request_id)
+            existing = self._existing_result(request_id, intent_sha256)
+            if existing is not None:
+                return existing
+
+            writers: dict[str, ConnectedDeviceWriter] = {}
+            prepared_pairs: list[tuple[ConnectedDeviceWriter, PreparedDeviceWrite]] = []
+            try:
+                current_statuses: dict[str, bytes] = {}
+                for item in targets:
+                    key = item.target.physical_identity_key
+                    writer = self._writer_factory(endpoint_by_key[key])
+                    writers[key] = writer
+                    current_statuses[key] = await writer.connect_and_read()
+                for item in targets:
+                    key = item.target.physical_identity_key
+                    writer = writers[key]
+                    current = current_statuses[key]
+                    prepared_pairs.extend(
+                        (writer, writer.prepare_scalar(intent, current)) for intent in item.intents
+                    )
+                record = self._create_record(
+                    request_id=request_id,
+                    intent_sha256=intent_sha256,
+                    prepared=tuple(prepared for _, prepared in prepared_pairs),
+                )
+                return await self._execute_prepared(
+                    record,
+                    tuple(prepared_pairs),
+                    active_lease,
+                )
+            finally:
+                for writer in reversed(tuple(writers.values())):
+                    await writer.close()
 
     async def execute_schedule(
         self,
@@ -621,6 +744,7 @@ def _canonical_sha256(value: object) -> str:
 
 
 __all__ = [
+    "LocalControlBatchTarget",
     "LocalControlCoordinator",
     "LocalControlExecutionError",
     "LocalControlResult",
