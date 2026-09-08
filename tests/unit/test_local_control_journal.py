@@ -80,6 +80,32 @@ def test_record_create_and_consecutive_atomic_transition(tmp_path: Path) -> None
         store.save(record, replacement)
 
 
+def test_legacy_action_without_recovery_policy_defaults_to_baseline_restore(
+    tmp_path: Path,
+) -> None:
+    store = LocalControlJournalStore.for_test(tmp_path / "journal")
+    payload = _record(store).model_dump(mode="json")
+    del payload["actions"][0]["restore_on_recovery"]
+
+    loaded = LocalControlJournalRecord.model_validate(payload)
+
+    assert loaded.actions[0].restore_on_recovery is True
+
+
+def test_non_power_action_cannot_claim_safe_state_retention(tmp_path: Path) -> None:
+    store = LocalControlJournalStore.for_test(tmp_path / "journal")
+    action = _record(store).actions[0]
+
+    with pytest.raises(ValueError, match="only power actions"):
+        JournalAction.model_validate(
+            {
+                **action.model_dump(),
+                "function": "manual_flow",
+                "restore_on_recovery": False,
+            }
+        )
+
+
 def test_unfinished_inventory_exposes_recovery_requirement(tmp_path: Path) -> None:
     store = LocalControlJournalStore.for_test(tmp_path / "journal")
     record = _record(store)

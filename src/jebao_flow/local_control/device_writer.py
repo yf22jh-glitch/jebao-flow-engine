@@ -130,7 +130,7 @@ _FLOW_FUNCTIONS = frozenset({"manual_flow", "slave_common_flow"})
 
 @dataclass(frozen=True, slots=True)
 class PreparedDeviceWrite:
-    """One exact forward frame plus its freshly captured rollback authority."""
+    """One exact forward frame plus its freshly captured recovery authority."""
 
     target: ResolvedEndpoint
     function: str
@@ -141,6 +141,7 @@ class PreparedDeviceWrite:
     baseline_readback: bytes = field(repr=False)
     verification_kind: str
     no_change: bool
+    restore_on_recovery: bool = True
 
     def __post_init__(self) -> None:
         if not self.forward_payload or self.forward_payload[0] != CONTROL_ACTION:
@@ -149,6 +150,18 @@ class PreparedDeviceWrite:
             raise ValueError("rollback payload must be one control action")
         if self.verification_kind not in {"scalar_fields", "schedule_image"}:
             raise ValueError("prepared write verification kind is unsupported")
+        if type(self.restore_on_recovery) is not bool:
+            raise TypeError("prepared write recovery policy must be boolean")
+        power_field = _SCALAR_FIELD_BY_PRODUCT.get(
+            self.target.target.product_key,
+            {},
+        ).get("power")
+        if not self.restore_on_recovery and (
+            self.function != "power"
+            or self.verification_kind != "scalar_fields"
+            or json.loads(self.expected_readback.decode("ascii")) != {power_field: False}
+        ):
+            raise ValueError("only an exact power-off action may retain its forward state")
 
     @property
     def forward_payload_sha256(self) -> str:
@@ -246,6 +259,12 @@ class ConnectedDeviceWriter:
             baseline_readback=_canonical_values(baseline),
             verification_kind="scalar_fields",
             no_change=expected == baseline,
+            # Turning a pump off is already the safer terminal state. Recovery may classify a
+            # fresh read as OFF or as the original baseline, but must never re-enable it merely
+            # to recreate a less-safe pre-write state.
+            restore_on_recovery=not (
+                intent.function == "power" and intent.value is False
+            ),
         )
 
     def _prepare_schedule_reset(

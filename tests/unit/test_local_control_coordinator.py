@@ -53,8 +53,14 @@ def _qualification(function: str) -> QualificationBinding:
     )
 
 
-def _status(*, flow: int = 40, schedule: bytes | None = None) -> bytes:
+def _status(
+    *,
+    enabled: bool = False,
+    flow: int = 40,
+    schedule: bytes | None = None,
+) -> bytes:
     raw = bytearray(LOCAL_WAVEMAKER_PRO.raw_status_size)
+    raw[0] = int(enabled)
     raw[2] = flow
     if schedule is not None:
         start = LOCAL_WAVEMAKER_PRO_SCHEDULE_STATUS_OFFSET
@@ -211,6 +217,7 @@ async def test_scalar_transaction_is_journal_first_verified_and_idempotent(
     record = journal.load(intent.request_id)
     assert record is not None
     assert record.actions[0].phase is ActionPhase.VERIFIED
+    assert record.actions[0].restore_on_recovery is True
 
 
 @pytest.mark.asyncio
@@ -289,6 +296,135 @@ async def test_uncertain_forward_is_never_retried_and_can_restore_fresh_baseline
     assert restored.physical_write_count == 1
     assert len(failed.sent) == 1
     assert len(recovery.sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("recovery_enabled", "diagnostic"),
+    (
+        (False, "safe_state_retained"),
+        (True, "baseline_already_present"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_power_off_recovery_classifies_fresh_state_without_reenabling(
+    tmp_path: Path,
+    recovery_enabled: bool,
+    diagnostic: str,
+) -> None:
+    target = _binding("wavemaker_left", "a")
+    endpoint = ResolvedEndpoint(
+        target,
+        "current-address",
+        wifi_firmware_version="wifi-current",
+    )
+    forward = _Session(
+        [_status(enabled=True)],
+        send_error=TimeoutError("ack lost"),
+    )
+    recovery = _Session([_status(enabled=recovery_enabled)])
+    coordinator, journal = _coordinator(
+        tmp_path,
+        qualifications=(_qualification("power"),),
+        resolver=_Resolver((endpoint,)),
+        sessions=_SessionFactory({"current-address": [forward, recovery]}),
+    )
+    intent = LocalControlIntent(
+        request_id="power_off_0001",
+        target=target,
+        function="power",
+        value=False,
+    )
+
+    with pytest.raises(LocalControlExecutionError, match="will not be retried"):
+        await coordinator.execute(intent)
+    restored = await coordinator.recover(intent.request_id)
+
+    assert restored.phase is TransactionPhase.ROLLED_BACK
+    assert restored.physical_write_count == 0
+    assert len(forward.sent) == 1
+    assert recovery.sent == []
+    record = journal.load(intent.request_id)
+    assert record is not None
+    assert record.actions[0].restore_on_recovery is False
+    assert record.actions[0].phase is ActionPhase.ROLLED_BACK
+    assert record.actions[0].diagnostic == diagnostic
+
+
+@pytest.mark.asyncio
+async def test_power_off_recovery_keeps_unreadable_state_nonterminal_without_a_send(
+    tmp_path: Path,
+) -> None:
+    target = _binding("wavemaker_left", "a")
+    endpoint = ResolvedEndpoint(
+        target,
+        "current-address",
+        wifi_firmware_version="wifi-current",
+    )
+    forward = _Session(
+        [_status(enabled=True)],
+        send_error=TimeoutError("ack lost"),
+    )
+    recovery = _Session([b""])
+    coordinator, journal = _coordinator(
+        tmp_path,
+        qualifications=(_qualification("power"),),
+        resolver=_Resolver((endpoint,)),
+        sessions=_SessionFactory({"current-address": [forward, recovery]}),
+    )
+    intent = LocalControlIntent(
+        request_id="power_off_0002",
+        target=target,
+        function="power",
+        value=False,
+    )
+    with pytest.raises(LocalControlExecutionError, match="will not be retried"):
+        await coordinator.execute(intent)
+
+    with pytest.raises(LocalControlExecutionError, match="no frame was sent"):
+        await coordinator.recover(intent.request_id)
+
+    assert recovery.sent == []
+    record = journal.load(intent.request_id)
+    assert record is not None
+    assert record.phase is TransactionPhase.RECOVERY_REQUIRED
+    assert record.actions[0].phase is ActionPhase.UNCERTAIN
+    assert record.actions[0].diagnostic == "safe_state_readback_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_verified_power_off_is_terminal_and_cannot_be_recovered(
+    tmp_path: Path,
+) -> None:
+    target = _binding("wavemaker_left", "a")
+    endpoint = ResolvedEndpoint(
+        target,
+        "current-address",
+        wifi_firmware_version="wifi-current",
+    )
+    session = _Session([_status(enabled=True), _status(enabled=False)])
+    coordinator, journal = _coordinator(
+        tmp_path,
+        qualifications=(_qualification("power"),),
+        resolver=_Resolver((endpoint,)),
+        sessions=_SessionFactory({"current-address": [session]}),
+    )
+    intent = LocalControlIntent(
+        request_id="power_off_0003",
+        target=target,
+        function="power",
+        value=False,
+    )
+    applied = await coordinator.execute(intent)
+
+    with pytest.raises(LocalControlExecutionError, match="terminal"):
+        await coordinator.recover(intent.request_id)
+
+    assert applied.phase is TransactionPhase.VERIFIED
+    assert len(session.sent) == 1
+    record = journal.load(intent.request_id)
+    assert record is not None
+    assert record.phase is TransactionPhase.VERIFIED
+    assert record.actions[0].phase is ActionPhase.VERIFIED
 
 
 @pytest.mark.asyncio

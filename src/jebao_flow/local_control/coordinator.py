@@ -15,6 +15,7 @@ from jebao_flow.local_control.device_writer import (
     PreparedDeviceWrite,
     SessionFactory,
     extract_current_pro_schedule_image,
+    verify_prepared_baseline,
     verify_prepared_readback,
 )
 from jebao_flow.local_control.install import current_protocol_schema_sha256
@@ -425,6 +426,10 @@ class LocalControlCoordinator:
         record = self._journal.load(request_id)
         if record is None:
             raise KeyError("local-control transaction does not exist")
+        if record.phase is TransactionPhase.VERIFIED:
+            raise LocalControlExecutionError(
+                "verified transaction is terminal and does not require recovery"
+            )
         if record.phase is TransactionPhase.ROLLED_BACK:
             return self._result(record, physical_write_count=0)
 
@@ -459,8 +464,17 @@ class LocalControlCoordinator:
                     continue
                 endpoint = endpoint_by_key[action.target.physical_identity_key]
                 writer = self._writer_factory(endpoint)
-                prepared = self._recovery_prepared(action, endpoint)
                 try:
+                    if not action.restore_on_recovery:
+                        record = await self._retain_safe_state_or_baseline(
+                            record,
+                            index,
+                            action,
+                            endpoint,
+                            writer,
+                        )
+                        continue
+                    prepared = self._recovery_prepared(action, endpoint)
                     current_status = await writer.connect_and_read()
                     if verify_prepared_readback(prepared, current_status):
                         record = self._save_action(
@@ -514,6 +528,61 @@ class LocalControlCoordinator:
                     await writer.close()
             record = self._save_transaction_phase(record, TransactionPhase.ROLLED_BACK)
             return self._result(record, physical_write_count=writes)
+
+    async def _retain_safe_state_or_baseline(
+        self,
+        record: LocalControlJournalRecord,
+        index: int,
+        action: JournalAction,
+        endpoint: ResolvedEndpoint,
+        writer: ConnectedDeviceWriter,
+    ) -> LocalControlJournalRecord:
+        """Classify a safer forward state without ever sending its rollback payload."""
+
+        prepared = self._forward_prepared(action, endpoint)
+        try:
+            current_status = await writer.connect_and_read()
+            forward_is_present = verify_prepared_readback(prepared, current_status)
+            baseline_is_present = (
+                False
+                if forward_is_present
+                else verify_prepared_baseline(prepared, current_status)
+            )
+        except BaseException as error:
+            self._save_action(
+                record,
+                index,
+                phase=ActionPhase.UNCERTAIN,
+                diagnostic="safe_state_readback_unavailable",
+                transaction_phase=TransactionPhase.RECOVERY_REQUIRED,
+            )
+            raise LocalControlExecutionError(
+                "safe-state recovery readback is unavailable; no frame was sent"
+            ) from error
+        if forward_is_present:
+            return self._save_action(
+                record,
+                index,
+                phase=ActionPhase.ROLLED_BACK,
+                diagnostic="safe_state_retained",
+            )
+        if baseline_is_present:
+            return self._save_action(
+                record,
+                index,
+                phase=ActionPhase.ROLLED_BACK,
+                diagnostic="baseline_already_present",
+            )
+        self._save_action(
+            record,
+            index,
+            phase=ActionPhase.UNCERTAIN,
+            diagnostic="safe_state_readback_mismatch",
+            transaction_phase=TransactionPhase.RECOVERY_REQUIRED,
+        )
+        raise LocalControlExecutionError(
+            "safe-state recovery readback matched neither intent nor baseline; no frame was sent"
+        )
 
     async def _execute_prepared(
         self,
@@ -610,6 +679,7 @@ class LocalControlCoordinator:
                     expected_readback_sha256=self._journal.install_blob(item.expected_readback),
                     baseline_readback_sha256=self._journal.install_blob(item.baseline_readback),
                     verification_kind=item.verification_kind,
+                    restore_on_recovery=item.restore_on_recovery,
                 )
             )
         record = LocalControlJournalRecord(
@@ -678,6 +748,26 @@ class LocalControlCoordinator:
             baseline_readback=self._journal.load_blob(action.baseline_readback_sha256),
             verification_kind=action.verification_kind,
             no_change=False,
+        )
+
+    def _forward_prepared(
+        self,
+        action: JournalAction,
+        endpoint: ResolvedEndpoint,
+    ) -> PreparedDeviceWrite:
+        """Rehydrate the original orientation for safe-state and baseline classification."""
+
+        return PreparedDeviceWrite(
+            target=endpoint,
+            function=action.function,
+            forward_payload=self._journal.load_blob(action.forward_payload_sha256),
+            rollback_payload=self._journal.load_blob(action.rollback_payload_sha256),
+            baseline_status=self._journal.load_blob(action.baseline_status_sha256),
+            expected_readback=self._journal.load_blob(action.expected_readback_sha256),
+            baseline_readback=self._journal.load_blob(action.baseline_readback_sha256),
+            verification_kind=action.verification_kind,
+            no_change=False,
+            restore_on_recovery=action.restore_on_recovery,
         )
 
     def _existing_result(self, request_id: str, intent_sha256: str) -> LocalControlResult | None:

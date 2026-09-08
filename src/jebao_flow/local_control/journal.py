@@ -18,7 +18,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from jebao_flow.hardware_safety import hardware_safety_root, validate_hardware_safety_root
 from jebao_flow.local_control.models import LocalDeviceBinding
@@ -49,7 +49,7 @@ class TransactionPhase(StrEnum):
 
 
 class JournalAction(BaseModel):
-    """One physical frame and the exact baseline needed to reverse it."""
+    """One physical frame, its exact baseline, and its durable recovery policy."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -62,6 +62,7 @@ class JournalAction(BaseModel):
     expected_readback_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     baseline_readback_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     verification_kind: str = Field(pattern=r"^(scalar_fields|schedule_image)$")
+    restore_on_recovery: StrictBool = True
     phase: ActionPhase = ActionPhase.PREPARED
     acknowledgement_sha256: str | None = Field(
         default=None,
@@ -71,6 +72,12 @@ class JournalAction(BaseModel):
         default=None,
         pattern=r"^[a-z][a-z0-9_.-]{0,95}$",
     )
+
+    @model_validator(mode="after")
+    def validate_recovery_policy(self) -> Self:
+        if not self.restore_on_recovery and self.function != "power":
+            raise ValueError("only power actions may retain a safer forward state")
+        return self
 
 
 class LocalControlJournalRecord(BaseModel):

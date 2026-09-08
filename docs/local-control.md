@@ -11,7 +11,7 @@ the legacy native-linkage harness. It includes:
 - fresh endpoint discovery for every operation, with IP addresses kept only inside the active
   transport object;
 - a separate owner-only write-ahead journal with immutable forward, rollback, baseline, ACK, and
-  readback blobs;
+  readback blobs plus an explicit per-action recovery policy;
 - the deployment-wide operation lease and the existing per-device physical lock namespace;
 - deterministic scalar writers for the audited schemas, with no `Auto*` status field exposed as a
   write target;
@@ -325,9 +325,20 @@ component qualification are checked before a session or lease is opened. It stil
 group member key in one lease call, then reads all dispatched device baselines, creates one journal
 record, and sends the ordered actions. The transaction becomes `VERIFIED` only after every
 non-no-change action has exact readback. A partial failure remains one `RECOVERY_REQUIRED` record
-whose actions are restored in reverse order; it is never synthesized into group success.
+whose actions are recovered in reverse order under their durable per-action policies; it is never
+synthesized into group success.
 Deliberately skipped members are visible through the total and dispatched member counts rather than
 being reported as physical writes.
+
+`power=false` is a safer terminal action, so its durable recovery policy differs from an ordinary
+setting change. Recovery never sends that action's stored `power=true` baseline merely to recreate
+the less-safe pre-write state. It instead performs one fresh read in the original action direction:
+an exact OFF match is terminalized as `safe_state_retained`, while an exact original ON match is
+terminalized as `baseline_already_present`. If neither state can be established, the action remains
+`UNCERTAIN`, the transaction remains `RECOVERY_REQUIRED`, no frame is sent, and later transactions
+remain blocked for operator resolution. A `ROLLED_BACK` group record can therefore contain a mix of
+retained-safe and baseline-present members; consumers must use each action's diagnostic rather than
+assuming the record phase means every member returned to its original state.
 
 The request id is the durable journal idempotency identity. Reusing it for the same physical intent
 returns the terminal record without another discovery or send; reusing it for a different intent
@@ -432,7 +443,11 @@ unfinished local-control transaction blocks a new request until recovery termina
 
 Each forward frame is preceded by a fresh baseline read and durable `PREPARED` state. The journal is
 advanced to `FORWARD_ATTEMPTING` before send. A missing ACK or readback never causes an automatic
-forward retry. Recovery resolves current endpoints again and uses the exact pre-write rollback bytes.
+forward retry. Recovery resolves current endpoints again and uses the exact pre-write rollback bytes
+for ordinary settings. A `power=false` action is the explicit exception: it is classified by fresh
+readback without sending a rollback frame, because turning a stopped pump back on is not recovery to
+a safe state. This policy covers both single-device and group power-off operations. A `VERIFIED`
+transaction is already terminal and cannot be repurposed as an undo request through `recover`.
 
 MQTT retained and duplicate-marked command messages are rejected. Command discovery and
 subscription use QoS 0 deliberately, so a broker cannot replay an older command after a newer

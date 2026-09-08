@@ -539,6 +539,75 @@ async def test_partial_group_failure_has_one_plan_wide_reverse_recovery_authorit
 
 
 @pytest.mark.asyncio
+async def test_partial_group_stop_recovery_never_reenables_a_verified_off_member(
+    tmp_path: Path,
+) -> None:
+    left = _binding("left", "a")
+    right = _binding("right", "b")
+    left_forward = _Session(
+        [_status(enabled=True, flow=40), _status(enabled=False, flow=40)]
+    )
+    right_forward = _Session(
+        [_status(enabled=True, flow=45)],
+        send_errors=[TimeoutError("ack lost")],
+    )
+    right_recovery = _Session([_status(enabled=True, flow=45)])
+    left_recovery = _Session([_status(enabled=False, flow=40)])
+    sessions = _SessionFactory(
+        {
+            "left": [left_forward, left_recovery],
+            "right": [right_forward, right_recovery],
+        }
+    )
+    endpoints = (
+        ResolvedEndpoint(left, "left", wifi_firmware_version="wifi-current"),
+        ResolvedEndpoint(right, "right", wifi_firmware_version="wifi-current"),
+    )
+    coordinator, journal, _resolver, _lease = _coordinator(
+        tmp_path,
+        endpoints=endpoints,
+        sessions=sessions,
+        qualified_keys=frozenset({left.physical_identity_key, right.physical_identity_key}),
+        functions=("power",),
+    )
+    actuator = _actuator(coordinator, left, right)
+
+    with pytest.raises(LocalControlExecutionError, match="uncertain"):
+        await actuator.execute(
+            request_id="group_stop_0002",
+            plan=_plan(
+                (
+                    _decision("left", DeviceTarget(enabled=False, power=0)),
+                    _decision("right", DeviceTarget(enabled=False, power=0)),
+                ),
+                state=GroupState.STOPPED,
+            ),
+        )
+
+    pending = journal.load("group_stop_0002")
+    assert pending is not None
+    assert pending.phase is TransactionPhase.RECOVERY_REQUIRED
+    assert [action.phase for action in pending.actions] == [
+        ActionPhase.VERIFIED,
+        ActionPhase.UNCERTAIN,
+    ]
+    assert all(action.restore_on_recovery is False for action in pending.actions)
+
+    restored = await coordinator.recover("group_stop_0002")
+
+    assert restored.phase is TransactionPhase.ROLLED_BACK
+    assert restored.physical_write_count == 0
+    assert right_recovery.sent == []
+    assert left_recovery.sent == []
+    restored_record = journal.load("group_stop_0002")
+    assert restored_record is not None
+    assert [action.diagnostic for action in restored_record.actions] == [
+        "safe_state_retained",
+        "baseline_already_present",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_no_dispatch_plan_creates_no_false_physical_success(tmp_path: Path) -> None:
     left = _binding("left", "a")
     right = _binding("right", "b")
