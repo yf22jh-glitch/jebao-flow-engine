@@ -1,4 +1,4 @@
-"""Audited operational profiles for the six observed local devices."""
+"""Audited vendor datapoint profiles for the six observed local devices."""
 
 from __future__ import annotations
 
@@ -57,15 +57,27 @@ def _uint8(
     minimum: int,
     maximum: int,
     values: tuple[str, ...] = (),
+    *,
+    kind: DatapointKind = DatapointKind.WRITABLE,
 ) -> Datapoint:
     return Datapoint(
         id=id_,
         name=name,
         data_type=DataType.UINT8,
-        kind=DatapointKind.WRITABLE,
+        kind=kind,
         position=Position(byte_offset=byte_offset),
         enum_values=values,
         numeric=NumericSpec(minimum=minimum, maximum=maximum),
+    )
+
+
+def _binary(id_: int, name: str, byte_offset: int, length: int) -> Datapoint:
+    return Datapoint(
+        id=id_,
+        name=name,
+        data_type=DataType.BINARY,
+        kind=DatapointKind.WRITABLE,
+        position=Position(byte_offset=byte_offset, length=length),
     )
 
 
@@ -116,6 +128,12 @@ DC_PUMP_PRO = ProductSchema(
         _uint8(7, "AutoFlow", 6, 0, 100),
         _uint8(8, "AutoFreq", 7, 0, 100),
         _uint8(9, "AutoFeedTime", 8, 1, 60),
+        *tuple(
+            _binary(10 + index, f"AutoTime{index:02d}", 9 + index * 8, 8)
+            for index in range(48)
+        ),
+        _binary(58, "YMDData", 393, 4),
+        _binary(59, "HMSData", 397, 4),
         *_faults(60, 401),
     ),
     enabled_attribute="SwitchON",
@@ -150,6 +168,11 @@ DOSING_PUMP = ProductSchema(
         _uint8(13, "IntervalT3", 4, 0, 30),
         _uint8(14, "IntervalT4", 5, 0, 30),
         _uint8(15, "Calib1", 6, 10, 100),
+        _binary(16, "CH1SWTime", 7, 96),
+        _binary(17, "CH2SWTime", 103, 96),
+        _binary(18, "CH3SWTime", 199, 96),
+        _binary(19, "CH4SWTime", 295, 96),
+        _uint8(20, "time1", 391, 10, 250, kind=DatapointKind.READ_ONLY),
         _bool(21, "OpenCircuit", 0, byte_offset=392, kind=DatapointKind.ALERT),
         _bool(22, "Fault_UART", 0, byte_offset=393, kind=DatapointKind.FAULT),
     ),
@@ -180,6 +203,12 @@ LOCAL_WAVEMAKER = ProductSchema(
         _uint8(11, "AutoFlow", 5, 0, 100),
         _uint8(12, "AutoFreq", 6, 0, 100),
         _uint8(13, "AutoFeedTime", 7, 1, 60),
+        *tuple(
+            _binary(14 + index, f"AutoTime{index:02d}", 8 + index * 8, 8)
+            for index in range(48)
+        ),
+        _binary(62, "YMDData", 392, 4),
+        _binary(63, "HMSData", 396, 4),
         *_faults(64, 400),
     ),
     enabled_attribute="SwitchON",
@@ -208,6 +237,12 @@ AQUARIUM_PUMP = ProductSchema(
         _uint8(6, "FeedTime", 2, 1, 60),
         _uint8(7, "AutoGears", 3, 0, 100),
         _uint8(8, "AutoFeedTime", 4, 1, 60),
+        _binary(9, "YMDData", 5, 4),
+        _binary(10, "HMSData", 9, 4),
+        *tuple(
+            _binary(11 + index, f"AutoTime{index:02d}", 13 + index * 6, 6)
+            for index in range(48)
+        ),
         *_faults(59, 301),
     ),
     enabled_attribute="SwitchON",
@@ -271,6 +306,12 @@ LOCAL_WAVEMAKER_PRO = ProductSchema(
         _uint8(10, "AutoFreq", 8, 0, 100),
         _uint8(11, "Auto_Cust_Wav_Freq", 9, 0, 100),
         _uint8(12, "AutoFeedTime", 10, 1, 60),
+        *tuple(
+            _binary(13 + index, f"AutoTime{index:02d}", 11 + index * 9, 9)
+            for index in range(48)
+        ),
+        _binary(61, "YMDData", 443, 4),
+        _binary(62, "HMSData", 447, 4),
         *_faults(63, 451),
     ),
     enabled_attribute="SwitchON",

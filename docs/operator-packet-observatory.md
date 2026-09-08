@@ -9,10 +9,12 @@ Assistant에서 제어할 수 있게 하는 것입니다. 두 Local Wavemaker Pr
 schedule slot 전체를 slave에 투영하면서 slave마다 각 slot의 Flow를 따로 지정하는 확장 모델도
 포함합니다.
 
-현재 구현 범위는 **write-free Track A/B**입니다. PCAP ingest, TCP 재조립, frame catalog,
-내구성 있는 raw 증거, 앱 기능 catalog, 증거 승격의 offline 단계, inert schedule model과
-Home Assistant 진단 projection을 제공합니다. 장비 write encoder, write session, HA control
-service와 packet injection은 아직 존재하지 않습니다.
+Track A/B는 PCAP ingest, TCP 재조립, frame catalog, 내구성 있는 raw 증거, 앱 기능 catalog,
+증거 승격의 offline 단계와 inert schedule model을 제공합니다. 별도 승인으로 부분 해제된 Track C는
+`local_control/`에 격리된 writer, 독립 write-ahead journal, fresh endpoint resolver, Home Assistant/MQTT
+adapter와 Pro slave별 48-slot Flow composition을 구현했습니다. 구현과 실장비 qualification은
+분리하며, 현재 accepted write 영수증은 다섯 제품 전체에서 `0`입니다. 상세 계약은
+[`local-control.md`](local-control.md)를 따릅니다.
 
 ## 구조
 
@@ -29,7 +31,6 @@ Jebao app or local controller <---- unchanged LAN traffic ----> device
                                 |
         capability evidence ledger -> read-only HA diagnostics
 
-  [not implemented before unfreeze]
   qualified catalog bytes -> separate device_writer -> ACK/readback -> HA controls
 ```
 
@@ -80,6 +81,9 @@ semantic뿐입니다. operational frame digest는 증거 승격에 필요할 때
 가진 PCAP packet과 login/passcode/discovery identity frame의 raw-object digest는 사전대입
 위험 때문에 공개 event에서 제거합니다. private root 경로와 raw bytes를 출력하지 않습니다.
 operator note도 MAC, 32-hex device id, IPv4 모양을 거부합니다.
+Binary schedule과 clock datapoint는 semantic JSON에 raw bytes를 복제하지 않고 각 필드의
+길이와 content SHA-256으로만 투영하므로, schema 확장 뒤에도 event는 직렬화 가능하고 bounded
+raw provenance는 private blob에 남습니다.
 
 ### Fresh install preparation
 
@@ -111,10 +115,10 @@ Assistant의 이름과 상태 문자열은 ASCII 영문만 허용하며 앱 arti
 | `OBSERVED` | preserved capture에 exact frame과 출처가 있음 | diagnostic만 |
 | `REPRODUCED` | 같은 의미의 서로 다른 retained occurrence가 2개 이상 | diagnostic만 |
 | `DIFFERENTIAL` | 이웃 값 비교에서 기대한 영역만 달라 의미를 확인 | diagnostic만 |
-| `QUALIFIED` | 별도 승인 실측과 ACK/readback 영수증 2/2 | **미구현** |
+| `QUALIFIED` | 별도 승인 실측과 ACK/readback 영수증 2/2 | 해당 physical device에만 control 노출; 현재 영수증 0 |
 
 `OBSERVED`를 곧바로 control로 노출하지 않습니다. UI control의 존재는 지원된다는 주장과 같기
-때문입니다. 향후 HA control의 native 범위도 앱의 `0..100`을 보여 준 뒤 뒤에서 clamp하지 않고,
+때문입니다. 구현된 HA control의 native 범위도 앱의 `0..100`을 보여 준 뒤 뒤에서 clamp하지 않고,
 저장소의 안전 envelope인 `30..75`를 UI 자체가 정직하게 표시합니다.
 
 승격은 아래 순서를 건너뛰지 않습니다.
@@ -130,9 +134,11 @@ Assistant의 이름과 상태 문자열은 ASCII 영문만 허용하며 앱 arti
 `INFEASIBLE_BY_APP`와 `UNKNOWN_ON_DEVICE`가 동시에 참입니다. `앱이 표현하지 못함`을
 `장비가 지원하지 않음`으로 승격하지 않습니다.
 
-writer가 schema 이름에서 새 bytes를 재도출하는 경로는 허용하지 않습니다. 각 replay 후보는
-유래 capture session·seq·frame digest를 가져야 합니다. 앱이 기능을 표현하지 못한다는 결과와
-firmware가 기능을 지원하지 않는다는 결과도 구분합니다.
+관측 단계의 replay 후보는 유래 capture session·seq·frame digest를 가져야 합니다. 별도로
+qualification된 local-control writer는 현재 설치의 content digest에 결속된 audited schema로
+결정론적 payload를 만들 수 있지만, catalog에 없는 필드나 `Auto*` status write를 추측해
+추가하지 않습니다. 앱이 기능을 표현하지 못한다는 결과와 firmware가 기능을 지원하지 않는다는
+결과도 구분합니다.
 
 ## 앱 parity와 확장 schedule
 
@@ -153,12 +159,12 @@ automation cloud를 로컬 runtime 의존성으로 복제한다는 뜻은 아닙
 필요하면 별도의 local equivalent로 명시합니다.
 
 `NativeSchedulePlan`은 정확히 48칸인 Pro master slot vector와 하나 이상의 logical slave를
-가집니다. 각 칸은 active schedule 또는 명시적인 unused 상태이며, 각 slave는 모든 active
-master slot의 time/mode/frequency/feed/custom-frequency를 그대로
-상속하고 slot별 Flow만 `30..75` 안에서 override합니다. override 부재는 master Flow를 계속
-상속한다는 뜻이고, master와 같은 값을 명시적으로 override한 것은 master가 나중에 바뀌어도
-그 값을 유지한다는 별도 의도입니다. 앱의 공통 slave `Flow`도 slot별 `AutoFlow`와 합치지 않고
-별도 필드로 둡니다.
+가집니다. 각 칸은 active schedule 또는 명시적인 unused 상태이며, runtime은 master의
+time/mode/frequency/feed/custom-frequency bytes를 slave에 복사합니다. 각 active slot의 Flow는
+그 slave의 fresh current image에서 보존하고 명시된 `30..75` override만 교체합니다. current
+slave slot이 unused인 경우에만 master Flow로 시작합니다. 따라서 bulk composition이 이전에
+설정한 slave별 Flow를 조용히 master 값으로 되돌리지 않습니다. 앱의 공통 slave `Flow`도 slot별
+`AutoFlow`와 합치지 않고 별도 operation으로 둡니다.
 
 Sync와 Async 모두 같은 desired-state 모델을 쓰며 48개 원소 각각에 안전 envelope를
 적용합니다. Pro의 slot byte `5`는 mode와 무관한 Flow이지만 다른 제품군에서는 같은 위치가
@@ -172,11 +178,11 @@ slave slot editor가 없으므로 앱 capture에서 이 기능의 완성 frame�
 승자를 발명하지 않습니다. 공통 slave Flow와 per-slot override는 별도 operation으로 유지하고
 한쪽이 다른 쪽보다 우선한다고 암묵적으로 합성하지 않습니다.
 
-최종 인코딩 근거는 구성적으로 얻습니다. 앱의 master schedule 저장에서 48x9 schedule write
-형식을, 앱의 공통 slave Flow에서 별도 속성 인코딩을, read-only slave state에서 장비별 432-byte
-slot image를 각각 보존합니다. 이후 동결 해제 아래의 bounded test는 master frame을 무비판적으로
-복사하는 것이 아니라, 위 differential 증거로 확인된 slot byte `5`만 slave별 override로 구성해
-검증합니다. 이 구성은 passive capture만으로 device support를 확정하지 못합니다.
+최종 인코딩 근거는 vendor product definition과 앱의 저장 dataflow에서 구성적으로 얻습니다.
+Pro의 48x9 schedule layout, slot byte `5` Flow, 개별 `AutoTimeNN` write와 all-slot reset 형태는
+정적으로 결속됐습니다. runtime은 매 operation에서 master와 각 slave의 fresh 432-byte image를
+읽고, master schedule bytes와 slave Flow를 위 규칙으로 조합합니다. 이 결정론적 구성은 device
+acceptance를 뜻하지 않으며, bounded live qualification 전까지 control은 숨겨집니다.
 
 ## 앱 본체와 template 전체 감사 경계
 
@@ -187,12 +193,17 @@ credential·token store는 열지 않고, 추출·decompile 산출물과 private
 넣지 않습니다.
 
 숫자가 가장 큰 cached template를 active라고 간주하지 않습니다. template의 영구 identity는
-JavaScript **내용 SHA-256**뿐이며 cache directory 이름·mtime·size는 provenance일 뿐 mapping이나
-gate가 아닙니다. 기능 evidence에는 앱 버전, **실제로 선택된 template 버전과 그 content
-digest**, firmware 버전을 한 묶음으로 결속합니다. 현재 active template 선택은 `unresolved`이고,
-이것을 추측으로 채우지 않습니다. save와 reset의
-dataflow, reset이 default write를 발생시키는지, Sync/Async 진입·이탈 때의 write 순서도 각각
-독립 capability로 추적합니다.
+JavaScript **내용 SHA-256**뿐이며 cache directory 이름·bundle id·mtime·size는 provenance일 뿐
+mapping이나 gate가 아닙니다. Bundle id는 실제 제품과 일치하지 않았으므로 product-specific
+datapoint fingerprint와 content digest로 매핑합니다. 현재 runtime-active template 선택은
+`unresolved`이지만, 여러 retained 판본에서 같은 save/reset/clock/Linkage dataflow는 그 digest
+집합에 결속된 static fact로 기록합니다.
+
+Native audit도 완료했습니다. Template `sendCmd`는 semantic object를 host `callService`로 넘기고,
+앱은 Gizwits SDK `write:withSN:`으로 진입하며, SDK가 vendor product definition에서 P0 bytes를
+조립합니다. 네 schedule 제품의 exact geometry, `0xEE` unused sentinel, zero-prefixed HMS,
+제품별 single-slot/full-image save와 reset 차이는 이 경로에서 확인됐습니다. Wire acceptance와
+물리 효과는 별도 evidence 축이라 계속 `UNKNOWN`입니다.
 
 Hermes 본체의 `sendCmd` wrapper는 payload를 native host call로 넘기기 전에 local `data`에
 낙관적으로 합치고, 전송 뒤 약 2초 동안 같은 key의 incoming update가 local 값을 덮지 않도록
@@ -216,12 +227,10 @@ private artifact의 opaque id, UTC span, digest와 identity binding만 기록합
 `protocol.control_session` 또는 미래의 `operator_capture.device_writer`가 들어가지 않습니다.
 회귀 테스트가 이 경계를 고정합니다. 기존 동결 여섯 파일과 그 테스트도 수정하지 않습니다.
 
-write-capable local runtime, packet replay, HA control service, Sync/Async schedule write는
-`AGENTS.md` §1의 동결 대상과 실질적으로 같은 질문을 다루므로 다음 둘 전에는 구현하지 않습니다.
+write-capable local runtime, HA control service와 Sync/Async schedule composition은
+`AGENTS.md`의 2026-09-08 부분 해제와 `unfreeze:` commit 아래 신규 `local_control/` 경로로만
+구현합니다. 기존 동결 여섯 파일과 관측기의 write-free import closure는 그대로 유지합니다.
 
-1. repository maintainer가 새 operator/local-control 모듈의 정확한 범위를 명시적으로 해제
-2. 해제 사유·안전 envelope·재개 조건과 `unfreeze:` trailer를 담은 별도 commit
-
-그 뒤에도 device write, 앱 조작, HA 연결, passive mirror 배치는 각각 별도 실기 승인과 exact
+구현 뒤에도 device write, 앱 조작, HA 연결, passive mirror 배치는 각각 별도 실기 승인과 exact
 restore 준비를 요구합니다. app-transparent relay/MITM은 local-first 제품에 필요하지 않으며,
 추후 필요성이 증명될 때 별도 위험 경계로 검토합니다.

@@ -63,7 +63,43 @@ _AUTO_FIELDS = frozenset(
         "Auto_Cust_Wav_Freq",
         "AutoFeedTime",
         "AutoPulseTide",
+        "AutoGears",
     }
+)
+_SCHEDULE_BINARY_FIELDS = frozenset(
+    {"YMDData", "HMSData"} | {f"AutoTime{index:02d}" for index in range(48)}
+)
+_DOSING_FIELDS = frozenset(
+    {
+        "switch",
+        "channe1",
+        "channe2",
+        "channe3",
+        "channe4",
+        "Timer1ON",
+        "Timer2ON",
+        "Timer3ON",
+        "Timer4ON",
+        "CALSW",
+        "CALSet",
+        "IntervalT1",
+        "IntervalT2",
+        "IntervalT3",
+        "IntervalT4",
+        "Calib1",
+        "CH1SWTime",
+        "CH2SWTime",
+        "CH3SWTime",
+        "CH4SWTime",
+        "time1",
+    }
+)
+_SCHEMA_FIELDS = frozenset(
+    _MANUAL_FIELDS
+    | _AUTO_FIELDS
+    | _SCHEDULE_BINARY_FIELDS
+    | _DOSING_FIELDS
+    | {"Motor_Speed"}
 )
 _DATAPOINT_SUFFIXES = ("datapoint_id", "data_type", "schema_range", "enum_values")
 _SCHEMA_L0_SUBJECTS = frozenset(
@@ -83,7 +119,7 @@ SCHEMA_SUBJECTS = frozenset(
     _SCHEMA_L0_SUBJECTS
     | {
         f"{field}.{suffix}"
-        for field in _MANUAL_FIELDS | _AUTO_FIELDS
+        for field in _SCHEMA_FIELDS
         for suffix in _DATAPOINT_SUFFIXES
     }
     | {"AutoMode.code_space"}
@@ -384,7 +420,7 @@ def _attribute_for_claim(claim: Claim) -> Any | None:
     if "." not in claim.subject:
         return None
     field = claim.subject.split(".", 1)[0]
-    if field not in _MANUAL_FIELDS | _AUTO_FIELDS:
+    if field not in _SCHEMA_FIELDS:
         return None
     from jebao_flow.protocol.profiles import get_product_schema
 

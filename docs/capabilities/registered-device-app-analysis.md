@@ -318,7 +318,7 @@ native mode와 Linkage는 없고 네 채널이 고정입니다.
 | entry | hour, minute, volume uint16 big-endian |
 | interval | `V` 0..30, 단위 선언 없음; `U` label과 picker는 Days |
 | calibration | `V` 10..100; `U`는 10 단위만 허용 |
-| calibration time | `V` 10..250 seconds |
+| calibration duration | `V` `time1` 10..250, unit 미선언; `U` 영문 label `Calibration duration` |
 | volume | `U`는 숫자 최대 4자리; 장비 accepted·safe range는 `?` |
 
 24×4 내부 layout과 Days·10단위 제약은 `U`에서 파생됐으며 vendor binary 정의 자체가 하위
@@ -430,3 +430,103 @@ readback을 각각 보존해야 합니다. `APP2DEV` 이름의 SDK notification�
 `app 3.4.18 / active template / firmware` 결속 중 active template는 `unresolved`입니다. active
 선택 경로, save/reset dataflow(reset이 write인지 포함), Linkage 진입·이탈 write sequence는
 남은 정적 감사 항목이며 확인 전에는 추측으로 catalog 상태를 올리지 않습니다.
+
+### 2026-09-08 native SDK와 제품별 template 전수 감사 정정
+
+위 마지막 문단의 `save/reset`·Linkage 전이·native 수신 경로는 후속 read-only 정적 감사로
+닫혔습니다. `active template` 선택 자체는 계속 `unresolved`이지만, 아래 결론은 제품별 datapoint
+fingerprint로 식별한 retained template 판본들에서 같았으므로 cache 이름이나 최신판 추측에
+의존하지 않습니다. 앱 실행·로그인·network·장비 접촉과 write는 모두 `0`이었고, provisioning,
+Keychain, credential/token store, SDK/HTTP log와 crash cache는 제외했습니다.
+
+#### Native boundary와 wire layout authority
+
+- template의 `sendCmd`는 host `callService("sendCmd", semantic_payload)`를 호출합니다.
+- 앱은 Gizwits SDK의 `write:withSN:`으로 들어가며, SDK가 vendor product definition의
+  datapoint name·type·offset·length로 P0 payload를 다시 인코딩합니다. JavaScript가 완성된 packet
+  bytes를 verbatim 전달하는 구조가 아닙니다.
+- SDK selector에서 app-to-device P0 `0x0093`, device-to-app P0 `0x0094` command pair와
+  sequence/header 조립 경계를 확인했습니다. attribute flag bit order는 retained wire
+  differential이 남아 있습니다.
+- 다섯 product definition의 datapoint offset, 범위, slot geometry와 fault base를 source와 전수
+  대조했습니다. Pro `48x9`, Bar `48x8`, DC Pump Pro `48x8`, Aquarium `48x6`, Dosing
+  `4 x 96` bytes가 모두 일치합니다.
+
+Product definition은 layout authority지만 write acceptance 증거는 아닙니다. 다섯 제품의 accepted
+write는 계속 `0`이며, `ENC`는 결정론적 bytes가 있다는 뜻으로만 사용합니다.
+
+#### Template identity 정정
+
+bundle id는 제품 identity가 아니었습니다. 제품별 datapoint fingerprint로 확인한 매핑은 다음과
+같습니다.
+
+| template family token | fingerprint로 확인한 제품 |
+|---|---|
+| `aquariumPumpPro.1` | Local Wavemaker Pro |
+| `zaolang` | Local Wavemaker bar |
+| `shuibeng` | Aquarium Pump |
+| `dcPro` | DC Pump Pro |
+| `doser.1` | Dosing Pump |
+| `auto.1` | 공통 auto/scene surface |
+
+따라서 과거의 `zaolang = Pro` 식 추론은 사용하지 않습니다. 영구 결속은 JavaScript content
+SHA-256과 datapoint fingerprint뿐이고 bundle/cache 이름·경로·mtime·size는 mapping이나 gate가
+아닙니다.
+
+#### Schedule, reset, clock의 제품별 정적 결론
+
+- 네 schedule 제품 모두 `YMDData=[century, year, month, day]`와
+  `HMSData=[0, hour, minute, second]`를 한 command로 보냅니다. 선행 `0`은 이제 static-confirmed
+  입니다.
+- unused slot은 제품 slot size에 맞는 `0xEE` 반복입니다. production app은 all-zero를 unused로
+  보지 않는 경로가 있으므로 writer는 `0xEE`를 사용합니다. read-only decoder가 기존 zero image를
+  보존하는 것은 별개입니다.
+- Pro와 DC Pump Pro는 선택한 `AutoTimeNN` 하나를 저장하고 별도 reset-all에서 48개 datapoint를
+  한 command로 보냅니다. reset sentinel은 각각 `0xEE x 9`, `0xEE x 8`입니다.
+- Bar와 Aquarium은 저장할 때 48개 전체 image를 한 command로 교체하고 목록에 없는 slot을
+  `0xEE`로 만듭니다. 별도 reset action은 없습니다.
+- Pro와 DC의 app-equivalent slot save에서 `start == stop` 또는 `start > stop`은 해당 slot을
+  clear합니다. 이것은 writer 의미이며, read/restore가 기존 역전 또는 동일시각 bytes를 거부해야
+  한다는 뜻은 아닙니다.
+- DC의 한 clear branch는 vendor length 8보다 긴 `0xEE x 9`를 만듭니다. local encoder는 vendor
+  definition의 8 bytes를 따르며 SDK/firmware의 over-length 처리는 `UNKNOWN`으로 남깁니다.
+
+#### Mode와 timer 의미
+
+Pro manual Mode의 wire code와 앱 영문 label은 `0 Pulse`, `1 Sine`, `2 Constant`, `3 Random`,
+`4 Tide Rise and Fall`, `5 Nutrient Transport`, `6 Cross-flow`, `7 Feeding`, `8 Custom Wave`입니다.
+표시 순서는 code 순서와 다르지만 code mapping 자체는 두 retained 판본에서 같습니다. DC manual
+Mode는 `0 Constant Flow`, `1 Pulse Wave`, `2 Sine Wave`, `3 Random Wave`, `4 Feed Mode`입니다.
+DC schedule mode code 1·2는 manual code space와 같다고 승격하지 않고 계속 `UNKNOWN`입니다.
+
+Pro timer toggle은 항상 inverse `SwitchON`을 함께 쓰고, 현재 Linkage가 `2` 또는 `3`이면 같은
+command에 `Linkage=0`을 넣어 independent로 detach합니다. DC에는 서로 다른 두 timer coupling이
+있고 화면별 선택 근거가 아직 없습니다. Bar와 Aquarium timer command는 현재 `Auto*` 값도 함께
+씁니다. 따라서 Pro만 exact app-equivalent timer shape가 있고, 나머지 세 제품 timer는 동일한
+상위 기능 이름만으로 단순화하지 않습니다.
+
+#### Dosing 정적 결론
+
+Vendor definition은 `CH1SWTime..CH4SWTime`을 각각 96-byte writable binary로 선언하고
+`time1`을 byte 391의 read-only `10..250` 값으로 선언합니다. Template은 각 channel image를
+24개 entry의 `[hour, minute, volume_uint16_be]`로 읽고 쓰며, 변경하지 않은 entry를 byte-exact로
+복사한 뒤 96 bytes 전체를 교체합니다.
+
+앱은 volume을 integer `mL`로 표시하고 fractional scale·rounding을 적용하지 않습니다. 직접
+표현 가능한 최소 positive schedule amount는 `1 mL`입니다. Calibration input `Calib1`은 정확히
+`10,20,...,100`만 허용하며 `0.5`는 거부합니다. `time1`의 앱 영문 label은
+`Calibration duration`이지만 vendor unit은 미선언입니다. 그러므로 `10 mL` calibration은
+`0.5 mL` encoding 근거가 아니며, 0.5는 local planner precision으로만 남습니다. 앱의 interval
+picker를 이용한 `1 mL / 2 days`는 일평균 0.5 mL 계획을 표현할 수 있지만 interval의 device
+semantics와 write acceptance는 여전히 `UNKNOWN`입니다.
+
+#### 감사 후에도 남은 것
+
+- Pro Q2: master Mode/timing과 slave slot Flow의 실제 소유권 분할
+- Pro Q1: manual slave Flow 독립 유지
+- 네 schedule 제품과 Dosing의 모든 write acceptance
+- DC schedule mode 1·2와 두 timer coupling의 화면 귀속
+- Bar/Aquarium timer의 `Auto*` write acceptance
+- Aquarium transport boolean 방향과 Motor Speed 안전 범위
+- Dosing volume code 물리 단위, calibration scale 관계, interval semantics
+- runtime-active template 선택과 P0 attribute flag bit order

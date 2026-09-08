@@ -141,7 +141,14 @@ async def _probe_one(
                 raise ProtocolError(f"could not discover a product key for {address}")
             product_key = devices[0].product_key
             schema = get_product_schema(product_key)
-            decoded = schema.decode_status(state)
+            # Binary schedule/clock images already remain available in ``state_hex``. Keep the
+            # semantic JSON projection bounded and serializable instead of duplicating every raw
+            # image as an ad-hoc text encoding.
+            decoded = {
+                name: value
+                for name, value in schema.decode_status(state).items()
+                if not isinstance(value, (bytes, bytearray, memoryview))
+            }
             return ProbeResult(
                 address=address,
                 success=True,

@@ -1,8 +1,8 @@
 """Read-only decoding of audited Jebao controller schedules.
 
 The four supported pump families all expose 48 daily slots, but their offsets, slot sizes,
-mode numbers, and parameter bytes differ.  Decoding is therefore selected by product key; no
-write/encode counterpart is intentionally provided here.
+mode numbers, and parameter bytes differ. Decoding is therefore selected by product key. Exact
+offline encoding lives at the isolated local-control write edge and is not implied by this module.
 """
 
 from __future__ import annotations

@@ -1579,17 +1579,20 @@ class LanJebaoDevice(JebaoDevice):
         observed_attributes = {
             name: value
             for name, value in values.items()
-            if name.startswith(("Timer", "Auto", "Feed", "Interval"))
-            or name
-            in {
-                "PulseTide",
-                "Linkage",
-                "Cust_Wav_Freq",
-                "channe1",
-                "channe2",
-                "channe3",
-                "channe4",
-            }
+            if not isinstance(value, (bytes, bytearray, memoryview))
+            and (
+                name.startswith(("Timer", "Auto", "Feed", "Interval"))
+                or name
+                in {
+                    "PulseTide",
+                    "Linkage",
+                    "Cust_Wav_Freq",
+                    "channe1",
+                    "channe2",
+                    "channe3",
+                    "channe4",
+                }
+            )
         }
         return DeviceState(
             online=True,

@@ -89,10 +89,10 @@ class Datapoint:
 class ProductSchema:
     """The selected operational datapoints for one known product family.
 
-    ``attribute_flags_size`` and ``attribute_values_size`` describe the complete vendor schema,
-    including schedule fields that the engine deliberately does not expose. Keeping those wire
-    sizes explicit lets a small audited set of operational attributes produce correctly sized
-    frames without copying hundreds of schedule definitions into this project.
+    ``attribute_flags_size`` and ``attribute_values_size`` describe the complete vendor schema.
+    Binary schedule and clock datapoints remain explicit so readback and offline encoding use the
+    same content-derived layout as the installed app. Product services decide which fields are
+    exposed; schema membership alone never qualifies a hardware control.
     """
 
     name: str

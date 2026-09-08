@@ -339,7 +339,17 @@ def _summarize_serial_state(
             unknown_regions=(UnknownRegion(offset=1, length=max(1, len(status)), reason=reason),),
         )
     semantic["product_key"] = product_key
-    semantic["operational_state"] = schema.decode_status(status)
+    semantic["operational_state"] = {
+        name: (
+            {
+                "length": len(value),
+                "value_sha256": hashlib.sha256(value).hexdigest(),
+            }
+            if isinstance(value, bytes)
+            else value
+        )
+        for name, value in schema.decode_status(status).items()
+    }
     return ProtocolSummary.create(
         disposition="known",
         command=frame.command,

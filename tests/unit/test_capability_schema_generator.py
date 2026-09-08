@@ -99,6 +99,10 @@ def test_generator_derives_schedule_sizes_and_distinguishes_sources() -> None:
     assert bar["schedule_image_size_bytes"].value == 384
     assert pro["schedule_slot_size_bytes"].value == 9
     assert bar["schedule_slot_size_bytes"].value == 8
+    assert pro["AutoTime00.data_type"].value == "binary"
+    assert pro["AutoTime47.datapoint_id"].value == 60
+    assert pro["YMDData.datapoint_id"].value == 61
+    assert pro["HMSData.datapoint_id"].value == 62
     assert ".protocol.schedule@" in pro["schedule_image_size_bytes"].source
     assert ".protocol.profiles@" in pro["Flow.schema_range"].source
 

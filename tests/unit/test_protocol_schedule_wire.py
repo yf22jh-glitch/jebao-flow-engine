@@ -345,11 +345,11 @@ def test_multi_slot_control_payload_sets_first_and_last_schedule_datapoints_only
     assert values[443:451] == bytes(8)
 
 
-def test_control_payload_does_not_add_schedule_attributes_to_operational_schema() -> None:
-    assert all(
-        not attribute.name.startswith("AutoTime")
+def test_control_payload_uses_complete_vendor_schedule_schema_without_public_state_leak() -> None:
+    assert sum(
+        attribute.name.startswith("AutoTime")
         for attribute in LOCAL_WAVEMAKER_PRO.attributes
-    )
+    ) == 48
     assert LOCAL_WAVEMAKER_PRO.by_name("AutoFlow").position.byte_offset == 7
 
 

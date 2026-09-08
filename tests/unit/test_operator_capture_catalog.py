@@ -94,6 +94,10 @@ def test_state_reply_is_decoded_only_for_exact_product_size() -> None:
     assert summary.disposition == "known"
     assert summary.semantic["status_sha256"] == hashlib.sha256(status).hexdigest()
     assert summary.semantic["operational_state"]["Flow"] == 0
+    assert summary.semantic["operational_state"]["AutoTime00"] == {
+        "length": 9,
+        "value_sha256": hashlib.sha256(bytes(9)).hexdigest(),
+    }
 
 
 def test_registered_app_catalog_covers_every_observed_product_family() -> None:

@@ -130,8 +130,7 @@ _CLOCK = AppFunction(
     "device_clock_sync",
     AppFunctionKind.ACTION,
     ("YMDData", "HMSData"),
-    confidence=CapabilityConfidence.VENDOR_DECLARED,
-    caveat="wire declaration; app-trigger timing requires capture",
+    caveat="app writes YMD and zero-prefixed HMS in one command",
 )
 _PUMP_FAULTS = AppFunction(
     "fault_status",
@@ -154,7 +153,14 @@ LOCAL_WAVEMAKER_PRO_APP = AppProductCatalog(
     registered_instances=2,
     functions=(
         _POWER,
-        _TIMER,
+        AppFunction(
+            "schedule_enable",
+            AppFunctionKind.BOOLEAN,
+            ("TimerON", "SwitchON", "Linkage"),
+            caveat=(
+                "app writes inverse SwitchON and returns a current slave Linkage to independent"
+            ),
+        ),
         AppFunction(
             "linkage_role",
             AppFunctionKind.ENUM,
@@ -172,7 +178,7 @@ LOCAL_WAVEMAKER_PRO_APP = AppProductCatalog(
                 "random",
                 "tidal",
                 "nutrient_transport",
-                "circulation",
+                "Cross-flow",
                 "feed",
                 "custom",
             ),
@@ -242,8 +248,18 @@ LOCAL_WAVEMAKER_PRO_APP = AppProductCatalog(
             ("AutoMode", "AutoFlow", "AutoFreq", "Auto_Cust_Wav_Freq", "AutoFeedTime"),
             confidence=CapabilityConfidence.VENDOR_DECLARED,
         ),
-        AppFunction("schedule_reset", AppFunctionKind.ACTION, ("AutoTime00..47",)),
-        _CLOCK,
+        AppFunction(
+            "schedule_reset",
+            AppFunctionKind.ACTION,
+            ("AutoTime00..47",),
+            caveat="app writes one command containing 48 slots of nine 0xee bytes",
+        ),
+        AppFunction(
+            "device_clock_sync",
+            AppFunctionKind.ACTION,
+            ("YMDData", "HMSData"),
+            caveat="app writes YMD and zero-prefixed HMS in one command",
+        ),
         _PUMP_FAULTS,
     ),
 )
@@ -254,7 +270,12 @@ LOCAL_WAVEMAKER_APP = AppProductCatalog(
     registered_instances=1,
     functions=(
         _POWER,
-        _TIMER,
+        AppFunction(
+            "schedule_enable",
+            AppFunctionKind.BOOLEAN,
+            ("TimerON", "Flow", "Frequency", "Mode", "PulseTide", "Linkage", "FeedSwitch"),
+            caveat="app command shape depends on the selected timer screen and current auto state",
+        ),
         AppFunction("feed_switch", AppFunctionKind.BOOLEAN, ("FeedSwitch",)),
         AppFunction("pulse_or_tide", AppFunctionKind.BOOLEAN, ("PulseTide",)),
         AppFunction(
@@ -301,6 +322,7 @@ LOCAL_WAVEMAKER_APP = AppProductCatalog(
             ),
             count=48,
             item_size=8,
+            caveat="app replaces all 48 slots and writes 0xee for unused positions",
         ),
         AppFunction(
             "current_schedule_state",
@@ -308,7 +330,6 @@ LOCAL_WAVEMAKER_APP = AppProductCatalog(
             ("AutoPulseTide", "AutoMode", "AutoFlow", "AutoFreq", "AutoFeedTime"),
             confidence=CapabilityConfidence.VENDOR_DECLARED,
         ),
-        AppFunction("schedule_reset", AppFunctionKind.ACTION, ("AutoTime00..47",)),
         _CLOCK,
         _PUMP_FAULTS,
     ),
@@ -320,7 +341,13 @@ DC_PUMP_PRO_APP = AppProductCatalog(
     registered_instances=1,
     functions=(
         _POWER,
-        _TIMER,
+        AppFunction(
+            "schedule_enable",
+            AppFunctionKind.BOOLEAN,
+            ("TimerON", "SwitchON"),
+            confidence=CapabilityConfidence.ACCEPTED_CAPTURE_REQUIRED,
+            caveat="two audited app screens use conflicting SwitchON coupling",
+        ),
         AppFunction(
             "manual_mode",
             AppFunctionKind.ENUM,
@@ -367,7 +394,12 @@ DC_PUMP_PRO_APP = AppProductCatalog(
             ("AutoMode", "AutoFlow", "AutoFreq", "AutoFeedTime"),
             confidence=CapabilityConfidence.VENDOR_DECLARED,
         ),
-        AppFunction("schedule_reset", AppFunctionKind.ACTION, ("AutoTime00..47",)),
+        AppFunction(
+            "schedule_reset",
+            AppFunctionKind.ACTION,
+            ("AutoTime00..47",),
+            caveat="app writes one command containing 48 slots of eight 0xee bytes",
+        ),
         _CLOCK,
         _PUMP_FAULTS,
     ),
@@ -379,8 +411,20 @@ AQUARIUM_PUMP_APP = AppProductCatalog(
     registered_instances=1,
     functions=(
         _POWER,
-        _TIMER,
-        AppFunction("transport_mode", AppFunctionKind.ENUM, ("Mode",), ("ap", "wireless")),
+        AppFunction(
+            "schedule_enable",
+            AppFunctionKind.BOOLEAN,
+            ("TimerON", "Motor_Speed", "FeedSwitch", "AutoGears", "AutoMode"),
+            caveat="app command shape depends on current mode and current auto state",
+        ),
+        AppFunction(
+            "transport_mode",
+            AppFunctionKind.ENUM,
+            ("Mode",),
+            ("ap", "wireless"),
+            confidence=CapabilityConfidence.ACCEPTED_CAPTURE_REQUIRED,
+            caveat="boolean-to-label direction requires an accepted capture",
+        ),
         AppFunction("feed_switch", AppFunctionKind.BOOLEAN, ("FeedSwitch",)),
         AppFunction(
             "motor_speed",
@@ -402,7 +446,10 @@ AQUARIUM_PUMP_APP = AppProductCatalog(
             ("start_hour", "start_minute", "end_hour", "end_minute", "mode", "gear_or_pause"),
             count=48,
             item_size=6,
-            caveat="feeding slot payload and accepted zero speed remain unverified",
+            caveat=(
+                "app replaces all 48 slots and writes 0xee for unused positions; accepted zero "
+                "speed remains unverified"
+            ),
         ),
         AppFunction(
             "current_schedule_state",
@@ -410,7 +457,6 @@ AQUARIUM_PUMP_APP = AppProductCatalog(
             ("AutoMode", "AutoGears", "AutoFeedTime"),
             confidence=CapabilityConfidence.VENDOR_DECLARED,
         ),
-        AppFunction("schedule_reset", AppFunctionKind.ACTION, ("AutoTime00..47",)),
         _CLOCK,
         _PUMP_FAULTS,
     ),
@@ -457,13 +503,19 @@ DOSING_PUMP_APP = AppProductCatalog(
             ("hour", "minute", "volume_uint16_be"),
             count=24,
             item_size=4,
-            caveat="four independent 96-byte channel images",
+            caveat=(
+                "app replaces one complete 96-byte channel image; device acceptance and volume "
+                "unit remain unverified"
+            ),
         ),
         AppFunction(
-            "clock_status",
+            "calibration_duration",
             AppFunctionKind.STATUS,
             ("time1",),
+            app_minimum=10,
+            app_maximum=250,
             confidence=CapabilityConfidence.VENDOR_DECLARED,
+            caveat="vendor declares no unit; app English label is Calibration duration",
         ),
         AppFunction(
             "fault_status",

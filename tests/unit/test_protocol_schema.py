@@ -54,6 +54,49 @@ def test_known_live_profile_shapes_decode_without_copying_schedule_fields() -> N
     assert DOSING_PUMP.decode_status(bytes(dosing))["switch"] is False
 
 
+@pytest.mark.parametrize(
+    ("schema", "first_id", "slot_offset", "slot_size", "ymd_id", "hms_id"),
+    (
+        (LOCAL_WAVEMAKER_PRO, 13, 11, 9, 61, 62),
+        (LOCAL_WAVEMAKER, 14, 8, 8, 62, 63),
+        (DC_PUMP_PRO, 10, 9, 8, 58, 59),
+        (AQUARIUM_PUMP, 11, 13, 6, 9, 10),
+    ),
+)
+def test_schedule_products_include_complete_vendor_binary_layout(
+    schema,
+    first_id: int,
+    slot_offset: int,
+    slot_size: int,
+    ymd_id: int,
+    hms_id: int,
+) -> None:
+    slots = tuple(schema.by_name(f"AutoTime{index:02d}") for index in range(48))
+
+    assert [item.id for item in slots] == list(range(first_id, first_id + 48))
+    assert [item.position.byte_offset for item in slots] == [
+        slot_offset + index * slot_size for index in range(48)
+    ]
+    assert all(item.position.length == slot_size for item in slots)
+    assert schema.by_name("YMDData").id == ymd_id
+    assert schema.by_name("HMSData").id == hms_id
+    assert schema.by_name("YMDData").position.length == 4
+    assert schema.by_name("HMSData").position.length == 4
+
+
+def test_dosing_profile_decodes_all_vendor_declared_channel_images_and_duration() -> None:
+    raw = bytearray(DOSING_PUMP.raw_status_size)
+    channel_images = tuple(bytes([index]) * 96 for index in range(1, 5))
+    for offset, image in zip((7, 103, 199, 295), channel_images, strict=True):
+        raw[offset : offset + len(image)] = image
+    raw[391] = 42
+
+    values = DOSING_PUMP.decode_status(bytes(raw))
+
+    assert tuple(values[f"CH{index}SWTime"] for index in range(1, 5)) == channel_images
+    assert values["time1"] == 42
+
+
 def test_status_size_mismatch_is_rejected() -> None:
     with pytest.raises(ValueError, match="must be 401 bytes"):
         LOCAL_WAVEMAKER.decode_status(bytes(400))

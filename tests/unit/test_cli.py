@@ -98,4 +98,6 @@ def test_probe_can_decode_known_product_without_printing_device_id(monkeypatch, 
     assert output[0]["schema_name"] == LOCAL_WAVEMAKER_PRO.name
     assert output[0]["decoded_state"]["SwitchON"] is True
     assert output[0]["decoded_state"]["Flow"] == 55
+    assert "AutoTime00" not in output[0]["decoded_state"]
+    assert len(output[0]["state_hex"]) == LOCAL_WAVEMAKER_PRO.raw_status_size * 2
     assert "private-not-printed" not in output_text
