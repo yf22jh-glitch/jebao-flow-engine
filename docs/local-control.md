@@ -20,8 +20,8 @@ the legacy native-linkage harness. It includes:
   48-slot timing/mode image and may independently override Flow for each active slot;
 - English Home Assistant/MQTT entity contracts, fresh read-only state polling, and a sequential
   command adapter;
-- fresh install and service-staging commands that replace, rather than merge, prior generated
-  artifacts.
+- fresh install, systemd staging, and standalone Docker Compose commands that replace, rather than
+  merge, prior generated artifacts.
 
 This is a local-first controller plus a passive observatory, not an inline transparent relay. The
 observatory can retain app/device traffic from a mirror without becoming a writer, while Home
@@ -100,7 +100,8 @@ The generated install manifest contains no address, PID, hostname, container id,
 ephemeral port, cache path, cache directory name, file mtime, or previous auto-detection result.
 Those values are neither mappings nor approval gates.
 
-Every invocation of `prepare-install`, `ha-schema`, or `serve`:
+Every install-bearing invocation, including `prepare-install`, `prepare-service`,
+`prepare-compose`, `ha-schema`, and `serve`:
 
 1. reads the current owner-only private YAML configuration;
 2. hashes the current template `index.js` contents, without using path, directory name, size, or
@@ -178,11 +179,10 @@ not present in the unit or initial service environment. It is never printed, inh
 unit, or regenerated from a missing or mismatched marker.
 
 The generated bare-host unit declares `RequiresMountsFor=/hardware-safety`. The identified safety
-volume must already be mounted there before systemd starts the service. The current production
-topology instead supplies `/hardware-safety` as a Docker named volume, so this bare unit is not the
-current deployment adapter and will not operate there merely by being copied into systemd. A
-compose-specific adapter must mount the same identified volume before this service shape is used in
-that topology; absence remains an explicit dependency failure rather than permanent unknown state.
+volume must already be mounted there before systemd starts the service. The current Docker topology
+instead supplies `/hardware-safety` as a named volume, so this bare unit is only for a host where
+the same identified volume is mounted at that fixed path. Absence remains an explicit dependency
+failure rather than permanent unknown state.
 
 The generated service omits `--write-enabled` by default. In that mode a qualification path is not
 retained, writer journals and write leases are not opened, and retained qualifications are neither
@@ -192,6 +192,82 @@ flag to the staging command uses only the current verified receipts and records 
 selected runtime opt-in; it does not
 install or start the service and it does not replace the qualification, private-config, lease,
 journal, or on-site live-write gates.
+
+### Standalone Docker Compose deployment
+
+`prepare-compose` is the deployment adapter for the current named-volume topology. It writes a
+standalone Compose file and one new private input generation from values read during that invocation:
+
+```bash
+export JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID="${CURRENT_SAFETY_VOLUME_ID:?set current value}"
+
+jebao-flow-local prepare-compose \
+  --role-attested-by on_site_operator \
+  --output "${CURRENT_COMPOSE_STAGING:?set a durable Compose destination}" \
+  --bundle-root "${CURRENT_COMPOSE_INPUT_ROOT:?set a durable private input root}" \
+  --mqtt-password-file "${CURRENT_MQTT_PASSWORD_FILE:?set the current 0600 password file}"
+
+docker compose -f "${CURRENT_COMPOSE_STAGING}" config --quiet
+docker compose -f "${CURRENT_COMPOSE_STAGING}" up -d --build jebao-flow-local
+```
+
+The preparation command does not invoke Docker, start a container, contact Home Assistant, or
+contact a device. An older Compose file, generation, install manifest, or automatic discovery
+result is never an input or default for a new value. The cleanup pass reads only an older generation
+descriptor to bound the exact directory entries it may remove. The new random generation is fully
+written first, the complete Compose file is atomically replaced last, and only then are older
+directories that validate as generated inputs removed. The descriptor is deleted after its secret
+files, so a later preparation can also finish an interrupted cleanup. Unrecognized entries are left
+untouched. Because each removed generation may contain a private volume identity and MQTT password,
+the adapter does not retain an accumulating history of old secret copies.
+
+The generated source-secret directory is owner-only mode `0700`. Its files are mode `0444` with one
+link: local Docker Compose bind-mounts file-backed secrets and does not implement secret UID/GID or
+mode remapping, so a portable non-root container must be able to read the mounted file. Host-side
+confidentiality comes from the non-traversable `0700` generation directory. The stage container
+also verifies that each production secret is on a read-only mount before reading it. It copies the
+verified current inputs into `/data/local-control` as mode `0600` files under a mode `0700`
+directory, removes known optional files that are absent from the new generation, writes the
+generation descriptor last, and never merges prior bytes. The runtime-generated install manifest
+is also removed before startup and then wholly regenerated from the newly staged config; it is
+never a bundle input.
+
+Every preparation rechecks the bundle root and every retained generation directory for the same
+owner and exact `0700` mode before writing another generation. Do not move the generated `0444`
+files out of that directory or loosen either parent mode between preparation and `docker compose
+up`; run `prepare-compose` again if the staging tree was copied or restored.
+
+Both generated services retain the image's fixed `jebao-flow` user; the Compose file has no `user:`
+override. The stage service has no network, drops every capability, uses a read-only root filesystem,
+and mounts only the source secrets plus the private data volume. It never mounts the hardware-safety
+volume. The runtime also drops every capability and uses a read-only root filesystem. Its private
+data volume is deliberately `rw` because every start replaces the freshly derived install manifest
+and the stage replaces the current inputs. The `/data` mount must remain writable by the image
+user, and `/data/local-control` remains owned by that user with exact mode `0700`.
+
+The runtime mounts the existing external volume named `jebao-flow-hardware-safety` at the fixed
+`/hardware-safety` path with `rw` access. This is required even for device-read-only operation
+because shared/exclusive coordination locks are created and flocked there. The mount mode does not
+enable a device write: the read-only runtime still constructs no writer, journal, or exclusive
+write lease. The stage service never sees this volume. The runtime uses Linux host networking
+because current endpoint discovery uses local UDP broadcast; this generated topology is therefore
+intended for the Linux deployment host, not a portable bridged-network substitute.
+
+The input descriptor binds every staged file digest and the install generation. The generated
+runtime passes that generation as an explicit command argument and validates it plus every current
+file digest before loading the volume identity or private config. An ambient or older generation
+environment variable is not consulted. This is a startup gate, not a periodic one: after every new
+`prepare-compose`, run the `docker compose up` command again so the stage and runtime consume the
+new generation. A process already running from the old generation keeps its in-memory config until
+it is recreated; no background path silently mixes the two generations.
+
+Read-only generation never reads or bundles qualifications. A write-enabled generation may contain
+only the current qualification binding list. The `local-control-receipt-<sha256>.json` receipt
+artifacts themselves are never copied into an input bundle: they remain in the fixed qualification
+directory on the shared hardware-safety volume and are resolved and verified there. Consequently a
+hand-built bundle cannot manufacture receipt authority. `--write-enabled` remains an explicit
+generation option and still does not bypass current private-config permission, per-device receipts,
+stable identity resolution, leases, journal, rollback, or on-site live-write approval.
 
 `ha-schema` accepts repeatable current topology declarations:
 

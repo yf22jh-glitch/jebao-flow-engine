@@ -61,6 +61,7 @@ def test_read_only_local_control_import_closure_excludes_write_and_frozen_module
     modules = (
         "jebao_flow.local_control.models",
         "jebao_flow.local_control.catalog",
+        "jebao_flow.local_control.compose",
         "jebao_flow.local_control.dosing",
         "jebao_flow.local_control.install",
         "jebao_flow.local_control.journal",

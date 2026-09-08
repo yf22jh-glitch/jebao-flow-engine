@@ -465,6 +465,181 @@ def test_prepare_service_requires_the_current_stable_safety_volume_identity(
     assert output.err == "jebao-flow-local: current_operation_failed_closed\n"
 
 
+def test_prepare_compose_uses_only_current_inputs_and_keeps_write_off_by_default(
+    monkeypatch,
+    capsys,
+) -> None:
+    current = SimpleNamespace(
+        config=SimpleNamespace(mqtt=SimpleNamespace(password_env=None)),
+        manifest=_manifest(),
+        template_roots=(local_control_cli.Path("/current/private/templates"),),
+    )
+    captured = {}
+    monkeypatch.setenv("JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID", "5" * 32)
+    monkeypatch.setenv(
+        "JEBAO_FLOW_LOCAL_QUALIFICATIONS",
+        "/stale/missing/qualifications.json",
+    )
+    monkeypatch.setenv(
+        "JEBAO_FLOW_LOCAL_MQTT_PASSWORD_FILE",
+        "/stale/missing/mqtt-password",
+    )
+    monkeypatch.setattr(local_control_cli, "_prepare_current", lambda args: current)
+    monkeypatch.setattr(
+        local_control_cli,
+        "load_current_qualifications",
+        lambda path: (_ for _ in ()).throw(
+            AssertionError("read-only Compose inspected write qualifications")
+        ),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "read_current_mqtt_password",
+        lambda path: (_ for _ in ()).throw(
+            AssertionError("password absent from current config was inspected")
+        ),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "resolve_current_build_context",
+        lambda path: local_control_cli.Path("/current/source"),
+    )
+
+    class _Artifact:
+        def public_dict(self):
+            return {
+                "status": "compose_prepared",
+                "previous_bundle_values_reused": False,
+                "private_paths_exposed": False,
+            }
+
+    def prepare(output, bundle_root, spec, **inputs):
+        captured.update(
+            output=output,
+            bundle_root=bundle_root,
+            spec=spec,
+            inputs=inputs,
+        )
+        return _Artifact()
+
+    monkeypatch.setattr(local_control_cli, "prepare_compose_deployment", prepare)
+
+    result = local_control_cli.main(
+        [
+            "prepare-compose",
+            "--config",
+            "/current/private/config.yaml",
+            "--role-attested-by",
+            "operator",
+            "--output",
+            "/current/private/compose.yaml",
+        ]
+    )
+
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert result == 0
+    assert captured["spec"].write_enabled is False
+    assert captured["spec"].qualification_configured is False
+    assert captured["spec"].mqtt_password_configured is False
+    assert captured["inputs"]["qualifications"] is None
+    assert captured["inputs"]["mqtt_password"] is None
+    assert captured["inputs"]["hardware_safety_volume_id"] == "5" * 32
+    assert captured["spec"].input_generation_root == local_control_cli.Path(
+        "/current/private/.compose.yaml.inputs"
+    ) / ("0" * 32)
+    assert payload["previous_bundle_values_reused"] is False
+    assert "/current/private" not in output.out
+    assert output.err == ""
+
+
+def test_internal_compose_stage_runs_without_loading_install_inputs(
+    monkeypatch,
+    capsys,
+) -> None:
+    seen = []
+
+    class _Staged:
+        def public_dict(self):
+            return {"status": "compose_inputs_staged", "private_values_exposed": False}
+
+    monkeypatch.setattr(
+        local_control_cli,
+        "stage_compose_inputs",
+        lambda generation: seen.append(generation) or _Staged(),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "_prepare_current",
+        lambda args: (_ for _ in ()).throw(AssertionError("install path was reached")),
+    )
+
+    result = local_control_cli.main(
+        ["stage-compose-inputs", "--expected-generation", "6" * 32]
+    )
+
+    output = capsys.readouterr()
+    assert result == 0
+    assert seen == ["6" * 32]
+    assert json.loads(output.out)["private_values_exposed"] is False
+    assert output.err == ""
+
+
+def test_compose_generation_is_checked_before_runtime_authority_or_config(
+    monkeypatch,
+    capsys,
+) -> None:
+    order = []
+    monkeypatch.setattr(
+        local_control_cli,
+        "_validate_current_compose_generation",
+        lambda generation: order.append(("generation", generation)),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "_activate_current_hardware_safety_volume_identity",
+        lambda: order.append("volume_identity"),
+    )
+
+    def stop_before_config(args):
+        order.append("config")
+        raise ValueError("stop after order observation")
+
+    monkeypatch.setattr(local_control_cli, "_prepare_current", stop_before_config)
+
+    result = local_control_cli.main(
+        [
+            "serve",
+            "--config",
+            "/current/private/config.yaml",
+            "--role-attested-by",
+            "operator",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert result == 2
+    assert order == [("generation", None), "volume_identity", "config"]
+    assert output.out == ""
+    assert output.err == "jebao-flow-local: current_operation_failed_closed\n"
+
+
+def test_stale_ambient_compose_generation_does_not_gate_a_bare_runtime(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("JEBAO_FLOW_LOCAL_COMPOSE_GENERATION", "stale-generation")
+    seen = []
+    monkeypatch.setattr(
+        local_control_cli,
+        "validate_current_compose_inputs",
+        lambda generation: seen.append(generation),
+    )
+
+    local_control_cli._validate_current_compose_generation(None)
+
+    assert seen == []
+
+
 def test_current_mqtt_password_prefers_the_current_service_password_file(
     monkeypatch,
 ) -> None:

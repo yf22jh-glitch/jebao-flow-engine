@@ -14,6 +14,13 @@ from pathlib import Path
 
 from jebao_flow.hardware_safety import HARDWARE_SAFETY_VOLUME_ID_ENV
 from jebao_flow.local_control.catalog import build_local_control_catalog
+from jebao_flow.local_control.compose import (
+    LocalControlComposeSpec,
+    prepare_compose_deployment,
+    resolve_current_build_context,
+    stage_compose_inputs,
+    validate_current_compose_inputs,
+)
 from jebao_flow.local_control.coordinator import LocalControlCoordinator
 from jebao_flow.local_control.dosing import (
     build_dosing_channel_schedule_preview,
@@ -91,12 +98,13 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (
         ("prepare-install", "replace the install manifest from current inputs"),
         ("prepare-service", "replace an owner-only systemd staging unit from current inputs"),
+        ("prepare-compose", "replace a standalone Docker Compose deployment from current inputs"),
         ("ha-schema", "show the current Home Assistant projection"),
         ("serve", "run the qualified Home Assistant/MQTT command service"),
     ):
         command = subparsers.add_parser(name, help=help_text)
         _add_install_arguments(command)
-        if name in {"prepare-service", "ha-schema", "serve"}:
+        if name in {"prepare-service", "prepare-compose", "ha-schema", "serve"}:
             command.add_argument(
                 "--qualifications",
                 type=Path,
@@ -133,7 +141,27 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="include the separately gated live-write opt-in in the staged unit",
             )
+        if name == "prepare-compose":
+            command.add_argument("--output", type=Path, required=True)
+            command.add_argument(
+                "--bundle-root",
+                type=Path,
+                help="durable owner-only root for newly generated Compose input generations",
+            )
+            command.add_argument("--build-context", type=Path)
+            command.add_argument(
+                "--mqtt-password-file",
+                type=Path,
+                default=_environment_path(_MQTT_PASSWORD_FILE_ENV),
+                help="current owner-only file containing only the MQTT password",
+            )
+            command.add_argument(
+                "--write-enabled",
+                action="store_true",
+                help="include the separately gated live-write opt-in in the Compose runtime",
+            )
         if name == "serve":
+            command.add_argument("--compose-generation", help=argparse.SUPPRESS)
             command.add_argument(
                 "--write-enabled",
                 action="store_true",
@@ -145,7 +173,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="recover one unfinished local-control request from its fresh baseline",
     )
     _add_install_arguments(recover)
+    recover.add_argument("--compose-generation", help=argparse.SUPPRESS)
     recover.add_argument("request_id")
+    stage_compose = subparsers.add_parser(
+        "stage-compose-inputs",
+        help="stage one generated Compose input generation inside its private data volume",
+    )
+    stage_compose.add_argument("--expected-generation", required=True)
     return parser
 
 
@@ -202,11 +236,15 @@ def _run(args: argparse.Namespace) -> int:
         )
         _print_json(plan.public_dict())
         return 0
+    if args.command == "stage-compose-inputs":
+        _print_json(stage_compose_inputs(args.expected_generation).public_dict())
+        return 0
     if args.command in {"serve", "recover"}:
+        _validate_current_compose_generation(args.compose_generation)
         _activate_current_hardware_safety_volume_identity()
     service_volume_id = (
         _current_hardware_safety_volume_id()
-        if args.command == "prepare-service"
+        if args.command in {"prepare-service", "prepare-compose"}
         else None
     )
     prepared = _prepare_current(args)
@@ -264,6 +302,52 @@ def _run(args: argparse.Namespace) -> int:
         )
         payload = artifact.public_dict()
         payload["install_generation"] = prepared.manifest.generation
+        payload["template_binding_complete"] = bool(
+            prepared.manifest.content.template_sha256
+        )
+        _print_json(payload)
+        return 0
+    if args.command == "prepare-compose":
+        if service_volume_id is None:
+            raise AssertionError("prepare-compose volume identity was not read")
+        compose_output = current_service_path(
+            args.output,
+            description="local-control compose staging file",
+        )
+        bundle_root = current_service_path(
+            args.bundle_root
+            or compose_output.with_name(f".{compose_output.name}.inputs"),
+            description="local-control compose bundle root",
+        )
+        mqtt_password = None
+        if prepared.config.mqtt.password_env is not None:
+            if args.mqtt_password_file is None:
+                raise ValueError("current MQTT password requires --mqtt-password-file")
+            mqtt_password = read_current_mqtt_password(args.mqtt_password_file)
+        qualifications = None
+        if args.write_enabled and args.qualifications is not None:
+            qualifications = load_current_qualifications(args.qualifications)
+        artifact = prepare_compose_deployment(
+            compose_output,
+            bundle_root,
+            LocalControlComposeSpec(
+                build_context=resolve_current_build_context(args.build_context),
+                input_generation_root=bundle_root / prepared.manifest.generation,
+                generation=prepared.manifest.generation,
+                role_attested_by=args.role_attested_by,
+                role_attested_at=prepared.manifest.devices[0].role_attested_at.isoformat(),
+                role_binding_sha256=stable_role_binding_sha256(prepared.manifest),
+                template_roots=prepared.template_roots,
+                mqtt_password_configured=mqtt_password is not None,
+                qualification_configured=qualifications is not None,
+                write_enabled=args.write_enabled,
+            ),
+            config=prepared.config,
+            hardware_safety_volume_id=service_volume_id,
+            mqtt_password=mqtt_password,
+            qualifications=qualifications,
+        )
+        payload = artifact.public_dict()
         payload["template_binding_complete"] = bool(
             prepared.manifest.content.template_sha256
         )
@@ -481,6 +565,13 @@ def _activate_current_hardware_safety_volume_identity() -> None:
     os.environ[HARDWARE_SAFETY_VOLUME_ID_ENV] = read_current_hardware_safety_volume_id(
         identity_file
     )
+
+
+def _validate_current_compose_generation(generation: str | None) -> None:
+    """Validate generated container inputs before any safety authority or config is consumed."""
+
+    if generation:
+        validate_current_compose_inputs(generation)
 
 
 def _schedule_plans(manifest, config, explicit: tuple[str, ...]):
