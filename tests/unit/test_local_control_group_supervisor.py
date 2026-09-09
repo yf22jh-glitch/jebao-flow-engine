@@ -33,6 +33,9 @@ from jebao_flow.groups.runtime import (
 from jebao_flow.local_control.group_supervisor import (
     GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL,
     GROUP_FORCED_OFF_WILL_REVERT,
+    GROUP_MEMBER_NOT_CONFIGURED,
+    GROUP_NOT_ARMED,
+    GroupMemberResumeRejected,
     GroupSupervisorDisposition,
     GroupSupervisorError,
     LocalControlGroupSupervisor,
@@ -923,4 +926,118 @@ async def test_emergency_stop_rejects_without_recording_override_or_new_plan() -
     assert manager.generation == generation_before
     assert supervisor.snapshot().manual_override_members == ()
     assert port.write_plan_call_count == 1
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unarmed_member_resume_is_rejected_without_mutation_or_arming() -> None:
+    supervisor, port, manager, _ = _supervisor()
+    await supervisor.claim_manual_ownership("left")
+    generation_before = manager.generation
+    runtime_before = supervisor.runtime
+
+    with pytest.raises(GroupMemberResumeRejected, match=GROUP_NOT_ARMED):
+        await supervisor.resume_member("left", now=1.0)
+
+    assert manager.generation == generation_before
+    assert supervisor.runtime == runtime_before
+    assert supervisor.snapshot().manual_override_members == ("left",)
+    assert not supervisor.armed
+    assert port.write_plan_call_count == 0
+
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.STOPPED, enabled=False),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+    assert supervisor.snapshot().manual_override_members == ()
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_running_member_resume_restores_dispatch_then_deduplicates() -> None:
+    supervisor, port, _, _ = _supervisor()
+    fresh = (_fresh("left"), _fresh("right"))
+    await supervisor.observe_fresh_cycle(fresh, now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.RUNNING, enabled=True, power=50),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+    await supervisor.claim_manual_ownership("left")
+    skipped = await supervisor.tick(now=3.0)
+    await supervisor.wait_idle()
+    before_resume = port.write_plan_call_count
+
+    resumed = await supervisor.resume_member("left", now=4.0)
+    await supervisor.wait_idle()
+    after_resume = port.write_plan_call_count
+    unchanged = await supervisor.tick(now=5.0)
+    await supervisor.wait_idle()
+
+    assert "left" in skipped.plan.manual_override_devices
+    assert "left" not in tuple(
+        decision.device for decision in skipped.plan.dispatch_decisions
+    )
+    assert resumed.ownership_changed
+    assert resumed.cycle.plan.manual_override_devices == ()
+    assert "left" in tuple(
+        decision.device for decision in resumed.cycle.plan.dispatch_decisions
+    )
+    assert after_resume == before_resume + 1
+    assert unchanged.deduplicated
+    assert port.write_plan_call_count == after_resume
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stopped_member_resume_reasserts_off_once_then_is_idempotent() -> None:
+    supervisor, port, _, _ = _supervisor()
+    await supervisor.observe_fresh_cycle((_fresh("left"), _fresh("right")), now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.STOPPED, enabled=False),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+    await supervisor.claim_manual_ownership("left")
+    before_resume = port.write_plan_call_count
+
+    first = await supervisor.resume_member("left", now=3.0)
+    await supervisor.wait_idle()
+    after_first = port.write_plan_call_count
+    repeated = await supervisor.resume_member("left", now=4.0)
+    await supervisor.wait_idle()
+
+    assert first.ownership_changed
+    assert all(not decision.target.enabled for decision in first.cycle.plan.dispatch_decisions)
+    assert after_first == before_resume + 1
+    assert not repeated.ownership_changed
+    assert repeated.cycle.disposition is GroupSupervisorDisposition.UNCHANGED_MANDATORY_OFF
+    assert port.write_plan_call_count == after_first
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_member_resume_rejects_unknown_and_emergency_targets_before_mutation() -> None:
+    supervisor, port, manager, _ = _supervisor()
+    await supervisor.observe_fresh_cycle((_fresh("left"), _fresh("right")), now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.EMERGENCY_STOP, enabled=False),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+    generation_before = manager.generation
+    writes_before = port.write_plan_call_count
+
+    with pytest.raises(GroupMemberResumeRejected, match=GROUP_MEMBER_NOT_CONFIGURED):
+        await supervisor.resume_member("unknown", now=3.0)
+    with pytest.raises(
+        GroupMemberResumeRejected,
+        match=GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL,
+    ):
+        await supervisor.resume_member("left", now=4.0)
+
+    assert manager.generation == generation_before
+    assert supervisor.snapshot().manual_override_members == ()
+    assert port.write_plan_call_count == writes_before
     await supervisor.aclose()

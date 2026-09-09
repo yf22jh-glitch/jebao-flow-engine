@@ -680,6 +680,10 @@ class _GroupLifecycle:
     def qualified_group_ids(self):
         return ("main_flow",)
 
+    @property
+    def qualified_group_members(self):
+        return (("main_flow", "master"), ("main_flow", "slave"))
+
     async def observe_fresh_cycle(self, states) -> None:
         self.cycles.append(states)
 

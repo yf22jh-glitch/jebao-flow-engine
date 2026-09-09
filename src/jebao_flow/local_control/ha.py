@@ -294,12 +294,74 @@ class GroupControlHomeAssistantEntityDescriptor:
 
 
 @dataclass(frozen=True, slots=True)
+class GroupMemberResumeHomeAssistantEntityDescriptor:
+    """State-less ownership-return button for one qualified logical group member."""
+
+    group_id: str
+    logical_member: str
+    unique_id: str
+    name: str
+    command_topic: str
+    availability_topic: str
+
+    @property
+    def platform(self) -> HomeAssistantPlatform:
+        return HomeAssistantPlatform.BUTTON
+
+    def __post_init__(self) -> None:
+        _require_ascii(self.public_dict())
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "platform": self.platform.value,
+            "group_id": self.group_id,
+            "logical_member": self.logical_member,
+            "unique_id": self.unique_id,
+            "name": self.name,
+            "command_topic": self.command_topic,
+            "availability_topic": self.availability_topic,
+        }
+
+    def mqtt_discovery_payload(self) -> dict[str, object]:
+        global_availability = _global_availability_topic(self.command_topic)
+        payload: dict[str, object] = {
+            "name": self.name,
+            "unique_id": self.unique_id,
+            "command_topic": self.command_topic,
+            "payload_press": "PRESS",
+            "qos": 0,
+            "availability": [
+                {
+                    "topic": global_availability,
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                },
+                {
+                    "topic": self.availability_topic,
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                },
+            ],
+            "availability_mode": "all",
+            "device": {
+                "identifiers": [f"jebao_flow_local_group_{self.group_id}"],
+                "name": f"{_english_member_name(self.group_id)} Group",
+                "manufacturer": "Jebao",
+                "model": "Local Control Group",
+            },
+        }
+        _require_ascii(payload)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class HomeAssistantProjection:
     discovery_prefix: str
     topic_prefix: str
     entities: tuple[HomeAssistantEntityDescriptor, ...]
     group_entities: tuple[GroupHomeAssistantEntityDescriptor, ...] = ()
     group_control_entities: tuple[GroupControlHomeAssistantEntityDescriptor, ...] = ()
+    group_resume_entities: tuple[GroupMemberResumeHomeAssistantEntityDescriptor, ...] = ()
 
     def __post_init__(self) -> None:
         _require_topic_prefix(self.discovery_prefix)
@@ -311,11 +373,19 @@ class HomeAssistantProjection:
         identities.extend(
             (entity.platform, entity.unique_id) for entity in self.group_control_entities
         )
+        identities.extend(
+            (entity.platform, entity.unique_id) for entity in self.group_resume_entities
+        )
         if len(identities) != len(set(identities)):
             raise ValueError("Home Assistant projection contains duplicate entities")
 
     def discovery_records(self) -> tuple[tuple[str, dict[str, object]], ...]:
-        entities = (*self.entities, *self.group_entities, *self.group_control_entities)
+        entities = (
+            *self.entities,
+            *self.group_entities,
+            *self.group_control_entities,
+            *self.group_resume_entities,
+        )
         return tuple(
             (
                 f"{self.discovery_prefix}/{entity.platform.value}/{entity.unique_id}/config",
@@ -336,6 +406,10 @@ class HomeAssistantProjection:
             "group_control_entity_count": len(self.group_control_entities),
             "group_control_entities": [
                 entity.public_dict() for entity in self.group_control_entities
+            ],
+            "group_resume_entity_count": len(self.group_resume_entities),
+            "group_resume_entities": [
+                entity.public_dict() for entity in self.group_resume_entities
             ],
         }
         _require_ascii(payload)
@@ -420,6 +494,11 @@ def project_home_assistant(
                     )
                 )
 
+    qualified_groups = tuple(
+        group
+        for group in groups
+        if group_control_qualification(group, manifest, catalog).qualified
+    )
     return HomeAssistantProjection(
         discovery_prefix=discovery_prefix,
         topic_prefix=topic_prefix,
@@ -427,8 +506,12 @@ def project_home_assistant(
         group_entities=tuple(_project_group_output(group, topic_prefix) for group in groups),
         group_control_entities=tuple(
             _project_group_control(group, topic_prefix)
-            for group in groups
-            if group_control_qualification(group, manifest, catalog).qualified
+            for group in qualified_groups
+        ),
+        group_resume_entities=tuple(
+            _project_group_member_resume(group, member.device, topic_prefix)
+            for group in qualified_groups
+            for member in group.members
         ),
     )
 
@@ -458,6 +541,22 @@ def _project_group_control(
         unique_id=f"jebao_flow_local_group_{group.id}_control",
         name=f"{_english_member_name(group.id)} Control",
         state_topic=f"{base}/state",
+        command_topic=f"{base}/set",
+        availability_topic=f"{base}/availability",
+    )
+
+
+def _project_group_member_resume(
+    group: GroupConfig,
+    logical_member: str,
+    topic_prefix: str,
+) -> GroupMemberResumeHomeAssistantEntityDescriptor:
+    base = f"{topic_prefix}/local/groups/{group.id}/members/{logical_member}/resume"
+    return GroupMemberResumeHomeAssistantEntityDescriptor(
+        group_id=group.id,
+        logical_member=logical_member,
+        unique_id=f"jebao_flow_local_group_{group.id}_{logical_member}_resume",
+        name=f"Resume {_english_member_name(logical_member)} To Group",
         command_topic=f"{base}/set",
         availability_topic=f"{base}/availability",
     )
@@ -614,6 +713,7 @@ def _require_ascii(value: object) -> None:
 __all__ = [
     "GroupControlHomeAssistantEntityDescriptor",
     "GroupHomeAssistantEntityDescriptor",
+    "GroupMemberResumeHomeAssistantEntityDescriptor",
     "HomeAssistantEntityDescriptor",
     "HomeAssistantPlatform",
     "HomeAssistantProjection",

@@ -133,6 +133,7 @@ def test_group_switch_requires_exact_two_of_two_member_qualification(
     )
     assert len(projection.group_entities) == 1
     assert len(projection.group_control_entities) == switch_count
+    assert len(projection.group_resume_entities) == switch_count * 2
     assert projection.group_entities[0].command_topic is None
     encoded = json.dumps(qualification.public_dict(), ensure_ascii=True)
     assert encoded.isascii()
@@ -160,3 +161,31 @@ def test_qualified_group_switch_is_non_optimistic_and_separate_from_actual_truth
     assert discovery["optimistic"] is False
     assert discovery["qos"] == 0
     assert discovery["state_topic"] != actual.state_topic
+
+
+def test_qualified_group_projects_one_stateless_resume_button_per_member() -> None:
+    keys = frozenset({"1" * 64, "2" * 64})
+    group, manifest, catalog = _inputs(power_keys=keys, manual_flow_keys=keys)
+
+    projection = project_home_assistant(
+        manifest,
+        catalog,
+        discovery_prefix="homeassistant",
+        topic_prefix="jebao-flow/test",
+        groups=(group,),
+    )
+
+    assert tuple(entity.logical_member for entity in projection.group_resume_entities) == (
+        "left",
+        "right",
+    )
+    for entity in projection.group_resume_entities:
+        discovery = entity.mqtt_discovery_payload()
+        assert entity.platform.value == "button"
+        assert discovery["payload_press"] == "PRESS"
+        assert discovery["qos"] == 0
+        assert "state_topic" not in discovery
+        assert entity.command_topic.endswith(f"/{entity.logical_member}/resume/set")
+        assert entity.availability_topic.endswith(
+            f"/{entity.logical_member}/resume/availability"
+        )

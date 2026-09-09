@@ -557,6 +557,44 @@ or inventory-mismatched group commands produce bounded diagnostics without an op
 publication. This is a source and offline-test connection only: no broker, Home Assistant, app, or
 physical device was contacted, hardware remains `NO-GO / BLOCKING`, and Q2 remains `UNKNOWN`.
 
+### Per-member return to group ownership
+
+Each member of a fully qualified group has a state-less Home Assistant `Resume ... To Group`
+button. It clears only that member's manual override; it does not change group state, enabled,
+pattern, power, limits, or period, and it never arms a group. An unarmed group rejects the action as
+`group_not_armed` before manager mutation. An armed emergency-stopped group similarly rejects it as
+`group_emergency_stop_blocks_direct_control`. The first later ON or OFF group command still clears
+all manual overrides, so an unarmed override cannot become permanent.
+
+For any other armed state, the supervisor validates the exact logical member, records whether
+`resume_member()` changed manager generation, then calls `plan_tick()` once and submits that exact
+plan through the existing plan-atomic runtime. A running group therefore restores the member to its
+ordinary dispatch. A stopped group uses the existing canonical mandatory OFF. Repeating the action
+for an already group-owned member does not change ownership; normal applied-plan deduplication or
+mandatory-OFF suppression decides whether the current plan needs a check. No direct coordinator,
+retry, applied-cache invalidation, or alternate write path is added.
+
+The button is available only when qualification and supervisor construction are current and the
+group has already been armed. Unlike the binary group switch, its availability does not depend on
+fresh aggregate output being `on` or `off`: `mixed` is commonly the state in which a member return
+is needed, and `unknown` is not folded into a guessed power state. The button result reports
+`action=resume_member`, logical group and member, `ownership_changed`, and the same identity-bound
+completion facts and headline precedence as the group switch. It has no `requested_on` field and
+does not claim physical-frame authorship.
+
+The existing group router owns both switch and resume topics, while its combined topic set remains
+disjoint from device and schedule commands. `PRESS` is the only accepted resume payload. Retained,
+duplicate-marked, malformed, unknown-member, unqualified, unconstructed, unarmed, emergency, and
+inventory-mismatched actions stop before journal or frame creation. No new MQTT consumer task is
+created, and unresolved mandatory-OFF shutdown remains sticky outside the adapter cancellation
+gather.
+
+There is no separate group-wide resume entity. Sending `ON` again to an already running group uses
+the existing validated same-state command path and clears every manual override; sending `ON` to a
+stopped group does the same while starting it. This source and offline-test surface does not contact
+a broker, Home Assistant, app, or physical device. Hardware remains `NO-GO / BLOCKING`, and Q2
+remains `UNKNOWN`.
+
 ## Product audit mapping
 
 `ENC` means deterministic bytes exist. `DEC` means deterministic status decoding exists. Neither

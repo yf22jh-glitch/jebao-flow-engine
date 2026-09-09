@@ -23,11 +23,13 @@ from jebao_flow.local_control.group_service import (
     DirectControlOwnershipDecision,
     GroupActualOutput,
     GroupCommandResult,
+    GroupMemberResumeResult,
     GroupOutputState,
     LocalControlGroupCommandRejected,
 )
 from jebao_flow.local_control.ha import (
     GroupControlHomeAssistantEntityDescriptor,
+    GroupMemberResumeHomeAssistantEntityDescriptor,
     HomeAssistantEntityDescriptor,
     HomeAssistantPlatform,
     HomeAssistantProjection,
@@ -109,11 +111,20 @@ class GroupCommandService(Protocol):
     @property
     def qualified_group_ids(self) -> tuple[str, ...]: ...
 
+    @property
+    def qualified_group_members(self) -> tuple[tuple[str, str], ...]: ...
+
     async def apply_group_switch(
         self,
         group_id: str,
         requested_on: bool,
     ) -> GroupCommandResult: ...
+
+    async def resume_group_member(
+        self,
+        group_id: str,
+        logical_member: str,
+    ) -> GroupMemberResumeResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +147,7 @@ class RoutedGroupCommandResult:
     """One MQTT request id and the bounded group-service result it names."""
 
     request_id: str
-    result: GroupCommandResult
+    result: GroupCommandResult | GroupMemberResumeResult
 
     def public_result(self) -> dict[str, object]:
         payload = self.result.public_dict()
@@ -300,7 +311,7 @@ class LocalControlMqttRouter:
 
 
 class LocalControlGroupCommandRouter:
-    """Route group switches without taking the shared physical-operation lock."""
+    """Route group switches and member resumes without the physical-operation lock."""
 
     def __init__(
         self,
@@ -309,43 +320,76 @@ class LocalControlGroupCommandRouter:
         service: GroupCommandService,
     ) -> None:
         self._service = service
-        self._routes: dict[str, GroupControlHomeAssistantEntityDescriptor] = {}
+        self._switch_routes: dict[str, GroupControlHomeAssistantEntityDescriptor] = {}
         for entity in projection.group_control_entities:
-            if entity.command_topic in self._routes:
+            if entity.command_topic in self._switch_routes:
                 raise ValueError("group MQTT command topic is duplicated")
-            self._routes[entity.command_topic] = entity
-        projected_groups = {entity.group_id for entity in self._routes.values()}
+            self._switch_routes[entity.command_topic] = entity
+        self._resume_routes: dict[
+            str, GroupMemberResumeHomeAssistantEntityDescriptor
+        ] = {}
+        for entity in projection.group_resume_entities:
+            if (
+                entity.command_topic in self._switch_routes
+                or entity.command_topic in self._resume_routes
+            ):
+                raise ValueError("group MQTT command topic is duplicated")
+            self._resume_routes[entity.command_topic] = entity
+        projected_groups = {entity.group_id for entity in self._switch_routes.values()}
+        projected_members = {
+            (entity.group_id, entity.logical_member)
+            for entity in self._resume_routes.values()
+        }
         self._inventory_consistent = (
             projected_groups == set(service.qualified_group_ids)
+            and projected_members == set(service.qualified_group_members)
             and projected_groups <= set(service.configured_group_ids)
+            and {group_id for group_id, _member in projected_members}
+            <= set(service.configured_group_ids)
         )
 
     @property
     def command_topics(self) -> tuple[str, ...]:
-        return tuple(sorted(self._routes))
+        return tuple(sorted((*self._switch_routes, *self._resume_routes)))
 
     @property
     def inventory_consistent(self) -> bool:
         return self._inventory_consistent
 
     def owns(self, topic: str) -> bool:
-        return topic in self._routes
+        return topic in self._switch_routes or topic in self._resume_routes
 
     async def handle(self, topic: str, payload: bytes | str) -> RoutedGroupCommandResult:
-        try:
-            entity = self._routes[topic]
-        except KeyError as error:
+        switch = self._switch_routes.get(topic)
+        resume = self._resume_routes.get(topic)
+        if switch is None and resume is None:
             raise LocalControlGroupCommandError(
                 "group_command_topic_not_published"
-            ) from error
-        requested_on = _parse_group_switch_value(payload)
+            )
+        requested_on: bool | None = None
+        if switch is not None:
+            requested_on = _parse_group_switch_value(payload)
+        else:
+            _parse_group_resume_value(payload)
         if not self._inventory_consistent:
             raise LocalControlGroupCommandError("group_command_inventory_mismatch")
         try:
-            result = await self._service.apply_group_switch(
-                entity.group_id,
-                requested_on,
-            )
+            if switch is not None:
+                if requested_on is None:
+                    raise AssertionError("group switch parsing must produce a boolean")
+                result: GroupCommandResult | GroupMemberResumeResult = (
+                    await self._service.apply_group_switch(
+                        switch.group_id,
+                        requested_on,
+                    )
+                )
+            else:
+                if resume is None:
+                    raise AssertionError("group route selection must be exhaustive")
+                result = await self._service.resume_group_member(
+                    resume.group_id,
+                    resume.logical_member,
+                )
         except LocalControlGroupCommandRejected as error:
             raise LocalControlGroupCommandError(error.diagnostic_reason) from error
         return RoutedGroupCommandResult(
@@ -380,7 +424,11 @@ class LocalControlMqttAdapter:
         self._group_service = group_service
         self._group_router = group_router
         projected_group_topics = {
-            entity.command_topic for entity in projection.group_control_entities
+            entity.command_topic
+            for entity in (
+                *projection.group_control_entities,
+                *projection.group_resume_entities,
+            )
         }
         routed_group_topics = (
             set() if group_router is None else set(group_router.command_topics)
@@ -437,6 +485,13 @@ class LocalControlMqttAdapter:
                     retain=True,
                 )
             for entity in self._projection.group_control_entities:
+                await client.publish(
+                    entity.availability_topic,
+                    "offline",
+                    qos=1,
+                    retain=True,
+                )
+            for entity in self._projection.group_resume_entities:
                 await client.publish(
                     entity.availability_topic,
                     "offline",
@@ -562,7 +617,11 @@ class LocalControlMqttAdapter:
         )
 
     async def _publish_group_outputs(self, client: aiomqtt.Client) -> None:
-        if not self._projection.group_entities and not self._projection.group_control_entities:
+        if not (
+            self._projection.group_entities
+            or self._projection.group_control_entities
+            or self._projection.group_resume_entities
+        ):
             return
         group_service = self._group_service
         if group_service is None:
@@ -574,6 +633,9 @@ class LocalControlMqttAdapter:
         expected_controls = {
             entity.group_id for entity in self._projection.group_control_entities
         }
+        expected_resume_groups = {
+            entity.group_id for entity in self._projection.group_resume_entities
+        }
         qualified_outputs = {
             output.group_id for output in outputs if output.command_qualified
         }
@@ -584,6 +646,7 @@ class LocalControlMqttAdapter:
             len(by_group) != len(outputs)
             or set(by_group) != expected
             or expected_controls != qualified_outputs
+            or not expected_resume_groups <= set(by_group)
             or not router_consistent
         ):
             await self._mark_group_outputs_unavailable(client)
@@ -617,6 +680,14 @@ class LocalControlMqttAdapter:
                 qos=1,
                 retain=True,
             )
+        for entity in self._projection.group_resume_entities:
+            output = by_group[entity.group_id]
+            await client.publish(
+                entity.availability_topic,
+                "online" if output.resume_available else "offline",
+                qos=1,
+                retain=True,
+            )
         for entity in self._projection.group_entities:
             output = by_group[entity.group_id]
             await client.publish(
@@ -640,8 +711,9 @@ class LocalControlMqttAdapter:
 
     async def _mark_group_outputs_unavailable(self, client: aiomqtt.Client) -> None:
         for entity in (
-            *self._projection.group_entities,
             *self._projection.group_control_entities,
+            *self._projection.group_resume_entities,
+            *self._projection.group_entities,
         ):
             await client.publish(
                 entity.availability_topic,
@@ -803,6 +875,17 @@ def _parse_group_switch_value(payload: bytes | str) -> bool:
     if normalized not in {"ON", "OFF"}:
         raise LocalControlGroupCommandError("group_command_payload_invalid")
     return normalized == "ON"
+
+
+def _parse_group_resume_value(payload: bytes | str) -> None:
+    try:
+        text = payload.decode("ascii") if isinstance(payload, bytes) else payload
+    except UnicodeDecodeError as error:
+        raise LocalControlGroupCommandError("group_command_payload_invalid") from error
+    if not isinstance(text, str) or not text.isascii() or len(text) > 128:
+        raise LocalControlGroupCommandError("group_command_payload_invalid")
+    if text.strip().upper() != "PRESS":
+        raise LocalControlGroupCommandError("group_command_payload_invalid")
 
 
 def _state_value(entity: HomeAssistantEntityDescriptor, value) -> str | None:

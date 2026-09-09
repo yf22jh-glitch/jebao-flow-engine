@@ -2,7 +2,7 @@
 
 The service builds each group independently, feeds only complete fresh-state cycles into a
 write-disarmed supervisor, and keeps construction or planning failures out of the existing device
-state publisher. It exposes one qualified ON/OFF service boundary without importing MQTT or Home
+state publisher. It exposes qualified group-command boundaries without importing MQTT or Home
 Assistant transport code.
 """
 
@@ -42,6 +42,8 @@ from jebao_flow.local_control.group_command import (
 from jebao_flow.local_control.group_supervisor import (
     GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL,
     GROUP_FORCED_OFF_WILL_REVERT,
+    GROUP_MEMBER_NOT_CONFIGURED,
+    GroupMemberResumeRejected,
     GroupSupervisorCycle,
     GroupSupervisorDisposition,
     LocalControlGroupSupervisor,
@@ -100,6 +102,57 @@ class GroupCommandHeadline(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class GroupCommandCompletionFacts:
+    """Shared identity-bound completion facts for group actions."""
+
+    headline: GroupCommandHeadline
+    ownership_accepted: bool
+    submitted_plan_identity_sha256: str
+    runtime_submit_called: bool
+    deduplicated: bool
+    dispatch_decision_count: int
+    applied_identity_matches: bool
+    latest_identity_matches: bool
+    delivery_certainty: DeliveryCertainty | None
+    completion_pending: bool
+
+    def __post_init__(self) -> None:
+        if type(self.ownership_accepted) is not bool:
+            raise TypeError("group command acceptance flag must be boolean")
+        if type(self.runtime_submit_called) is not bool or type(self.deduplicated) is not bool:
+            raise TypeError("group command submission flags must be boolean")
+        if (
+            type(self.applied_identity_matches) is not bool
+            or type(self.latest_identity_matches) is not bool
+            or type(self.completion_pending) is not bool
+        ):
+            raise TypeError("group command completion flags must be boolean")
+        if self.dispatch_decision_count < 0:
+            raise ValueError("group command dispatch count cannot be negative")
+        if len(self.submitted_plan_identity_sha256) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in self.submitted_plan_identity_sha256
+        ):
+            raise ValueError("group command plan identity must be lowercase SHA-256")
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "headline": self.headline.value,
+            "ownership_accepted": self.ownership_accepted,
+            "submitted_plan_identity_sha256": self.submitted_plan_identity_sha256,
+            "runtime_submit_called": self.runtime_submit_called,
+            "deduplicated": self.deduplicated,
+            "dispatch_decision_count": self.dispatch_decision_count,
+            "applied_identity_matches": self.applied_identity_matches,
+            "latest_identity_matches": self.latest_identity_matches,
+            "delivery_certainty": (
+                None if self.delivery_certainty is None else self.delivery_certainty.value
+            ),
+            "completion_pending": self.completion_pending,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class GroupCommandResult:
     """Identity-bound group-command facts without guessed physical authorship."""
 
@@ -119,40 +172,62 @@ class GroupCommandResult:
     def __post_init__(self) -> None:
         if not self.group_id or not self.group_id.isascii():
             raise ValueError("group command result id must be non-empty ASCII")
-        if type(self.requested_on) is not bool or type(self.ownership_accepted) is not bool:
-            raise TypeError("group command acceptance flags must be boolean")
-        if type(self.runtime_submit_called) is not bool or type(self.deduplicated) is not bool:
-            raise TypeError("group command submission flags must be boolean")
-        if (
-            type(self.applied_identity_matches) is not bool
-            or type(self.latest_identity_matches) is not bool
-            or type(self.completion_pending) is not bool
-        ):
-            raise TypeError("group command completion flags must be boolean")
-        if self.dispatch_decision_count < 0:
-            raise ValueError("group command dispatch count cannot be negative")
-        if len(self.submitted_plan_identity_sha256) != 64 or any(
-            character not in "0123456789abcdef"
-            for character in self.submitted_plan_identity_sha256
-        ):
-            raise ValueError("group command plan identity must be lowercase SHA-256")
+        if type(self.requested_on) is not bool:
+            raise TypeError("group command requested state must be boolean")
+        self.completion_facts()
+
+    def completion_facts(self) -> GroupCommandCompletionFacts:
+        return GroupCommandCompletionFacts(
+            headline=self.headline,
+            ownership_accepted=self.ownership_accepted,
+            submitted_plan_identity_sha256=self.submitted_plan_identity_sha256,
+            runtime_submit_called=self.runtime_submit_called,
+            deduplicated=self.deduplicated,
+            dispatch_decision_count=self.dispatch_decision_count,
+            applied_identity_matches=self.applied_identity_matches,
+            latest_identity_matches=self.latest_identity_matches,
+            delivery_certainty=self.delivery_certainty,
+            completion_pending=self.completion_pending,
+        )
 
     def public_dict(self) -> dict[str, object]:
         return {
             "group_id": self.group_id,
             "requested_on": self.requested_on,
-            "headline": self.headline.value,
-            "ownership_accepted": self.ownership_accepted,
-            "submitted_plan_identity_sha256": self.submitted_plan_identity_sha256,
-            "runtime_submit_called": self.runtime_submit_called,
-            "deduplicated": self.deduplicated,
-            "dispatch_decision_count": self.dispatch_decision_count,
-            "applied_identity_matches": self.applied_identity_matches,
-            "latest_identity_matches": self.latest_identity_matches,
-            "delivery_certainty": (
-                None if self.delivery_certainty is None else self.delivery_certainty.value
-            ),
-            "completion_pending": self.completion_pending,
+            **self.completion_facts().public_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GroupMemberResumeResult:
+    """One per-member ownership return with the shared group completion facts."""
+
+    group_id: str
+    logical_member: str
+    ownership_changed: bool
+    completion: GroupCommandCompletionFacts
+
+    @property
+    def action(self) -> str:
+        return "resume_member"
+
+    def __post_init__(self) -> None:
+        if not self.group_id or not self.group_id.isascii():
+            raise ValueError("group member resume id must be non-empty ASCII")
+        if not self.logical_member or not self.logical_member.isascii():
+            raise ValueError("group member resume target must be non-empty ASCII")
+        if type(self.ownership_changed) is not bool:
+            raise TypeError("group member resume change flag must be boolean")
+        if not isinstance(self.completion, GroupCommandCompletionFacts):
+            raise TypeError("group member resume requires completion facts")
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "action": self.action,
+            "group_id": self.group_id,
+            "logical_member": self.logical_member,
+            "ownership_changed": self.ownership_changed,
+            **self.completion.public_dict(),
         }
 
 
@@ -201,6 +276,7 @@ class GroupOutputState:
     command_diagnostic_reason: str | None = None
     missing_control_qualifications: tuple[tuple[str, str], ...] = ()
     supervisor_constructed: bool = False
+    supervisor_armed: bool = False
 
     @property
     def available(self) -> bool:
@@ -214,6 +290,10 @@ class GroupOutputState:
             and self.actual_output in {GroupActualOutput.ON, GroupActualOutput.OFF}
         )
 
+    @property
+    def resume_available(self) -> bool:
+        return self.command_qualified and self.supervisor_constructed and self.supervisor_armed
+
     def attributes_dict(self) -> dict[str, object]:
         return {
             "actual_output": self.actual_output.value,
@@ -225,6 +305,8 @@ class GroupOutputState:
             "group_command": {
                 "qualified": self.command_qualified,
                 "available": self.command_available,
+                "armed": self.supervisor_armed,
+                "resume_available": self.resume_available,
                 "diagnostic_reason": self.command_diagnostic_reason,
                 "missing": [
                     {
@@ -245,6 +327,7 @@ class GroupLifecycleItem:
     member_count: int
     state: GroupLifecycleState
     supervisor_constructed: bool
+    supervisor_armed: bool
     cycle_count: int
     cycle_failure_count: int
     last_cycle_disposition: str | None
@@ -264,6 +347,7 @@ class GroupLifecycleItem:
             "member_count": self.member_count,
             "state": self.state.value,
             "supervisor_constructed": self.supervisor_constructed,
+            "supervisor_armed": self.supervisor_armed,
             "cycle_count": self.cycle_count,
             "cycle_failure_count": self.cycle_failure_count,
             "last_cycle_disposition": self.last_cycle_disposition,
@@ -465,6 +549,15 @@ class LocalControlGroupService:
             item.group_id for item in self._groups if item.qualification.qualified
         )
 
+    @property
+    def qualified_group_members(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (item.group_id, member_id)
+            for item in self._groups
+            if item.qualification.qualified
+            for member_id in item.member_ids
+        )
+
     def snapshot(self) -> GroupLifecycleSnapshot:
         groups = tuple(
             self._lifecycle_item(item)
@@ -548,6 +641,71 @@ class LocalControlGroupService:
             cycle=cycle,
             final_dispatch=final_dispatch,
             timed_out=timed_out,
+        )
+
+    async def resume_group_member(
+        self,
+        group_id: str,
+        logical_member: str,
+    ) -> GroupMemberResumeResult:
+        """Return one member to an already armed group and report shared completion facts."""
+
+        if not isinstance(group_id, str) or not group_id or not group_id.isascii():
+            raise LocalControlGroupCommandRejected("group_not_configured")
+        if (
+            not isinstance(logical_member, str)
+            or not logical_member
+            or not logical_member.isascii()
+        ):
+            raise LocalControlGroupCommandRejected(GROUP_MEMBER_NOT_CONFIGURED)
+        if self._closed:
+            raise LocalControlGroupCommandRejected("group_lifecycle_closed")
+        item = self._group_by_id.get(group_id)
+        if item is None:
+            raise LocalControlGroupCommandRejected("group_not_configured")
+        if logical_member not in item.member_ids:
+            raise LocalControlGroupCommandRejected(GROUP_MEMBER_NOT_CONFIGURED)
+        if not item.qualification.qualified:
+            reason = item.qualification.diagnostic_reason
+            if reason is None:
+                raise LocalControlGroupServiceError(
+                    "unqualified group resume requires a diagnostic reason"
+                )
+            raise LocalControlGroupCommandRejected(reason)
+        supervisor = item.supervisor
+        if supervisor is None:
+            raise LocalControlGroupCommandRejected(
+                item.diagnostic_reason or "group_supervisor_unavailable"
+            )
+
+        try:
+            resumed = await supervisor.resume_member(logical_member)
+        except asyncio.CancelledError:
+            raise
+        except GroupMemberResumeRejected as error:
+            raise LocalControlGroupCommandRejected(error.diagnostic_reason) from error
+        except Exception as error:
+            raise LocalControlGroupCommandRejected(
+                "group_member_resume_rejected"
+            ) from error
+        self._mark_cycle_succeeded(item, resumed.cycle)
+
+        timed_out = False
+        try:
+            async with asyncio.timeout(self._command_completion_timeout_seconds):
+                final_dispatch = await supervisor.wait_idle()
+        except TimeoutError:
+            timed_out = True
+            final_dispatch = supervisor.snapshot().dispatch
+        return GroupMemberResumeResult(
+            group_id=group_id,
+            logical_member=logical_member,
+            ownership_changed=resumed.ownership_changed,
+            completion=_group_completion_verdict(
+                cycle=resumed.cycle,
+                final_dispatch=final_dispatch,
+                timed_out=timed_out,
+            ),
         )
 
     async def claim_direct_ownership(
@@ -745,8 +903,10 @@ class LocalControlGroupService:
     def _lifecycle_item(self, item: _ManagedGroup) -> GroupLifecycleItem:
         manual_override_members = item.manual_override_members
         ownership_diagnostic_reason = item.ownership_diagnostic_reason
+        supervisor_armed = False
         if item.supervisor is not None:
             supervisor_snapshot = item.supervisor.snapshot()
+            supervisor_armed = supervisor_snapshot.armed
             manual_override_members = supervisor_snapshot.manual_override_members
             ownership_diagnostic_reason = (
                 supervisor_snapshot.ownership_diagnostic_reason
@@ -756,6 +916,7 @@ class LocalControlGroupService:
             member_count=len(item.member_ids),
             state=item.state,
             supervisor_constructed=item.supervisor is not None,
+            supervisor_armed=supervisor_armed,
             cycle_count=item.cycle_count,
             cycle_failure_count=item.cycle_failure_count,
             last_cycle_disposition=item.last_cycle_disposition,
@@ -777,8 +938,10 @@ class LocalControlGroupService:
     def _group_output_state(self, item: _ManagedGroup) -> GroupOutputState:
         manual_override_members = item.manual_override_members
         ownership_diagnostic_reason = item.ownership_diagnostic_reason
+        supervisor_armed = False
         if item.supervisor is not None:
             supervisor_snapshot = item.supervisor.snapshot()
+            supervisor_armed = supervisor_snapshot.armed
             manual_override_members = supervisor_snapshot.manual_override_members
             ownership_diagnostic_reason = (
                 supervisor_snapshot.ownership_diagnostic_reason
@@ -797,6 +960,7 @@ class LocalControlGroupService:
             ),
             missing_control_qualifications=item.qualification.missing,
             supervisor_constructed=item.supervisor is not None,
+            supervisor_armed=supervisor_armed,
         )
 
     @staticmethod
@@ -905,14 +1069,16 @@ def _group_actual_output(
     return GroupActualOutput.MIXED
 
 
-def _group_command_result(
+def _group_completion_verdict(
     *,
-    group_id: str,
-    requested_on: bool,
     cycle: GroupSupervisorCycle,
     final_dispatch: GroupPlanDispatchSnapshot,
     timed_out: bool,
-) -> GroupCommandResult:
+) -> GroupCommandCompletionFacts:
+    if cycle.disposition is GroupSupervisorDisposition.WRITE_DISARMED:
+        raise LocalControlGroupServiceError(
+            "write-disarmed cycle cannot produce a group command verdict"
+        )
     identity = group_plan_identity_sha256(cycle.plan)
     failure = final_dispatch.failure
     matching_failure = (
@@ -948,9 +1114,7 @@ def _group_command_result(
         headline = GroupCommandHeadline.PENDING
 
     completion_pending = headline is GroupCommandHeadline.PENDING
-    return GroupCommandResult(
-        group_id=group_id,
-        requested_on=requested_on,
+    return GroupCommandCompletionFacts(
         headline=headline,
         ownership_accepted=True,
         submitted_plan_identity_sha256=identity,
@@ -966,6 +1130,35 @@ def _group_command_result(
     )
 
 
+def _group_command_result(
+    *,
+    group_id: str,
+    requested_on: bool,
+    cycle: GroupSupervisorCycle,
+    final_dispatch: GroupPlanDispatchSnapshot,
+    timed_out: bool,
+) -> GroupCommandResult:
+    completion = _group_completion_verdict(
+        cycle=cycle,
+        final_dispatch=final_dispatch,
+        timed_out=timed_out,
+    )
+    return GroupCommandResult(
+        group_id=group_id,
+        requested_on=requested_on,
+        headline=completion.headline,
+        ownership_accepted=completion.ownership_accepted,
+        submitted_plan_identity_sha256=completion.submitted_plan_identity_sha256,
+        runtime_submit_called=completion.runtime_submit_called,
+        deduplicated=completion.deduplicated,
+        dispatch_decision_count=completion.dispatch_decision_count,
+        applied_identity_matches=completion.applied_identity_matches,
+        latest_identity_matches=completion.latest_identity_matches,
+        delivery_certainty=completion.delivery_certainty,
+        completion_pending=completion.completion_pending,
+    )
+
+
 __all__ = [
     "DirectControlOwnershipDecision",
     "GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL",
@@ -973,7 +1166,9 @@ __all__ = [
     "GROUP_COMMAND_COMPLETION_TIMEOUT_SECONDS",
     "GroupActualOutput",
     "GroupCommandHeadline",
+    "GroupCommandCompletionFacts",
     "GroupCommandResult",
+    "GroupMemberResumeResult",
     "GroupLifecycleItem",
     "GroupLifecycleSnapshot",
     "GroupLifecycleState",

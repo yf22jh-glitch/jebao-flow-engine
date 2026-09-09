@@ -24,6 +24,7 @@ from jebao_flow.local_control.group_service import (
     GroupCommandHeadline,
     LocalControlGroupCommandRejected,
     LocalControlGroupService,
+    LocalControlGroupServiceError,
 )
 from jebao_flow.local_control.ha import project_home_assistant
 from jebao_flow.local_control.models import (
@@ -303,6 +304,183 @@ async def test_verified_deduplicated_and_explicit_off_results_are_distinct(monke
     assert repeated_off.headline is GroupCommandHeadline.VERIFIED
     assert not repeated_off.deduplicated
     assert actuator.write_plan_call_count == 3
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_running_member_resume_restores_one_dispatch_with_shared_completion(
+    monkeypatch,
+) -> None:
+    service = _service(monkeypatch)
+    fresh = _fresh()
+    await service.observe_fresh_cycle(fresh)
+    await service.apply_group_switch("main_flow", True)
+    await service.claim_direct_ownership("left")
+    skipped = await service.observe_fresh_cycle(fresh)
+    actuator = _RecordingActuator.instances[0]
+    before_resume = actuator.write_plan_call_count
+
+    result = await service.resume_group_member("main_flow", "left")
+    after_resume = actuator.write_plan_call_count
+    await service.observe_fresh_cycle(fresh)
+
+    assert "left" in skipped.groups[0].manual_override_members
+    assert result.action == "resume_member"
+    assert result.logical_member == "left"
+    assert result.ownership_changed
+    assert result.completion.headline is GroupCommandHeadline.VERIFIED
+    assert result.completion.applied_identity_matches
+    assert result.completion.latest_identity_matches
+    assert after_resume == before_resume + 1
+    assert actuator.write_plan_call_count == after_resume
+    assert service.snapshot().groups[0].manual_override_members == ()
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stopped_member_resume_reasserts_once_and_repeated_resume_is_a_noop(
+    monkeypatch,
+) -> None:
+    service = _service(monkeypatch)
+    await service.observe_fresh_cycle(_fresh())
+    await service.apply_group_switch("main_flow", False)
+    await service.claim_direct_ownership("left")
+    actuator = _RecordingActuator.instances[0]
+    before_resume = actuator.write_plan_call_count
+
+    first = await service.resume_group_member("main_flow", "left")
+    after_first = actuator.write_plan_call_count
+    repeated = await service.resume_group_member("main_flow", "left")
+
+    assert first.ownership_changed
+    assert first.completion.headline is GroupCommandHeadline.VERIFIED
+    assert after_first == before_resume + 1
+    assert not repeated.ownership_changed
+    assert repeated.completion.headline is GroupCommandHeadline.VERIFIED
+    assert not repeated.completion.runtime_submit_called
+    assert actuator.write_plan_call_count == after_first
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unarmed_member_resume_rejects_without_mutation_and_next_command_unlocks(
+    monkeypatch,
+) -> None:
+    service = _service(monkeypatch)
+    await service.claim_direct_ownership("left")
+    supervisor = service._groups[0].supervisor  # noqa: SLF001
+    assert supervisor is not None
+    manager = supervisor._manager  # noqa: SLF001
+    generation_before = manager.generation
+    runtime_before = supervisor.runtime
+
+    with pytest.raises(LocalControlGroupCommandRejected, match="group_not_armed"):
+        await service.resume_group_member("main_flow", "left")
+
+    assert manager.generation == generation_before
+    assert supervisor.runtime == runtime_before
+    assert supervisor.snapshot().manual_override_members == ("left",)
+    assert not supervisor.armed
+    assert _RecordingActuator.instances[0].write_plan_call_count == 0
+
+    await service.apply_group_switch("main_flow", True)
+    assert supervisor.armed
+    assert supervisor.snapshot().manual_override_members == ()
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_member_resume_rejects_unknown_and_emergency_before_group_work(
+    monkeypatch,
+) -> None:
+    service = _service(monkeypatch)
+    supervisor = service._groups[0].supervisor  # noqa: SLF001
+    assert supervisor is not None
+
+    with pytest.raises(
+        LocalControlGroupCommandRejected,
+        match="group_member_not_configured",
+    ):
+        await service.resume_group_member("main_flow", "unknown")
+
+    await supervisor.apply_runtime_command(
+        supervisor.runtime.model_copy(
+            update={"state": GroupState.EMERGENCY_STOP, "enabled": False}
+        )
+    )
+    await supervisor.wait_idle()
+    writes_before = _RecordingActuator.instances[0].write_plan_call_count
+    generation_before = supervisor._manager.generation  # noqa: SLF001
+
+    with pytest.raises(
+        LocalControlGroupCommandRejected,
+        match="group_emergency_stop_blocks_direct_control",
+    ):
+        await service.resume_group_member("main_flow", "left")
+
+    assert supervisor._manager.generation == generation_before  # noqa: SLF001
+    assert _RecordingActuator.instances[0].write_plan_call_count == writes_before
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_completion_helper_rejects_a_write_disarmed_cycle(monkeypatch) -> None:
+    service = _service(monkeypatch)
+    supervisor = service._groups[0].supervisor  # noqa: SLF001
+    assert supervisor is not None
+    cycle = await supervisor.tick()
+
+    with pytest.raises(LocalControlGroupServiceError, match="write-disarmed"):
+        group_service_module._group_completion_verdict(  # noqa: SLF001
+            cycle=cycle,
+            final_dispatch=cycle.dispatch,
+            timed_out=False,
+        )
+
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_member_resume_does_not_call_runtime_or_ownership_shortcuts(monkeypatch) -> None:
+    service = _service(monkeypatch)
+    await service.observe_fresh_cycle(_fresh())
+    await service.apply_group_switch("main_flow", True)
+    await service.claim_direct_ownership("left")
+    supervisor = service._groups[0].supervisor  # noqa: SLF001
+    assert supervisor is not None
+    manager = supervisor._manager  # noqa: SLF001
+    runtime = supervisor._runtime  # noqa: SLF001
+    desired_before = supervisor.runtime
+    calls = {
+        "update_runtime": 0,
+        "resume_all": 0,
+        "invalidate_applied": 0,
+        "retry_latest": 0,
+    }
+
+    def forbidden(name):
+        def invoke(*args, **kwargs):
+            del args, kwargs
+            calls[name] += 1
+            raise AssertionError(f"member resume called forbidden shortcut {name}")
+
+        return invoke
+
+    monkeypatch.setattr(manager, "update_runtime", forbidden("update_runtime"))
+    monkeypatch.setattr(manager, "resume_all", forbidden("resume_all"))
+    monkeypatch.setattr(runtime, "invalidate_applied", forbidden("invalidate_applied"))
+    monkeypatch.setattr(runtime, "retry_latest", forbidden("retry_latest"))
+
+    result = await service.resume_group_member("main_flow", "left")
+
+    assert result.ownership_changed
+    assert supervisor.runtime == desired_before
+    assert calls == {
+        "update_runtime": 0,
+        "resume_all": 0,
+        "invalidate_applied": 0,
+        "retry_latest": 0,
+    }
     await service.aclose()
 
 
@@ -650,9 +828,113 @@ async def test_group_consumer_bypasses_direct_router_and_never_publishes_optimis
     await service.aclose()
 
 
+@pytest.mark.asyncio
+async def test_group_consumer_routes_resume_button_through_the_existing_group_router(
+    monkeypatch,
+) -> None:
+    config, manifest, catalog = _inputs()
+    service = _service(monkeypatch)
+    fresh = _fresh()
+    await service.observe_fresh_cycle(fresh)
+    await service.apply_group_switch("main_flow", True)
+    await service.claim_direct_ownership("left")
+    await service.observe_fresh_cycle(fresh)
+    projection = _projection(config, manifest, catalog)
+    direct_router = _DirectRouter()
+    group_router = LocalControlGroupCommandRouter(
+        projection=projection,
+        service=service,
+    )
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/test"),
+        projection=projection,
+        router=direct_router,  # type: ignore[arg-type]
+        state_poller=_Poller(),  # type: ignore[arg-type]
+        group_service=service,
+        group_router=group_router,
+    )
+    resume = next(
+        entity
+        for entity in projection.group_resume_entities
+        if entity.logical_member == "left"
+    )
+    client = _Client(
+        (
+            SimpleNamespace(
+                topic=resume.command_topic,
+                payload=b"PRESS",
+                retain=False,
+                dup=False,
+            ),
+        )
+    )
+
+    await adapter._consume(client)  # noqa: SLF001
+
+    result_payload = next(
+        json.loads(payload)
+        for topic, payload, qos, retain in client.published
+        if topic.endswith("/result") and qos == 1 and not retain
+    )
+    assert direct_router.calls == []
+    assert result_payload["action"] == "resume_member"
+    assert result_payload["logical_member"] == "left"
+    assert result_payload["ownership_changed"] is True
+    assert result_payload["headline"] == "verified"
+    assert "requested_on" not in result_payload
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_button_availability_uses_arming_not_actual_output(monkeypatch) -> None:
+    config, manifest, catalog = _inputs()
+    service = _service(monkeypatch)
+    projection = _projection(config, manifest, catalog)
+    group_router = LocalControlGroupCommandRouter(projection=projection, service=service)
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/test"),
+        projection=projection,
+        router=_DirectRouter(),  # type: ignore[arg-type]
+        state_poller=_Poller(),  # type: ignore[arg-type]
+        group_service=service,
+        group_router=group_router,
+    )
+    client = _Client()
+
+    await service.observe_fresh_cycle(_fresh_power(True, False))
+    await adapter._publish_group_outputs(client)  # noqa: SLF001
+    assert all(
+        (entity.availability_topic, "offline", 1, True) in client.published
+        for entity in projection.group_resume_entities
+    )
+
+    await service.apply_group_switch("main_flow", True)
+    client.published.clear()
+    await service.observe_fresh_cycle(_fresh_power(True, False))
+    await adapter._publish_group_outputs(client)  # noqa: SLF001
+
+    [control] = projection.group_control_entities
+    assert (control.availability_topic, "offline", 1, True) in client.published
+    assert all(
+        (entity.availability_topic, "online", 1, True) in client.published
+        for entity in projection.group_resume_entities
+    )
+
+    client.published.clear()
+    await service.observe_fresh_cycle(_fresh_power(False, None))
+    await adapter._publish_group_outputs(client)  # noqa: SLF001
+    assert (control.availability_topic, "offline", 1, True) in client.published
+    assert all(
+        (entity.availability_topic, "online", 1, True) in client.published
+        for entity in projection.group_resume_entities
+    )
+    await service.aclose()
+
+
 class _NeverCalledGroupService:
     configured_group_ids = ("main_flow",)
     qualified_group_ids = ("main_flow",)
+    qualified_group_members = (("main_flow", "left"), ("main_flow", "right"))
 
     def __init__(self) -> None:
         self.calls = []
@@ -661,10 +943,15 @@ class _NeverCalledGroupService:
         self.calls.append((group_id, requested_on))
         raise AssertionError("rejected command reached the group service")
 
+    async def resume_group_member(self, group_id, logical_member):
+        self.calls.append((group_id, logical_member))
+        raise AssertionError("rejected command reached the group service")
+
 
 class _BlockingCommandLifecycle:
     configured_group_ids = ("main_flow",)
     qualified_group_ids = ("main_flow",)
+    qualified_group_members = (("main_flow", "left"), ("main_flow", "right"))
 
     def __init__(self) -> None:
         self.command_started = asyncio.Event()
@@ -679,6 +966,9 @@ class _BlockingCommandLifecycle:
         except asyncio.CancelledError:
             self.command_cancelled.set()
             raise
+
+    async def resume_group_member(self, group_id, logical_member):
+        raise AssertionError((group_id, logical_member))
 
     async def observe_fresh_cycle(self, states) -> None:
         del states
@@ -797,6 +1087,105 @@ def test_group_and_device_command_topics_must_have_exactly_one_owner() -> None:
             state_poller=_Poller(),  # type: ignore[arg-type]
             group_router=group_router,
         )
+
+
+def test_switch_resume_and_direct_topics_are_pairwise_disjoint() -> None:
+    config, manifest, catalog = _inputs()
+    projection = _projection(config, manifest, catalog)
+    service = _NeverCalledGroupService()
+    group_router = LocalControlGroupCommandRouter(
+        projection=projection,
+        service=service,  # type: ignore[arg-type]
+    )
+    [control] = projection.group_control_entities
+    resume_topics = {entity.command_topic for entity in projection.group_resume_entities}
+
+    assert control.command_topic not in resume_topics
+    assert len(group_router.command_topics) == 1 + len(resume_topics)
+    assert len(group_router.command_topics) == len(set(group_router.command_topics))
+
+    with pytest.raises(ValueError, match="must be disjoint"):
+        LocalControlMqttAdapter(
+            MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/test"),
+            projection=projection,
+            router=_DirectRouter((next(iter(resume_topics)),)),  # type: ignore[arg-type]
+            state_poller=_Poller(),  # type: ignore[arg-type]
+            group_router=group_router,
+        )
+
+    first_resume, *remaining = projection.group_resume_entities
+    colliding = replace(first_resume, command_topic=control.command_topic)
+    duplicate_projection = replace(
+        projection,
+        group_resume_entities=(colliding, *remaining),
+    )
+    with pytest.raises(ValueError, match="topic is duplicated"):
+        LocalControlGroupCommandRouter(
+            projection=duplicate_projection,
+            service=service,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_resume_payload_and_inventory_fail_before_the_service() -> None:
+    config, manifest, catalog = _inputs()
+    projection = _projection(config, manifest, catalog)
+    service = _NeverCalledGroupService()
+    router = LocalControlGroupCommandRouter(
+        projection=projection,
+        service=service,  # type: ignore[arg-type]
+    )
+    resume = projection.group_resume_entities[0]
+
+    with pytest.raises(LocalControlGroupCommandError, match="group_command_payload_invalid"):
+        await router.handle(resume.command_topic, "ON")
+    assert service.calls == []
+
+    service.qualified_group_members = (("main_flow", "right"),)
+    mismatched = LocalControlGroupCommandRouter(
+        projection=projection,
+        service=service,  # type: ignore[arg-type]
+    )
+    with pytest.raises(LocalControlGroupCommandError, match="group_command_inventory_mismatch"):
+        await mismatched.handle(resume.command_topic, "PRESS")
+    assert service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_retained_resume_stops_before_the_service() -> None:
+    config, manifest, catalog = _inputs()
+    projection = _projection(config, manifest, catalog)
+    service = _NeverCalledGroupService()
+    group_router = LocalControlGroupCommandRouter(
+        projection=projection,
+        service=service,  # type: ignore[arg-type]
+    )
+    resume = projection.group_resume_entities[0]
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/test"),
+        projection=projection,
+        router=_DirectRouter(),  # type: ignore[arg-type]
+        state_poller=_Poller(),  # type: ignore[arg-type]
+        group_router=group_router,
+    )
+    client = _Client(
+        (
+            SimpleNamespace(
+                topic=resume.command_topic,
+                payload=b"PRESS",
+                retain=True,
+                dup=False,
+            ),
+        )
+    )
+
+    await adapter._consume(client)  # noqa: SLF001
+
+    assert service.calls == []
+    assert json.loads(client.published[-1][1]) == {
+        "reason": "retained_command_rejected",
+        "status": "rejected",
+    }
 
 
 @pytest.mark.asyncio

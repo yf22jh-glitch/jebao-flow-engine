@@ -28,10 +28,22 @@ from jebao_flow.protocol.models import DeviceTarget
 _CANONICAL_OFF = DeviceTarget(enabled=False, power=0)
 GROUP_FORCED_OFF_WILL_REVERT = "group_forced_off_will_revert_next_cycle"
 GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL = "group_emergency_stop_blocks_direct_control"
+GROUP_MEMBER_NOT_CONFIGURED = "group_member_not_configured"
+GROUP_NOT_ARMED = "group_not_armed"
 
 
 class GroupSupervisorError(RuntimeError):
     """The group supervisor lifecycle or current observation is invalid."""
+
+
+class GroupMemberResumeRejected(GroupSupervisorError):
+    """A stable pre-write diagnostic rejected one member-ownership return."""
+
+    def __init__(self, diagnostic_reason: str) -> None:
+        if not diagnostic_reason or not diagnostic_reason.isascii():
+            raise ValueError("group member resume reason must be non-empty ASCII")
+        self.diagnostic_reason = diagnostic_reason
+        super().__init__(diagnostic_reason)
 
 
 class GroupSupervisorDisposition(StrEnum):
@@ -86,6 +98,24 @@ class GroupManualOwnershipDecision:
             raise ValueError("rejected direct control cannot record manual ownership")
         if self.diagnostic_reason is not None and not self.diagnostic_reason.isascii():
             raise ValueError("manual ownership diagnostics must use ASCII")
+
+
+@dataclass(frozen=True, slots=True)
+class GroupMemberResumeCycle:
+    """One member-ownership return and its exact manager-produced planning cycle."""
+
+    group_id: str
+    logical_member: str
+    ownership_changed: bool
+    cycle: GroupSupervisorCycle
+
+    def __post_init__(self) -> None:
+        if not self.group_id or not self.group_id.isascii():
+            raise ValueError("group member resume group id must be non-empty ASCII")
+        if not self.logical_member or not self.logical_member.isascii():
+            raise ValueError("group member resume target must be non-empty ASCII")
+        if type(self.ownership_changed) is not bool:
+            raise TypeError("group member resume change flag must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +278,37 @@ class LocalControlGroupSupervisor:
                     if forced_off and power_on_requested
                     else None
                 ),
+            )
+
+    async def resume_member(
+        self,
+        logical_member: str,
+        *,
+        now: float | None = None,
+    ) -> GroupMemberResumeCycle:
+        """Return one member to an already armed group without changing desired runtime."""
+
+        async with self._operation_lock:
+            self._require_open()
+            if logical_member not in self._member_ids:
+                raise GroupMemberResumeRejected(GROUP_MEMBER_NOT_CONFIGURED)
+            if not self._armed:
+                raise GroupMemberResumeRejected(GROUP_NOT_ARMED)
+            if self._manager.runtime.state is GroupState.EMERGENCY_STOP:
+                raise GroupMemberResumeRejected(
+                    GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL
+                )
+            generation_before = self._manager.generation
+            ownership_changed = (
+                self._manager.resume_member(logical_member) != generation_before
+            )
+            plan = self._manager.plan_tick(now=now)
+            cycle = self._finish_cycle(plan, force_mandatory_off=False)
+            return GroupMemberResumeCycle(
+                group_id=self.group_id,
+                logical_member=logical_member,
+                ownership_changed=ownership_changed,
+                cycle=cycle,
             )
 
     async def note_verified_direct_power_on(self, logical_member: str) -> None:
@@ -432,7 +493,11 @@ def _runtime_holds_mandatory_off(
 __all__ = [
     "GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL",
     "GROUP_FORCED_OFF_WILL_REVERT",
+    "GROUP_MEMBER_NOT_CONFIGURED",
+    "GROUP_NOT_ARMED",
     "GroupManualOwnershipDecision",
+    "GroupMemberResumeCycle",
+    "GroupMemberResumeRejected",
     "GroupSupervisorCycle",
     "GroupSupervisorDisposition",
     "GroupSupervisorError",
