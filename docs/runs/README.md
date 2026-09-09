@@ -91,6 +91,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-02 Q2-slotflow 앱-sequence 교정](2026-09-02-q2-slotflow-appseq-sync-gate-ced43a9.md) | master→Sync write + fresh raw 2 + exact restore | master·sync-slave 지정, TimerON, 장비별 schedule image 보존은 확인; runtime schedule 소유권 미판별, inactive manual mode/frequency drift gate에서 ASYNC write 0 |
 | [2026-09-04 standalone exact-restore qualification](2026-09-04-exact-restore-qualification-4dcd8364.md) | sentinel write 8 + strict raw baseline 검증 + final verify 2회 | 두 장비 byte-exact 원복은 확인; 하나의 pair-gap 정책이 completion gap과 전체 취득창에 겹쳐 receipt는 미발급, non-terminal journal을 보존하고 park |
 | [2026-09-07 B1 identity-resolution stop](2026-09-07-b1-identity-resolution-stop-7746b28a.md) | primary 2 pair 시도 / raw frame 0 / write 0 | 두 ordinal의 두 role 모두 identity-before exact resolution 실패; corroborating·retry는 실행하지 않았고 Q2는 UNKNOWN |
+| [2026-09-10 local observer 첫 활성화](2026-09-10-local-observer-first-activation.md) | native entity 86 / exact discovery 4 of 6 / write 0 | native HA 등록 PASS; 한 target 누락이 read-only batch 전체를 unavailable로 접는 mismatch-isolation 결함 확인 |
 
 ## 새 실행 기록 템플릿
 
