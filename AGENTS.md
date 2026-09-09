@@ -1991,6 +1991,108 @@ connection, retained mutation, Home Assistant, daemon restart·deployment, devic
 유일성, cleanup 처리 완료가 확인되지 않아 계속 별도로 blocked이고, 하드웨어 `NO-GO / BLOCKING`,
 Q2 `UNKNOWN`, frozen native harness를 유지합니다.
 
+### 2026-09-10 Home Assistant 첫 배포 표면 선택과 read-only 감사 D1e
+
+repository maintainer는 Jebao Home Assistant·local-control을 과거에 배포하거나 사용한 적이 없고
+지금 처음 만드는 것이라고 확인한 뒤, 홈서버의 Home Assistant 상태를 SSH로 읽기 전용 감사하라고
+지시했습니다. 감사 결과와 다음 단계 설명을 받은 뒤 “ㅇㅇㅇ 다음단계 수행해”라고 답했습니다. 이
+답은 아래의 Home Assistant 표면 정합화, 문서 정정, current `jebao-flow-local` observer 첫 배포와
+read-only 검증을 진행하는 승인으로 결속합니다. control mode, 장비 write, vendor app 조작이나
+pre-namespace retained config 삭제 승인은 아닙니다. observer operation에는 장비 write가 없으므로
+현장 승인이나 물리 전원 차단 확인을 반복적인 software gate로 추가하지 않습니다.
+답변 전에 제시한 다음 단계도 문서 정합화와 observer 첫 배포·read-only 검증이었으며, 이 결속은
+그 제시 범위와 같습니다.
+
+이번 작업이 닫을 질문은 (1) bounded broker 관측과 Home Assistant registry·recorder 감사에서 실제
+legacy migration 대상이 발견됐는가, (2) 현재 제품의 Home Assistant 표면이 old aggregate custom
+component와 새 local-control native MQTT discovery 중 어느 경로인가, (3) 전자를 잘못 설치·구성하지
+않고 후자 하나만 observer로 처음 활성화할 수 있는가입니다. 근거는 실제 write-free broker artifact,
+Home Assistant의 read-only registry·recorder·설치 파일 감사, 두 MQTT contract의 static trace입니다.
+
+첫 broker capture는 reviewed source commit `ae026be09c57b736cdd2792ad12d6a5c26b24508`와 byte-identical한
+코드로 20초의 bounded window를 관측했습니다. private artifact는 opaque id
+`legacy-inventory-fe3db9aa99408baad7cd8998d3aa581f`, digest
+`f76f36ae4916e815281b2602445f06945d2ffe8ba24357c26a8b2545d2f993a4`, UTC span
+`2026-09-09T15:31:58.438207Z..2026-09-09T15:32:18.439326Z`로 보존됐고, 전달된 152개 메시지는
+모두 기록 전 필터에서 제외되어 record·candidate·ambiguous count가 각각 0이었습니다. 이는 증거등급
+(b)의 persisted bounded-observation claim이며 broker retained set의 완전한 snapshot이나 부재 증명이
+아닙니다.
+
+별도 Home Assistant read-only 감사에서는 entity registry 4,539개 중 Jebao entity, MQTT Jebao entity,
+pre-namespace·namespaced local-control entity가 모두 0개였고 Jebao device registry와 config entry도
+각각 0개였습니다. Recorder의 current·legacy state metadata와 statistics, YAML config에서도 Jebao
+entity·integration 참조가 0개였습니다. 설치된 `custom_components/jebao_flow` tree는 존재하지만
+config entry가 없어 inert하고, repository 사본보다 파일 하나가 부족하며 여덟 파일이 byte-different한
+구형 사본입니다. 로그의 두 Jebao 문자열은 custom integration 일반 경고이고 integration error는
+없었습니다. 이 감사는 broker retained absence를 증명하지 않지만, maintainer의 배포 이력 확인과
+record·candidate 0인 bounded artifact를 함께 보면 실제로 선택·삭제·복원할 legacy 대상이 없습니다.
+따라서 D1d apply·restore와 추가 capture·counter 계측은 §7에 따라 park하며, provenance 있는 eligible
+record가 1개 이상 새로 생길 때만 재개합니다.
+
+바로 앞 D1d가 유지한 D1b/D1c deployment block은 이 **첫 observer activation에만** 다음처럼 좁게
+적용하지 않습니다. pre-namespace actionable legacy는 bounded record 0, Home Assistant artifact 0과
+maintainer의 미배포 이력 확인으로 실제 조치 대상이 없고, broker absence를 증명했다고 일반화하지
+않습니다. exact `topic_prefix` 유일성은 code-enforced가 아니라 시작 전 host-local process·Compose
+inventory와 maintainer의 단일 홈서버 배포 확인으로 충족하는 operator precondition이며 cross-host
+daemon 부재를 증명하지 않습니다. cleanup 처리 완료는 prior Jebao retained config가 실재한 이력이
+없어 이번 첫 activation에는 삭제할 대상이 없으므로 moot이지, Home Assistant 처리를 증명한 것이
+아닙니다. control mode 배포나 이 precondition을 확인하지 못한 배포에는 기존 block이 그대로
+유효합니다.
+
+이 broker·Home Assistant 감사는 장비나 펌프의 동작 질문을 측정한 실기가 아니라 첫 배포 전 외부
+상태의 write-free 감사입니다. 따라서 §4 `docs/runs/` hardware run으로 분류하지 않고, 이미 소진된
+collector 예외도 원용하지 않습니다. capture 승인은 read-only broker 접촉 1회에 한정됐고 retained
+mutation을 승인하지 않았다는 범위도 이 절에 함께 보존합니다. 이 결정 때문에 후속 `src/` 변경 순서가
+§4 run record를 기다리지는 않지만 frozen native harness는 계속 동결합니다.
+
+static trace로 두 Home Assistant 계약은 대체 관계임을 확인했습니다. `custom_components/jebao_flow`
+runtime은 old `jebao-flowd`의 aggregate `system/config`, `groups/+/state`, `devices/+/state`,
+`requests/+/result` 계약만 소비하고 aggregate group·device command를 발행합니다. 반면 current
+deployment adapter인 `jebao-flow-local serve`는 `src/jebao_flow/local_control/ha.py`가 만드는 native
+MQTT Discovery와 `topic_prefix/local/...` state·command만 사용하며 old aggregate topic을 만들지
+않습니다. custom card도 custom component entity의 `jebao_flow_*` attributes에 의존하므로 native
+discovery entity를 자동 소비하지 않습니다. 두 daemon·HA surface를 함께 띄우는 것은 current 제품
+구성이 아니며, 같은 물리 장비에 대해 중복되고 서로 다른 authority 표면을 만듭니다. MQTT topic
+tree는 서로 달라도 old writer는 local-control의 per-device lease와 journal에 참여하지 않으므로
+동시 배포 시 duplicate write, 서로의 계산을 모르는 out-of-envelope 결과, local-control journal이
+모르는 상태를 rollback하는 손실 가능성이 생깁니다. 이는 source가 저장소에 함께 있는 현재 상태의
+P1이 아니라 **동시 배포 시점의 §3 P1**입니다. 일반 daemon·old MQTT 경로는 앞선 하위절에서도
+계속 동결한다고 명시됐으므로, 이번 작업은 그 경로를 기동·수정하거나 조용히 해제하지 않습니다.
+
+따라서 첫 배포의 유일한 current Home Assistant 경로는 **built-in MQTT integration +
+`jebao-flow-local` native MQTT Discovery**입니다. 홈서버의 unconfigured 구형 custom component를
+repository 사본으로 덮거나 config entry를 만들거나 Lovelace card를 등록하지 않습니다. 그 tree는
+이번 observer 배포에 필요하지 않고, 단순 sync는 local-control 계약을 연결하지 못합니다. 제거 역시
+이 작업의 필요조건이 아니므로 별도 Home Assistant mutation으로 확대하지 않습니다. custom card를
+native discovery에 맞추는 작업은 별도 제품 slice로 park합니다. old `jebao-flowd`와 current
+`jebao-flow-local`을 동시에 실행하지 않습니다. `pyproject.toml`의 old console entry를 삭제하는 것도
+동결 해제가 필요하고 기동 금지보다 추가 보호가 없으므로 이번 범위에 넣지 않습니다.
+
+문서 정합화는 `docs/home-assistant.md`, `docs/local-control.md`, `README.md`, `PROJECT_CONTEXT.md`에서
+current native-discovery 경로와 parked legacy custom-component 경로를 명확히 구분하는 데 한정합니다.
+`custom_components/*`, old `src/jebao_flow/mqtt/*`, `src/jebao_flow/app.py`, frozen six와 직접 테스트,
+write edge, groups runtime, protocol·devices, `docs/runs/*`는 수정하지 않습니다. 기존 custom component
+source와 test는 역사적 aggregate 계약 보존용으로 유지하며 current deployment에 사용된다고 주장하지
+않습니다.
+
+observer 첫 배포는 reviewed current source와 private current config·manifest를 사용해 정확히 한
+`jebao-flow-local` instance만 시작합니다. 시작 전에 config의 `runtime.mode=observer`, current
+`topic_prefix`를 쓰는 다른 daemon 0개, old `jebao-flowd` 0개, custom component config entry 0개를
+확인합니다. qualification은 읽지 않고 coordinator·journal·writer를 구성하지 않으며 command topic을
+projection·subscribe하지 않습니다. 이 확인은 구체적인 authority 충돌 방지이고 generic 현장 gate가
+아닙니다. 불일치가 있으면 추측해 서비스를 고치지 않고 보고합니다.
+
+첫 활성화는 native discovery config와 D1c의 owned current-namespace tombstone을 broker에 publish하고
+Home Assistant가 entity를 생성하는 외부 mutation임을 숨기지 않습니다. 이 mutation은 maintainer의
+“다음단계 수행” 승인에 포함하되, 장비에는 read-only fresh state session만 열고 control frame은 0회로
+유지합니다. 검증은 (1) local-control service exactly one, (2) HA에 current namespace의 native entity가
+생기고 legacy custom entity·config entry는 0, (3) observer control entity·command subscription 0,
+(4) fresh state와 availability가 현재 관측으로 갱신, (5) local-control journal·write coordinator·device
+writer 사용 0을 확인합니다. 이 observer 결과는 Q1·Q2 또는 firmware capability 판정으로 승격하지
+않고, control·실기 단계는 별도 concrete operation 지시 뒤에 진행합니다. 하드웨어는 계속
+`NO-GO / BLOCKING`, Q2는 `UNKNOWN`이고 frozen native harness와 일반 daemon·old MQTT 경로의
+동결도 유지합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
