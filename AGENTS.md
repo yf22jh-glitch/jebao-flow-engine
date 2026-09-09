@@ -1466,6 +1466,130 @@ Home Assistant·장비·앱·원격 환경 실행과 장비 write는 포함하�
 별도로 필요합니다. 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`은 유지합니다. 같은 resume 질문을
 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
 
+### 2026-09-09 observer control-surface suppression D1 범위 확장
+
+per-member group ownership resume commit `a18a0dd46de9d9e8bf5d776707977937b9c33300`의 완료 뒤
+repository maintainer는 서버 OS 재부팅 전후의 read-only 안전 상태 확인을 요청했고, 재부팅 완료 후
+“이어서 하자”고 답했습니다. 그 발언은 기능을 이름으로 고르거나 actual deployment를 활성화하라는
+승인이 아니라 다음 제품 작업을 계속하라는 요청입니다. 이후 read-only static trace에서
+`docs/home-assistant.md`가 `runtime.mode: observer`이면 모든 group·device control entity를 생성하지
+않는다고 약속하지만, current local-control projection과 CLI composition은 `--write-enabled`, current
+qualification, `dry_run`, per-device write flag만 소비하고 top-level runtime mode를 소비하지 않는
+divergence를 확인했습니다. 이번 D1은 그 요청을 이 문서화된 경계의 **source·test·offline 검증
+범위로 좁게 결속**하며, 이후 product slice의 상시 승인이나 broker·Home Assistant·장비·앱·원격 환경
+실행 및 장비 write 승인으로 일반화하지 않습니다.
+기존 old `src/jebao_flow/mqtt/service.py`는 이미 observer에서 control 광고와 command를 낮추거나
+거부하므로, D1은 새 gate를 발명하는 것이 아니라 새 local-control stack이 잃은 기존 mode 계약을
+현재 projection·composition 경계에 복원하는 작업입니다.
+
+이번 작업이 닫을 질문은 `runtime.mode`가 `observer`이면 current qualification과 명시적
+`--write-enabled`가 함께 있어도 **current process가 새로 projection·publish·subscribe하는** device
+scalar·schedule, group switch와 per-member resume command surface를 0개로 유지하면서 기존
+diagnostic·actual-output·read-only publish와 shutdown 의미를 그대로 보존할 수 있는가입니다. 근거는
+firmware 가설이 아니라 `RuntimeMode`, CLI composition, Home Assistant projection과 MQTT subscription의
+static trace 및 offline regression입니다. 이는 §3 P1을 주장하는 변경이 아니라, 최근 B2·C1이 넓힌
+surface를 이미 문서화된 observer 자세에 맞추는 제한입니다.
+
+이 확장은 다음 파일로 한정합니다.
+
+- `src/jebao_flow/local_control/ha.py`, `src/jebao_flow/local_control_cli.py`
+- 필요한 회귀에 한한 `tests/unit/test_local_control_*`
+- 구현 경계 기록에 한한 `docs/local-control.md`, `docs/home-assistant.md`
+
+`src/jebao_flow/config.py`, `src/jebao_flow/groups/*`, `src/jebao_flow/local_control/catalog.py`,
+`group_command.py`, `group_service.py`, `group_supervisor.py`, `state.py`, `group.py`, `coordinator.py`, `lease.py`,
+`device_writer.py`, `journal.py`, `mqtt.py`, old `src/jebao_flow/mqtt/*`, `src/jebao_flow/app.py`,
+`custom_components/*`, `src/jebao_flow/protocol/*`, `src/jebao_flow/devices/*`, 기존 여섯 frozen source와
+그 직접 테스트, `docs/runs/*`는 수정하지 않습니다. old MQTT/group service나 `devices.*` observer를
+import하거나 우회 경로로 재사용하지 않습니다.
+
+이번 source 변경은 observer-mode projection과 production composition의 **새 제어 표면을 줄이는 데만**
+한정하며 broker retained state를 삭제하거나 migration하지 않습니다.
+`tests/unit/test_local_control_group_supervisor.py`, `test_local_control_group_service.py`,
+`test_local_control_group_command.py`, `test_local_control_group_transport.py`,
+`test_local_control_state.py`, `test_local_control_ha.py`, `test_local_control_mqtt.py`,
+`test_local_control_cli.py`의 기존 단정은 완화하거나 삭제하지 않으며, 필요하면 별도 repository
+maintainer 승인을 먼저 받습니다. B1~C1의 fresh device truth, write-disarmed startup, exact
+manager-produced plan provenance, disposition 다섯 종, mandatory OFF token·dedupe 우회, direct-power
+watermark, identity-based eight-stage verdict와 unresolved OFF sticky close 의미를 변경하지 않습니다.
+
+top-level `RuntimeMode.OBSERVER`는 control surface에 대해 `--write-enabled`, `runtime.dry_run`, retained
+qualification과 per-device `allow_hardware_writes`보다 먼저 적용합니다. observer mode에서는 current
+qualification 파일을 읽거나 write coordinator를 구성하지 않고, projection에 control authority가
+없음을 projection-level bounded field `control_surface_diagnostic_reason`의 stable English 값
+`runtime_mode_observer`로 명시적으로 전달합니다. 이 mode reason은 `physical_device_not_qualified` 같은
+entity capability·qualification `diagnostic_reason`을 대체하지 않으며, 이미 qualified된 function의 control을
+observer mode가 억제할 때 qualification 부재를 주장하지 않습니다. entity의 기존 capability reason은
+observer와 control projection에서 그대로 보존합니다. `ha-schema`도 current
+config의 runtime mode를 존중합니다. 따라서
+qualified receipt가 남아 있거나 `--write-enabled`가 주어져도 device scalar·schedule command topic,
+group switch와 member resume entity·topic은 생성되지 않고, group command router도 생성되지 않습니다.
+MQTT adapter가 subscribe하는 command topic은 0개이며 group lifecycle은 coordinator 없는 기존
+read-only inventory로 supervisor 0개를 유지합니다.
+
+observer suppression은 관측 표면을 지우지 않습니다. device·system diagnostic state, existing product
+schedule read-only observation, per-device availability, group actual-output diagnostic과 lifecycle inventory는 계속 projection·
+publish하며, complete fresh cycle의 device publication 순서와 group callback을 바꾸지 않습니다. 이미
+qualification된 function도 observer projection에서는 command topic 없는 read-only entity로만 나타나고,
+qualification 파일을 읽지 않은 production observer는 그 권위를 추측하지 않습니다. command result나
+desired state를 actual output으로 낙관 publish하지 않고 `mixed`·`unknown` 의미도 그대로 유지합니다.
+production composition은 qualification 파일을 읽지 않는 상위 보장을 제공하고, projection 층은 injected
+qualified catalog를 받아도 독립적으로 control을 억제하는 하위 보장을 제공하며 둘을 같은 판정으로
+혼동하지 않습니다.
+
+이 D1은 이전 run에서 retained된 MQTT discovery config를 제거하지 않습니다. current discovery topic,
+`unique_id`와 Home Assistant device identifier는 `topic_prefix` 또는 instance 성분을 포함하지 않아, 같은
+`discovery_prefix`와 논리 ID를 쓰는 다른 daemon의 config와 구분되지 않습니다. 그러므로 empty retained
+payload를 자동 publish하면 삭제 대상이 이 instance 소유라는 사실을 증명할 수 없고 다른 daemon의 control
+entity를 지울 수 있습니다. broker retained state를 조회하거나 지난 projection 목록을 file·volume에
+저장하거나 operator opt-in으로 그 소유권 증명을 대체하지 않습니다. 이 slice는 어떤 discovery·state·
+command·availability topic에도 deletion 목적의 empty retained payload를 publish하지 않습니다.
+
+따라서 D1의 보장은 current process의 projection·route·subscription에 한정합니다. pre-D1 retained control
+entity가 broker·Home Assistant에 남았는지는 `UNKNOWN`이고 화면에 남아 실제 control처럼 보일 수 있지만,
+observer process는 그 command topic을 subscribe하지 않습니다. `docs/home-assistant.md`의 “같은 논리 ID를
+쓰는 여러 daemon도 `topic_prefix`가 Home Assistant config entry를 구분한다”는 약속은 현재 discovery
+identity에 구현되어 있지 않으며 이 divergence를 숨기지 않습니다. 후속 D1b가 discovery `unique_id`·device
+identifier·node id를 stable instance namespace에 결속한 뒤에만, D1c가 그 소유 namespace 안의 retained
+variant를 정리할 수 있습니다. D1b만 landing하면 legacy entity를 한 벌 더 만들 수 있으므로 D1c와 migration
+비용을 별도 정책·적대적 검토에 먼저 결속해야 하고, pre-namespace legacy config는 자동 삭제하지 않습니다.
+
+`RuntimeMode.CONTROL`에서는 B2·C1 behavior를 바꾸지 않습니다. current explicit write opt-in과
+qualification을 기존과 같이 소비하고, device command, group switch와 member resume entity·topic,
+topic disjointness, qualification·construction·arming availability와 pre-journal rejection을 그대로
+유지합니다. `dry_run`과 per-device write lock은 observer-mode entity suppression으로 대체하지 않고
+control-mode의 기존 live-opt-in 검증으로 남깁니다. observer 이외의 새 mode, firmware gate, device write
+path 또는 MQTT task를 만들지 않으며, 위 `runtime_mode_observer` 이외의 새 stable reason도 만들지
+않습니다. `control_surface_diagnostic_reason` 하나는 additive public diagnostic이며 CONTROL에서 `None`이고,
+그 밖의 기존 public projection field와 의미를 바꾸지 않습니다.
+
+회귀는 최소한 (1) default인 `mode=observer`에 `--write-enabled`, `dry_run=false`, current qualification을
+함께 주어도 qualification 파일 read·coordinator construction·group supervisor가 각각 0이고 public
+`control_count`, group switch와 resume entity, 모든 command topic·subscription이 0개, (2) 같은 observer
+projection에서 device·system diagnostic, schedule observation, group actual output과 availability가 기존과
+같이 생성·publish되고 각 entity의 기존 capability `diagnostic_reason`도 같은 catalog·manifest의 control
+projection과 동일하게 보존됨, (3) direct qualified catalog를 observer projection에 주입해도 qualified device function은 command
+topic 없는 read-only entity이고 entity capability reason을 qualification 부재로 바꾸지 않으며 projection의
+`control_surface_diagnostic_reason`은 정확히 `runtime_mode_observer`이고 group switch·resume는 0개,
+(4) `mode=control`에서는 additive mode-reason field가 `None`인 것 외에 기존 qualified device·group
+switch·resume projection과 router 단일 소유가 byte/schema 의미상 불변,
+(5) observer production composition의 group service는 coordinator·supervisor가 없어 injected group
+switch·resume 호출도 기존 construction diagnostic으로 journal·frame 전에 거부되고 public MQTT route는
+존재하지 않음, (6) 기존 read-only startup, fresh publish ordering, mismatch isolation, timeout, sticky
+shutdown과 public redaction 단정이 그대로 통과함, (7) observer에서도 MQTT adapter가 어떤 discovery
+topic에도 deletion 목적의 empty retained payload를 publish하지 않아 retained cleanup이 이 slice에 섞이지 않음을
+고정합니다. (8) 기존 테스트가 다루지 않던 `ha-schema`의 첫 mode 회귀로, observer config와
+current qualification path를 함께 주어도 qualification 파일 read가 0회이고 출력의 device·schedule
+command topic, group switch와 resume entity가 모두 0개이며 `control_surface_diagnostic_reason`이
+정확히 `runtime_mode_observer`임을 고정합니다. 이 단정은 `serve`와 composition block을 공유하지만
+coordinator·group service 구성 전에 return하는 `ha-schema` 분기의 첫 직접 coverage입니다.
+
+D1 source·offline test landing은 actual deployment를 재기동하거나 broker·Home Assistant·device·app에
+접촉하지 않습니다. post-reboot read-only 확인은 새 write 권한을 만들지 않으며 실제 활성화에는
+`docs/hardware-readiness.md`의 fresh preflight·exact restore·on-site 승인·현장 감시·중단 수단이 별도로
+필요합니다. 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`, frozen native harness를 유지합니다. 같은
+observer-surface 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
