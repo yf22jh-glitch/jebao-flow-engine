@@ -19,7 +19,7 @@ from jebao_flow.groups.models import (
     OfflinePolicy,
     PatternKind,
 )
-from jebao_flow.groups.plan import DeviceActuationLimits, GroupTickPlan
+from jebao_flow.groups.plan import DeviceActuationLimits, GroupPlanningError, GroupTickPlan
 from jebao_flow.groups.runtime import (
     DeliveryCertainty,
     GroupPlanSupersededError,
@@ -28,6 +28,7 @@ from jebao_flow.groups.runtime import (
     StaleDispatchError,
     UnresolvedGroupSafetyStopError,
     WriteGuard,
+    group_plan_identity_sha256,
 )
 from jebao_flow.local_control.group_supervisor import (
     GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL,
@@ -349,7 +350,84 @@ async def test_an_explicit_repeated_off_command_may_reach_the_plan_port_once_mor
 
     assert len(port.plans) == 2
     assert port.plans[1] is repeated.plan
+    assert repeated.pre_submit_dispatch is not None
+    assert (
+        repeated.pre_submit_dispatch.applied_plan_identity_sha256
+        == group_plan_identity_sha256(repeated.plan)
+    )
+    assert not repeated.deduplicated
     assert supervisor.snapshot().runtime_submit_count == 2
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_state_group_command_clears_override_before_exact_plan_submit() -> None:
+    supervisor, port, _, _ = _supervisor()
+    fresh = (_fresh("left"), _fresh("right"))
+    await supervisor.observe_fresh_cycle(fresh, now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.RUNNING, enabled=True, power=50),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+    await supervisor.claim_manual_ownership("left")
+
+    cycle = await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.RUNNING, enabled=True, power=50),
+        now=3.0,
+    )
+    await supervisor.wait_idle()
+
+    assert cycle.plan.manual_override_devices == ()
+    assert port.plans[-1] is cycle.plan
+    assert supervisor.runtime.state is GroupState.RUNNING
+    assert supervisor.snapshot().manual_override_members == ()
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_rejected_runtime_update_preserves_existing_manual_override() -> None:
+    supervisor, port, _, _ = _supervisor()
+    await supervisor.claim_manual_ownership("left")
+
+    with pytest.raises(GroupPlanningError, match="pattern"):
+        await supervisor.apply_runtime_command(
+            GroupRuntime(
+                state=GroupState.RUNNING,
+                enabled=True,
+                pattern=PatternKind.SINE,
+                power=50,
+            ),
+            now=1.0,
+        )
+
+    assert supervisor.snapshot().manual_override_members == ("left",)
+    assert not supervisor.armed
+    assert port.write_plan_call_count == 0
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_off_accepts_inactive_values_without_pattern_validation() -> None:
+    supervisor, port, _, _ = _supervisor()
+    await supervisor.observe_fresh_cycle((_fresh("left"), _fresh("right")), now=1.0)
+
+    cycle = await supervisor.apply_runtime_command(
+        GroupRuntime(
+            state=GroupState.STOPPED,
+            enabled=False,
+            pattern=PatternKind.SINE,
+            power=99,
+            min_power=80,
+            max_power=90,
+        ),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+
+    assert cycle.plan.derived_status is GroupState.STOPPED
+    assert port.plans == [cycle.plan]
+    assert not cycle.deduplicated
     await supervisor.aclose()
 
 

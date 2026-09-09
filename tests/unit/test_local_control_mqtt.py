@@ -29,6 +29,7 @@ from jebao_flow.local_control.models import (
 from jebao_flow.local_control.mqtt import (
     COMMAND_QOS,
     LocalControlCommandConflictError,
+    LocalControlGroupCommandRouter,
     LocalControlMqttAdapter,
     LocalControlMqttError,
     LocalControlMqttRouter,
@@ -671,6 +672,14 @@ class _GroupLifecycle:
         self.close_error = close_error
         self.outputs = outputs
 
+    @property
+    def configured_group_ids(self):
+        return ("main_flow",)
+
+    @property
+    def qualified_group_ids(self):
+        return ("main_flow",)
+
     async def observe_fresh_cycle(self, states) -> None:
         self.cycles.append(states)
 
@@ -774,14 +783,21 @@ async def test_fresh_group_output_publishes_command_free_state_and_truth_attribu
         install_generation="0" * 32,
         manual_override_members=("master",),
         ownership_diagnostic_reason="group_forced_off_will_revert_next_cycle",
+        command_qualified=True,
+        supervisor_constructed=True,
     )
     group_service = _GroupLifecycle(outputs=(output,))
+    group_router = LocalControlGroupCommandRouter(
+        projection=projection,
+        service=group_service,  # type: ignore[arg-type]
+    )
     adapter = LocalControlMqttAdapter(
         MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
         projection=projection,
         router=router,
         state_poller=_OneCyclePoller(()),  # type: ignore[arg-type]
         group_service=group_service,
+        group_router=group_router,
     )
     client = _Client()
 
@@ -804,6 +820,8 @@ async def test_fresh_group_output_publishes_command_free_state_and_truth_attribu
             install_generation="0" * 32,
             manual_override_members=("master",),
             ownership_diagnostic_reason=None,
+            command_qualified=True,
+            supervisor_constructed=True,
         ),
     )
     await adapter._observe_group_cycle(client, ())  # noqa: SLF001
@@ -819,12 +837,17 @@ async def test_group_output_inventory_mismatch_is_isolated_from_device_state_syn
     )
     projection, _coordinator, router = _setup(groups=(group,))
     group_service = _GroupLifecycle(outputs=())
+    group_router = LocalControlGroupCommandRouter(
+        projection=projection,
+        service=group_service,  # type: ignore[arg-type]
+    )
     adapter = LocalControlMqttAdapter(
         MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
         projection=projection,
         router=router,
         state_poller=_OneCyclePoller(()),  # type: ignore[arg-type]
         group_service=group_service,
+        group_router=group_router,
     )
     client = _Client()
 

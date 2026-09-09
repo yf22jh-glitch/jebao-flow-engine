@@ -13,6 +13,7 @@ from enum import StrEnum
 
 from jebao_flow.groups.models import GroupConfig
 from jebao_flow.local_control.catalog import LocalControlCatalog, LocalFunctionDescriptor
+from jebao_flow.local_control.group_command import group_control_qualification
 from jebao_flow.local_control.models import FreshInstallManifest, LocalDeviceBinding
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan
 from jebao_flow.operator_capture.app_catalog import AppFunctionKind
@@ -226,11 +227,79 @@ class GroupHomeAssistantEntityDescriptor:
 
 
 @dataclass(frozen=True, slots=True)
+class GroupControlHomeAssistantEntityDescriptor:
+    """Non-optimistic ON/OFF switch for one fully qualified logical group."""
+
+    group_id: str
+    unique_id: str
+    name: str
+    state_topic: str
+    command_topic: str
+    availability_topic: str
+
+    @property
+    def platform(self) -> HomeAssistantPlatform:
+        return HomeAssistantPlatform.SWITCH
+
+    def __post_init__(self) -> None:
+        _require_ascii(self.public_dict())
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "platform": self.platform.value,
+            "group_id": self.group_id,
+            "unique_id": self.unique_id,
+            "name": self.name,
+            "state_topic": self.state_topic,
+            "command_topic": self.command_topic,
+            "availability_topic": self.availability_topic,
+            "optimistic": False,
+        }
+
+    def mqtt_discovery_payload(self) -> dict[str, object]:
+        global_availability = _global_availability_topic(self.state_topic)
+        payload: dict[str, object] = {
+            "name": self.name,
+            "unique_id": self.unique_id,
+            "state_topic": self.state_topic,
+            "command_topic": self.command_topic,
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "state_on": "ON",
+            "state_off": "OFF",
+            "optimistic": False,
+            "qos": 0,
+            "availability": [
+                {
+                    "topic": global_availability,
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                },
+                {
+                    "topic": self.availability_topic,
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                },
+            ],
+            "availability_mode": "all",
+            "device": {
+                "identifiers": [f"jebao_flow_local_group_{self.group_id}"],
+                "name": f"{_english_member_name(self.group_id)} Group",
+                "manufacturer": "Jebao",
+                "model": "Local Control Group",
+            },
+        }
+        _require_ascii(payload)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class HomeAssistantProjection:
     discovery_prefix: str
     topic_prefix: str
     entities: tuple[HomeAssistantEntityDescriptor, ...]
     group_entities: tuple[GroupHomeAssistantEntityDescriptor, ...] = ()
+    group_control_entities: tuple[GroupControlHomeAssistantEntityDescriptor, ...] = ()
 
     def __post_init__(self) -> None:
         _require_topic_prefix(self.discovery_prefix)
@@ -239,11 +308,14 @@ class HomeAssistantProjection:
         identities.extend(
             (entity.platform, entity.unique_id) for entity in self.group_entities
         )
+        identities.extend(
+            (entity.platform, entity.unique_id) for entity in self.group_control_entities
+        )
         if len(identities) != len(set(identities)):
             raise ValueError("Home Assistant projection contains duplicate entities")
 
     def discovery_records(self) -> tuple[tuple[str, dict[str, object]], ...]:
-        entities = (*self.entities, *self.group_entities)
+        entities = (*self.entities, *self.group_entities, *self.group_control_entities)
         return tuple(
             (
                 f"{self.discovery_prefix}/{entity.platform.value}/{entity.unique_id}/config",
@@ -261,6 +333,10 @@ class HomeAssistantProjection:
             "entities": [entity.public_dict() for entity in self.entities],
             "group_entity_count": len(self.group_entities),
             "group_entities": [entity.public_dict() for entity in self.group_entities],
+            "group_control_entity_count": len(self.group_control_entities),
+            "group_control_entities": [
+                entity.public_dict() for entity in self.group_control_entities
+            ],
         }
         _require_ascii(payload)
         return payload
@@ -286,6 +362,18 @@ class HomeAssistantProjection:
             )
         except StopIteration as error:
             raise KeyError("logical group is not in the Home Assistant projection") from error
+
+    def group_control_availability_topic(self, group_id: str) -> str:
+        try:
+            return next(
+                entity.availability_topic
+                for entity in self.group_control_entities
+                if entity.group_id == group_id
+            )
+        except StopIteration as error:
+            raise KeyError(
+                "logical group control is not in the Home Assistant projection"
+            ) from error
 
 
 def project_home_assistant(
@@ -337,6 +425,11 @@ def project_home_assistant(
         topic_prefix=topic_prefix,
         entities=tuple(entities),
         group_entities=tuple(_project_group_output(group, topic_prefix) for group in groups),
+        group_control_entities=tuple(
+            _project_group_control(group, topic_prefix)
+            for group in groups
+            if group_control_qualification(group, manifest, catalog).qualified
+        ),
     )
 
 
@@ -351,6 +444,21 @@ def _project_group_output(
         name=f"{_english_member_name(group.id)} Actual Output",
         state_topic=f"{base}/state",
         attributes_topic=f"{base}/attributes",
+        availability_topic=f"{base}/availability",
+    )
+
+
+def _project_group_control(
+    group: GroupConfig,
+    topic_prefix: str,
+) -> GroupControlHomeAssistantEntityDescriptor:
+    base = f"{topic_prefix}/local/groups/{group.id}/control"
+    return GroupControlHomeAssistantEntityDescriptor(
+        group_id=group.id,
+        unique_id=f"jebao_flow_local_group_{group.id}_control",
+        name=f"{_english_member_name(group.id)} Control",
+        state_topic=f"{base}/state",
+        command_topic=f"{base}/set",
         availability_topic=f"{base}/availability",
     )
 
@@ -504,6 +612,7 @@ def _require_ascii(value: object) -> None:
 
 
 __all__ = [
+    "GroupControlHomeAssistantEntityDescriptor",
     "GroupHomeAssistantEntityDescriptor",
     "HomeAssistantEntityDescriptor",
     "HomeAssistantPlatform",

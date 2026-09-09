@@ -21,9 +21,13 @@ from jebao_flow.local_control.coordinator import LocalControlCoordinator, LocalC
 from jebao_flow.local_control.group_service import (
     GROUP_FORCED_OFF_WILL_REVERT,
     DirectControlOwnershipDecision,
+    GroupActualOutput,
+    GroupCommandResult,
     GroupOutputState,
+    LocalControlGroupCommandRejected,
 )
 from jebao_flow.local_control.ha import (
+    GroupControlHomeAssistantEntityDescriptor,
     HomeAssistantEntityDescriptor,
     HomeAssistantPlatform,
     HomeAssistantProjection,
@@ -47,6 +51,16 @@ class LocalControlCommandConflictError(LocalControlMqttError):
     def __init__(self, diagnostic_reason: str) -> None:
         if not diagnostic_reason or not diagnostic_reason.isascii():
             raise ValueError("command conflict reason must be non-empty ASCII")
+        self.diagnostic_reason = diagnostic_reason
+        super().__init__(diagnostic_reason)
+
+
+class LocalControlGroupCommandError(LocalControlMqttError):
+    """A stable group-route diagnostic rejected one ON/OFF command."""
+
+    def __init__(self, diagnostic_reason: str) -> None:
+        if not diagnostic_reason or not diagnostic_reason.isascii():
+            raise ValueError("group command diagnostic must be non-empty ASCII")
         self.diagnostic_reason = diagnostic_reason
         super().__init__(diagnostic_reason)
 
@@ -86,6 +100,22 @@ class DirectControlOwnershipService(Protocol):
     async def note_verified_direct_power_on(self, logical_member: str) -> None: ...
 
 
+class GroupCommandService(Protocol):
+    """Qualified plan-atomic ON/OFF surface used by the separate group router."""
+
+    @property
+    def configured_group_ids(self) -> tuple[str, ...]: ...
+
+    @property
+    def qualified_group_ids(self) -> tuple[str, ...]: ...
+
+    async def apply_group_switch(
+        self,
+        group_id: str,
+        requested_on: bool,
+    ) -> GroupCommandResult: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RoutedCommandResult:
     request_id: str
@@ -98,6 +128,19 @@ class RoutedCommandResult:
         payload = self.result.public_dict()
         if self.ownership is not None:
             payload["direct_control_ownership"] = self.ownership.public_dict()
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class RoutedGroupCommandResult:
+    """One MQTT request id and the bounded group-service result it names."""
+
+    request_id: str
+    result: GroupCommandResult
+
+    def public_result(self) -> dict[str, object]:
+        payload = self.result.public_dict()
+        payload["request_id"] = self.request_id
         return payload
 
 
@@ -256,6 +299,61 @@ class LocalControlMqttRouter:
         )
 
 
+class LocalControlGroupCommandRouter:
+    """Route group switches without taking the shared physical-operation lock."""
+
+    def __init__(
+        self,
+        *,
+        projection: HomeAssistantProjection,
+        service: GroupCommandService,
+    ) -> None:
+        self._service = service
+        self._routes: dict[str, GroupControlHomeAssistantEntityDescriptor] = {}
+        for entity in projection.group_control_entities:
+            if entity.command_topic in self._routes:
+                raise ValueError("group MQTT command topic is duplicated")
+            self._routes[entity.command_topic] = entity
+        projected_groups = {entity.group_id for entity in self._routes.values()}
+        self._inventory_consistent = (
+            projected_groups == set(service.qualified_group_ids)
+            and projected_groups <= set(service.configured_group_ids)
+        )
+
+    @property
+    def command_topics(self) -> tuple[str, ...]:
+        return tuple(sorted(self._routes))
+
+    @property
+    def inventory_consistent(self) -> bool:
+        return self._inventory_consistent
+
+    def owns(self, topic: str) -> bool:
+        return topic in self._routes
+
+    async def handle(self, topic: str, payload: bytes | str) -> RoutedGroupCommandResult:
+        try:
+            entity = self._routes[topic]
+        except KeyError as error:
+            raise LocalControlGroupCommandError(
+                "group_command_topic_not_published"
+            ) from error
+        requested_on = _parse_group_switch_value(payload)
+        if not self._inventory_consistent:
+            raise LocalControlGroupCommandError("group_command_inventory_mismatch")
+        try:
+            result = await self._service.apply_group_switch(
+                entity.group_id,
+                requested_on,
+            )
+        except LocalControlGroupCommandRejected as error:
+            raise LocalControlGroupCommandError(error.diagnostic_reason) from error
+        return RoutedGroupCommandResult(
+            request_id=f"mqtt_group_{secrets.token_hex(16)}",
+            result=result,
+        )
+
+
 class LocalControlMqttAdapter:
     """Publish the HA surface and execute its non-retained commands one at a time."""
 
@@ -268,6 +366,7 @@ class LocalControlMqttAdapter:
         state_poller: FreshStatePoller,
         password: str | None | object = _PASSWORD_FROM_CONFIG,
         group_service: GroupLifecycleService | None = None,
+        group_router: LocalControlGroupCommandRouter | None = None,
     ) -> None:
         if password is not _PASSWORD_FROM_CONFIG and not (
             password is None or isinstance(password, str)
@@ -279,6 +378,17 @@ class LocalControlMqttAdapter:
         self._state_poller = state_poller
         self._password = password
         self._group_service = group_service
+        self._group_router = group_router
+        projected_group_topics = {
+            entity.command_topic for entity in projection.group_control_entities
+        }
+        routed_group_topics = (
+            set() if group_router is None else set(group_router.command_topics)
+        )
+        if projected_group_topics != routed_group_topics:
+            raise ValueError("projected group command topics require one group router")
+        if set(router.command_topics) & routed_group_topics:
+            raise ValueError("device and group command topics must be disjoint")
         self._availability = projection.global_availability_topic
         self._status = f"{projection.topic_prefix}/local/status"
         self._group_status = f"{projection.topic_prefix}/local/groups/status"
@@ -326,7 +436,15 @@ class LocalControlMqttAdapter:
                     qos=1,
                     retain=True,
                 )
-            for topic in self._router.command_topics:
+            for entity in self._projection.group_control_entities:
+                await client.publish(
+                    entity.availability_topic,
+                    "offline",
+                    qos=1,
+                    retain=True,
+                )
+            group_topics = () if self._group_router is None else self._group_router.command_topics
+            for topic in (*self._router.command_topics, *group_topics):
                 # At-most-once command delivery is intentional: losing one command is safer than
                 # a broker replay applying an old value after a newer physical operation.
                 await client.subscribe(topic, qos=COMMAND_QOS)
@@ -444,7 +562,7 @@ class LocalControlMqttAdapter:
         )
 
     async def _publish_group_outputs(self, client: aiomqtt.Client) -> None:
-        if not self._projection.group_entities:
+        if not self._projection.group_entities and not self._projection.group_control_entities:
             return
         group_service = self._group_service
         if group_service is None:
@@ -453,7 +571,21 @@ class LocalControlMqttAdapter:
         outputs = group_service.group_output_states()
         by_group = {output.group_id: output for output in outputs}
         expected = {entity.group_id for entity in self._projection.group_entities}
-        if len(by_group) != len(outputs) or set(by_group) != expected:
+        expected_controls = {
+            entity.group_id for entity in self._projection.group_control_entities
+        }
+        qualified_outputs = {
+            output.group_id for output in outputs if output.command_qualified
+        }
+        router_consistent = (
+            self._group_router is None or self._group_router.inventory_consistent
+        )
+        if (
+            len(by_group) != len(outputs)
+            or set(by_group) != expected
+            or expected_controls != qualified_outputs
+            or not router_consistent
+        ):
             await self._mark_group_outputs_unavailable(client)
             await client.publish(
                 self._group_status,
@@ -470,6 +602,21 @@ class LocalControlMqttAdapter:
                 retain=True,
             )
             return
+        for entity in self._projection.group_control_entities:
+            output = by_group[entity.group_id]
+            if output.actual_output in {GroupActualOutput.ON, GroupActualOutput.OFF}:
+                await client.publish(
+                    entity.state_topic,
+                    "ON" if output.actual_output is GroupActualOutput.ON else "OFF",
+                    qos=1,
+                    retain=True,
+                )
+            await client.publish(
+                entity.availability_topic,
+                "online" if output.command_available else "offline",
+                qos=1,
+                retain=True,
+            )
         for entity in self._projection.group_entities:
             output = by_group[entity.group_id]
             await client.publish(
@@ -492,7 +639,10 @@ class LocalControlMqttAdapter:
             )
 
     async def _mark_group_outputs_unavailable(self, client: aiomqtt.Client) -> None:
-        for entity in self._projection.group_entities:
+        for entity in (
+            *self._projection.group_entities,
+            *self._projection.group_control_entities,
+        ):
             await client.publish(
                 entity.availability_topic,
                 "offline",
@@ -508,8 +658,33 @@ class LocalControlMqttAdapter:
             if bool(getattr(message, "dup", False)):
                 await self._publish_rejection(client, "duplicate_command_rejected")
                 continue
+            topic = str(message.topic)
+            if self._group_router is not None and self._group_router.owns(topic):
+                try:
+                    group_routed = await self._group_router.handle(topic, message.payload)
+                except LocalControlGroupCommandError as error:
+                    await self._publish_rejection(client, error.diagnostic_reason)
+                    await self._publish_group_status(client)
+                    continue
+                except Exception as error:
+                    await self._publish_rejection(
+                        client,
+                        f"command_rejected_{type(error).__name__}",
+                    )
+                    await self._publish_group_status(client)
+                    continue
+                await client.publish(
+                    f"{self._projection.topic_prefix}/local/requests/"
+                    f"{group_routed.request_id}/result",
+                    _canonical_json(group_routed.public_result()),
+                    qos=1,
+                    retain=False,
+                )
+                # Switch truth remains fresh-device-derived; a command result is never mirrored.
+                await self._publish_group_status(client)
+                continue
             try:
-                routed = await self._router.handle(str(message.topic), message.payload)
+                routed = await self._router.handle(topic, message.payload)
             except LocalControlCommandConflictError as error:
                 await self._publish_rejection(client, error.diagnostic_reason)
                 await self._publish_group_status(client)
@@ -617,6 +792,19 @@ def _parse_entity_value(
     raise LocalControlMqttError("diagnostic entities do not accept commands")
 
 
+def _parse_group_switch_value(payload: bytes | str) -> bool:
+    try:
+        text = payload.decode("ascii") if isinstance(payload, bytes) else payload
+    except UnicodeDecodeError as error:
+        raise LocalControlGroupCommandError("group_command_payload_invalid") from error
+    if not isinstance(text, str) or not text.isascii() or len(text) > 128:
+        raise LocalControlGroupCommandError("group_command_payload_invalid")
+    normalized = text.strip().upper()
+    if normalized not in {"ON", "OFF"}:
+        raise LocalControlGroupCommandError("group_command_payload_invalid")
+    return normalized == "ON"
+
+
 def _state_value(entity: HomeAssistantEntityDescriptor, value) -> str | None:
     if entity.platform is HomeAssistantPlatform.SWITCH:
         return "ON" if value else "OFF"
@@ -639,9 +827,13 @@ def _canonical_json(value: object) -> str:
 
 __all__ = [
     "DirectControlOwnershipService",
+    "GroupCommandService",
     "LocalControlCommandConflictError",
+    "LocalControlGroupCommandError",
+    "LocalControlGroupCommandRouter",
     "LocalControlMqttAdapter",
     "LocalControlMqttError",
     "LocalControlMqttRouter",
+    "RoutedGroupCommandResult",
     "RoutedCommandResult",
 ]

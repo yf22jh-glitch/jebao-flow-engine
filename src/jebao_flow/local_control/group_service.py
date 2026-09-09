@@ -2,12 +2,14 @@
 
 The service builds each group independently, feeds only complete fresh-state cycles into a
 write-disarmed supervisor, and keeps construction or planning failures out of the existing device
-state publisher.  It deliberately exposes no command transport or Home Assistant entity.
+state publisher. It exposes one qualified ON/OFF service boundary without importing MQTT or Home
+Assistant transport code.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -18,21 +20,30 @@ from jebao_flow.groups.manager import GroupManager
 from jebao_flow.groups.models import (
     GroupConfig,
     GroupExecutionStrategy,
+    GroupState,
     OfflinePolicy,
 )
 from jebao_flow.groups.plan import DeviceActuationLimits, GroupTickPlan
 from jebao_flow.groups.runtime import (
+    DeliveryCertainty,
+    GroupPlanDispatchSnapshot,
     PlanAtomicGroupDispatchRuntime,
     UnresolvedGroupSafetyStopError,
     WriteGuard,
+    group_plan_identity_sha256,
 )
 from jebao_flow.local_control.catalog import LocalControlCatalog
 from jebao_flow.local_control.coordinator import LocalControlCoordinator
 from jebao_flow.local_control.group import SoftwareIndependentGroupActuator
+from jebao_flow.local_control.group_command import (
+    GroupControlQualification,
+    group_control_qualification,
+)
 from jebao_flow.local_control.group_supervisor import (
     GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL,
     GROUP_FORCED_OFF_WILL_REVERT,
     GroupSupervisorCycle,
+    GroupSupervisorDisposition,
     LocalControlGroupSupervisor,
 )
 from jebao_flow.local_control.models import FreshInstallManifest, LocalDeviceBinding
@@ -40,10 +51,21 @@ from jebao_flow.local_control.state import FreshDeviceState
 
 _GROUP_FLOW_MINIMUM = 30
 _GROUP_FLOW_MAXIMUM = 75
+GROUP_COMMAND_COMPLETION_TIMEOUT_SECONDS = 2.0
 
 
 class LocalControlGroupServiceError(RuntimeError):
     """The isolated group lifecycle could not complete a requested local operation."""
+
+
+class LocalControlGroupCommandRejected(LocalControlGroupServiceError):
+    """A stable pre-write diagnostic rejected one group command."""
+
+    def __init__(self, diagnostic_reason: str) -> None:
+        if not diagnostic_reason or not diagnostic_reason.isascii():
+            raise ValueError("group command rejection reason must be non-empty ASCII")
+        self.diagnostic_reason = diagnostic_reason
+        super().__init__(diagnostic_reason)
 
 
 class GroupLifecycleState(StrEnum):
@@ -61,6 +83,77 @@ class GroupActualOutput(StrEnum):
     ON = "on"
     MIXED = "mixed"
     UNKNOWN = "unknown"
+
+
+class GroupCommandHeadline(StrEnum):
+    """Bounded action headline derived from immediate submission and final identity facts."""
+
+    DEFERRED_SAFETY_OFF = "deferred_safety_off"
+    SUPPRESSED_AFTER_FAILURE = "suppressed_after_failure"
+    NOT_SENT = "not_sent"
+    UNCERTAIN = "uncertain"
+    AWAITING_FRESH_STATE = "awaiting_fresh_state"
+    DEDUPLICATED = "deduplicated"
+    VERIFIED = "verified"
+    SUPERSEDED = "superseded"
+    PENDING = "pending"
+
+
+@dataclass(frozen=True, slots=True)
+class GroupCommandResult:
+    """Identity-bound group-command facts without guessed physical authorship."""
+
+    group_id: str
+    requested_on: bool
+    headline: GroupCommandHeadline
+    ownership_accepted: bool
+    submitted_plan_identity_sha256: str
+    runtime_submit_called: bool
+    deduplicated: bool
+    dispatch_decision_count: int
+    applied_identity_matches: bool
+    latest_identity_matches: bool
+    delivery_certainty: DeliveryCertainty | None
+    completion_pending: bool
+
+    def __post_init__(self) -> None:
+        if not self.group_id or not self.group_id.isascii():
+            raise ValueError("group command result id must be non-empty ASCII")
+        if type(self.requested_on) is not bool or type(self.ownership_accepted) is not bool:
+            raise TypeError("group command acceptance flags must be boolean")
+        if type(self.runtime_submit_called) is not bool or type(self.deduplicated) is not bool:
+            raise TypeError("group command submission flags must be boolean")
+        if (
+            type(self.applied_identity_matches) is not bool
+            or type(self.latest_identity_matches) is not bool
+            or type(self.completion_pending) is not bool
+        ):
+            raise TypeError("group command completion flags must be boolean")
+        if self.dispatch_decision_count < 0:
+            raise ValueError("group command dispatch count cannot be negative")
+        if len(self.submitted_plan_identity_sha256) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in self.submitted_plan_identity_sha256
+        ):
+            raise ValueError("group command plan identity must be lowercase SHA-256")
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "group_id": self.group_id,
+            "requested_on": self.requested_on,
+            "headline": self.headline.value,
+            "ownership_accepted": self.ownership_accepted,
+            "submitted_plan_identity_sha256": self.submitted_plan_identity_sha256,
+            "runtime_submit_called": self.runtime_submit_called,
+            "deduplicated": self.deduplicated,
+            "dispatch_decision_count": self.dispatch_decision_count,
+            "applied_identity_matches": self.applied_identity_matches,
+            "latest_identity_matches": self.latest_identity_matches,
+            "delivery_certainty": (
+                None if self.delivery_certainty is None else self.delivery_certainty.value
+            ),
+            "completion_pending": self.completion_pending,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,10 +197,22 @@ class GroupOutputState:
     install_generation: str
     manual_override_members: tuple[str, ...]
     ownership_diagnostic_reason: str | None
+    command_qualified: bool = False
+    command_diagnostic_reason: str | None = None
+    missing_control_qualifications: tuple[tuple[str, str], ...] = ()
+    supervisor_constructed: bool = False
 
     @property
     def available(self) -> bool:
         return self.actual_output is not GroupActualOutput.UNKNOWN
+
+    @property
+    def command_available(self) -> bool:
+        return (
+            self.command_qualified
+            and self.supervisor_constructed
+            and self.actual_output in {GroupActualOutput.ON, GroupActualOutput.OFF}
+        )
 
     def attributes_dict(self) -> dict[str, object]:
         return {
@@ -117,6 +222,18 @@ class GroupOutputState:
             "manual_override_members": list(self.manual_override_members),
             "ownership_diagnostic_reason": self.ownership_diagnostic_reason,
             "pattern_conformance": "unknown",
+            "group_command": {
+                "qualified": self.command_qualified,
+                "available": self.command_available,
+                "diagnostic_reason": self.command_diagnostic_reason,
+                "missing": [
+                    {
+                        "logical_member": logical_member,
+                        "function": function,
+                    }
+                    for logical_member, function in self.missing_control_qualifications
+                ],
+            },
         }
 
 
@@ -137,6 +254,9 @@ class GroupLifecycleItem:
     install_generation: str
     manual_override_members: tuple[str, ...]
     ownership_diagnostic_reason: str | None
+    command_qualified: bool
+    command_diagnostic_reason: str | None
+    missing_control_qualifications: tuple[tuple[str, str], ...]
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -154,6 +274,17 @@ class GroupLifecycleItem:
             "manual_override_members": list(self.manual_override_members),
             "ownership_diagnostic_reason": self.ownership_diagnostic_reason,
             "pattern_conformance": "unknown",
+            "group_command": {
+                "qualified": self.command_qualified,
+                "diagnostic_reason": self.command_diagnostic_reason,
+                "missing": [
+                    {
+                        "logical_member": logical_member,
+                        "function": function,
+                    }
+                    for logical_member, function in self.missing_control_qualifications
+                ],
+            },
         }
 
 
@@ -189,9 +320,11 @@ class GroupLifecycleSnapshot:
 
 @dataclass(slots=True)
 class _ManagedGroup:
+    group: GroupConfig
     group_id: str
     member_ids: tuple[str, ...]
     member_enabled: tuple[tuple[str, bool], ...]
+    qualification: GroupControlQualification
     supervisor: LocalControlGroupSupervisor | None
     state: GroupLifecycleState
     diagnostic_reason: str | None
@@ -263,6 +396,7 @@ class LocalControlGroupService:
         catalog: LocalControlCatalog,
         coordinator: LocalControlCoordinator | None,
         operation_lock: asyncio.Lock,
+        command_completion_timeout_seconds: float = GROUP_COMMAND_COMPLETION_TIMEOUT_SECONDS,
     ) -> None:
         if not isinstance(config, AppConfig):
             raise TypeError("group lifecycle requires current AppConfig")
@@ -272,10 +406,20 @@ class LocalControlGroupService:
             raise TypeError("group lifecycle requires the current local-control catalog")
         if not isinstance(operation_lock, asyncio.Lock):
             raise TypeError("group lifecycle requires the shared operation lock")
+        if (
+            not isinstance(command_completion_timeout_seconds, int | float)
+            or isinstance(command_completion_timeout_seconds, bool)
+            or not math.isfinite(command_completion_timeout_seconds)
+            or command_completion_timeout_seconds <= 0
+        ):
+            raise ValueError("group command completion timeout must be finite and positive")
 
         self._expected_members = tuple(device.logical_member for device in manifest.devices)
         self._install_generation = manifest.generation
         self._operation_lock = operation_lock
+        self._command_completion_timeout_seconds = float(
+            command_completion_timeout_seconds
+        )
         self._fresh_cycle_count = 0
         self._closed = False
         devices_by_id = {device.id: device for device in config.devices}
@@ -283,6 +427,7 @@ class LocalControlGroupService:
         self._groups = tuple(
             self._construct_group(
                 group,
+                qualification=group_control_qualification(group, manifest, catalog),
                 devices_by_id=devices_by_id,
                 bindings_by_id=bindings_by_id,
                 catalog=catalog,
@@ -291,8 +436,12 @@ class LocalControlGroupService:
             )
             for group in config.groups
         )
+        self._group_by_id: dict[str, _ManagedGroup] = {}
         self._group_by_member: dict[str, _ManagedGroup] = {}
         for item in self._groups:
+            if item.group_id in self._group_by_id:
+                raise ValueError("local-control group ids must be unique")
+            self._group_by_id[item.group_id] = item
             for member_id in item.member_ids:
                 if member_id in self._group_by_member:
                     raise ValueError("one device cannot belong to multiple local-control groups")
@@ -305,6 +454,16 @@ class LocalControlGroupService:
     @property
     def operation_lock(self) -> asyncio.Lock:
         return self._operation_lock
+
+    @property
+    def configured_group_ids(self) -> tuple[str, ...]:
+        return tuple(item.group_id for item in self._groups)
+
+    @property
+    def qualified_group_ids(self) -> tuple[str, ...]:
+        return tuple(
+            item.group_id for item in self._groups if item.qualification.qualified
+        )
 
     def snapshot(self) -> GroupLifecycleSnapshot:
         groups = tuple(
@@ -328,6 +487,67 @@ class LocalControlGroupService:
         return tuple(
             self._group_output_state(item)
             for item in self._groups
+        )
+
+    async def apply_group_switch(
+        self,
+        group_id: str,
+        requested_on: bool,
+    ) -> GroupCommandResult:
+        """Apply one qualified ON/OFF command and report identity-bound completion facts."""
+
+        if not isinstance(group_id, str) or not group_id or not group_id.isascii():
+            raise LocalControlGroupCommandRejected("group_not_configured")
+        if type(requested_on) is not bool:
+            raise LocalControlGroupCommandRejected("group_command_payload_invalid")
+        if self._closed:
+            raise LocalControlGroupCommandRejected("group_lifecycle_closed")
+        item = self._group_by_id.get(group_id)
+        if item is None:
+            raise LocalControlGroupCommandRejected("group_not_configured")
+        if not item.qualification.qualified:
+            reason = item.qualification.diagnostic_reason
+            if reason is None:
+                raise LocalControlGroupServiceError(
+                    "unqualified group command requires a diagnostic reason"
+                )
+            raise LocalControlGroupCommandRejected(reason)
+        supervisor = item.supervisor
+        if supervisor is None:
+            raise LocalControlGroupCommandRejected(
+                item.diagnostic_reason or "group_supervisor_unavailable"
+            )
+
+        current = supervisor.runtime
+        desired = current.model_copy(
+            update={
+                "state": GroupState.RUNNING if requested_on else GroupState.STOPPED,
+                "enabled": requested_on,
+            }
+        )
+        try:
+            cycle = await supervisor.apply_runtime_command(desired)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            raise LocalControlGroupCommandRejected(
+                "group_runtime_command_rejected"
+            ) from error
+        self._mark_cycle_succeeded(item, cycle)
+
+        timed_out = False
+        try:
+            async with asyncio.timeout(self._command_completion_timeout_seconds):
+                final_dispatch = await supervisor.wait_idle()
+        except TimeoutError:
+            timed_out = True
+            final_dispatch = supervisor.snapshot().dispatch
+        return _group_command_result(
+            group_id=group_id,
+            requested_on=requested_on,
+            cycle=cycle,
+            final_dispatch=final_dispatch,
+            timed_out=timed_out,
         )
 
     async def claim_direct_ownership(
@@ -459,6 +679,7 @@ class LocalControlGroupService:
         self,
         group: GroupConfig,
         *,
+        qualification: GroupControlQualification,
         devices_by_id: dict[str, DeviceConfig],
         bindings_by_id: dict[str, LocalDeviceBinding],
         catalog: LocalControlCatalog,
@@ -490,26 +711,32 @@ class LocalControlGroupService:
             supervisor = LocalControlGroupSupervisor(manager=manager, runtime=runtime)
         except _GroupConstructionUnavailable as error:
             return _ManagedGroup(
+                group=group,
                 group_id=group.id,
                 member_ids=member_ids,
                 member_enabled=member_enabled,
+                qualification=qualification,
                 supervisor=None,
                 state=GroupLifecycleState.UNCONSTRUCTED,
                 diagnostic_reason=error.reason,
             )
         except Exception:
             return _ManagedGroup(
+                group=group,
                 group_id=group.id,
                 member_ids=member_ids,
                 member_enabled=member_enabled,
+                qualification=qualification,
                 supervisor=None,
                 state=GroupLifecycleState.UNCONSTRUCTED,
                 diagnostic_reason="group_construction_failed",
             )
         return _ManagedGroup(
+            group=group,
             group_id=group.id,
             member_ids=member_ids,
             member_enabled=member_enabled,
+            qualification=qualification,
             supervisor=supervisor,
             state=GroupLifecycleState.SUPERVISED,
             diagnostic_reason=None,
@@ -538,6 +765,13 @@ class LocalControlGroupService:
             install_generation=self._install_generation,
             manual_override_members=manual_override_members,
             ownership_diagnostic_reason=ownership_diagnostic_reason,
+            command_qualified=item.qualification.qualified,
+            command_diagnostic_reason=(
+                item.qualification.diagnostic_reason
+                if not item.qualification.qualified
+                else (None if item.supervisor is not None else item.diagnostic_reason)
+            ),
+            missing_control_qualifications=item.qualification.missing,
         )
 
     def _group_output_state(self, item: _ManagedGroup) -> GroupOutputState:
@@ -555,6 +789,14 @@ class LocalControlGroupService:
             install_generation=self._install_generation,
             manual_override_members=manual_override_members,
             ownership_diagnostic_reason=ownership_diagnostic_reason,
+            command_qualified=item.qualification.qualified,
+            command_diagnostic_reason=(
+                item.qualification.diagnostic_reason
+                if not item.qualification.qualified
+                else (None if item.supervisor is not None else item.diagnostic_reason)
+            ),
+            missing_control_qualifications=item.qualification.missing,
+            supervisor_constructed=item.supervisor is not None,
         )
 
     @staticmethod
@@ -663,15 +905,80 @@ def _group_actual_output(
     return GroupActualOutput.MIXED
 
 
+def _group_command_result(
+    *,
+    group_id: str,
+    requested_on: bool,
+    cycle: GroupSupervisorCycle,
+    final_dispatch: GroupPlanDispatchSnapshot,
+    timed_out: bool,
+) -> GroupCommandResult:
+    identity = group_plan_identity_sha256(cycle.plan)
+    failure = final_dispatch.failure
+    matching_failure = (
+        failure
+        if failure is not None and failure.plan_identity_sha256 == identity
+        else None
+    )
+    applied_matches = final_dispatch.applied_plan_identity_sha256 == identity
+    latest_matches = final_dispatch.latest_plan_identity_sha256 == identity
+    verified = applied_matches and final_dispatch.failure is None
+
+    if cycle.disposition is GroupSupervisorDisposition.DEFERRED_SAFETY_OFF:
+        headline = GroupCommandHeadline.DEFERRED_SAFETY_OFF
+    elif cycle.disposition is GroupSupervisorDisposition.SUPPRESSED_AFTER_FAILURE:
+        headline = GroupCommandHeadline.SUPPRESSED_AFTER_FAILURE
+    elif matching_failure is not None:
+        headline = (
+            GroupCommandHeadline.NOT_SENT
+            if matching_failure.delivery_certainty is DeliveryCertainty.NOT_SENT
+            else GroupCommandHeadline.UNCERTAIN
+        )
+    elif not cycle.plan.dispatch_decisions:
+        headline = GroupCommandHeadline.AWAITING_FRESH_STATE
+    elif cycle.deduplicated:
+        headline = GroupCommandHeadline.DEDUPLICATED
+    elif verified:
+        headline = GroupCommandHeadline.VERIFIED
+    elif not latest_matches:
+        headline = GroupCommandHeadline.SUPERSEDED
+    elif timed_out:
+        headline = GroupCommandHeadline.PENDING
+    else:
+        headline = GroupCommandHeadline.PENDING
+
+    completion_pending = headline is GroupCommandHeadline.PENDING
+    return GroupCommandResult(
+        group_id=group_id,
+        requested_on=requested_on,
+        headline=headline,
+        ownership_accepted=True,
+        submitted_plan_identity_sha256=identity,
+        runtime_submit_called=cycle.runtime_submit_called,
+        deduplicated=cycle.deduplicated,
+        dispatch_decision_count=len(cycle.plan.dispatch_decisions),
+        applied_identity_matches=applied_matches,
+        latest_identity_matches=latest_matches,
+        delivery_certainty=(
+            None if matching_failure is None else matching_failure.delivery_certainty
+        ),
+        completion_pending=completion_pending,
+    )
+
+
 __all__ = [
     "DirectControlOwnershipDecision",
     "GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL",
     "GROUP_FORCED_OFF_WILL_REVERT",
+    "GROUP_COMMAND_COMPLETION_TIMEOUT_SECONDS",
     "GroupActualOutput",
+    "GroupCommandHeadline",
+    "GroupCommandResult",
     "GroupLifecycleItem",
     "GroupLifecycleSnapshot",
     "GroupLifecycleState",
     "GroupOutputState",
     "LocalControlGroupService",
+    "LocalControlGroupCommandRejected",
     "LocalControlGroupServiceError",
 ]

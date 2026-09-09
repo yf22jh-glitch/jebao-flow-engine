@@ -37,7 +37,11 @@ from jebao_flow.local_control.install import (
 )
 from jebao_flow.local_control.journal import LocalControlJournalStore
 from jebao_flow.local_control.lease import LocalControlLease
-from jebao_flow.local_control.mqtt import LocalControlMqttAdapter, LocalControlMqttRouter
+from jebao_flow.local_control.mqtt import (
+    LocalControlGroupCommandRouter,
+    LocalControlMqttAdapter,
+    LocalControlMqttRouter,
+)
 from jebao_flow.local_control.qualification import load_current_qualifications
 from jebao_flow.local_control.resolver import CurrentEndpointResolver
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan, FreshSlaveSchedule
@@ -409,6 +413,14 @@ def _run(args: argparse.Namespace) -> int:
             operation_lock=operation_lock,
             ownership_service=group_service,
         )
+        group_router = (
+            LocalControlGroupCommandRouter(
+                projection=projection,
+                service=group_service,
+            )
+            if projection.group_control_entities
+            else None
+        )
         state_poller = FreshStatePoller(
             manifest=prepared.manifest,
             resolver=_resolver(prepared.config),
@@ -431,6 +443,7 @@ def _run(args: argparse.Namespace) -> int:
                     state_poller=state_poller,
                     password=_current_mqtt_password(prepared.config),
                     group_service=group_service,
+                    group_router=group_router,
                 )
             )
         )

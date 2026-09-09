@@ -407,11 +407,13 @@ failure suppresses a later plan, the cycle is `suppressed_after_failure` rather 
 An unresolved safety OFF remains a sticky shutdown error on every `aclose()` call; repeated
 shutdown observers cannot turn it into a clean return.
 
-This slice does not run a background tick, construct the supervisor from a daemon or CLI, expose a
-group Home Assistant entity, or accept an MQTT group command. It also cannot yet compare projected
-fresh scalar state with a typed group target, so external target drift remains `UNKNOWN` rather than
-becoming a speculative write gate. Production construction and any broker, Home Assistant, or live
-hardware activation require a separate reviewed scope and the hardware-readiness preconditions.
+The supervisor module does not run a background tick or directly know about MQTT, Home Assistant,
+device construction, or discovery. The production lifecycle now constructs it and the qualified
+group-command router described below calls it only through the lifecycle service. The runtime still
+cannot compare projected fresh scalar state with a typed group target, so external target drift
+remains `UNKNOWN` rather than becoming a speculative write gate. Broker, Home Assistant, and live
+hardware activation remain outside the offline implementation and require the hardware-readiness
+preconditions.
 
 ### Production group lifecycle inventory
 
@@ -436,15 +438,15 @@ A read-only `serve` process reports the inventory but constructs zero supervisor
 a fake write port. With `--write-enabled`, each supported group receives the current coordinator and
 its physical plan boundary shares the same process operation lock as direct device commands and
 fresh reads. The supervisor itself remains structurally write-disarmed until an explicit group
-runtime command. This slice provides no production caller for that command, so startup and every
-fresh cycle still submit zero group plans regardless of configured group or member `enabled` values.
+runtime command. The qualified group switch described below is now the sole production caller for
+that command. Startup and every fresh cycle before the first accepted switch command still submit
+zero group plans regardless of configured group or member `enabled` values.
 
 Shutdown attempts every constructed supervisor. An unresolved mandatory OFF is re-raised outside
 the adapter's task-cancellation gather and remains an error on repeated close; it cannot become a
-clean service exit. Before a later command-transport slice can arm groups, direct per-device writes
-must also set the affected manager's manual override and group entities must remain based on fresh
-device truth. External scalar-target drift detection is still `UNKNOWN`, not an inferred success or
-new write gate.
+clean service exit. The command transport preserves the same rule: direct per-device writes set the
+affected manager's manual override, and group entities remain based on fresh device truth. External
+scalar-target drift detection is still `UNKNOWN`, not an inferred success or new write gate.
 
 ### Fresh group output and direct-device ownership
 
@@ -464,8 +466,9 @@ availability are published only after the individual device-state publications f
 cycle have succeeded. The manual-override list follows the planner's current report, so after a plan
 cycle it enumerates config-enabled overridden members rather than claiming a complete ownership
 ledger for disabled members. A group-output inventory mismatch makes group output unavailable and
-publishes a bounded lifecycle diagnostic instead of terminating device-state synchronization. No
-group command topic, switch, or button is exposed by this slice.
+publishes a bounded lifecycle diagnostic instead of terminating device-state synchronization. The
+qualified group switch added below is a separate entity and never changes this diagnostic sensor's
+fresh-truth semantics.
 
 Existing qualified direct-device scalar and schedule commands declare manual ownership after their
 payload has been parsed and before the current coordinator operation begins. The declaration and
@@ -499,9 +502,60 @@ An armed emergency-stopped group takes precedence over disabled/stopped handling
 control before a request id, durable journal, or physical frame is created and reports
 `group_emergency_stop_blocks_direct_control`. That rejection does not record an override, because
 changing the control epoch would itself create another mandatory-OFF plan. An already accepted
-mandatory OFF remains uncancellable by a later ordinary generation. In the current production
-surface no group command caller exists, so these armed-state interactions are fault-injection
-contracts for the later command slice rather than newly enabled live behavior.
+mandatory OFF remains uncancellable by a later ordinary generation. The group-command service now
+exposes the only production arming caller, while these direct-ownership interactions retain the
+same frame-boundary and mandatory-OFF contracts.
+
+### Qualified group command transport
+
+A separate Home Assistant switch is projected only when every current group member has both the
+existing identity-bound `power` and `manual_flow` qualifications. The pure qualification fold
+returns the exact sorted missing logical member/function pairs and imports no manager, dispatch
+runtime, coordinator, journal, MQTT, or Home Assistant implementation. There is no one-sided OFF
+button for a partially qualified group. Construction is a separate fact: a qualified but
+unconstructed group keeps its switch unavailable and rejects a command before coordinator,
+journal, or frame creation using the lifecycle's existing stable construction reason.
+
+The switch is non-optimistic. Its retained state is published only from a successful complete fresh
+device-state cycle: `on` and `off` are available, while `mixed` and `unknown` leave the switch
+unavailable and are never folded into a guessed binary state. The command topic is owned by a
+separate `LocalControlGroupCommandRouter`; it is checked for disjointness from every device and
+schedule command topic and never enters `LocalControlMqttRouter.handle()`. Consequently the group
+router does not hold the shared process operation lock while it waits. The existing plan port takes
+that lock only when the runtime worker reaches the physical plan boundary.
+
+An accepted `ON` command copies the current runtime with `state=RUNNING` and `enabled=true`; `OFF`
+uses `state=STOPPED` and `enabled=false`. Other runtime preferences are preserved. Under the
+supervisor lifecycle lock, validation succeeds before manual ownership is cleared, then the manager
+plans and submits that exact returned object. A failed runtime validation therefore preserves the
+existing override, while a same-state accepted command clears it. Explicit OFF continues to use the
+existing mandatory-safety token and intentionally bypasses ordinary applied-plan deduplication.
+The per-group `cycle_count` covers both successful fresh-observation planning cycles and accepted
+explicit command planning cycles; the top-level `fresh_cycle_count` continues to count only complete
+fresh observations.
+
+The command result separates immediate action from current identity state. It reports the submitted
+plan identity, whether runtime submission was called, immediate deduplication, dispatch count,
+applied- and latest-identity matches, matching failure certainty, and whether completion remains
+pending. Immediate deduplication comes only from the submit call's no-await counter delta; it is not
+inferred from the pre-submit applied identity, because an explicit repeated mandatory OFF may still
+perform a plan-wide check. The headline precedence is `deferred_safety_off`,
+`suppressed_after_failure`, identity-matched `not_sent`/`uncertain`, `awaiting_fresh_state`,
+`deduplicated`, `verified`, `superseded`, then `pending`.
+
+`verified` means that the submitted desired identity is currently applied and no runtime failure is
+latched. It does not claim that this command authored a physical frame: during the bounded wait a
+different identity may supersede it and a later cycle may apply the same desired identity again.
+No command-specific physical-operation boolean is guessed. Completion waiting uses a fixed bounded
+timeout outside both locks; timeout reports only `pending` and does not cancel the runtime worker.
+Consumer cancellation has the same observer-only effect.
+
+The command consumer remains inside the adapter's ordinary task-cancellation gather. Group service
+close remains outside that gather, attempts every supervisor, and re-raises an unresolved mandatory
+OFF ahead of other close errors. Retained, duplicate-marked, malformed, unqualified, unconstructed,
+or inventory-mismatched group commands produce bounded diagnostics without an optimistic state
+publication. This is a source and offline-test connection only: no broker, Home Assistant, app, or
+physical device was contacted, hardware remains `NO-GO / BLOCKING`, and Q2 remains `UNKNOWN`.
 
 ## Product audit mapping
 

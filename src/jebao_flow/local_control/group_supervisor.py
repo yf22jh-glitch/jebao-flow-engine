@@ -51,6 +51,8 @@ class GroupSupervisorCycle:
     plan: GroupTickPlan
     disposition: GroupSupervisorDisposition
     dispatch: GroupPlanDispatchSnapshot
+    pre_submit_dispatch: GroupPlanDispatchSnapshot | None = None
+    deduplicated: bool = False
 
     @property
     def submitted(self) -> bool:
@@ -153,6 +155,12 @@ class LocalControlGroupSupervisor:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def runtime(self) -> GroupRuntime:
+        """Return the manager's immutable current desired runtime snapshot."""
+
+        return self._manager.runtime
+
     async def tick(self, *, now: float | None = None) -> GroupSupervisorCycle:
         """Plan one cycle, remaining structurally write-disarmed before explicit ownership."""
 
@@ -189,6 +197,9 @@ class LocalControlGroupSupervisor:
         async with self._operation_lock:
             self._require_open()
             self._manager.update_runtime(runtime, now=now)
+            # Validation must succeed before a same-state command clears manual ownership.
+            # Ownership-boundary transitions already clear it, making this call a no-op there.
+            self._manager.resume_all()
             plan = self._manager.plan_tick(now=now)
             self._armed = True
             return self._finish_cycle(plan, force_mandatory_off=True)
@@ -294,10 +305,12 @@ class LocalControlGroupSupervisor:
 
         if not self._armed:
             self._write_disarmed_count += 1
+            dispatch = self._runtime.snapshot()
             return GroupSupervisorCycle(
                 plan=plan,
                 disposition=GroupSupervisorDisposition.WRITE_DISARMED,
-                dispatch=self._runtime.snapshot(),
+                dispatch=dispatch,
+                pre_submit_dispatch=dispatch,
             )
 
         mandatory_off = _is_mandatory_group_off(plan)
@@ -312,7 +325,8 @@ class LocalControlGroupSupervisor:
             return GroupSupervisorCycle(
                 plan=plan,
                 disposition=GroupSupervisorDisposition.UNCHANGED_MANDATORY_OFF,
-                dispatch=self._runtime.snapshot(),
+                dispatch=current_dispatch,
+                pre_submit_dispatch=current_dispatch,
             )
 
         dispatch = self._runtime.submit(plan, is_current=self._manager.is_current)
@@ -330,6 +344,10 @@ class LocalControlGroupSupervisor:
             plan=plan,
             disposition=disposition,
             dispatch=dispatch,
+            pre_submit_dispatch=current_dispatch,
+            deduplicated=(
+                dispatch.deduplicated_count > current_dispatch.deduplicated_count
+            ),
         )
 
     def _direct_power_on_is_reconciled(

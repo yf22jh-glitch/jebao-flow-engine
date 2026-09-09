@@ -68,6 +68,7 @@ def test_read_only_local_control_import_closure_excludes_write_and_frozen_module
         "jebao_flow.local_control.resolver",
         "jebao_flow.local_control.schedule",
         "jebao_flow.local_control.ha",
+        "jebao_flow.local_control.group_command",
         "jebao_flow.local_control.qualification",
         "jebao_flow.local_control.service",
         "jebao_flow.local_control.state",
@@ -92,6 +93,38 @@ def test_read_only_local_control_import_closure_excludes_write_and_frozen_module
     assert closure.isdisjoint(FROZEN_MODULES)
     assert closure.isdisjoint(WRITE_PROTOCOL_MODULES)
     assert "jebao_flow.hardware_test" not in closure
+
+
+def test_group_command_import_closure_stays_pure() -> None:
+    script = (
+        "import importlib,json,sys;"
+        "importlib.import_module('jebao_flow.local_control.group_command');"
+        "print(json.dumps(sorted(name for name in sys.modules "
+        "if name.startswith('jebao_flow.'))))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stderr == ""
+    closure = set(json.loads(completed.stdout))
+    assert closure.isdisjoint(
+        {
+            "jebao_flow.groups.manager",
+            "jebao_flow.groups.runtime",
+            "jebao_flow.local_control.coordinator",
+            "jebao_flow.local_control.group_service",
+            "jebao_flow.local_control.group_supervisor",
+            "jebao_flow.local_control.ha",
+            "jebao_flow.local_control.journal",
+            "jebao_flow.local_control.mqtt",
+        }
+    )
 
 
 def test_write_runtime_and_cli_import_closure_still_excludes_the_frozen_harness() -> None:
@@ -127,13 +160,15 @@ def test_write_runtime_and_cli_import_closure_still_excludes_the_frozen_harness(
     assert not any(name.startswith("jebao_flow.devices") for name in closure)
 
 
-def test_production_group_lifecycle_has_no_command_transport_caller() -> None:
+def test_production_group_transport_calls_the_service_not_the_supervisor() -> None:
     connector_sources = (
         (PACKAGE / "mqtt.py").read_text(encoding="utf-8"),
         CLI.read_text(encoding="utf-8"),
     )
 
     assert all("apply_runtime_command" not in source for source in connector_sources)
+    assert "apply_group_switch" in connector_sources[0]
+    assert "LocalControlGroupCommandRouter" in connector_sources[1]
 
 
 def test_per_device_lock_uses_the_stable_physical_key_filename() -> None:
