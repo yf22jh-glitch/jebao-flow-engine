@@ -1862,6 +1862,135 @@ repository maintainer는 위의 좁은 질문에 “응 진행해”라고 답�
 source·offline 회귀의 park를 해제합니다. broker retained mutation, Home Assistant, daemon deployment,
 장비·앱·원격 환경 실행과 장비 write 승인으로 넓히지 않으며, 다른 기존 단정은 완화·삭제하지 않습니다.
 
+### 2026-09-09 pre-namespace discovery 관측 inventory와 selection D1d
+
+D1c source·docs·offline test commit `d048736941e9047fff7f4d496c0a8652281fb76e`의 완료 뒤
+repository maintainer는 “다음 진행하자”고 요청했습니다. 이 발언은 다음 제품 작업을 계속하라는
+요청이며 legacy discovery cleanup을 이름으로 선택하거나 실제 broker·Home Assistant·daemon deployment,
+장비·앱·원격 환경 실행 및 장비 write를 승인한 발언이 아닙니다. 다음 경계의 선택은 그 뒤 current
+source와 D1b 이전 source의 read-only static trace, aiomqtt 2.5.1의 MQTT 3.1.1 client semantics,
+OASIS MQTT 3.1.1 §3.8.4에 대한 검토와 적대적 교차검토에서 정했습니다. 후속 slice의 상시 승인이나
+외부 접촉 승인으로 일반화하지 않습니다.
+
+이번 작업이 닫을 질문은 pre-namespace Jebao Home Assistant discovery config 중 **유계 관측 창에
+실제로 전달된 retained record**의 topic과 payload 원문을 owner-only artifact에 무손실 보존하고,
+그 관측 artifact의 부분집합에 한해서 repository maintainer가 별도로 제공한 exact digest 목록을
+감사 가능한 selection artifact로 결속할 수 있는가입니다. 이 slice는 broker 전체 retained set의
+완전성, 관측되지 않은 topic의 부재, pre-namespace record의 최종 소유권, 삭제 성공이나 deployment
+가능 상태를 답하지 않습니다. 근거는 firmware 가설이나 fake broker behavior가 아니라 MQTT 표준의
+retained delivery 의미와 완료 표식의 부재, current·historical discovery topic/payload construction,
+private artifact filesystem 경계에 대한 static trace와 fault injection입니다.
+
+MQTT 3.1.1은 새 subscription에 맞는 retained message를 보내도록 요구하지만 retained replay의
+끝을 알리는 packet이나 count를 정의하지 않고, matching PUBLISH를 SUBACK보다 먼저 보낼 수도 있습니다.
+따라서 SUBACK, 고정 quiet period, 두 scan의 우연한 동등성은 complete inventory 증거가 아닙니다.
+self-published sentinel도 cross-topic retained backlog 뒤에 온다는 표준 보장이 없고 publish 0회라는
+collector 경계를 깨므로 사용하지 않습니다. artifact와 public result는 오직 “predeclared window에서
+관측됨”이라고 서술하며 `complete`, `absent`, `all`, `exhaustive` 같은 긍정 완전성 fact를 만들지 않습니다.
+관측되지 않음은 broker 부재나 이미 삭제됨으로 접지 않습니다.
+
+이 확장은 다음 파일로 한정합니다.
+
+- 새 broker-neutral 관측·분류·selection 모델과 owner-only store인
+  `src/jebao_flow/legacy_discovery_inventory.py`
+- source module로만 실행하는 별도 CLI `src/jebao_flow/legacy_discovery_inventory_cli.py`
+- 새 모듈 전용 회귀 `tests/unit/test_legacy_discovery_inventory.py`,
+  `tests/unit/test_legacy_discovery_inventory_cli.py`
+- 관측·selection·후속 mutation park 경계 기록에 한한 `docs/local-control.md`,
+  `docs/home-assistant.md`
+
+`src/jebao_flow/local_control_cli.py`, `src/jebao_flow/local_control/{ha,mqtt,catalog,group_command,
+group_service,group_supervisor,state,group,coordinator,lease,device_writer,journal,install}.py`,
+`src/jebao_flow/config.py`, `src/jebao_flow/groups/*`, old `src/jebao_flow/mqtt/*`,
+`src/jebao_flow/read_only_collector.py`, `read_only_collector_cli.py`, `source_attestation.py`,
+`src/jebao_flow/protocol/*`, `devices/*`, `app.py`, `custom_components/*`, 기존 여섯 frozen source와
+그 직접 테스트, `docs/runs/*`, `pyproject.toml`, `config.example.yaml`는 수정하지 않습니다. 새 config
+field, write-enabled flag, broker-specific `$SYS`·administrative API parser, discovery tombstone publish,
+Home Assistant registry mutation, device write path, coordinator·journal·runtime task를 만들지 않습니다.
+
+collector는 current config의 exact `discovery_prefix`에 대해
+`{discovery_prefix}/+/+/config` subscription 하나만 사용합니다. D1b가 고정한 optional node-id 없는
+discovery topic 형식보다 넓은 `#` filter를 사용하지 않습니다. 수신 message 중 `retain is True`, payload가
+non-empty bytes이고 object id가 `jebao_flow_local_`로 시작하는 exact 3-level discovery config만 artifact
+기록 전에 메모리에서 선별합니다. live publish, non-config topic, 더 깊은 node-id 형상, 다른 integration
+object id와 empty deletion payload는 private artifact에도 기록하지 않습니다. record 수·개별 payload·
+전체 artifact byte 상한을 고정하고, 같은 topic의 byte-identical QoS 중복은 하나로 접되 다른 payload가
+겹치면 두 관측을 모두 보존하고 그 topic을 ambiguous·selection 불가로 표시합니다. 상한을 넘으면
+truncate·부분 artifact를 남기지 않고 artifact 생성을 실패시킵니다.
+
+inventory client는 매 실행 새 random client id와 non-persistent clean session을 사용하며 will을 설정하지
+않습니다. publish API는 sentinel·availability·diagnostic을 포함해 한 번도 호출하지 않습니다. 고정 client
+id로 실행 중 daemon session을 밀어내거나 adapter의 router·poller·group service를 재사용하지 않습니다.
+관측 시간은 monotonic deadline으로 유계이며 외부 cancellation을 그대로 전파합니다. 실제 첫 broker
+연결은 이 source landing과 별개의 구체적인 broker-contact 승인 대상이지만, pump hardware write가
+아니므로 현장 감시·물리 전원 차단을 software gate로 복제하지 않습니다.
+
+private inventory artifact는 exact topic UTF-8 bytes와 raw payload bytes, retain fact, 관측 UTC span,
+source kind `mqtt_retained_window_observation`, exact filter digest, current config·`discovery_prefix`·
+`topic_prefix` binding digest를 canonical bytes로 보존합니다. root와 generation은 owner-only 0700,
+파일은 0600이며 symlink를 따르지 않고 no-clobber 생성, file fsync 뒤 parent-directory fsync가 성공한
+뒤에만 usable artifact id를 반환합니다. 부분 기록·late fsync ambiguity는 성공으로 보고하지 않습니다.
+public stdout·stderr·exception·log에는 raw topic, payload 부분열, exact prefixes, broker host·username·
+password나 private 절대경로를 싣지 않고 opaque artifact id, record·candidate count, UTC span과 SHA-256
+digest만 냅니다.
+
+분류기는 artifact에 이미 보존된 record 밖으로 candidate를 확장하지 않습니다. D1b 이전 commit
+`cc68af25fa73104d06688ab296b7f5d0c6c2a9f0`의 device function·system function·schedule slot·group
+actual-output·group switch·member-resume ID 형식과 당시 platform mapping은 advisory classification에만
+사용합니다. payload `unique_id`와 discovery object id의 exact 일치, JSON object·bounded field shape,
+pre-namespace 형식, payload 안 topic-valued field의 current exact `topic_prefix` binding을 별도 fact로
+보고합니다. current `instance_<64-lowercase-hex>` namespace, malformed JSON, 다른 prefix binding,
+unknown family와 한 topic의 conflicting payload는 selection artifact 입력으로 거부합니다. historical
+공식 일치도 소유권이나 삭제 권한으로 취급하지 않습니다.
+
+selection은 interactive prompt나 “전체 선택” option이 아니라 별도 offline command입니다. 입력은
+repository maintainer가 제공한 exact record id·topic SHA-256·payload SHA-256 목록이고, 출력은 inventory
+digest, current config·discovery-prefix·topic-prefix binding digest, 각 선택 record의 두 digest와 bounded
+classification을 포함한 owner-only no-clobber selection artifact입니다. 입력 항목이 inventory의 정확한
+부분집합이 아니거나 어느 digest·binding이라도 다르면 broker 접촉 전에 거부합니다. selection은 사람이
+검토한 소유권 결정을 감사 가능하게 보존할 뿐이며 broker에 그 record가 아직 존재함, inventory가
+완전함, 삭제가 승인됨을 주장하지 않습니다.
+
+apply·restore source는 이 D1d에서 만들지 않고 park합니다. 후속 apply는 실제 첫 inventory artifact를
+검토한 뒤 별도 정책·적대적 검토와 repository maintainer의 좁은 mutation 결정을 받아야 합니다.
+그 정책은 최소한 선택 topic의 exact retained payload가 fresh positive readback에서 baseline digest와
+일치하지 않거나 관측되지 않으면 **abort**하고, 미관측을 absence·이미 삭제됨·skip 성공으로 읽지 않아야
+합니다. local exclusive claim은 다른 host publisher를 막는 ownership proof가 아니며, ambiguity나 partial
+failure를 자동 restore로 덮지 않습니다. 후속 restore도 bounded readback의 미관측을 broker absence
+증거로 사용하지 않고, 다른 non-empty successor를 관측하면 절대 덮어쓰지 않습니다. broker-native
+complete snapshot 또는 별도로 입증된 deployment-specific acquisition evidence는 artifact provenance로
+결속할 수 있지만 generic collector에 broker별 추측 코드를 넣지 않습니다.
+
+D1d는 §4의 이미 소진된 “첫 write-free read-only collector 구현 1회” 예외를 원용하거나 재사용하지
+않습니다. 그 예외는 실제 장비 pilot 뒤 결과 파일보다 먼저 `src/`를 다시 수정하지 못하게 한 순서에서,
+최초 장비 collector가 아직 없을 때만 source 구현을 허용한 것입니다. §4 본문이 밝히듯 그 순서는 실기
+실행 뒤에 발동하고, D1d source landing은 장비뿐 아니라 broker에도 접촉하지 않으므로 D1·D1b·D1c와
+같이 그 예외가 필요하지 않습니다. 첫 실제 broker 관측을 §4 run 기록 대상으로 볼지는 별도
+broker-contact 승인에서 결정하며, 어느 쪽이든 소진된 예외를 근거로 삼지 않습니다. 기록 대상으로
+결정하면 그 결과 파일을 먼저 커밋할 때까지 추가 `src/` 수정은 하지 않습니다.
+
+회귀는 최소한 (1) fake client의 publish 0회·will 없음·실행별 client id 차이·clean session과 exact
+`{discovery_prefix}/+/+/config` subscription 하나, (2) retained/non-retained, exact/deeper topic,
+Jebao/third-party object id가 섞여도 eligible retained Jebao config만 **기록 전에** 남음, (3) artifact와
+public result가 bounded observation만 말하고 미관측·complete·absence fact를 만들지 않음, (4) legacy
+여섯 family classification과 D1b namespaced·malformed·other-prefix 격리가 inventory 밖 candidate를
+만들지 않음, (5) selection이 exact inventory 부분집합과 topic·payload·inventory·config binding digest를
+모두 검사하고 불일치는 network factory 호출 0회에서 끝남, (6) existing destination·symlink·mode·link
+count·file/parent fsync fault가 no-clobber 또는 unusable failure로 끝나고 raw bytes round-trip은 exact,
+(7) stdout·stderr·exception과 public dict가 ASCII이고 private topic·payload·prefix·credential 부분열을
+포함하지 않음, (8) 새 source import closure가 frozen six·write edge·`protocol/*`·groups runtime·
+`read_only_collector`·local-control MQTT adapter를 포함하지 않으며 기존 D1~D1c와 full read-only 단정이
+수정 없이 통과함을 고정합니다. conflicting payload topic은 모두 보존되지만 selection 0개이고, 상한
+초과는 truncate·부분 artifact 없이 실패함을 함께 고정합니다. 기존 테스트의 assert를 삭제·완화·
+개명하지 않습니다.
+
+D1d source·offline test landing은 collector와 review artifact 계약만 저장소에 추가하며 실제 broker
+connection, retained mutation, Home Assistant, daemon restart·deployment, device·app·원격 환경 실행과
+장비 write를 포함하지 않습니다. 한 번의 observed inventory가 생기기 전에는 apply 조건을 fake에 맞춰
+구체화하지 않습니다. D1b/D1c deployment는 pre-namespace actionable legacy와 exact `topic_prefix`
+유일성, cleanup 처리 완료가 확인되지 않아 계속 별도로 blocked이고, 하드웨어 `NO-GO / BLOCKING`,
+Q2 `UNKNOWN`, frozen native harness를 유지합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
