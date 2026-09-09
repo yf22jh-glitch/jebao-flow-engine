@@ -1346,6 +1346,126 @@ Home Assistant·장비·앱·원격 환경을 실행하거나 장비 write를 �
 중단 수단이 별도로 필요하고, 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`은 유지합니다.
 같은 command verdict·transport 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
 
+### 2026-09-09 per-member group ownership resume C1 범위 확장
+
+qualified group ON/OFF transport commit `136f9acdc40e67c9d06ed4eb88c4f9fc24535c50`의 완료 보고 뒤
+repository maintainer는 “다음 단계 진행하자”고 답했습니다. 그 발언은 다음 기능을 이름으로
+선택한 승인이 아니라 B2 다음의 제품 작업을 계속하라는 요청이었고, 이후 read-only static trace에서
+`GroupManager.resume_member()`가 구현·직접 테스트되어 있지만 production 호출자는 0개이며 기존
+문서가 약속한 개별 “그룹 복귀”만 비어 있음을 확인했습니다. 이번 C1은 그 요청을 이 가장 작은
+공백의 **source·test·offline 검증 범위로 좁게 결속**합니다. 이후 product slice의 상시 승인으로
+일반화하지 않고 실제 broker·Home Assistant·장비·앱·원격 환경 실행이나 장비 write 승인이 아닙니다.
+
+이번 작업이 닫을 질문은 이미 명시적 group ON/OFF command로 armed된 fully-qualified software-
+independent group에서 manual override member 하나만 desired runtime을 바꾸거나 두 번째 arming 경로를
+만들지 않고 기존 plan-atomic 경계로 복귀시킬 수 있는가입니다. 근거는 firmware 가설이 아니라
+manager generation, supervisor arming·plan provenance, runtime identity verdict와 MQTT topic ownership의
+static trace 및 fault injection입니다.
+
+이 확장은 다음 파일로 한정합니다.
+
+- `src/jebao_flow/local_control/group_service.py`, `group_supervisor.py`, `ha.py`, `mqtt.py`
+- 필요한 production composition 갱신에 한한 `src/jebao_flow/local_control_cli.py`
+- `tests/unit/test_local_control_*`
+- `docs/local-control.md`, `docs/home-assistant.md`
+
+`src/jebao_flow/groups/*`와 기존 `GroupManager.resume_member()` 구현·직접 테스트,
+`src/jebao_flow/local_control/group_command.py`, `state.py`, `group.py`, `coordinator.py`, `lease.py`,
+`device_writer.py`, `journal.py`, old `src/jebao_flow/mqtt/*`, `src/jebao_flow/app.py`,
+`custom_components/*`, `src/jebao_flow/protocol/*`, `src/jebao_flow/devices/*`, 기존 여섯 frozen source와
+그 직접 테스트, `docs/runs/*`는 수정하지 않습니다. old MQTT/group service나 `devices.*` observer를
+import하거나 그 `resume_group`·`resume_all_members` action을 우회 경로로 재사용하지 않습니다.
+
+이번 source 변경은 기존 read-only device state와 B1·B2 group truth, ownership, command verdict,
+shutdown 의미에 대한 가산적 변경으로 한정합니다. `tests/unit/test_local_control_group_supervisor.py`,
+`test_local_control_group_service.py`, `test_local_control_group_transport.py`,
+`test_local_control_state.py`, `test_local_control_ha.py`, `test_local_control_mqtt.py`,
+`test_local_control_cli.py`의 기존 단정은 완화하거나 삭제하지 않으며, 필요하면 별도 repository
+maintainer 승인을 먼저 받습니다. write-disarmed startup, exact manager-produced plan provenance,
+disposition 다섯 종, explicit mandatory OFF의 dedupe 우회와 token 보존, direct-power watermark,
+identity-based eight-stage verdict, unresolved OFF sticky close를 변경하지 않습니다.
+
+C1은 per-member resume만 추가합니다. 별도 “전체 그룹 복귀” control은 만들지 않습니다. 이미 armed·
+RUNNING인 group에 같은 `ON` command를 다시 보내면 B2의 검증된 `update_runtime()` 뒤 `resume_all()`이
+모든 override를 해제하고, stopped group도 다음 `ON`에서 같은 경로를 사용합니다. 이 기존 동작을
+`docs/home-assistant.md`에 명시하되 새 능력이나 별도 action으로 표현하지 않습니다.
+
+per-member resume는 기존 group qualification fold를 그대로 재사용하며 모든 member의 current
+physical identity에 대해 `power`·`manual_flow`가 2/2 qualified인 group에만 member별 state-less Home
+Assistant button을 projection합니다. 새 qualification 술어·receipt 의미·OFF-only fallback을 만들지
+않습니다. button availability는 qualification, constructed supervisor와 current `armed` fact만
+소비하며 actual output의 `mixed`·`unknown`을 임의의 power 상태로 접지 않습니다. command result나
+button press를 actual-output 또는 group switch state에 낙관적으로 mirror하지 않습니다.
+
+unarmed group의 resume는 stable English reason `group_not_armed`로 **manager mutation 전에** 거부하고
+manager generation, manual override, runtime, coordinator, durable journal과 physical frame을 모두
+바꾸지 않습니다. resume는 `_armed=True`를 설정하지 않으며 B2 group ON/OFF
+`apply_runtime_command()`만 production arming 권한을 유지합니다. 첫 group `ON` 또는 `OFF` command가
+기존 `resume_all()`을 무조건 지나므로 unarmed override가 영구히 갇히지 않습니다.
+
+armed `EMERGENCY_STOP`에서는 기존 stable reason
+`group_emergency_stop_blocks_direct_control`로 manager mutation 전에 거부합니다. 이 action은 emergency
+stop의 별도 출구가 아니며, rejected command가 ownership epoch이나 mandatory OFF identity를 바꾸지
+않습니다. 그 밖의 armed state에서는 desired `GroupRuntime`을 읽거나 수정하지 않고 supervisor
+lifecycle lock 안의 await 없는 구간에서 다음 순서를 지킵니다.
+
+1. exact logical member가 현재 group에 속하는지 검증
+2. `before = GroupManager.generation`
+3. `ownership_changed = GroupManager.resume_member(member) != before`
+4. 위 비교가 끝난 뒤 `GroupManager.plan_tick()`을 정확히 한 번 호출
+5. 그 exact 반환 객체를 `_finish_cycle(..., force_mandatory_off=False)`에 전달
+
+`plan_tick()` 자체가 generation을 올리므로 2~3의 판정을 그 뒤로 미루지 않습니다. resume는
+`update_runtime()`·`resume_all()`·`invalidate_applied()`·`retry_latest()`를 호출하거나 즉시 coordinator를
+직접 호출하지 않습니다. `ownership_changed=False`도 별도 물리 shortcut을 만들지 않고 같은 plan
+경로로 흘려, applied cache가 current이면 dedupe되고 invalidated 상태이면 기존 runtime 의미대로만
+재확인됩니다. RUNNING resume는 기존 ordinary plan, STOPPED resume는 기존 canonical mandatory OFF이며,
+watermark·safety token·failure retry 규칙을 새로 만들거나 우회하지 않습니다.
+
+B2의 `GroupCommandResult.requested_on: bool`과 public switch result schema는 완화·변경하지 않습니다.
+identity·matching failure·applied/latest 계산과
+`deferred_safety_off -> suppressed_after_failure -> not_sent/uncertain -> awaiting_fresh_state ->
+deduplicated -> verified -> superseded -> pending` precedence를 하나의 await-free pure completion helper로
+분리해 switch와 resume가 공유합니다. helper는 runtime에 실제 submit을 시도한 cycle만 받으며
+`WRITE_DISARMED` disposition은 내부 계약 오류로 거부합니다. 얇은 resume result는 action
+`resume_member`, logical group·member, `ownership_changed`와 B2와 같은 completion facts를 내보내고,
+별도 physical-authorship PASS boolean이나 새 headline을 만들지 않습니다. await 뒤 unrelated counter
+delta를 command verdict로 사용하지 않습니다.
+
+resume button topic은 기존 `LocalControlGroupCommandRouter`가 shared process `operation_lock` 없이 함께
+소유하고 새 router나 task를 만들지 않습니다. group switch와 per-member resume route는 router 내부에서
+서로 중복될 수 없고, 그 합집합은 기존 device·schedule command topics와 disjoint해야 하며 각 projected
+topic에는 정확히 한 route만 존재합니다. retained·duplicate-marked·invalid payload, unknown member,
+unqualified·unconstructed·unarmed·emergency group과 projection/lifecycle inventory mismatch는 stable
+bounded diagnostic으로 pre-journal·frame 0회에 종결합니다. inventory mismatch는 기존 device-state
+task로 raise하지 않고 해당 group control availability를 offline으로 격리합니다.
+
+runtime completion은 B2의 고정·유계 observer-only wait과 identity facts를 그대로 사용합니다. wait는
+supervisor lifecycle lock과 shared process lock을 잡지 않고 timeout·consumer cancellation로 worker를
+cancel하지 않습니다. MQTT adapter는 기존 `_consume` task를 공유하며 group service `aclose()`는 계속
+adapter `run()`의 외부 `finally`에서 모든 supervisor를 닫고 unresolved mandatory OFF를 우선 재전파합니다.
+
+회귀는 최소한 (1) 2/2 qualification에서만 logical member별 button이 생기고 missing qualification에는
+button 0개, (2) unarmed resume가 `group_not_armed`이며 manager generation·override·runtime·journal·frame
+변화 0이고 뒤 첫 ON/OFF가 override를 모두 해제함, (3) armed RUNNING resume가 해당 member를
+`SKIP_MANUAL_OVERRIDE`에서 `DISPATCH`로 복귀시키고 plan port 호출 정확히 1회 뒤 unchanged cycle 0회,
+(4) armed STOPPED resume가 전 member canonical OFF를 정확히 1회 만들고 같은 member 재실행은
+`ownership_changed=False`와 추가 write 0회인 stable-applied fixture, (5) EMERGENCY_STOP과 unknown member가
+stable reason으로 manager·journal·frame 전 거부됨, (6) resume 전후 runtime의 state·enabled·pattern·power·
+limits·period가 불변이고 `update_runtime()`·`resume_all()`·`invalidate_applied()`·`retry_latest()` 호출이
+모두 0회, (7) switch와 resume가 동일 completion helper의 8단계 precedence·identity facts를 사용하며
+B2 `requested_on` 계약이 불변이고 `WRITE_DISARMED` cycle을 helper에 넘기면 내부 계약 오류, (8) device·schedule·group
+switch·group resume topic의 pairwise disjointness와 단일 소유, retained·duplicate·inventory mismatch의
+service·journal·frame 0회, (9) button availability가 qualification·construction·arming만 반영하고
+actual-output/switch optimistic publish 0회, (10) 기존 B1·B2와 read-only startup·publish·redaction·timeout·
+shutdown 단정이 그대로 통과함을 고정합니다.
+
+C1 source·offline test landing은 production schema와 command route만 코드에 추가합니다. 실제 broker·
+Home Assistant·장비·앱·원격 환경 실행과 장비 write는 포함하지 않으며, 각각
+`docs/hardware-readiness.md`의 fresh preflight·exact restore·on-site 승인·현장 감시·중단 수단이
+별도로 필요합니다. 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`은 유지합니다. 같은 resume 질문을
+반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
