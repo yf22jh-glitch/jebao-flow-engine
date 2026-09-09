@@ -104,13 +104,21 @@ qualification `diagnostic_reason`은 대체하지 않고 그대로 보존합니�
 member resume는 같은 logical group으로 계속 묶입니다. state·command·availability topic은 기존
 exact `topic_prefix` 형식을 그대로 유지합니다.
 
-이 identity 변경은 retained-state migration이 아니며 empty retained deletion payload를 보내지 않습니다.
-pre-namespace legacy config가 broker·Home Assistant에 남아 있는지와 그 소유권은 `UNKNOWN`입니다.
-control mode에서 legacy entity와 namespaced replacement는 같은 command topic을 가리켜 둘 다
-조작 가능할 수 있으므로, 소유 namespace 내 variant cleanup과 legacy exact inventory·제거·복구
-절차가 별도로 검토·승인되기 전에는 실제 daemon을 이 schema로 재기동하지 않습니다.
-pre-namespace legacy config는 자동 삭제하지 않고, Recorder history·device/entity customization·area·
-dashboard reference가 새 identity로 자동 이전된다고 주장하지 않습니다.
+MQTT 연결 때마다 현재 config·manifest·catalog·group·schedule topology에서 유도한 이 instance
+namespace의 platform variant 중, 이번 projection이 publish하지 않는 discovery config만 exact
+zero-byte/QoS 1/retained payload로 제거합니다. availability를 먼저 offline으로 만들고 command topic
+구독과 current discovery publish 전에 삭제하며, state·command·availability와 current discovery topic은
+삭제하지 않습니다. mode·qualification이 바뀌어도 같은 bounded variant 집합을 둘로 나누므로 이전
+sensor·number·switch·select·button 형상이 함께 남는 것을 줄입니다.
+
+이 cleanup은 complete retained-state migration이 아닙니다. 제거된 topology, 과거 function kind·
+`discovery_prefix`, 다른 namespace, pre-namespace legacy config는 추측해 삭제하지 않으며 존재와
+소유권을 `UNKNOWN`으로 둡니다. exact `topic_prefix`는 daemon마다 유일해야 하지만 code-enforced
+namespace lease는 없어서, 이를 공유한 두 daemon은 서로의 current variant를 삭제할 수 있습니다.
+pre-namespace legacy entity도 namespaced replacement와 같은 command topic을 가리켜 계속 조작 가능할
+수 있으므로 exact inventory·제거·복구 절차가 별도로 검토·승인되기 전에는 실제 daemon을 이 schema로
+재기동하지 않습니다. Recorder history·device/entity customization·area·dashboard reference가 새
+identity로 자동 이전된다고 주장하지 않습니다.
 
 장비가 로컬 시간표를 제공하면 별도 `장비 시간표` sensor가 만들어집니다. sensor 상태는
 해석에 성공한 시간 구간 수이며, `enabled`, `slot_capacity`, `entries`, `invalid_slots` 속성을

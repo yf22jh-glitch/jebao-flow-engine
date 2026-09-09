@@ -516,10 +516,10 @@ def test_qualified_router_requires_a_write_coordinator() -> None:
 
 class _Client:
     def __init__(self) -> None:
-        self.published: list[tuple[str, str, int, bool]] = []
+        self.published: list[tuple[str, object, int, bool]] = []
 
     async def publish(self, topic, payload, *, qos, retain) -> None:
-        self.published.append((str(topic), str(payload), qos, retain))
+        self.published.append((str(topic), payload, qos, retain))
 
 
 class _OneMessageClient(_Client):
@@ -545,6 +545,7 @@ class _RunClient(_Client):
     def __init__(self) -> None:
         super().__init__()
         self.subscribed: list[tuple[str, int]] = []
+        self.events: list[tuple[str, str, object, int, bool]] = []
         self.messages = _IdleMessages()
 
     async def __aenter__(self):
@@ -553,8 +554,13 @@ class _RunClient(_Client):
     async def __aexit__(self, exc_type, exc, traceback) -> None:
         return None
 
+    async def publish(self, topic, payload, *, qos, retain) -> None:
+        await super().publish(topic, payload, qos=qos, retain=retain)
+        self.events.append(("publish", str(topic), payload, qos, retain))
+
     async def subscribe(self, topic, *, qos) -> None:
         self.subscribed.append((str(topic), qos))
+        self.events.append(("subscribe", str(topic), None, qos, False))
 
 
 @pytest.mark.asyncio
@@ -581,13 +587,167 @@ async def test_observer_adapter_does_not_publish_discovery_deletions(monkeypatch
     await adapter.run(stop_event)
 
     discovery = [
-        payload
+        (topic, payload)
         for topic, payload, qos, retain in client.published
         if topic.endswith("/config") and qos == 1 and retain
     ]
+    current_topics = {topic for topic, _payload in projection.discovery_records()}
+    tombstone_topics = set(projection.discovery_tombstone_topics())
     assert discovery
-    assert all(payload for payload in discovery)
+    assert {topic for topic, payload in discovery if payload != b""} == current_topics
+    assert {topic for topic, payload in discovery if payload == b""} == tombstone_topics
+    assert current_topics.isdisjoint(tombstone_topics)
+    assert sum(payload == b"" for _topic, payload, _qos, _retain in client.published) == len(
+        tombstone_topics
+    )
     assert client.subscribed == []
+
+
+@pytest.mark.asyncio
+async def test_owned_tombstones_precede_subscriptions_and_current_discovery(monkeypatch) -> None:
+    projection, _coordinator, router = _setup()
+
+    class _Poller:
+        logical_members = ("master", "slave")
+
+        async def run(self, publish, stop_event) -> None:
+            await stop_event.wait()
+
+    client = _RunClient()
+    monkeypatch.setattr(mqtt_module.aiomqtt, "Client", lambda *args, **kwargs: client)
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
+        projection=projection,
+        router=router,
+        state_poller=_Poller(),  # type: ignore[arg-type]
+    )
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    await adapter.run(stop_event)
+
+    expected_tombstones = projection.discovery_tombstone_topics()
+    tombstone_indices = [
+        index
+        for index, event in enumerate(client.events)
+        if event[0] == "publish" and event[2] == b""
+    ]
+    offline_indices = [
+        index
+        for index, event in enumerate(client.events)
+        if event[0] == "publish" and event[2] == "offline"
+    ]
+    subscribe_indices = [
+        index for index, event in enumerate(client.events) if event[0] == "subscribe"
+    ]
+    current_topics = {topic for topic, _payload in projection.discovery_records()}
+    current_discovery_indices = [
+        index
+        for index, event in enumerate(client.events)
+        if event[0] == "publish" and event[1] in current_topics and event[2] != b""
+    ]
+
+    assert expected_tombstones
+    assert [client.events[index][1] for index in tombstone_indices] == list(
+        expected_tombstones
+    )
+    assert len(tombstone_indices) == len(expected_tombstones)
+    startup_offline_indices = [
+        index for index in offline_indices if index < min(tombstone_indices)
+    ]
+    assert startup_offline_indices
+    assert max(startup_offline_indices) < min(tombstone_indices)
+    assert not [
+        index
+        for index in offline_indices
+        if min(tombstone_indices) < index < min(subscribe_indices)
+    ]
+    assert max(tombstone_indices) < min(subscribe_indices)
+    assert max(tombstone_indices) < min(current_discovery_indices)
+    assert min(subscribe_indices) > max(tombstone_indices)
+    assert all(
+        client.events[index][3:] == (1, True) for index in tombstone_indices
+    )
+
+
+@pytest.mark.asyncio
+async def test_owned_tombstone_sequence_is_bounded_and_repeatable_per_connection(
+    monkeypatch,
+) -> None:
+    projection, _coordinator, router = _setup()
+
+    class _Poller:
+        logical_members = ("master", "slave")
+
+        async def run(self, publish, stop_event) -> None:
+            await stop_event.wait()
+
+    clients = (_RunClient(), _RunClient())
+    pending_clients = iter(clients)
+    monkeypatch.setattr(
+        mqtt_module.aiomqtt,
+        "Client",
+        lambda *args, **kwargs: next(pending_clients),
+    )
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
+        projection=projection,
+        router=router,
+        state_poller=_Poller(),  # type: ignore[arg-type]
+    )
+
+    for _client in clients:
+        stop_event = asyncio.Event()
+        stop_event.set()
+        await adapter.run(stop_event)
+
+    tombstone_sequences = tuple(
+        tuple(topic for topic, payload, _qos, _retain in client.published if payload == b"")
+        for client in clients
+    )
+    assert tombstone_sequences == (
+        projection.discovery_tombstone_topics(),
+        projection.discovery_tombstone_topics(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_tombstone_publish_failure_stops_subscription_discovery_and_online(
+    monkeypatch,
+) -> None:
+    projection, _coordinator, router = _setup()
+
+    class _Poller:
+        logical_members = ("master", "slave")
+
+        async def run(self, publish, stop_event) -> None:
+            await stop_event.wait()
+
+    class _FailingClient(_RunClient):
+        async def publish(self, topic, payload, *, qos, retain) -> None:
+            await super().publish(topic, payload, qos=qos, retain=retain)
+            if payload == b"":
+                raise RuntimeError("owned discovery tombstone rejected")
+
+    client = _FailingClient()
+    monkeypatch.setattr(mqtt_module.aiomqtt, "Client", lambda *args, **kwargs: client)
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
+        projection=projection,
+        router=router,
+        state_poller=_Poller(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="owned discovery tombstone rejected"):
+        await adapter.run(asyncio.Event())
+
+    current_topics = {topic for topic, _payload in projection.discovery_records()}
+    assert client.subscribed == []
+    assert not any(
+        topic in current_topics and payload != b""
+        for topic, payload, _qos, _retain in client.published
+    )
+    assert not any(payload == "online" for _topic, payload, _qos, _retain in client.published)
 
 
 @pytest.mark.asyncio

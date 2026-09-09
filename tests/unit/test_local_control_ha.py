@@ -137,6 +137,38 @@ def _qualified_projection(
     )
 
 
+def _unqualified_projection(
+    topic_prefix: str,
+    *,
+    discovery_prefix: str = "homeassistant",
+    control_surface_enabled: bool = True,
+) -> HomeAssistantProjection:
+    manifest = _manifest()
+    master, slave = manifest.devices
+    group = GroupConfig(
+        id="main_flow",
+        name="Main Flow",
+        members=(
+            GroupMember(device=master.logical_member),
+            GroupMember(device=slave.logical_member),
+        ),
+    )
+    plan = FreshMasterSchedulePlan(
+        linkage_mode=NativeLinkageMode.ASYNC,
+        master=master,
+        slaves=(FreshSlaveSchedule(target=slave),),
+    )
+    return project_home_assistant(
+        manifest,
+        build_local_control_catalog((), current_content=manifest.content),
+        discovery_prefix=discovery_prefix,
+        topic_prefix=topic_prefix,
+        schedule_plans=(plan,),
+        groups=(group,),
+        control_surface_enabled=control_surface_enabled,
+    )
+
+
 def test_unqualified_functions_are_english_diagnostics_without_commands() -> None:
     projection = project_home_assistant(
         _manifest(),
@@ -464,6 +496,218 @@ def test_observer_projection_suppresses_qualified_controls_without_losing_diagno
     assert any(entity.function == "schedule" for entity in observer.entities)
     assert all(entity.command_topic is None for entity in observer.entities)
     assert all("command_topic" not in payload for _topic, payload in observer.discovery_records())
+
+
+def test_owned_discovery_variants_partition_across_mode_and_qualification() -> None:
+    control = _qualified_projection("jebao-flow/main")
+    observer = _qualified_projection(
+        "jebao-flow/main",
+        control_surface_enabled=False,
+    )
+    unqualified = _unqualified_projection("jebao-flow/main")
+    partitions: list[tuple[set[str], set[str]]] = []
+    for projection in (control, observer, unqualified):
+        current = {topic for topic, _payload in projection.discovery_records()}
+        tombstones = set(projection.discovery_tombstone_topics())
+        assert current.isdisjoint(tombstones)
+        assert projection.discovery_tombstone_topics() == tuple(sorted(tombstones))
+        partitions.append((current, tombstones))
+
+    control_current, control_tombstones = partitions[0]
+    observer_current, observer_tombstones = partitions[1]
+    assert control_current | control_tombstones == observer_current | observer_tombstones
+    assert control_current | control_tombstones == partitions[2][0] | partitions[2][1]
+
+    control_flow = next(
+        entity
+        for entity in control.entities
+        if entity.logical_member == "wavemaker_master" and entity.function == "manual_flow"
+    )
+    observer_flow = next(
+        entity
+        for entity in observer.entities
+        if entity.logical_member == "wavemaker_master" and entity.function == "manual_flow"
+    )
+    assert control_flow.unique_id == observer_flow.unique_id
+    number_topic = (
+        f"{control.discovery_prefix}/number/{control_flow.unique_id}/config"
+    )
+    sensor_topic = (
+        f"{control.discovery_prefix}/sensor/{control_flow.unique_id}/config"
+    )
+    assert number_topic in control_current
+    assert sensor_topic in control_tombstones
+    assert sensor_topic in observer_current
+    assert number_topic in observer_tombstones
+
+    slot = next(entity for entity in control.entities if entity.slot_index == 0)
+    slot_topic = f"{control.discovery_prefix}/number/{slot.unique_id}/config"
+    [group_control] = control.group_control_entities
+    group_control_topic = (
+        f"{control.discovery_prefix}/switch/{group_control.unique_id}/config"
+    )
+    resume_topics = {
+        f"{control.discovery_prefix}/button/{entity.unique_id}/config"
+        for entity in control.group_resume_entities
+    }
+    assert slot_topic in control_current
+    assert slot_topic in observer_tombstones
+    assert group_control_topic in control_current
+    assert group_control_topic in observer_tombstones
+    assert resume_topics <= control_current
+    assert resume_topics <= observer_tombstones
+
+    [actual] = control.group_entities
+    actual_topic = f"{control.discovery_prefix}/sensor/{actual.unique_id}/config"
+    system = next(
+        entity for entity in control.entities if entity.logical_member == "local_system"
+    )
+    system_topic = f"{control.discovery_prefix}/sensor/{system.unique_id}/config"
+    assert {actual_topic, system_topic} <= control_current & observer_current
+    assert {actual_topic, system_topic}.isdisjoint(
+        control_tombstones | observer_tombstones
+    )
+    assert not any(
+        "/binary_sensor/" in topic
+        for current, tombstones in partitions
+        for topic in current | tombstones
+    )
+
+
+def test_owned_discovery_tombstones_are_current_namespace_only_and_bounded() -> None:
+    projection = _qualified_projection("jebao-flow/main")
+    other = _qualified_projection("jebao-flow/other")
+    [namespace] = {
+        entity.instance_namespace for entity in _projected_entities(projection)
+    }
+    current = {topic for topic, _payload in projection.discovery_records()}
+    tombstones = set(projection.discovery_tombstone_topics())
+    all_variants = current | tombstones
+
+    for topic in tombstones:
+        relative = topic.removeprefix(f"{projection.discovery_prefix}/")
+        platform, object_id, config = relative.split("/")
+        assert topic == (
+            f"{projection.discovery_prefix}/{platform}/{object_id}/{config}"
+        )
+        assert config == "config"
+        assert object_id.count(namespace) == 1
+    assert all(
+        topic.startswith(f"{projection.discovery_prefix}/") for topic in tombstones
+    )
+    assert tombstones.isdisjoint(
+        topic for topic, _payload in other.discovery_records()
+    )
+    assert tombstones.isdisjoint(other.discovery_tombstone_topics())
+    runtime_topics = {
+        projection.global_availability_topic,
+        f"{projection.topic_prefix}/local/status",
+        f"{projection.topic_prefix}/local/groups/status",
+    }
+    for _topic, payload in projection.discovery_records():
+        for key in (
+            "state_topic",
+            "command_topic",
+            "availability_topic",
+            "json_attributes_topic",
+        ):
+            value = payload.get(key)
+            if isinstance(value, str):
+                runtime_topics.add(value)
+        availability = payload.get("availability")
+        if isinstance(availability, list):
+            runtime_topics.update(
+                item["topic"]
+                for item in availability
+                if isinstance(item, dict) and isinstance(item.get("topic"), str)
+            )
+    assert tombstones.isdisjoint(runtime_topics)
+
+    manifest = _manifest()
+    catalog = build_local_control_catalog(
+        (
+            _qualification("power"),
+            _qualification("manual_flow"),
+            _qualification("slave_per_slot_flow_extension"),
+        ),
+        current_content=manifest.content,
+        _qualification_verifier_for_test=lambda _item: frozenset(
+            device.physical_identity_key for device in manifest.devices
+        ),
+    )
+    device_function_count = sum(
+        descriptor.product_key == device.product_key
+        for device in manifest.devices
+        for descriptor in catalog.functions
+    )
+    system_function_count = sum(
+        descriptor.product_key is None for descriptor in catalog.functions
+    )
+    group_member_count = 2
+    upper_bound = (
+        (2 * device_function_count)
+        + system_function_count
+        + 48
+        + 1
+        + 1
+        + group_member_count
+    )
+    assert len(all_variants) <= upper_bound
+
+    manifest = _manifest()
+    reduced = project_home_assistant(
+        manifest,
+        build_local_control_catalog((), current_content=manifest.content),
+        discovery_prefix="homeassistant",
+        topic_prefix="jebao-flow/main",
+    )
+    reduced_variants = {
+        topic for topic, _payload in reduced.discovery_records()
+    } | set(reduced.discovery_tombstone_topics())
+    topology_entities = (
+        *(entity for entity in projection.entities if entity.slot_index is not None),
+        *projection.group_entities,
+        *projection.group_control_entities,
+        *projection.group_resume_entities,
+    )
+    full_topology_only = {
+        f"{projection.discovery_prefix}/{entity.platform.value}/{entity.unique_id}/config"
+        for entity in topology_entities
+    }
+    assert full_topology_only
+    assert full_topology_only.isdisjoint(reduced_variants)
+
+
+def test_device_variant_candidates_reuse_the_existing_platform_fold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest()
+    catalog = build_local_control_catalog((), current_content=manifest.content)
+    expected_calls = sorted(
+        (descriptor.product_key, descriptor.function)
+        for device in manifest.devices
+        for descriptor in catalog.functions
+        if descriptor.product_key == device.product_key
+    )
+    actual_calls: list[tuple[str | None, str]] = []
+    original = ha_module._platform_for
+
+    def tracking_platform(descriptor, *, control_available):
+        if control_available:
+            actual_calls.append((descriptor.product_key, descriptor.function))
+        return original(descriptor, control_available=control_available)
+
+    monkeypatch.setattr(ha_module, "_platform_for", tracking_platform)
+    projection = _unqualified_projection(
+        "jebao-flow/main",
+        control_surface_enabled=False,
+    )
+
+    assert sorted(actual_calls) == expected_calls
+    assert not any(
+        "/binary_sensor/" in topic
+        for topic in projection.discovery_tombstone_topics()
+    )
 
 
 def test_topic_prefix_namespaces_every_discovery_identity_family() -> None:

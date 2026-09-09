@@ -35,6 +35,9 @@ class HomeAssistantPlatform(StrEnum):
     SWITCH = "switch"
 
 
+_DiscoveryIdentity = tuple[HomeAssistantPlatform, str]
+
+
 @dataclass(frozen=True, slots=True)
 class HomeAssistantEntityDescriptor:
     """One stable, English-only Home Assistant entity contract."""
@@ -382,6 +385,10 @@ class HomeAssistantProjection:
     group_control_entities: tuple[GroupControlHomeAssistantEntityDescriptor, ...] = ()
     group_resume_entities: tuple[GroupMemberResumeHomeAssistantEntityDescriptor, ...] = ()
     control_surface_diagnostic_reason: str | None = None
+    _potential_discovery_identities: tuple[_DiscoveryIdentity, ...] = field(
+        kw_only=True,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         _require_topic_prefix(self.discovery_prefix)
@@ -403,6 +410,13 @@ class HomeAssistantProjection:
         identities = [(entity.platform, entity.unique_id) for entity in entities]
         if len(identities) != len(set(identities)):
             raise ValueError("Home Assistant projection contains duplicate entities")
+        potential_identities = set(self._potential_discovery_identities)
+        if len(potential_identities) != len(self._potential_discovery_identities):
+            raise ValueError("Home Assistant potential discovery identities must be unique")
+        for _platform, unique_id in potential_identities:
+            _require_discovery_identity(unique_id, expected_namespace)
+        if not set(identities).issubset(potential_identities):
+            raise ValueError("current Home Assistant discovery is outside its potential variants")
 
     def discovery_records(self) -> tuple[tuple[str, dict[str, object]], ...]:
         entities = (
@@ -413,10 +427,34 @@ class HomeAssistantProjection:
         )
         return tuple(
             (
-                f"{self.discovery_prefix}/{entity.platform.value}/{entity.unique_id}/config",
+                _discovery_topic(
+                    self.discovery_prefix,
+                    entity.platform,
+                    entity.unique_id,
+                ),
                 entity.mqtt_discovery_payload(),
             )
             for entity in entities
+        )
+
+    def discovery_tombstone_topics(self) -> tuple[str, ...]:
+        """Return owned current-topology variants not published by this projection."""
+
+        current_identities = {
+            (entity.platform, entity.unique_id)
+            for entity in (
+                *self.entities,
+                *self.group_entities,
+                *self.group_control_entities,
+                *self.group_resume_entities,
+            )
+        }
+        return tuple(
+            sorted(
+                _discovery_topic(self.discovery_prefix, platform, unique_id)
+                for platform, unique_id in self._potential_discovery_identities
+                if (platform, unique_id) not in current_identities
+            )
         )
 
     def public_dict(self) -> dict[str, object]:
@@ -492,12 +530,22 @@ def project_home_assistant(
     _require_topic_prefix(topic_prefix)
     instance_namespace = _discovery_instance_namespace(topic_prefix)
     _validate_unique_schedule_topology(schedule_plans)
+    potential_identities: set[_DiscoveryIdentity] = set()
     entities: list[HomeAssistantEntityDescriptor] = []
     for device in manifest.devices:
         descriptors = tuple(
             item for item in catalog.functions if item.product_key == device.product_key
         )
         for descriptor in descriptors:
+            unique_id = _device_function_unique_id(
+                instance_namespace,
+                device.logical_member,
+                descriptor.function,
+            )
+            potential_identities.add((HomeAssistantPlatform.SENSOR, unique_id))
+            control_platform = _platform_for(descriptor, control_available=True)
+            if control_platform is not HomeAssistantPlatform.SENSOR:
+                potential_identities.add((control_platform, unique_id))
             entities.append(
                 _project_device_function(
                     device,
@@ -508,6 +556,12 @@ def project_home_assistant(
                 )
             )
     for descriptor in (item for item in catalog.functions if item.product_key is None):
+        potential_identities.add(
+            (
+                HomeAssistantPlatform.SENSOR,
+                _system_function_unique_id(instance_namespace, descriptor.function),
+            )
+        )
         entities.append(
             _project_system_function(
                 descriptor,
@@ -519,6 +573,19 @@ def project_home_assistant(
     known_members = {device.logical_member: device for device in manifest.devices}
     for plan in schedule_plans:
         _validate_plan_members(plan, known_members)
+        for slave in plan.slaves:
+            for slot_index in range(48):
+                potential_identities.add(
+                    (
+                        HomeAssistantPlatform.NUMBER,
+                        _slave_slot_unique_id(
+                            instance_namespace,
+                            plan,
+                            slave.target.logical_member,
+                            slot_index,
+                        ),
+                    )
+                )
         if not control_surface_enabled:
             continue
         descriptor = catalog.find(plan.master.product_key, "slave_per_slot_flow_extension")
@@ -538,6 +605,31 @@ def project_home_assistant(
                         instance_namespace=instance_namespace,
                     )
                 )
+
+    for group in groups:
+        potential_identities.add(
+            (
+                HomeAssistantPlatform.SENSOR,
+                _group_output_unique_id(instance_namespace, group.id),
+            )
+        )
+        potential_identities.add(
+            (
+                HomeAssistantPlatform.SWITCH,
+                _group_control_unique_id(instance_namespace, group.id),
+            )
+        )
+        potential_identities.update(
+            (
+                HomeAssistantPlatform.BUTTON,
+                _group_member_resume_unique_id(
+                    instance_namespace,
+                    group.id,
+                    member.device,
+                ),
+            )
+            for member in group.members
+        )
 
     qualified_groups = (
         tuple(
@@ -581,6 +673,12 @@ def project_home_assistant(
         control_surface_diagnostic_reason=(
             None if control_surface_enabled else _RUNTIME_MODE_OBSERVER_REASON
         ),
+        _potential_discovery_identities=tuple(
+            sorted(
+                potential_identities,
+                key=lambda item: (item[0].value, item[1]),
+            )
+        ),
     )
 
 
@@ -593,7 +691,7 @@ def _project_group_output(
     base = f"{topic_prefix}/local/groups/{group.id}/actual-output"
     return GroupHomeAssistantEntityDescriptor(
         group_id=group.id,
-        unique_id=_unique_id(instance_namespace, f"group_{group.id}_actual_output"),
+        unique_id=_group_output_unique_id(instance_namespace, group.id),
         name=f"{_english_member_name(group.id)} Actual Output",
         state_topic=f"{base}/state",
         attributes_topic=f"{base}/attributes",
@@ -611,7 +709,7 @@ def _project_group_control(
     base = f"{topic_prefix}/local/groups/{group.id}/control"
     return GroupControlHomeAssistantEntityDescriptor(
         group_id=group.id,
-        unique_id=_unique_id(instance_namespace, f"group_{group.id}_control"),
+        unique_id=_group_control_unique_id(instance_namespace, group.id),
         name=f"{_english_member_name(group.id)} Control",
         state_topic=f"{base}/state",
         command_topic=f"{base}/set",
@@ -631,9 +729,10 @@ def _project_group_member_resume(
     return GroupMemberResumeHomeAssistantEntityDescriptor(
         group_id=group.id,
         logical_member=logical_member,
-        unique_id=_unique_id(
+        unique_id=_group_member_resume_unique_id(
             instance_namespace,
-            f"group_{group.id}_{logical_member}_resume",
+            group.id,
+            logical_member,
         ),
         name=f"Resume {_english_member_name(logical_member)} To Group",
         command_topic=f"{base}/set",
@@ -656,12 +755,12 @@ def _project_device_function(
     )
     platform = _platform_for(descriptor, control_available=control_available)
     control_available = control_available and platform is not HomeAssistantPlatform.SENSOR
-    suffix = descriptor.function.replace(".", "_")
     return HomeAssistantEntityDescriptor(
         platform=platform,
-        unique_id=_unique_id(
+        unique_id=_device_function_unique_id(
             instance_namespace,
-            f"{device.logical_member}_{suffix}",
+            device.logical_member,
+            descriptor.function,
         ),
         name=descriptor.exposed_name,
         logical_member=device.logical_member,
@@ -696,9 +795,11 @@ def _project_slave_slot(
     )
     return HomeAssistantEntityDescriptor(
         platform=HomeAssistantPlatform.NUMBER,
-        unique_id=_unique_id(
+        unique_id=_slave_slot_unique_id(
             instance_namespace,
-            f"{group_key}_{slave.logical_member}_slot_{slot_index:02d}_flow",
+            plan,
+            slave.logical_member,
+            slot_index,
         ),
         name=f"Schedule Slot {slot_index + 1} Flow",
         logical_member=slave.logical_member,
@@ -724,7 +825,7 @@ def _project_system_function(
     base = f"{topic_prefix}/local/system/functions/{descriptor.function}"
     return HomeAssistantEntityDescriptor(
         platform=HomeAssistantPlatform.SENSOR,
-        unique_id=_unique_id(instance_namespace, f"system_{descriptor.function}"),
+        unique_id=_system_function_unique_id(instance_namespace, descriptor.function),
         name=descriptor.exposed_name,
         logical_member="local_system",
         function=descriptor.function,
@@ -736,6 +837,8 @@ def _project_system_function(
         entity_category="diagnostic",
         instance_namespace=instance_namespace,
     )
+
+
 def _platform_for(
     descriptor: LocalFunctionDescriptor,
     *,
@@ -758,6 +861,61 @@ def _discovery_instance_namespace(topic_prefix: str) -> str:
 def _unique_id(instance_namespace: str, suffix: str) -> str:
     _require_instance_namespace(instance_namespace)
     return f"jebao_flow_local_{instance_namespace}_{suffix}"
+
+
+def _device_function_unique_id(
+    instance_namespace: str,
+    logical_member: str,
+    function: str,
+) -> str:
+    return _unique_id(
+        instance_namespace,
+        f"{logical_member}_{function.replace('.', '_')}",
+    )
+
+
+def _system_function_unique_id(instance_namespace: str, function: str) -> str:
+    return _unique_id(instance_namespace, f"system_{function}")
+
+
+def _slave_slot_unique_id(
+    instance_namespace: str,
+    plan: FreshMasterSchedulePlan,
+    logical_member: str,
+    slot_index: int,
+) -> str:
+    group_key = f"{plan.master.logical_member}_{plan.linkage_mode.value}"
+    return _unique_id(
+        instance_namespace,
+        f"{group_key}_{logical_member}_slot_{slot_index:02d}_flow",
+    )
+
+
+def _group_output_unique_id(instance_namespace: str, group_id: str) -> str:
+    return _unique_id(instance_namespace, f"group_{group_id}_actual_output")
+
+
+def _group_control_unique_id(instance_namespace: str, group_id: str) -> str:
+    return _unique_id(instance_namespace, f"group_{group_id}_control")
+
+
+def _group_member_resume_unique_id(
+    instance_namespace: str,
+    group_id: str,
+    logical_member: str,
+) -> str:
+    return _unique_id(
+        instance_namespace,
+        f"group_{group_id}_{logical_member}_resume",
+    )
+
+
+def _discovery_topic(
+    discovery_prefix: str,
+    platform: HomeAssistantPlatform,
+    unique_id: str,
+) -> str:
+    return f"{discovery_prefix}/{platform.value}/{unique_id}/config"
 
 
 def _device_identifier(instance_namespace: str, logical_member: str) -> str:

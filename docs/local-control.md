@@ -325,15 +325,26 @@ remain grouped by logical device, while actual-output, switch, and resume entiti
 remain grouped by logical group. State, command, and availability topics keep their existing exact
 `topic_prefix`-based values.
 
-This identity change is not a retained-state migration. It deliberately sends no empty retained
-deletion payload, and pre-namespace discovery configs still cannot be attributed to one daemon
-when another daemon may use the same discovery prefix and logical IDs. Their existence remains
-`UNKNOWN`. In control mode, a retained legacy entity and its namespaced replacement would remain
-actionable against the same command topic, so deployment is blocked until a separately reviewed
-owned-variant cleanup and an explicit legacy inventory, removal, and restore procedure are
-approved. Recorder history, entity/device-registry customization, area placement, and dashboard
-references are not assumed to transfer automatically to the new identities. Pre-namespace legacy
-config is never deleted automatically.
+On each MQTT connection, the adapter now removes only current-topology platform variants owned by
+this instance namespace that the current projection no longer publishes. It derives a bounded
+potential set before runtime-mode and qualification filtering, subtracts the current discovery set,
+and publishes the resulting sorted topics as exact zero-length QoS 1 retained payloads after all
+availability topics are offline and before command subscriptions or current discovery. State,
+command, availability, and current discovery topics are never deletion targets. A failed tombstone
+publish aborts the remaining startup sequence rather than opening command subscriptions beside a
+stale control surface.
+
+This cleanup is intentionally not a complete retained-state migration. It uses only the current
+configuration, manifest, catalog, groups, and invocation-derived schedule topology; it does not
+query the broker or preserve prior projection history. Removed topology, an older function kind or
+discovery prefix, another namespace, and pre-namespace discovery configs are therefore outside its
+authority and remain `UNKNOWN`. Exact `topic_prefix` uniqueness per daemon is an operator invariant,
+not a code-enforced lease: two daemons sharing it can delete each other's current platform variants.
+Pre-namespace legacy entities can also remain actionable against the same command topic, so actual
+deployment stays blocked until a separately reviewed exact legacy inventory, removal, and restore
+procedure is approved. Recorder history, entity/device-registry customization, area placement, and
+dashboard references are not assumed to transfer automatically, and pre-namespace config is never
+deleted automatically.
 
 ## Software-independent group actuation
 

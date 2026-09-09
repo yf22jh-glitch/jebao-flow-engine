@@ -498,6 +498,8 @@ class LocalControlMqttAdapter:
                     qos=1,
                     retain=True,
                 )
+            for topic in self._projection.discovery_tombstone_topics():
+                await client.publish(topic, b"", qos=1, retain=True)
             group_topics = () if self._group_router is None else self._group_router.command_topics
             for topic in (*self._router.command_topics, *group_topics):
                 # At-most-once command delivery is intentional: losing one command is safer than
