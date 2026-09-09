@@ -2,8 +2,10 @@
 
 ## 목표
 
-Jebao Flow Engine(`jebao-flowd`)은 제바오 수류모터와 리턴펌프를 로컬 네트워크에서 직접
-제어하고, Home Assistant 커스텀 통합에 MQTT로 물리 장비와 논리 그룹을 제공합니다.
+Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 로컬 네트워크에서 직접 제어하고,
+Home Assistant에 MQTT로 물리 장비와 논리 그룹을 제공합니다. 현재 배포 경로는
+`jebao-flow-local`의 native MQTT Discovery입니다. `jebao-flowd` aggregate MQTT와
+`custom_components/jebao_flow`는 동결된 legacy 경로이며 현재 경로와 함께 실행하지 않습니다.
 
 첫 MVP는 동일 모델 메인 수류모터 두 대와 바형 크로스플로우 한 대에 집중합니다.
 
@@ -21,9 +23,9 @@ Jebao Flow Engine(`jebao-flowd`)은 제바오 수류모터와 리턴펌프를 �
 ```text
 Home Assistant
   UI, 자동화 조건, 패턴/출력/주기 선택, 경고 표시
-       │ MQTT
+       │ native MQTT Discovery / state / command
        ▼
-jebao-flowd
+jebao-flow-local
   desired state, 그룹/패턴, 안전 제한, 연결/복구, actual state
        │ local LAN
        ▼
@@ -31,9 +33,9 @@ Jebao devices
 ```
 
 Home Assistant가 짧은 주기로 펌프별 출력을 계산하지 않습니다. 실제 장비에 명령하는
-프로세스는 `jebao-flowd` 하나이며 기존 직접 제어 통합과 동시에 운용하지 않습니다.
-커스텀 통합과 Lovelace 카드는 장비 LAN 주소나 Jebao/Gizwits 프로토콜을 알지 못하며,
-Home Assistant 엔티티와 데몬의 MQTT 계약만 사용합니다.
+프로세스는 current 배포의 `jebao-flow-local` 하나이며 기존 daemon·직접 제어 통합과 동시에
+운용하지 않습니다. Home Assistant의 built-in MQTT integration은 장비 LAN 주소나
+Jebao/Gizwits 프로토콜을 알지 못하고 native discovery entity와 데몬의 MQTT 계약만 사용합니다.
 
 ## 설계 불변 조건
 
@@ -76,11 +78,10 @@ Observer는 5초 기본 주기로 실제 전원·출력·모드·주파수와 �
 앱·클라우드·장비 자체 중 하나로 단정하지 않고 `external_or_native`로 기록합니다.
 
 네이티브 Linkage 트랜잭션 코어와 제한된 현장 실행·attended recovery까지 완료됐습니다.
-소프트웨어 독립 그룹용 순수 planner와 protocol-neutral dispatcher는 구현됐지만, 현재 데몬에는
-이를 MQTT·앱·실제 LAN port에 연결한 command executor가 없습니다. 따라서 `control`로 설정해도
-MQTT 명령을 fail-closed로 거부하며, Sync/Async 시험 API를 Home Assistant에 광고하지 않습니다.
-불명확한 write barrier를 해제할 Actual State reconciler도 미연결입니다. 실기 write 검증과
-startup recovery wiring이 끝나기 전에는 이 경계를 해제하지 않습니다.
+current `jebao-flow-local`에는 별도 journal·lease를 쓰는 software-independent group executor와
+native MQTT projection이 연결되어 있지만, 기본 `observer`에서는 qualification을 읽거나 writer,
+coordinator, command entity·subscription을 구성하지 않습니다. frozen native Sync/Async 시험 API도
+Home Assistant에 광고하지 않습니다. control activation과 장비 write는 observer 첫 배포와 별도입니다.
 2026-08-27 Async 장기 시험은 슬레이브 출력 변경 시점 직후 안전 실패했고 자동 exact restore가
 완료되지 않아 영수증 0/2 상태로 끝났습니다. 새 토큰의 attended recovery는 성공했으며 Observer가
 시험 전 TimerON 상태를 다시 확인했습니다. 이 결과는 Linkage 레지스터 관계 자체를 부정하지 않지만,

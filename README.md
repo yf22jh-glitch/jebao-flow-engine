@@ -1,11 +1,12 @@
 # Jebao Flow Engine
 
 Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없이 로컬에서 제어하고,
-여러 펌프를 하나의 논리적인 수류 그룹으로 운전하기 위한 프로젝트입니다. 실행 데몬의
-이름은 `jebao-flowd`입니다.
+여러 펌프를 하나의 논리적인 수류 그룹으로 운전하기 위한 프로젝트입니다. 현재 배포
+엔트리포인트는 `jebao-flow-local`입니다. 기존 `jebao-flowd`와 그 aggregate MQTT/custom-component
+경로는 동결된 legacy surface이며 현재 경로와 함께 실행하지 않습니다.
 
 > 현재 상태: 실제 장비의 읽기 전용 검증과 지속 Observer, 오프라인 control 프레임 생성,
-> MQTT 상태 계약과 Home Assistant 커스텀 통합 뼈대까지 구현했습니다. 기본 실행 모드는
+> MQTT 상태 계약과 Home Assistant native MQTT Discovery까지 구현했습니다. 기본 실행 모드는
 > `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 현장 전용 경로에서는 Pro 두 대의
 > 제한된 저출력 Sync와 자동 exact restore가 성공해 qualification 영수증 2/2를 발급했습니다.
 > 다만 Async 슬레이브 출력 변경과 TimerON 슬롯별 출력 전환은 아직 성공으로 인정할 수 없습니다.
@@ -32,15 +33,19 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 [`docs/operator-packet-observatory.md`](docs/operator-packet-observatory.md)를 따릅니다.
 
 ```text
-Home Assistant ── MQTT ──> jebao-flowd ── Jebao LAN protocol ──> pumps
-                            ├─ group/pattern engine
-                            ├─ safety controller
-                            └─ desired/actual state
+Home Assistant built-in MQTT integration
+                │ native discovery / state / command
+                ▼
+        jebao-flow-local ── Jebao LAN protocol ──> pumps
+                ├─ group/pattern engine
+                ├─ safety controller
+                └─ desired/actual state
 ```
 
-Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 연결 유지, 출력 계산,
-명령 속도 제한과 장애 처리를 담당합니다. 장비를 직접 제어하는 주체는 `jebao-flowd`
-하나로 제한합니다.
+Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flow-local`은 연결 유지, 출력 계산,
+명령 속도 제한과 장애 처리를 담당합니다. 장비를 직접 제어하는 주체는 한 배포에서
+`jebao-flow-local` 하나로 제한합니다. 저장소의 `custom_components/jebao_flow`는 old
+`jebao-flowd` aggregate 계약 전용이라 현재 native-discovery 배포에 설치·구성하지 않습니다.
 
 기본 그룹 전략은 세 펌프를 모두 장비 `independent` 상태로 두는
 `software_independent`입니다. 그래서 두 Pro와 바형 보조에 각각 gain/phase/출력을 적용할 수
@@ -48,10 +53,10 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 소프트웨어 `Sync`/`Anti Phase` 패턴과 같은 기능으로 취급하지 않습니다. 현재 native 페어는
 실기 자격 미충족으로 잠겨 있습니다.
 
-`software_independent`용 순수 tick planner와 protocol-neutral 비동기 dispatcher는 구현되어
-있습니다. 다만 아직 MQTT·앱·실제 LAN port에 연결하지 않았으므로 데몬의
-`command_executor_ready`는 계속 `false`이고 Observer/control fail-closed 경계도 유지됩니다.
-불명확한 write 이후 barrier를 해제할 Actual State reconciler도 아직 연결하지 않았습니다.
+`software_independent`용 planner·plan-atomic runtime과 local-control writer는 별도 journal·lease
+아래 연결되어 있습니다. 다만 현재 첫 배포는 `observer`라 writer·coordinator·command entity와
+subscription을 구성하지 않습니다. control activation과 장비 write qualification은 이 observer
+배포와 별도이고, native Sync/Async 시험 경로는 계속 동결합니다.
 
 ## 현재 포함된 것
 
@@ -88,15 +93,16 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 - 그룹 제어와 개별 제어를 함께 지원하는 명시적 `manual_override` 상태
 - 그룹 및 장비 출력 제한
 - 버전이 있는 MQTT 그룹·장비 상태/명령 계약과 중복 요청 방지
-- MQTT만 사용하는 Home Assistant 커스텀 통합 및 전용 Lovelace 카드
-- Docker/Compose 실행 뼈대
+- instance namespace가 결속된 Home Assistant native MQTT Discovery와 observer 전용 진단 표면
+- current-input replacement와 owner-only secret staging을 사용하는 `jebao-flow-local` Docker/Compose 배포
+- 동결된 legacy `jebao-flowd` aggregate MQTT/custom-component source(현재 배포 대상 아님)
 - 단위 테스트와 GitHub Actions CI
 
 실제 장비 6대의 읽기 전용 검증 결과와 제품군별 Capability는
 [검증된 장비 카탈로그](docs/devices/README.md)에 정리했습니다. 제한 실기 절차는
 [실기 제어 안전 체크리스트](docs/pre-hardware-test-checklist.md), VorTech 모드 대응은
 [VorTech 계열 패턴](docs/vortech-inspired-modes.md)을 참고하세요.
-Home Assistant 설치와 카드는
+Home Assistant native discovery와 legacy component 구분은
 [Home Assistant 연동 가이드](docs/home-assistant.md)를 참고하세요.
 기존 스케줄을 write 없이 관찰하는 방법과 한계는
 [Observer 모드](docs/observer-mode.md)를 참고하세요.
@@ -115,11 +121,9 @@ pytest
 ruff check .
 ```
 
-설정만 검증하려면 다음 명령을 사용합니다.
-
-```bash
-jebao-flowd --config config.example.yaml --check-config
-```
+현재 local-control 설정·manifest·Compose 준비는
+[local-control 배포 절차](docs/local-control.md)를 따릅니다. 동결된 `jebao-flowd --check-config`를
+현재 배포 검증으로 사용하지 않습니다.
 
 현재 LAN에서 장비를 읽기 전용으로 검색하려면 다음 명령을 사용합니다. IoT VLAN의
 브로드캐스트 주소를 여러 번 지정할 수도 있습니다.
@@ -139,20 +143,10 @@ jebao-flowctl probe 192.0.2.41 --decode --json
 
 ## Docker
 
-```bash
-cp config.example.yaml config.yaml
-if [ ! -e .env ]; then
-  cp .env.example .env
-fi
-# Edit the private .env values before continuing.
-docker compose up --build
-```
-
-현재 Compose 파일은 기본적으로 예제 설정을 읽고 Observer 데몬을 실행합니다. Linux 홈서버에서
-UDP 브로드캐스트 검색을 사용할 수 있도록 host network를 기본값으로 둡니다. 실제 배포
-전에는 `config.example.yaml`을 `config.yaml`로 복사해 장비와 MQTT 주소를 수정하고,
-`JEBAO_FLOW_CONFIG`로 그 파일을 마운트합니다. 비밀번호는 저장소 파일이 아니라 홈서버의
-환경 변수나 private `.env`·비밀 저장소로 주입합니다.
+현재 Docker 배포는 `jebao-flow-local prepare-compose`가 current private inputs에서 새로 만드는
+standalone Compose를 사용합니다. 저장소 루트의 legacy Compose로 `jebao-flowd`를 함께 올리지
+않습니다. 생성·검증·기동 순서와 secret 경계는
+[local-control 배포 절차](docs/local-control.md#standalone-docker-compose-deployment)를 따릅니다.
 
 `JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID`는 최초 safety-volume provisioning 전에 한 번만 생성해 private
 `.env` 또는 비밀 저장소와 별도 복구 가능한 private backup에 보존합니다. marker 설치 뒤에는 값을

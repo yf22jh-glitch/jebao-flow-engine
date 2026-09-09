@@ -1,24 +1,41 @@
 # Home Assistant 연동
 
-## 제어 경계
+## 현재 배포 경계
 
 ```text
-Lovelace card
-    │ Home Assistant entity service
-    ▼
-custom_components/jebao_flow
-    │ MQTT
-    ▼
-jebao-flowd
-    │ Jebao LAN protocol
-    ▼
-physical pumps
+Home Assistant built-in MQTT integration
+                │ native discovery / state / command
+                ▼
+        jebao-flow-local
+                │ Jebao LAN protocol
+                ▼
+          physical pumps
 ```
 
-커스텀 통합과 카드는 펌프 IP, MAC, product key 또는 Gizwits/Jebao LAN 프로토콜을 알지
-못합니다. 그룹 계산과 개별 장비 제어권은 항상 `jebao-flowd`에 있습니다.
+현재 Home Assistant 경로는 built-in MQTT integration이 `jebao-flow-local`의 native MQTT
+Discovery를 소비하는 방식입니다. 펌프 IP, MAC, product key 또는 Gizwits/Jebao LAN 프로토콜은
+Home Assistant에 전달하지 않습니다. 그룹 계산과 장비 제어권은 `jebao-flow-local` 하나에만
+있습니다.
 
-## 설치
+Home Assistant의 MQTT integration이 먼저 구성돼 있으면 custom component 설치나 Home Assistant
+재시작 없이 daemon이 discovery config를 publish할 때 entity가 만들어집니다. daemon 설치·기동은
+[`docs/local-control.md`](local-control.md)의 standalone Compose 절차를 따릅니다. 첫 observer
+배포에서는 control entity와 command subscription이 0개이고 진단·actual state만 나타납니다.
+
+## 동결된 legacy custom component와 카드
+
+저장소의 `custom_components/jebao_flow`는 old `jebao-flowd`가 publish하는 aggregate
+`system/config`, `groups/+/state`, `devices/+/state`, `requests/+/result` 계약 전용입니다. current
+`topic_prefix/local/...` native-discovery 계약을 소비하지 않으며 config entry를 만들면 별도 group·
+device command publisher가 됩니다. old daemon은 local-control journal·per-device lease에 참여하지
+않으므로 두 경로를 동시에 구성·실행하지 않습니다.
+
+따라서 아래 설치·카드 예시는 **legacy 계약 참고용이며 현재 배포 절차가 아닙니다.** 홈서버에
+파일이 남아 있어도 config entry·entity가 0이면 inert합니다. current 배포를 위해 파일을 sync하거나
+통합을 추가하거나 카드 resource를 등록하지 않습니다. native discovery를 읽는 card-only 개조는
+별도 제품 작업입니다.
+
+### Legacy 설치 참고
 
 저장소의 `custom_components/jebao_flow` 디렉터리를 Home Assistant 설정 디렉터리 아래에
 복사합니다.
@@ -39,7 +56,7 @@ MQTT 통합이 먼저 구성되어 있어야 합니다.
 
 대시보드의 리소스 관리에서 위 URL을 `JavaScript Module`로 한 번 등록합니다.
 
-## 메인 3대 수류 그룹 카드
+### Legacy 메인 3대 수류 그룹 카드
 
 ```yaml
 type: custom:jebao-flow-card
@@ -70,7 +87,7 @@ title: 메인 수류
 pair 멤버의 개별 전원·출력도 잠급니다. 특히 native slave의 `Flow`는 물리적인 개별 출력으로
 보장되지 않으므로 카드와 진단 센서 모두 `장비 보고 Flow`로 표시합니다.
 
-## 리턴·도징 간단 카드
+### Legacy 리턴·도징 간단 카드
 
 ```yaml
 type: custom:jebao-equipment-card
@@ -83,18 +100,17 @@ title: 리턴 및 도징
 도징기는 상태 중심으로 표시합니다. 도징 동작은 실제 모델의 용량·채널·보정 단위를 검증한 뒤에만
 쓰기 기능을 열며, 현재 안전 계약에서는 읽기 전용입니다.
 
-## 쓰기 잠금
+## Current native discovery observer
 
-`runtime.dry_run: true`이거나 장비의 `allow_hardware_writes: false`이면 카드 상단에 하드웨어
-쓰기 잠금 배너가 표시됩니다. 이때 Home Assistant 명령과 서버의 패턴 계산은 확인할 수 있지만
-실제 장비 write는 허용되지 않습니다.
+Legacy card의 `runtime.dry_run` 배너는 current native-discovery 표면의 gate가 아닙니다. current
+경로는 아래처럼 observer에서 control entity 자체를 만들지 않습니다.
 
 `runtime.mode: observer`에서는 `--write-enabled`와 current qualification이 있어도 현재 데몬이
 그룹·장비 제어 엔티티를 새로 projection·publish하거나 그 command topic을 subscribe하지
 않습니다. `ha-schema`도 같은 mode를 존중합니다. public projection의
 `control_surface_diagnostic_reason`은 `runtime_mode_observer`이고, 각 entity의 기존 capability·
-qualification `diagnostic_reason`은 대체하지 않고 그대로 보존합니다. 카드는 목표값 대신 실제 LAN
-관찰값, 마지막 확인 시각, `TimerON`과 Auto 설정 단서를 표시합니다. 장비별 장비 보고
+qualification `diagnostic_reason`은 대체하지 않고 그대로 보존합니다. native diagnostic entity는
+목표값 대신 실제 LAN 관찰값, 마지막 확인 시각, `TimerON`과 Auto 설정 단서를 표시합니다. 장비별 장비 보고
 출력 sensor는 Home Assistant Recorder의 이력 그래프에서 기존 스케줄의 출력 변화를 확인하는 데
 사용할 수 있습니다.
 
@@ -116,9 +132,12 @@ sensor·number·switch·select·button 형상이 함께 남는 것을 줄입니�
 소유권을 `UNKNOWN`으로 둡니다. exact `topic_prefix`는 daemon마다 유일해야 하지만 code-enforced
 namespace lease는 없어서, 이를 공유한 두 daemon은 서로의 current variant를 삭제할 수 있습니다.
 pre-namespace legacy entity도 namespaced replacement와 같은 command topic을 가리켜 계속 조작 가능할
-수 있으므로 exact inventory·제거·복구 절차가 별도로 검토·승인되기 전에는 실제 daemon을 이 schema로
-재기동하지 않습니다. Recorder history·device/entity customization·area·dashboard reference가 새
-identity로 자동 이전된다고 주장하지 않습니다.
+수 있으므로 **관측된 legacy record가 있는 배포**는 exact inventory·제거·복구 절차가 별도로
+검토·승인되기 전에는 daemon을 이 schema로 재기동하지 않습니다. 2026-09-10 첫 배포 감사에서는
+bounded broker record와 HA registry·recorder·config entry가 모두 0이고 과거 배포 이력도 없어 실제
+migration 대상이 없었습니다. 이는 broker 부재 증명이 아니며, 이 한 observer activation에서만
+legacy migration block이 적용되지 않는 근거입니다. Recorder history·device/entity customization·
+area·dashboard reference가 새 identity로 자동 이전된다고 주장하지 않습니다.
 
 ## 기존 discovery 관측 inventory
 
@@ -169,12 +188,12 @@ source를 설치하거나 테스트하는 것만으로 broker에 연결하지 �
 해석에 성공한 시간 구간 수이며, `enabled`, `slot_capacity`, `entries`, `invalid_slots` 속성을
 제공합니다.
 초마다 바뀌는 `device_local_time`은 Recorder 이력 증가를 막기 위해 의도적으로 노출하지
-않습니다. 메인 수류 카드와 리턴·도징 카드 모두 제어·관찰 모드에서 시간표를 접이식으로
-표시하며, 해석하지 못한 슬롯은 경고만 보여 줍니다. 이 시간표는 현재 읽기 전용입니다.
+않습니다. native discovery entity는 해석하지 못한 슬롯을 진단으로 남기며 이 시간표는 현재
+읽기 전용입니다. 위 legacy card의 접이식 표시는 current 배포 기능으로 주장하지 않습니다.
 
 `topic_prefix`는 여러 데몬 인스턴스의 state·command topic을 구분하고, 그 exact 문자열의
 full SHA-256 namespace가 Home Assistant discovery object id·`unique_id`·device identifier도 구분합니다.
 따라서 같은 `discovery_prefix`와 논리 ID를 쓰더라도 `topic_prefix`가 다른 새 projection은
 discovery identity를 공유하지 않습니다. 단, 이 보장은 pre-namespace retained config를 이전·삭제하지
-않습니다. 같은 `instance`가 둘 이상인데 `topic_prefix`를 생략하면 카드는 임의 선택하지 않고
-명시적인 선택을 요청합니다.
+않습니다. legacy card의 `instance`·`topic_prefix` 선택 규칙도 current native-discovery entity의
+선택 규칙으로 사용하지 않습니다.

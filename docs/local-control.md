@@ -25,6 +25,15 @@ the legacy native-linkage harness. It includes:
 - fresh install, systemd staging, and standalone Docker Compose commands that replace, rather than
   merge, prior generated artifacts.
 
+The current Home Assistant boundary is the built-in MQTT integration consuming native discovery
+published by `jebao-flow-local`. It does not install or configure
+`custom_components/jebao_flow`. That component consumes the frozen `jebao-flowd` aggregate
+`system/config`, `groups`, `devices`, and `requests` contract and is not an adapter for the
+`topic_prefix/local/...` contract below. Running both paths would create two physical-device
+authorities without a shared journal or per-device lease, so the legacy daemon, component config
+entry, and custom card remain inactive during current deployment. A card-only native-discovery
+adaptation is a separate parked product slice.
+
 This is a local-first controller plus a passive observatory, not an inline transparent relay. The
 observatory can retain app/device traffic from a mirror without becoming a writer, while Home
 Assistant commands terminate at the local controller. The current implementation does not arbitrate
