@@ -1196,6 +1196,156 @@ B1 source·offline test landing은 broker·Home Assistant·실제 device를 연�
 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`은 유지합니다. 같은 truth·ownership 질문을 반복해 정보가
 늘지 않으면 §7 예산에 따라 park합니다.
 
+### 2026-09-09 qualified group command transport B2 범위 확장
+
+production lifecycle을 연결한 뒤 다음 단계를 production daemon·MQTT·Home Assistant 연결로
+제시한 직후 repository maintainer가 “이어서 진행하자”로 답했습니다. 그 답은 제시된 다음
+단계 전체에 대한 것이고, 이를 B1·B2로 나눈 것은 그 뒤 적대적 검토에서 채택해 B1
+하위절에 기록한 내부 결정입니다. B1을 먼저 닫고, 그 하위절이 command surface 전에
+요구한 별도 정책과 적대적 검토를 이제 충족합니다. 이번 B2는 같은 특정 답변이 승인한
+단계의 남은 group ON/OFF command transport만 **source·test·offline 검증 범위로 좁게
+결속**하며 그 발언보다 넓지 않습니다. 새 maintainer 승인을 추가로 주장하거나 이후 product
+slice의 상시 승인으로 일반화하지 않고, 실제 broker·Home Assistant·장비·앱·원격 환경
+실행 승인은 아닙니다.
+
+이번 작업이 닫을 질문은 모든 member가 current physical identity에 대해 `power`·`manual_flow`
+2/2 qualification을 가진 group command를 shared-lock deadlock 없이 유일한 plan-atomic write 경로로
+route하고, 동시 fresh cycle이 끼어들어도 command 결과를 plan identity로 과장 없이 판정할 수
+있는가입니다. 근거는 firmware 가설이 아니라 qualification fold, manager generation,
+runtime submit·completion, MQTT task lifetime의 static trace와 fault injection입니다.
+
+이 확장은 다음 파일로 한정합니다.
+
+- 신규 pure module `src/jebao_flow/local_control/group_command.py`
+- `src/jebao_flow/local_control/group_service.py`, `group_supervisor.py`, `ha.py`, `mqtt.py`
+- `src/jebao_flow/local_control_cli.py`
+- `tests/unit/test_local_control_*`
+- `docs/local-control.md`
+
+이 하위절은 B1의 “group command topic·switch·production caller 0개”라는 현재 구현 진술만 B2
+범위에서 명시적으로 대체합니다. B1의 fresh device truth, command-free actual-output sensor, direct
+manual ownership, watermark, write-disarmed startup과 sticky close 의미는 유지합니다.
+`src/jebao_flow/groups/*`, `src/jebao_flow/local_control/state.py`, `group.py`, `coordinator.py`,
+`lease.py`, `device_writer.py`, `journal.py`, `src/jebao_flow/mqtt/*`, `src/jebao_flow/app.py`,
+`custom_components/*`, `src/jebao_flow/protocol/*`, `src/jebao_flow/devices/*`, 기존 여섯 frozen
+source와 그 직접 테스트, `docs/runs/*`는 수정하지 않습니다. old MQTT/group service나
+`devices.*` observer를 import하거나 우회 write 경로로 재사용하지 않습니다.
+
+이번 source 변경은 기존 read-only device-state, B1 group truth·ownership, supervisor/runtime 의미에
+대한 가산적 변경으로 한정합니다. `tests/unit/test_local_control_group_supervisor.py`,
+`test_local_control_group_service.py`, `test_local_control_state.py`, `test_local_control_ha.py`,
+`test_local_control_mqtt.py`, `test_local_control_cli.py`의 기존 단정은 완화하거나 삭제하지 않으며,
+필요하면 별도 repository maintainer 승인을 먼저 받습니다. 특히 exact manager-produced plan
+provenance, 명시 OFF의 mandatory-safety dedupe 우회, disposition 다섯 종, direct-ownership
+watermark, unresolved OFF sticky close를 변경하지 않습니다.
+
+`group_command.py`는 group control qualification의 단일 pure fold입니다. coordinator·manager·runtime·
+journal·MQTT·Home Assistant를 import하지 않고 import-boundary 테스트의 전이 폐쇄로 이를
+고정합니다. 새 qualification 술어나 receipt 의미를 만들지 않고, 기존
+`LocalFunctionDescriptor.control_exposed_for(physical_identity_key)`를 각 group member의 `power`·
+`manual_flow`에 대해 fold합니다. 결과는 `qualified: bool`과 정렬된 bounded
+`(logical_member, function)` missing tuple을 함께 제공하고, 두 소비자인 projection과 lifecycle이
+같은 결과로 stable English `physical_device_not_qualified` 진단을 만듭니다. physical identity,
+receipt 내용, private path는 public schema·status·result에 싣지 않습니다.
+
+기존 actual-output diagnostic sensor는 그대로 두고 별도 group switch를 모든 member가 2/2
+qualified인 group에만 생성합니다. 1/2 qualification에 OFF-only button을 만들지 않으며,
+빠진 logical member·function은 actual-output attributes와 lifecycle 진단에서 구분합니다. projection은
+qualification만으로 switch 존재를 결정하고, construction 성공 여부는 switch availability와
+command 수용에서 별도 판정합니다. qualified이지만 unconstructed인 group은 switch를
+discovery할 수 있어도 availability `offline`으로 두고, command는 해당 group의 기존 stable
+construction `diagnostic_reason`으로 coordinator·journal·frame 전에 거부합니다. projection과
+lifecycle inventory 불일치는 raise로 device-state task를 종료하지 않고, B1과 같이 group
+availability `offline`과 bounded inventory-mismatch 진단으로 격리합니다.
+
+switch state는 desired runtime이나 command result를 반영하지 않고 successful complete fresh cycle의
+actual output만 소비합니다. `on`·`off`일 때만 switch availability를 `online`으로 두고,
+`mixed`·`unknown`을 어느 한쪽으로 접지 않으며 `offline`으로 둡니다. command 직후에 낙관적
+switch state를 publish하지 않습니다. group switch command topic과 기존 device/schedule command
+topic은 생성 시점에 disjoint함을 확인해 각 topic을 정확히 router 하나만 소유하게 합니다.
+충돌을 발견하면 잘못된 target으로 route하지 않고 construction을 거부합니다.
+
+group command는 별도 `LocalControlGroupCommandRouter`에서 bounded ASCII `ON`·`OFF`를 parse하고,
+shared process `operation_lock`을 이미 잡는 `LocalControlMqttRouter.handle()`을 경유하지 않습니다.
+group router와 그 command 대기는 shared `operation_lock`을 잡지 않고 runtime worker가 기존
+`_OperationLockedGroupPlanPort` 경계에서 그 lock을 얻게 합니다. retained·duplicate-marked command는
+기존처럼 거부하고 QoS 0을 유지합니다. invalid payload, 미존재·unconstructed·
+unqualified group, topic inventory mismatch는 manager ownership·coordinator·durable journal·frame을 만들지
+않고 stable bounded diagnostic으로 종결합니다.
+
+유효한 switch command는 supervisor lifecycle lock 안의 await 없는 구간에서 현 runtime을 복사해
+`ON = state RUNNING, enabled=True`, `OFF = state STOPPED, enabled=False`로 바꾸되 나머지 pattern·power·
+limit·period 선호는 보존합니다. 순서는 반드시 `GroupManager.update_runtime()` 성공 →
+`resume_all()` → `plan_tick()` → arm → exact 반환 객체 `submit()`입니다. `update_runtime()`
+검증이 실패한 command가 manual override를 먼저 지우지 않게 하고, ownership-boundary
+전이에서는 뒤 `resume_all()`이 no-op이며, 같은 state command에서는 남은 override를 해제합니다.
+OFF plan은 기존 mandatory safety token·dedupe 우회·shutdown 보존을 그대로 사용하고 별도 지름길을
+만들지 않습니다.
+
+submit 직전·직후 runtime snapshot과 `deduplicated_count`는 lifecycle lock 안의 **await 없는 하나의
+구간**에서 잡습니다. `deduplicated` action은 그 counter delta로만 판정하여, 이미 applied
+identity가 같아도 mandatory OFF를 실제 재확인하는 explicit `OFF`를 dedupe로 오판하지 않습니다.
+`no_dispatch`는 counter가 아닌 `cycle.plan.dispatch_decisions` 비어 있음으로 직접 판정합니다.
+submit 후 await를 건너 `succeeded_count`·`deduplicated_count`·`no_dispatch_count` 등의 delta를
+해당 command의 verdict 근거로 사용하지 않습니다. fresh cycle이 그 간격에 별도 plan을 submit할
+수 있기 때문입니다.
+
+command result는 행위와 현재 identity 상태를 분리합니다. `ownership_accepted`,
+`submitted_plan_identity_sha256`, `runtime_submit_called`, `deduplicated`, `dispatch_decision_count`,
+`applied_identity_matches`, `latest_identity_matches`, matching failure의 `delivery_certainty`,
+`completion_pending`을 서로 독립된 bounded fact로 내보냅니다. identity 동등성만으로 특정
+command의 physical operation 수행 여부를 새 boolean PASS로 추측하지 않습니다. 배타적 headline은
+즉시 submit disposition과 완료 identity를 모두 소비하며, `deferred_safety_off` →
+`suppressed_after_failure` → submitted identity와 결속된 `not_sent`·`uncertain` failure →
+`awaiting_fresh_state` → `deduplicated` → `verified` → `superseded` → `pending` 우선순위로
+판정합니다. `verified`는 final applied identity가 submitted identity와 같고 final failure가 없을 때만,
+`superseded`는 latest identity가 submitted identity와 다를 때만 가능합니다. headline이
+`deduplicated`여도 `applied_identity_matches`로 current state를 별도 표시하고,
+`verified`와 latest mismatch가 겹칠 때도 `latest_identity_matches=False`를 숨기지 않습니다.
+consumer는 `verified`만으로 “이 command가 썼다”를 추가로 발명하지 않습니다.
+`deduplicated=False` ∧ `verified`는 submitted desired state가 현재 적용되어 있음을 뜻합니다. wait
+사이 다른 identity로 supersede된 뒤 동일 identity가 다시 적용될 수 있으므로, 우리 job이
+supersede되지 않았다는 별도 근거 없이 이 command 자신이 그 write를 냈다고 주장하지
+않습니다. `deduplicated=True`는 해당 command가 no-op으로 합쳐졌다는 반대 방향의 권위 있는
+신호이고, 그 외 조합의 command-specific 물리 수행 여부도 추측하지 않습니다.
+
+runtime completion은 고정·유계 timeout으로 **보고만** 기다립니다. timeout은 PID·wall clock·
+직전 관측같은 volatile 값에서 유도하지 않고, `pending`이지 `NOT_SENT`가 아닙니다. wait는
+supervisor lifecycle lock과 shared process `operation_lock` 모두를 잡지 않으며, timeout·consumer
+cancellation은 wait observer만 종결하고 runtime worker를 cancel하지 않습니다. 나중 fresh truth와
+identity snapshot이 최종 결과를 드러내고, timeout 자체로 frame 미전송을 판정하지 않습니다.
+
+MQTT consumer 또는 command waiter task를 추가하면 adapter 내부의 취소·
+`gather(..., return_exceptions=True)` 대상으로만 둡니다. group service `aclose()`는 계속 adapter
+`run()`의 외부 `finally`에서 모든 supervisor를 닫고, unresolved mandatory OFF를 다른 오류보다
+우선해 adapter 밖으로 재전파합니다. 새 task와 close를 같은 `return_exceptions=True` 집계에
+넣어 sticky failure를 삼키지 않습니다.
+
+회귀는 최소한 (1) 2/2·2/1·1/2·0/2 qualification에서 switch 생성·미생성과 exact bounded
+missing member/function 진단, pure import closure, (2) actual-output sensor 보존, switch의
+fresh `on`·`off`·`mixed`·`unknown` state·availability와 optimistic publish 0회, (3) group·device·
+schedule command topic의 단일 소유와 group route의 `LocalControlMqttRouter.handle()`·shared lock 비경유,
+(4) retained·duplicate·invalid payload와 qualified-but-unconstructed·inventory mismatch의 manager·journal·
+frame 0회 및 stable diagnostic, (5) `update_runtime()` 거부가 manual override를 보존하고 same-state
+command는 성공 뒤 해제하며 exact `plan_tick()` 객체만 submit하고, `OFF`는 current runtime
+값과 무관하게 `STOPPED`·disabled 검증을 통과함, (6) 반복 explicit OFF가 기존
+applied identity와 같아도 `deduplicated=False`이고 미해결 token이 없으면
+`GroupPlanPort.write_plan()` 1회에 도달함, (7) immediate counter delta의 dedupe와
+identity-keyed `verified`·`superseded`·`not_sent`·`uncertain`, `awaiting_fresh_state`,
+`deferred_safety_off`, `suppressed_after_failure`, `pending` 우선순위를 각각 fault injection하고
+await 뒤 unrelated counter 변화가 verdict를 바꾸지 않음, (8) fresh cycle이 command wait 사이 더 새
+plan을 submit해도 identity fact와 headline이 오판하지 않음, (9) timeout·consumer cancellation이 worker를
+cancel하지 않고 timeout은 `pending`으로만 보고됨, (10) unconstructed switch availability offline·
+construction reason 재사용과 projection/lifecycle mismatch 격리, (11) 새 command task를 닫아도 모든
+supervisor close·unresolved OFF sticky 재전파가 유지됨, (12) 기존 B1·read-only startup·publish·
+redaction 단정이 그대로 통과함을 고정합니다.
+
+B2 source·offline test landing은 production command surface를 코드에 연결하지만 실제 broker·
+Home Assistant·장비·앱·원격 환경을 실행하거나 장비 write를 승인하지 않습니다. 실제
+활성화에는 `docs/hardware-readiness.md`의 fresh preflight·exact restore·on-site 승인·현장 감시·
+중단 수단이 별도로 필요하고, 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`은 유지합니다.
+같은 command verdict·transport 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
