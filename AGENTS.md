@@ -1121,25 +1121,52 @@ false가 됩니다. old ordinary plan은 shared lock을 다시 얻은 뒤에도 
 direct value를 덮지 않습니다. override는 운영자가 direct ownership을 선택했다는 뜻이므로 이후 coordinator
 preflight가 frame 전에 거부돼도 유지합니다.
 
-direct/group ownership 충돌은 다음 네 경우를 구분합니다. unarmed group과 armed ordinary group은 manual
-override를 기록한 뒤 direct write를 허용합니다. armed group이 `STOPPED`이거나 config에서 disabled이면 direct
-write를 허용하되 command result와 group diagnostic에 stable English reason
-`group_forced_off_will_revert_next_cycle`을 싣습니다. 다음 successful fresh cycle의 전체 canonical OFF가 그
-direct value를 되돌릴 수 있다는 뜻이며, 이를 조용히 숨기거나 유지 보장으로 표현하지 않습니다. armed
-`EMERGENCY_STOP`에서는 stable reason `group_emergency_stop_blocks_direct_control`로 coordinator와 durable
-journal 이전에 거부하고 physical frame을 0회로 유지합니다. 이 branch는 manual override도 기록하지
+direct/group ownership 충돌은 다음 네 경우를 구분하며 `EMERGENCY_STOP` 규율이 항상 우선합니다. unarmed
+group과 armed ordinary group은 manual override를 기록한 뒤 direct write를 허용합니다. armed group 중
+state가 `EMERGENCY_STOP`이 아닌 경우에는 state가 `STOPPED`이거나 config에서 disabled여도 모든 direct
+write를 허용하되, coordinator가 `VERIFIED`를 반환한 direct `power=true`의 command result와 group
+diagnostic에만 stable English reason `group_forced_off_will_revert_next_cycle`을 싣습니다. 다음 successful
+fresh cycle의 전체 canonical OFF가 power를 강제로 OFF로 만들어 물리 출력을 바꿀 수 있다는 뜻입니다.
+canonical OFF는 direct `manual_flow`나 schedule scalar 자체를 rollback하지 않으므로 그 명령에는 이 reason을
+붙이지 않고, 그 값의 향후 장비 적용은 추측하지 않은 채 `UNKNOWN`으로 둡니다. preflight 실패나 non-verified
+direct `power=true`도 reason·watermark를 만들지 않습니다. 그때의 물리 상태는 다음 fresh cycle의 actual
+output으로 드러내고, durable uncertain record가 생긴 경우에는 기존 operator-resolution 경로로만
+해결합니다. group plan이 그 record를 recovery나 PASS로 대체하지 않습니다. 이를 조용히 숨기거나 유지
+보장으로 표현하지 않습니다.
+armed `EMERGENCY_STOP`에서는 stable reason `group_emergency_stop_blocks_direct_control`로 coordinator와
+durable journal 이전에 거부하고 physical frame을 0회로 유지합니다. 이 branch는 manual override도 기록하지
 않습니다. 거부된 command가 control epoch을 올려 다음 fresh cycle의 mandatory OFF 재write를 만드는 경로를
 차단하기 위해서입니다. 국소 direct write가 emergency stop을 무력화할 수 없다는 기존 안전 의미를
 보존하는 것이며, `STOPPED`까지 같은 거부로 넓히지 않습니다. 두 stable reason은 예외 class 이름에서
 유도하지 않고 command result·status에 위 문자열 그대로 publish합니다.
+
+STOPPED/disabled group에서 verified `power=true` direct write가 반복돼도 첫 선언과 같은 OFF 재확인 의미를
+유지합니다. router는 coordinator가 `VERIFIED`를 반환한 뒤에도 같은 process `operation_lock`을 쥔 상태에서
+그 group runtime의 현재 `safety_off_succeeded_count`를 supervisor-local watermark로 기록합니다. unchanged
+mandatory-OFF 억제는 watermark가 없거나 이후 mandatory OFF 성공으로 counter가 watermark를 초과했을 때만
+허용합니다. lock을 기다리던 기존 mandatory OFF가 direct write 뒤 성공했다면 그 기존 성공이 watermark를
+초과하므로 새 OFF를 중복 전송하지 않고, 그런 성공이 없었다면 다음 complete fresh cycle이 OFF plan을
+미해결 safety token이 없는 범위에서 정확히 한 번 제출합니다. 이 watermark를 만들기 위해
+`runtime.invalidate_applied()`를 호출하거나 ownership을
+toggle하거나 새 group plan을 즉시 submit하지 않습니다. non-verified direct result, direct preflight 실패,
+`power=false`, `manual_flow`, schedule operation은 watermark를 만들지 않습니다. mandatory OFF의 실패·취소·
+불확정·supersede·in-flight invalidation은 기존 runtime counter를 증가시키지 않으므로 reconciled로 가장하지
+않고, outstanding safety token이 있으면 기존 runtime의 deferred·operator-resolution 의미를 그대로 따릅니다.
 
 manual override는 이미 수락된 mandatory canonical OFF의 safety token을 취소하지 않습니다. 따라서 group
 OFF가 진행 중일 때 direct write는 그 OFF에 의해 덮일 수 있으며, 이번 B1은 그 반대를 보장한다고
 서술하지 않습니다. 이번 B1 production에는 group을 arm하는 caller가 없어 그 경합을 새로 만들지 않습니다.
 armed ordinary group의 fault injection에서는 override 자체가 submit 0회임을 고정하고, 다음 successful fresh
 cycle의 새 plan identity가 dispatch 가능한 남은 member를 포함한 plan-wide write를 정확히 1회 만들며 그 다음
-unchanged cycle은 추가 `GroupPlanPort.write_plan()` 0회로 dedupe됨을 기록합니다. 이는 per-member applied
-tracking을 새로 발명하지 않은 plan-atomic ownership 전이의 유계 비용입니다.
+unchanged cycle은 추가 `GroupPlanPort.write_plan()` 0회로 dedupe됨을 기록합니다. STOPPED/disabled group의
+verified direct `power=true`는 같은 member에 대한 두 번째 이후 명령도 각각 다음 complete fresh cycle에서
+OFF 재확인을 정확히 1회 만들고, 그 성공 뒤 unchanged cycle은 추가 호출 0회입니다. function이나 coordinator
+결과와 무관하게 member의 첫 manual ownership 선언은 control epoch을 한 번 전진시키므로, STOPPED/disabled
+group에서도 다음 cycle에 plan-wide canonical OFF 재확인 호출을 정확히 1회 만들고 다음 unchanged cycle은
+추가 호출 0회입니다. 같은 member의 재선언은 identity를 바꾸지 않아 이 ownership 전이 비용을 다시 만들지
+않습니다. 이는 per-member applied tracking을 새로 발명하지 않은 plan-atomic ownership 전이와 verified
+direct power reconciliation의 서로 구분되고 유계인 원인이며, 두 원인이 같은 cycle에 있으면 하나의
+plan-wide 호출로 합쳐집니다.
 
 최소 회귀는 (1) unqualified·diagnostic-only entity에서도 decoded bool power truth가 I/O 추가 없이 남음,
 (2) `off`·`on`·`mixed`·`unknown`과 member disabled·manual override 조합이 actual/ownership을 섞지 않음,
@@ -1148,12 +1175,17 @@ override도 frame도 0회, valid direct scalar·schedule payload는 override가 
 (5) manual generation 변화가 대기 중 ordinary plan을 pre-send에서 폐기하며 override 시점 submit은 0회,
 (6) 이미 수락된 mandatory OFF는 override로 취소되지 않음, (7) armed ordinary group이 override 뒤 첫 fresh
 cycle에서 idle까지 기다린 뒤 `GroupPlanPort.write_plan()` 호출을 정확히 1회 만들고 다음 unchanged cycle은
-추가 호출 0회, (8) armed
-`STOPPED`에서는 direct write 성공과 `group_forced_off_will_revert_next_cycle`을 함께 보고하고 다음 cycle의
-canonical OFF가 idle까지 `GroupPlanPort.write_plan()` 정확히 1회 호출된 뒤 반복되지 않음, (9) armed
-`EMERGENCY_STOP`에서는
-`group_emergency_stop_blocks_direct_control`로 journal·frame 0회에 거부함, (10) 기존 read-only
-startup·publish·shutdown과 public redaction 단정이 그대로 통과함을 고정합니다.
+추가 호출 0회, (8) armed `STOPPED`에서는 미해결 safety token이 없는 fixture의 첫 번째와 반복 verified
+direct `power=true`가 각각 warning과 다음 cycle의 canonical OFF 호출 정확히 1회를 만들고 성공 뒤 unchanged
+cycle은 추가 호출 0회, (9) shared lock을
+기다리던 기존 mandatory OFF가 direct write 뒤 성공하면 그 성공 counter가 watermark를 넘어 다음 cycle의
+중복 OFF 호출은 0회, (10) direct preflight 실패·non-verified result·`power=false`·`manual_flow`·schedule은
+watermark나 revert warning을 만들지 않되 해당 member의 첫 ownership 선언이면 다음 cycle의 plan-wide OFF
+호출 정확히 1회와 그 다음 unchanged cycle 0회, 같은 member의 재선언이면 추가 호출 0회, (11) watermark를
+세운 mandatory OFF 재확인의 실패·불확정은 counter를 전진시키지 않고 이후 submit이 deferred되어
+`safety_off_required`를 유지하며 실패 이후 추가 port 호출은 0회,
+(12) armed `EMERGENCY_STOP`에서는 `group_emergency_stop_blocks_direct_control`로 journal·frame 0회에 거부함,
+(13) 기존 read-only startup·publish·shutdown과 public redaction 단정이 그대로 통과함을 고정합니다.
 
 B1 source·offline test landing은 broker·Home Assistant·실제 device를 연결하거나 group write를 승인하지
 않습니다. B2에서 command surface를 열기 전에는 identity-based command verdict, 유계 wait, qualification
