@@ -120,6 +120,51 @@ pre-namespace legacy entity도 namespaced replacement와 같은 command topic을
 재기동하지 않습니다. Recorder history·device/entity customization·area·dashboard reference가 새
 identity로 자동 이전된다고 주장하지 않습니다.
 
+## 기존 discovery 관측 inventory
+
+`python -m jebao_flow.legacy_discovery_inventory_cli`는 pre-namespace discovery를 바로 지우지 않고
+먼저 증거를 남기는 source-only 도구입니다. `capture`는 매 실행 random client id의 MQTT 3.1.1 clean
+session을 만들고 will이나 publish 없이 `{discovery_prefix}/+/+/config` 하나만 구독합니다. 정해 둔
+monotonic 관측 창에 실제로 전달된 메시지 중 retained·non-empty·exact 3-level
+`jebao_flow_local_` config만 private artifact에 기록합니다. 프로토콜에는 retained replay 종료 표식이
+없으므로 이 결과는 관측 창에 전달된 항목만 뜻하며, 보이지 않은 항목의 broker 부재를 뜻하지 않습니다.
+
+artifact root는 미리 만든 owner-only `0700` 디렉터리여야 합니다. generation은 `0700`, 파일은
+`0600`이고 exact topic·payload 원문은 private artifact 밖으로 출력하지 않습니다. `inspect`의 public
+출력에는 opaque id·개수·UTC 구간·유계 분류·SHA-256 결속만 나옵니다. 같은 topic에서 서로 다른
+retained payload가 관측되면 둘 다 보존하되 ambiguous·selection 불가로 표시합니다.
+
+```text
+python -m jebao_flow.legacy_discovery_inventory_cli capture \
+  --config <private-config> --output-root <private-owner-only-root> \
+  --window-seconds <bounded-seconds>
+
+python -m jebao_flow.legacy_discovery_inventory_cli inspect \
+  --config <private-config> --output-root <private-owner-only-root> \
+  --inventory-id <opaque-inventory-id>
+```
+
+selection은 대화형 전체 선택이 아니라 maintainer가 작성한 `0600` exact digest 목록을 입력으로 받는
+별도 offline command입니다. request의 inventory·current config·discovery/topic prefix 결속과 각
+record의 opaque id·topic SHA-256·payload SHA-256이 모두 맞아야 owner-only selection artifact가
+생깁니다. 이 artifact의 `mutation_authorized`는 `false`이며 삭제 승인이나 현재 retained 존재를
+주장하지 않습니다. request JSON의 `schema_version`은 `1`, `request_kind`는
+`maintainer_exact_observed_record_selection`이고, `bindings` 네 값과 `records`의 세 digest 값은
+`inspect` 출력에서 옮깁니다. raw record를 private artifact에서 검토한 뒤 필요한 항목만 적으며
+전체 선택 shortcut은 없습니다.
+
+```text
+python -m jebao_flow.legacy_discovery_inventory_cli select \
+  --config <private-config> --output-root <private-owner-only-root> \
+  --inventory-id <opaque-inventory-id> --request <private-selection-request>
+```
+
+source를 설치하거나 테스트하는 것만으로 broker에 연결하지 않습니다. 첫 `capture` 실행은 별도의
+명시적 broker 접촉 결정이지만 Home Assistant·daemon·펌프 write가 전혀 없고 현장 물리 차단 조건을
+소프트웨어 gate로 추가하지 않습니다. apply·restore는 아직 구현하지 않았으며 실제 artifact를 검토한
+뒤 별도 단계로 설계합니다. bounded 재관측에서 보이지 않았다는 사실을 삭제 성공이나 broker 부재로
+판정하지 않습니다.
+
 장비가 로컬 시간표를 제공하면 별도 `장비 시간표` sensor가 만들어집니다. sensor 상태는
 해석에 성공한 시간 구간 수이며, `enabled`, `slot_capacity`, `entries`, `invalid_slots` 속성을
 제공합니다.

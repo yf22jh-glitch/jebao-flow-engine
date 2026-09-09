@@ -346,6 +346,77 @@ procedure is approved. Recorder history, entity/device-registry customization, a
 dashboard references are not assumed to transfer automatically, and pre-namespace config is never
 deleted automatically.
 
+### Observed pre-namespace discovery inventory
+
+The source-only `jebao_flow.legacy_discovery_inventory_cli` provides a write-free evidence step for
+that legacy boundary. `capture` creates a fresh MQTT 3.1.1 clean session with a random client id, no
+will, and no publish call. It subscribes only to
+`{discovery_prefix}/+/+/config` for a predeclared monotonic window. Before durable storage it drops
+live messages, empty deletion payloads, deeper discovery shapes, and object ids outside the
+`jebao_flow_local_` family. A retained replay has no protocol-level end marker, so the artifact says
+only that its records were delivered during that window; a missing record is not evidence about
+broker state.
+
+The artifact root must already be an owner-only `0700` directory. Each opaque generation is `0700`,
+its canonical files are `0600`, and usable ids are returned only after file and parent-directory
+fsync. Exact topic UTF-8 and payload bytes remain private. `inspect` emits only opaque ids, counts,
+UTC bounds, bounded classifications, and SHA-256 bindings. Conflicting retained payloads for one
+topic are both preserved and marked unselectable rather than guessed.
+
+```text
+python -m jebao_flow.legacy_discovery_inventory_cli capture \
+  --config <private-config> --output-root <private-owner-only-root> \
+  --window-seconds <bounded-seconds>
+
+python -m jebao_flow.legacy_discovery_inventory_cli inspect \
+  --config <private-config> --output-root <private-owner-only-root> \
+  --inventory-id <opaque-inventory-id>
+```
+
+Selection is a separate offline command, not an interactive or select-everything action. A
+maintainer-provided `0600` JSON request names the inventory id and digest, repeats its four binding
+digests, and lists each chosen record's opaque id plus exact topic and payload SHA-256 values. Every
+entry must be an eligible record in that inventory. The resulting artifact explicitly records
+`mutation_authorized: false`; it is a reviewable ownership decision, not proof of current retained
+presence or permission to delete.
+
+```json
+{
+  "schema_version": 1,
+  "request_kind": "maintainer_exact_observed_record_selection",
+  "inventory_artifact_id": "legacy-inventory-00000000000000000000000000000000",
+  "inventory_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "bindings": {
+    "config_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "discovery_prefix_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "subscription_filter_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "topic_prefix_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "records": [
+    {
+      "record_id": "legacy-record-6666666666666666666666666666666666666666666666666666666666666666",
+      "topic_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "payload_sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+    }
+  ]
+}
+```
+
+The values come from the redacted `inspect` output after reviewing the corresponding private raw
+record; the example values above are placeholders and do not authorize any record.
+
+```text
+python -m jebao_flow.legacy_discovery_inventory_cli select \
+  --config <private-config> --output-root <private-owner-only-root> \
+  --inventory-id <opaque-inventory-id> --request <private-selection-request>
+```
+
+This source landing does not connect to a broker by itself. An intentional first `capture`
+invocation is a separate broker-contact decision, but it performs no Home Assistant, daemon, or
+pump write and does not add an on-site hardware gate. Apply and restore are not implemented. Their
+rules will be designed only after a real observed artifact is reviewed; non-observation can never
+be treated as deletion success or as broker absence.
+
 ## Software-independent group actuation
 
 The actuator accepts one already-built `GroupTickPlan` and can be called directly for a one-shot
