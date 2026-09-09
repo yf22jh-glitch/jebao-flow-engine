@@ -49,6 +49,26 @@ class ResolvedEndpoint:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class CurrentEndpointObservation:
+    """One target's outcome from a shared current discovery observation."""
+
+    target: LocalDeviceBinding
+    endpoint: ResolvedEndpoint | None = field(default=None, repr=False)
+    diagnostic_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.endpoint is None:
+            if self.diagnostic_reason not in {
+                "current_endpoint_absent",
+                "current_endpoint_ambiguous",
+            }:
+                raise ValueError("unresolved endpoint observation requires a bounded reason")
+            return
+        if self.diagnostic_reason is not None:
+            raise ValueError("resolved endpoint observation cannot carry a diagnostic reason")
+
+
 class CurrentEndpointResolver:
     """Resolve bindings from one new discovery result per call."""
 
@@ -71,13 +91,19 @@ class CurrentEndpointResolver:
         self,
         targets: tuple[LocalDeviceBinding, ...],
     ) -> tuple[ResolvedEndpoint, ...]:
-        if not targets:
-            raise ValueError("endpoint resolution requires at least one target")
-        physical = [target.physical_identity_key for target in targets]
-        if len(physical) != len(set(physical)):
-            raise ValueError("endpoint resolution targets must be physically distinct")
+        _validate_targets(targets)
         devices = await self._discovery.discover(timeout_seconds=self._timeout_seconds)
         return tuple(resolve_current_observation(target, devices) for target in targets)
+
+    async def observe_many(
+        self,
+        targets: tuple[LocalDeviceBinding, ...],
+    ) -> tuple[CurrentEndpointObservation, ...]:
+        """Classify each target independently from exactly one current discovery."""
+
+        _validate_targets(targets)
+        devices = await self._discovery.discover(timeout_seconds=self._timeout_seconds)
+        return tuple(classify_current_observation(target, devices) for target in targets)
 
 
 def resolve_current_observation(
@@ -85,6 +111,20 @@ def resolve_current_observation(
     devices: list[DiscoveredDevice],
 ) -> ResolvedEndpoint:
     """Match one stable binding against only the supplied current observation."""
+
+    observation = classify_current_observation(target, devices)
+    if observation.endpoint is None:
+        raise CurrentEndpointResolutionError(
+            "current discovery must contain exactly one matching physical controller"
+        )
+    return observation.endpoint
+
+
+def classify_current_observation(
+    target: LocalDeviceBinding,
+    devices: list[DiscoveredDevice],
+) -> CurrentEndpointObservation:
+    """Classify one stable binding without collapsing absence and ambiguity."""
 
     matches: list[DiscoveredDevice] = []
     for device in devices:
@@ -98,17 +138,34 @@ def resolve_current_observation(
         )
         if physical_identity_key(binding) == target.physical_identity_key:
             matches.append(device)
-    if len(matches) != 1:
-        raise CurrentEndpointResolutionError(
-            "current discovery must contain exactly one matching physical controller"
+    if not matches:
+        return CurrentEndpointObservation(
+            target=target,
+            diagnostic_reason="current_endpoint_absent",
+        )
+    if len(matches) > 1:
+        return CurrentEndpointObservation(
+            target=target,
+            diagnostic_reason="current_endpoint_ambiguous",
         )
     matched = matches[0]
-    return ResolvedEndpoint(
+    return CurrentEndpointObservation(
         target=target,
-        address=matched.address,
-        wifi_firmware_version=_ascii_optional(matched.wifi_firmware_version),
-        gizwits_version=_ascii_optional(matched.gizwits_version),
+        endpoint=ResolvedEndpoint(
+            target=target,
+            address=matched.address,
+            wifi_firmware_version=_ascii_optional(matched.wifi_firmware_version),
+            gizwits_version=_ascii_optional(matched.gizwits_version),
+        ),
     )
+
+
+def _validate_targets(targets: tuple[LocalDeviceBinding, ...]) -> None:
+    if not targets:
+        raise ValueError("endpoint resolution requires at least one target")
+    physical = [target.physical_identity_key for target in targets]
+    if len(physical) != len(set(physical)):
+        raise ValueError("endpoint resolution targets must be physically distinct")
 
 
 def _ascii_optional(value: str | None) -> str | None:
@@ -120,8 +177,10 @@ def _ascii_optional(value: str | None) -> str | None:
 
 
 __all__ = [
+    "CurrentEndpointObservation",
     "CurrentEndpointResolutionError",
     "CurrentEndpointResolver",
     "ResolvedEndpoint",
+    "classify_current_observation",
     "resolve_current_observation",
 ]

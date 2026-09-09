@@ -14,7 +14,7 @@ from jebao_flow.local_control.models import (
     LocalDeviceBinding,
     QualificationBinding,
 )
-from jebao_flow.local_control.resolver import ResolvedEndpoint
+from jebao_flow.local_control.resolver import CurrentEndpointObservation, ResolvedEndpoint
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan, FreshSlaveSchedule
 from jebao_flow.local_control.state import (
     FreshDeviceState,
@@ -160,12 +160,25 @@ class _Resolver:
         self.fail = fail
         self.calls = 0
 
-    async def resolve_many(self, targets):
+    async def observe_many(self, targets):
         self.calls += 1
         if self.fail:
             raise RuntimeError("no current observation")
         assert tuple(endpoint.target for endpoint in self.endpoints) == targets
-        return self.endpoints
+        return tuple(
+            CurrentEndpointObservation(target=endpoint.target, endpoint=endpoint)
+            for endpoint in self.endpoints
+        )
+
+
+class _ObservationResolver:
+    def __init__(self, observations: tuple[CurrentEndpointObservation, ...]) -> None:
+        self.observations = observations
+        self.calls = 0
+
+    async def observe_many(self, targets):
+        self.calls += 1
+        return self.observations
 
 
 class _Session:
@@ -324,6 +337,103 @@ async def test_failed_current_discovery_publishes_no_stale_values() -> None:
 
 
 @pytest.mark.asyncio
+async def test_poller_reads_four_matches_and_isolates_two_absent_targets() -> None:
+    base_manifest, catalog, _projection = _projection_setup()
+    targets = tuple(_binding(f"device_{index}", str(index)) for index in range(1, 7))
+    manifest = base_manifest.model_copy(update={"devices": targets})
+    projection = project_home_assistant(
+        manifest,
+        catalog,
+        discovery_prefix="homeassistant",
+        topic_prefix="jebao-flow/test",
+    )
+    observations = tuple(
+        CurrentEndpointObservation(
+            target=target,
+            endpoint=ResolvedEndpoint(target, f"runtime-address-{index}"),
+        )
+        if index <= 4
+        else CurrentEndpointObservation(
+            target=target,
+            diagnostic_reason="current_endpoint_absent",
+        )
+        for index, target in enumerate(targets, start=1)
+    )
+    resolver = _ObservationResolver(observations)
+    events: list[str] = []
+    poller = FreshStatePoller(
+        manifest=manifest,
+        resolver=resolver,  # type: ignore[arg-type]
+        projector=LocalControlStateProjector(
+            manifest=manifest,
+            projection=projection,
+            catalog=catalog,
+        ),
+        poll_interval_seconds=5,
+        reconnect_initial_seconds=2,
+        reconnect_max_seconds=60,
+        read_lease=_ReadLease(events),
+        session_factory=lambda address: _Session(address, _status(), events),
+        now=lambda: datetime(2026, 9, 8, 6, 3, tzinfo=UTC),
+    )
+
+    results = await poller.poll_once()
+
+    assert resolver.calls == 1
+    assert [result.available for result in results] == [True, True, True, True, False, False]
+    assert all(result.publications for result in results[:4])
+    assert all(result.observed_at is not None for result in results[:4])
+    assert all(result.diagnostic_reason is None for result in results[:4])
+    assert all(result.publications == () for result in results[4:])
+    assert all(
+        result.diagnostic_reason == "current_endpoint_absent" for result in results[4:]
+    )
+    assert events.count("read_once") == 4
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_target_does_not_block_a_matched_sibling() -> None:
+    manifest, catalog, projection = _projection_setup()
+    matched, ambiguous = manifest.devices
+    resolver = _ObservationResolver(
+        (
+            CurrentEndpointObservation(
+                target=matched,
+                endpoint=ResolvedEndpoint(matched, "runtime-address"),
+            ),
+            CurrentEndpointObservation(
+                target=ambiguous,
+                diagnostic_reason="current_endpoint_ambiguous",
+            ),
+        )
+    )
+    events: list[str] = []
+    poller = FreshStatePoller(
+        manifest=manifest,
+        resolver=resolver,  # type: ignore[arg-type]
+        projector=LocalControlStateProjector(
+            manifest=manifest,
+            projection=projection,
+            catalog=catalog,
+        ),
+        poll_interval_seconds=5,
+        reconnect_initial_seconds=2,
+        reconnect_max_seconds=60,
+        read_lease=_ReadLease(events),
+        session_factory=lambda address: _Session(address, _status(), events),
+    )
+
+    matched_result, ambiguous_result = await poller.poll_once()
+
+    assert matched_result.available is True
+    assert ambiguous_result.available is False
+    assert ambiguous_result.publications == ()
+    assert ambiguous_result.diagnostic_reason == "current_endpoint_ambiguous"
+    assert ambiguous_result.diagnostic_reason != "current_endpoint_absent"
+    assert events.count("read_once") == 1
+
+
+@pytest.mark.asyncio
 async def test_resolver_output_must_keep_the_exact_current_stable_binding() -> None:
     manifest, catalog, projection = _projection_setup()
     wrong = manifest.devices[0].model_copy(
@@ -331,10 +441,16 @@ async def test_resolver_output_must_keep_the_exact_current_stable_binding() -> N
     )
 
     class _WrongResolver:
-        async def resolve_many(self, targets):
+        async def observe_many(self, targets):
             return (
-                ResolvedEndpoint(wrong, "runtime-address"),
-                ResolvedEndpoint(targets[1], "runtime-address"),
+                CurrentEndpointObservation(
+                    target=targets[0],
+                    endpoint=ResolvedEndpoint(wrong, "runtime-address"),
+                ),
+                CurrentEndpointObservation(
+                    target=targets[1],
+                    endpoint=ResolvedEndpoint(targets[1], "runtime-address"),
+                ),
             )
 
     poller = FreshStatePoller(
@@ -358,6 +474,45 @@ async def test_resolver_output_must_keep_the_exact_current_stable_binding() -> N
         result.diagnostic_reason == "current_resolution_binding_mismatch"
         for result in results
     )
+
+
+@pytest.mark.asyncio
+async def test_resolver_observations_must_keep_manifest_length_and_order() -> None:
+    manifest, catalog, projection = _projection_setup()
+    first, second = manifest.devices
+    ordered = (
+        CurrentEndpointObservation(
+            target=first,
+            endpoint=ResolvedEndpoint(first, "first-runtime-address"),
+        ),
+        CurrentEndpointObservation(
+            target=second,
+            endpoint=ResolvedEndpoint(second, "second-runtime-address"),
+        ),
+    )
+
+    for observations in (ordered[:1], tuple(reversed(ordered))):
+        poller = FreshStatePoller(
+            manifest=manifest,
+            resolver=_ObservationResolver(observations),  # type: ignore[arg-type]
+            projector=LocalControlStateProjector(
+                manifest=manifest,
+                projection=projection,
+                catalog=catalog,
+            ),
+            poll_interval_seconds=5,
+            reconnect_initial_seconds=2,
+            reconnect_max_seconds=60,
+            read_lease=_ReadLease([]),
+        )
+
+        results = await poller.poll_once()
+
+        assert all(result.available is False for result in results)
+        assert all(
+            result.diagnostic_reason == "current_resolution_binding_mismatch"
+            for result in results
+        )
 
 
 @pytest.mark.asyncio

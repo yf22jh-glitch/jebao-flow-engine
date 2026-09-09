@@ -29,7 +29,11 @@ from jebao_flow.local_control.ha import (
 )
 from jebao_flow.local_control.lease import LocalControlLeaseBusyError, LocalControlReadLease
 from jebao_flow.local_control.models import FreshInstallManifest, LocalDeviceBinding
-from jebao_flow.local_control.resolver import CurrentEndpointResolver, ResolvedEndpoint
+from jebao_flow.local_control.resolver import (
+    CurrentEndpointObservation,
+    CurrentEndpointResolver,
+    ResolvedEndpoint,
+)
 from jebao_flow.protocol.models import DeviceSchedule
 from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.schedule import decode_schedule
@@ -275,26 +279,30 @@ class FreshStatePoller:
     async def poll_once(self) -> tuple[FreshDeviceState, ...]:
         try:
             async with self._operation_lock:
-                endpoints = await self._resolver.resolve_many(self._targets)
+                observations = await self._resolver.observe_many(self._targets)
         except Exception:
             return tuple(
                 _unavailable(target, "current_discovery_unavailable")
                 for target in self._targets
             )
-        by_member = {endpoint.target.logical_member: endpoint for endpoint in endpoints}
-        if (
-            len(endpoints) != len(self._targets)
-            or set(by_member) != {target.logical_member for target in self._targets}
-            or any(by_member[target.logical_member].target != target for target in self._targets)
-        ):
+        if not _observations_keep_exact_bindings(observations, self._targets):
             return tuple(
                 _unavailable(target, "current_resolution_binding_mismatch")
                 for target in self._targets
             )
 
         results: list[FreshDeviceState] = []
-        for target in self._targets:
-            endpoint = by_member[target.logical_member]
+        for target, observation in zip(self._targets, observations, strict=True):
+            endpoint = observation.endpoint
+            if endpoint is None:
+                reason = observation.diagnostic_reason
+                if reason is None:
+                    return tuple(
+                        _unavailable(item, "current_resolution_binding_mismatch")
+                        for item in self._targets
+                    )
+                results.append(_unavailable(target, reason))
+                continue
             try:
                 async with self._operation_lock:
                     with self._read_lease.acquire(target.physical_identity_key):
@@ -371,6 +379,22 @@ def _unavailable(target: LocalDeviceBinding, reason: str) -> FreshDeviceState:
         available=False,
         diagnostic_reason=reason,
     )
+
+
+def _observations_keep_exact_bindings(
+    observations: tuple[CurrentEndpointObservation, ...],
+    targets: tuple[LocalDeviceBinding, ...],
+) -> bool:
+    if len(observations) != len(targets):
+        return False
+    for target, observation in zip(targets, observations, strict=True):
+        if not isinstance(observation, CurrentEndpointObservation):
+            return False
+        if observation.target != target:
+            return False
+        if observation.endpoint is not None and observation.endpoint.target != target:
+            return False
+    return True
 
 
 def _primary_observed_value(

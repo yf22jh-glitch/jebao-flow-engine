@@ -326,6 +326,14 @@ unqualified. Structurally, mode suppression changes only projected control avail
 qualification. In `runtime.mode: control`, the mode reason is `null` and the existing qualification,
 construction, arming, and live-opt-in behavior is unchanged.
 
+Fresh observer polling classifies every manifest target from one current discovery without making
+the writer resolver partial: exactly one physical match proceeds to the existing read-only session,
+no match reports `current_endpoint_absent`, and multiple matches report
+`current_endpoint_ambiguous`. A malformed position or target binding from that observer API still
+makes the whole cycle `current_resolution_binding_mismatch`. The strict resolver calls used by the
+coordinator keep their existing all-or-nothing exception contract, and no endpoint address is
+retained in public diagnostics or artifacts.
+
 Newly projected Home Assistant identities now bind discovery object ids, entity `unique_id`
 values, and device identifiers to a stable instance namespace. The namespace is `instance_`
 followed by the full SHA-256 digest of the exact validated `topic_prefix`; it is independent of

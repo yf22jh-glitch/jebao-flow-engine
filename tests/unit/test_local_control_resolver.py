@@ -27,7 +27,11 @@ def _device(address: str, *, vendor_id: str = "device-one") -> DiscoveredDevice:
     )
 
 
-def _target(device: DiscoveredDevice | None = None) -> LocalDeviceBinding:
+def _target(
+    device: DiscoveredDevice | None = None,
+    *,
+    logical_member: str = "wavemaker_left",
+) -> LocalDeviceBinding:
     current = device or _device("first-current-address")
     binding = PhysicalDeviceBinding.from_identifiers(
         vendor_device_id=current.device_id,
@@ -36,7 +40,7 @@ def _target(device: DiscoveredDevice | None = None) -> LocalDeviceBinding:
         config_fingerprint=configuration_fingerprint({"scope": "test-does-not-bind-key"}),
     )
     return LocalDeviceBinding(
-        logical_member="wavemaker_left",
+        logical_member=logical_member,
         product_key=LOCAL_WAVEMAKER_PRO.product_key,
         physical_identity_key=physical_identity_key(binding),
         logical_role="left",
@@ -90,6 +94,17 @@ async def test_resolver_rejects_current_absence_or_ambiguity_without_using_cache
 
 
 @pytest.mark.asyncio
+async def test_strict_resolver_keeps_the_existing_error_for_current_absence() -> None:
+    resolver = CurrentEndpointResolver(_Discovery([[]]), timeout_seconds=2)
+
+    with pytest.raises(
+        CurrentEndpointResolutionError,
+        match="current discovery must contain exactly one matching physical controller",
+    ):
+        await resolver.resolve(_target())
+
+
+@pytest.mark.asyncio
 async def test_resolve_many_uses_one_fresh_observation() -> None:
     left = _device("left-current", vendor_id="left-device")
     right = _device("right-current", vendor_id="right-device").model_copy(
@@ -101,4 +116,36 @@ async def test_resolve_many_uses_one_fresh_observation() -> None:
     resolved = await resolver.resolve_many((_target(left), _target(right)))
 
     assert [item.address for item in resolved] == ["left-current", "right-current"]
+    assert discovery.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_observe_many_isolates_matched_absent_and_ambiguous_targets() -> None:
+    matched = _device("matched-current", vendor_id="matched-device")
+    absent = _device("absent-current", vendor_id="absent-device").model_copy(
+        update={"mac_address": ":".join(("02", "10", "20", "30", "40", "50"))}
+    )
+    ambiguous = _device("ambiguous-one", vendor_id="ambiguous-device").model_copy(
+        update={"mac_address": ":".join(("02", "aa", "bb", "cc", "dd", "ee"))}
+    )
+    moved_ambiguous = ambiguous.model_copy(update={"address": "ambiguous-two"})
+    discovery = _Discovery([[matched, ambiguous, moved_ambiguous]])
+    resolver = CurrentEndpointResolver(discovery, timeout_seconds=2)
+    targets = (
+        _target(matched, logical_member="matched"),
+        _target(absent, logical_member="absent"),
+        _target(ambiguous, logical_member="ambiguous"),
+    )
+
+    observations = await resolver.observe_many(targets)
+
+    assert tuple(item.target for item in observations) == targets
+    assert observations[0].endpoint is not None
+    assert observations[0].endpoint.address == "matched-current"
+    assert observations[0].diagnostic_reason is None
+    assert observations[1].endpoint is None
+    assert observations[1].diagnostic_reason == "current_endpoint_absent"
+    assert observations[2].endpoint is None
+    assert observations[2].diagnostic_reason == "current_endpoint_ambiguous"
+    assert "matched-current" not in repr(observations[0])
     assert discovery.calls == 1
