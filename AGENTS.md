@@ -967,6 +967,91 @@ slice로 남깁니다.
 감시·중단 수단이 별도로 필요하고, 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`은 유지합니다.
 같은 lifecycle·submit 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
 
+### 2026-09-09 production group lifecycle 연결 범위 확장
+
+repository maintainer는 write-disarmed group supervisor commit
+`0b4d037a152ff4e7e8ca29527cdb3c8254ab7a83`의 완료 보고와 production daemon/MQTT/Home
+Assistant 연결이 다음 단계라는 설명 뒤 “이어서 진행하자”로 **첫 production lifecycle 연결의
+source·test·offline 검증 진행을 명시 승인**했습니다. 이번 slice는 그 승인보다 좁게, current
+`serve`가 supervisor inventory를 구성하고 완전한 fresh-state cycle을 전달하는 단계까지만
+다룹니다. MQTT group command와 Home Assistant group entity는 아직 연결하지 않습니다. 실제 broker,
+Home Assistant, 장비, 앱 또는 원격 환경을 실행하는 승인도 아닙니다.
+이번 작업이 닫을 질문은 기존 read-only device-state service의 publish·availability·startup 의미를
+바꾸지 않고 production lifecycle에 격리된 group supervisor inventory와 complete fresh-cycle feed를
+추가할 수 있는가입니다. 근거는 firmware 가설이 아니라 construction·callback·shutdown 경계의 static
+trace와 fault injection입니다.
+
+이 확장은 이전 하위절의 “어떤 daemon이나 CLI도 supervisor를 구성하지 않는다”는 현재 구현
+진술을 대체합니다. supervisor 내부의 **명시 command 전 write-disarmed** 구조는 그대로이고, 이번
+slice에는 그 command의 production 호출자도 없으므로 물리 write는 0회입니다. 첫 보장은 다음 transport
+slice에도 남고 두 번째 보장만 그때 별도 검토합니다. `LocalControlGroupSupervisor.apply_runtime_command()`를
+묶는 내부 API는 존재할 수 있지만 이번 slice의 CLI·MQTT·Home Assistant 어느 경로에서도 호출하지
+않습니다.
+
+허용 범위는 다음 파일로 한정합니다.
+
+- 신규 `src/jebao_flow/local_control/group_service.py`
+- `src/jebao_flow/local_control/state.py`, `src/jebao_flow/local_control/mqtt.py`
+- `src/jebao_flow/local_control_cli.py`
+- `tests/unit/test_local_control_*`
+- `docs/local-control.md`
+
+`src/jebao_flow/groups/*`, 기존 `src/jebao_flow/local_control/group_supervisor.py`,
+`src/jebao_flow/local_control/group.py`, `coordinator.py`, `lease.py`, `device_writer.py`,
+`src/jebao_flow/mqtt/*`, `src/jebao_flow/app.py`, `custom_components/*`,
+`src/jebao_flow/protocol/*`, `src/jebao_flow/devices/*`, 기존 여섯 frozen source와 그 직접 테스트,
+`docs/runs/*`는 수정하지 않습니다. 기존 old MQTT/group service나 `devices.*` observer를 import하거나
+우회 write 경로로 재사용하지 않습니다.
+`state.py`·`mqtt.py`·`local_control_cli.py` 변경은 기존 read-only device-state 경로에 대한 가산적
+변경으로 한정합니다. `tests/unit/test_local_control_state.py`,
+`tests/unit/test_local_control_mqtt.py`, `tests/unit/test_local_control_cli.py`의 기존 단정은 완화하거나
+삭제하지 않으며, 필요하면 별도 repository maintainer 승인을 먼저 받습니다.
+
+각 group은 서로 독립적으로 구성합니다. native-linked strategy, 미지원 제품, 미구현 pattern,
+`fallback_constant`, current manifest 결손, 중복 physical identity, 안전 Flow 교집합 부재 또는 기타
+구성 실패는 stable English `diagnostic_reason`을 가진 unconstructed inventory 항목으로 남기며 다른
+group이나 기존 device-state service의 기동을 막지 않습니다. group 하나의 planning/tick 예외도
+fresh poller·MQTT adapter task로 전파하지 않고 해당 group 진단으로만 남깁니다. read-only `serve`는
+가짜 no-write port를 만들지 않고 supervisor 0개와 그 이유를 보고합니다. 실제 supervisor와 actuator는
+current `--write-enabled` coordinator가 존재할 때만 구성합니다.
+`fallback_constant`는 현재 planner가 unavailable member를 처음 만날 때까지 실패가 잠복하므로 구성
+시점에 미지원 진단으로 분류합니다. cycle 예외 격리 회귀는 이 정책 대신 별도 fault injection으로
+검증합니다.
+
+per-device `DeviceActuationLimits`는 current private config의 device limit와 선언된 local-control Flow
+안전 봉투 `30..75`의 교집합으로 유도합니다. group-level effective limit와 device 봉투를 합치지 않고,
+config에 없는 firmware step을 추측하지 않으며 현재 planner capability의 기본 step을 그대로 사용합니다.
+완료된 `FreshStatePoller.poll_once()` 한 번당 정확히 한 번, 일부가 아닌 전체 결과 tuple을 inventory에
+전달합니다. 각 supervised group은 자기 member를 logical key로 골라 `observe_fresh_cycle()`을 한 번만
+호출하며 별도 `tick()`을 겹쳐 호출하지 않습니다. planner 시간은 monotonic clock을 사용하고
+`observed_at` wall clock을 generation·identity·gate로 사용하지 않습니다.
+
+모든 group plan port는 기존 device router·fresh poller와 같은 process `operation_lock` 아래에서 물리
+경계를 통과하도록 구성합니다. 이 slice에는 group을 arm하는 production caller가 없어 frame이 나갈 수
+없지만, 다음 transport 연결이 group 자신의 write를 concurrent read로 오인해 control epoch을 바꾸지
+않도록 지금 같은 직렬화 namespace를 고정합니다. 반면 group 밖의 개별 device command가
+`GroupManager.set_manual_override(device_id)`를 거치는 결합은 group command transport를 여는 다음
+slice의 선행조건으로 남깁니다. 같은 프로세스가 낸 device write를 external drift `UNKNOWN`으로 숨기지
+않습니다.
+
+종료는 구성된 supervisor 전부에 `aclose()`를 시도한 뒤 결과를 검사합니다. 한 supervisor의 실패가
+나머지 close를 생략해서도 안 되고, `return_exceptions=True` 집계가
+`UnresolvedGroupSafetyStopError`나 다른 close 오류를 삼켜서도 안 됩니다. unresolved mandatory OFF는
+다른 종료 오류보다 우선해 adapter 밖으로 다시 전파되어야 하고, 반복 close에서도 clean success로
+바뀌지 않습니다.
+
+회귀는 최소한 (1) group enabled·group disabled·member disabled 각 구성의 여러 complete fresh cycle에서
+`GroupPlanPort.write_plan()` 0회, (2) 구성 불가 group이 있어도 기존 device state publish와 service
+startup 유지, (3) group tick 예외가 poller task를 종료하지 않음, (4) 전체 discovery 실패 cycle에서
+write 0회, (5) supervisor 두 개 중 하나만 unresolved mandatory OFF여도 둘 다 close되고 오류 재전파,
+(6) read-only `serve` supervisor 0개를 고정합니다. inventory와 status에는 logical group id·bounded
+diagnostic만 내보내고 physical identity나 private path를 노출하지 않습니다.
+
+실제 장비 write·앱 조작·broker 또는 Home Assistant 연결은 이 구현 승인에 포함되지 않습니다. 실제
+활성화에는 `docs/hardware-readiness.md`의 fresh preflight·exact restore·on-site 승인·현장 감시·중단
+수단이 별도로 필요하고, 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`은 유지합니다. 같은 production
+lifecycle 격리 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
