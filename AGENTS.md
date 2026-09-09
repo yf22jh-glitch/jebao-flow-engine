@@ -2093,6 +2093,61 @@ writer 사용 0을 확인합니다. 이 observer 결과는 Q1·Q2 또는 firmwar
 `NO-GO / BLOCKING`, Q2는 `UNKNOWN`이고 frozen native harness와 일반 daemon·old MQTT 경로의
 동결도 유지합니다.
 
+### 2026-09-10 observer의 장비별 endpoint 격리 D1f
+
+D1e가 승인한 첫 native observer 활성화는
+[`docs/runs/2026-09-10-local-observer-first-activation.md`](docs/runs/2026-09-10-local-observer-first-activation.md)에
+먼저 기록하고 commit `aff9413`으로 source 수정 전에 고정했습니다. 같은 discovery 관측에서 current
+physical binding 6개 중 4개가 정확히 한 번씩 식별되고 2개는 관측되지 않았지만, read-only poller는
+6개 모두를 `current_discovery_unavailable`로 publish했습니다. static trace에서 poller가 writer와 같은
+strict `resolve_many()`를 호출하고 첫 unresolved target의 예외를 batch 전체 실패로 접는 것이 그
+원인입니다. 이번 작업이 닫을 질문은 **한 번의 current discovery에서 정확히 식별된 장비의 fresh
+read를 살리면서, writer의 all-or-nothing resolution과 wrong-device 방어를 전혀 완화하지 않을 수
+있는가**입니다.
+
+관측되지 않은 두 장비가 전원·LAN·stale config 중 어느 이유인지 이 slice에서 추측하거나 고치지
+않습니다. 또한 absent와 ambiguous는 같은 사실이 아닙니다. match 0개는
+`current_endpoint_absent`, match 2개 이상은 wrong-device 선행 신호인
+`current_endpoint_ambiguous`로 해당 target에만 보고합니다. discovery socket 자체가 실패한 경우의
+`current_discovery_unavailable`과도 구분합니다.
+
+구현은 `src/jebao_flow/local_control/resolver.py`의 기존 matching 계산을 하나의 순수한 per-target
+observation 함수로 공유하고, target 순서를 보존하는 observer 전용 batch API를 추가하는 데
+한정합니다. 이 API는 cycle당 current discovery를 정확히 한 번만 수행하고 각 target에 matched
+endpoint 또는 위 두 diagnostic 중 하나를 돌려줍니다. 기존 `resolve()`와 `resolve_many()`는 그
+분류를 사용하더라도 non-match에서 기존 `CurrentEndpointResolutionError` 타입과 메시지,
+all-or-nothing 의미를 그대로 유지합니다. coordinator의 다섯 strict resolution 호출부와 write
+경로는 수정하지 않습니다.
+
+`src/jebao_flow/local_control/state.py`의 poller만 observer API를 소비합니다. 반환 길이·순서,
+observation target, matched endpoint의 target이 현재 manifest와 byte-equivalent하지 않으면 새 API의
+주장을 신뢰하지 않고 batch 전체를 기존 `current_resolution_binding_mismatch`로 유지합니다. 정상
+matched target은 기존 shared read lease·read-only session·fresh projection 순서를 그대로 수행하고,
+absent·ambiguous target만 publication 없는 unavailable 결과가 됩니다. endpoint address를 cache,
+artifact, public diagnostic에 보존하지 않습니다.
+
+source 범위는 위 두 파일과 `tests/unit/test_local_control_resolver.py`,
+`tests/unit/test_local_control_state.py`, 동작 경계 기록에 한한 `docs/local-control.md`입니다. frozen six와
+직접 테스트, coordinator·device writer·journal·lease·groups, MQTT adapter, config, protocol·devices,
+old daemon·MQTT, custom component는 수정하지 않습니다. 이 결함은 정상 장비를 unavailable로 보는
+false-negative라 §3 P1로 과장하지 않으며, 새 write gate 없이 read 표면의 과도한 batch 실패를 줄이는
+§2 정합 수정입니다.
+
+회귀는 (1) one discovery에서 matched 4·absent 2이면 네 target만 fresh state와 online availability로
+진행하고 두 target만 `current_endpoint_absent`, (2) ambiguous target 하나는 다른 target을 막지 않고
+정확히 `current_endpoint_ambiguous`, (3) discovery 자체 예외는 계속 전 target
+`current_discovery_unavailable`, (4) 길이·순서·target binding 불일치는 계속 전 target
+`current_resolution_binding_mismatch`, (5) existing strict resolver·coordinator assertions를 삭제·완화
+없이 통과하고 strict 예외 타입·메시지가 불변, (6) observer cycle당 discovery 호출 1회와 address
+비공개를 고정합니다. source가 landing되면 reviewed commit으로 observer Compose를 교체하고 4개의
+matched 장비가 fresh `observed_at` state와 online availability를 실제 publish하는지 다시 확인하되,
+장비 write·control mode·vendor app 조작은 수행하지 않습니다. 교체는 기존 instance를 먼저 정지한
+뒤 새 instance를 시작해 중첩을 0으로 유지하며, 시작 직전에 D1e의 네 precondition
+(`runtime.mode=observer`, 같은 `topic_prefix`의 다른 daemon 0, old `jebao-flowd` 0, custom component
+config entry 0)을 다시 확인합니다. 이 확인은 host-local이고 cross-host daemon 부재를 증명하지
+않습니다. 하드웨어 `NO-GO / BLOCKING`, Q2 `UNKNOWN`, frozen native harness와 일반 daemon·old MQTT
+경로의 동결은 유지합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
