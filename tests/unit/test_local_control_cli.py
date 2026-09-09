@@ -38,6 +38,37 @@ def _manifest() -> FreshInstallManifest:
     )
 
 
+def _observer_runtime_config() -> AppConfig:
+    return AppConfig.model_validate(
+        {
+            "instance": {"id": "test", "name": "Test"},
+            "mqtt": {"host": "broker.invalid", "topic_prefix": "jebao-flow/test"},
+            "runtime": {"mode": "observer", "dry_run": False},
+            "devices": [
+                {
+                    "id": member,
+                    "name": member.title(),
+                    "type": "wavemaker",
+                    "product_key": LOCAL_WAVEMAKER_PRO.product_key,
+                    "address": f"192.0.2.{index}",
+                    "identity": {
+                        "device_id": f"synthetic-device-{index}",
+                        "mac_address": f"0200000000{index:02x}",
+                    },
+                }
+                for index, member in enumerate(("master", "slave"), start=1)
+            ],
+            "groups": [
+                {
+                    "id": "main_flow",
+                    "name": "Main flow",
+                    "members": [{"device": "master"}, {"device": "slave"}],
+                }
+            ],
+        }
+    )
+
+
 def test_catalog_command_is_ascii_and_covers_all_products(capsys) -> None:
     result = local_control_cli.main(["catalog"])
 
@@ -865,3 +896,113 @@ def test_read_only_serve_constructs_group_inventory_without_a_supervisor(
     assert captured["group_kwargs"]["coordinator"] is None
     assert captured["adapter"]._group_service is group_service  # noqa: SLF001
     assert captured["adapter"]._router._ownership_service is group_service  # noqa: SLF001
+
+
+def test_observer_serve_ignores_write_opt_in_and_current_qualifications(
+    monkeypatch,
+) -> None:
+    current = SimpleNamespace(
+        config=_observer_runtime_config(),
+        manifest=_manifest(),
+        config_path=local_control_cli.Path("/current/private/config.yaml"),
+        manifest_path=local_control_cli.Path("/current/private/install.json"),
+        template_roots=(),
+    )
+    captured = {}
+
+    async def serve(adapter) -> None:
+        captured["adapter"] = adapter
+
+    monkeypatch.setattr(local_control_cli, "_prepare_current", lambda args: current)
+    monkeypatch.setattr(
+        local_control_cli,
+        "load_current_qualifications",
+        lambda _path: (_ for _ in ()).throw(AssertionError("observer read the qualification file")),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "_coordinator",
+        lambda _config, _catalog: (_ for _ in ()).throw(
+            AssertionError("observer constructed the write coordinator")
+        ),
+    )
+    monkeypatch.setattr(local_control_cli, "_serve", serve)
+
+    result = local_control_cli.main(
+        [
+            "serve",
+            "--config",
+            "/current/private/config.yaml",
+            "--role-attested-by",
+            "operator",
+            "--qualifications",
+            "/current/private/qualifications.json",
+            "--write-enabled",
+            "--schedule-pair",
+            "async:master:slave",
+        ]
+    )
+
+    adapter = captured["adapter"]
+    projection = adapter._projection  # noqa: SLF001
+    assert result == 0
+    assert projection.control_surface_diagnostic_reason == "runtime_mode_observer"
+    assert projection.public_dict()["control_count"] == 0
+    assert projection.group_control_entities == ()
+    assert projection.group_resume_entities == ()
+    assert not [entity for entity in projection.entities if entity.slot_index is not None]
+    assert all(entity.command_topic is None for entity in projection.entities)
+    assert adapter._router.command_topics == ()  # noqa: SLF001
+    assert adapter._group_router is None  # noqa: SLF001
+    assert adapter._group_service.supervisor_count == 0  # noqa: SLF001
+
+
+def test_observer_ha_schema_does_not_read_qualifications_or_emit_controls(
+    monkeypatch,
+    capsys,
+) -> None:
+    current = SimpleNamespace(
+        config=_observer_runtime_config(),
+        manifest=_manifest(),
+        config_path=local_control_cli.Path("/current/private/config.yaml"),
+        manifest_path=local_control_cli.Path("/current/private/install.json"),
+        template_roots=(),
+    )
+    monkeypatch.setattr(local_control_cli, "_prepare_current", lambda args: current)
+    monkeypatch.setattr(
+        local_control_cli,
+        "load_current_qualifications",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("observer ha-schema read the qualification file")
+        ),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "_coordinator",
+        lambda _config, _catalog: (_ for _ in ()).throw(
+            AssertionError("observer ha-schema constructed the write coordinator")
+        ),
+    )
+
+    result = local_control_cli.main(
+        [
+            "ha-schema",
+            "--config",
+            "/current/private/config.yaml",
+            "--role-attested-by",
+            "operator",
+            "--qualifications",
+            "/current/private/qualifications.json",
+            "--schedule-pair",
+            "async:master:slave",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["control_surface_diagnostic_reason"] == "runtime_mode_observer"
+    assert payload["control_count"] == 0
+    assert payload["group_control_entity_count"] == 0
+    assert payload["group_resume_entity_count"] == 0
+    assert not [entity for entity in payload["entities"] if entity["slot_index"] is not None]
+    assert all(entity["command_topic"] is None for entity in payload["entities"])

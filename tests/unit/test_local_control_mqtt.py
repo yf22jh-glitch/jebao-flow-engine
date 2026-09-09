@@ -100,7 +100,13 @@ def _rejected_result(request_id: str) -> LocalControlResult:
     )
 
 
-def _setup(*, ownership_service=None, groups=(), mismatch_ownership_lock=False):
+def _setup(
+    *,
+    ownership_service=None,
+    groups=(),
+    mismatch_ownership_lock=False,
+    control_surface_enabled=True,
+):
     master = _binding("master", "1")
     slave = _binding("slave", "2")
     content = InstallContentBindings(
@@ -136,6 +142,7 @@ def _setup(*, ownership_service=None, groups=(), mismatch_ownership_lock=False):
         topic_prefix="jebao-flow/main",
         schedule_plans=(plan,),
         groups=groups,
+        control_surface_enabled=control_surface_enabled,
     )
     coordinator = _Coordinator([], [])
     operation_lock = asyncio.Lock() if ownership_service is not None else None
@@ -548,6 +555,39 @@ class _RunClient(_Client):
 
     async def subscribe(self, topic, *, qos) -> None:
         self.subscribed.append((str(topic), qos))
+
+
+@pytest.mark.asyncio
+async def test_observer_adapter_does_not_publish_discovery_deletions(monkeypatch) -> None:
+    projection, _coordinator, router = _setup(control_surface_enabled=False)
+
+    class _Poller:
+        logical_members = ("master", "slave")
+
+        async def run(self, publish, stop_event) -> None:
+            await stop_event.wait()
+
+    client = _RunClient()
+    monkeypatch.setattr(mqtt_module.aiomqtt, "Client", lambda *args, **kwargs: client)
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
+        projection=projection,
+        router=router,
+        state_poller=_Poller(),  # type: ignore[arg-type]
+    )
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    await adapter.run(stop_event)
+
+    discovery = [
+        payload
+        for topic, payload, qos, retain in client.published
+        if topic.endswith("/config") and qos == 1 and retain
+    ]
+    assert discovery
+    assert all(payload for payload in discovery)
+    assert client.subscribed == []
 
 
 @pytest.mark.asyncio

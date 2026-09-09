@@ -89,10 +89,21 @@ title: 리턴 및 도징
 쓰기 잠금 배너가 표시됩니다. 이때 Home Assistant 명령과 서버의 패턴 계산은 확인할 수 있지만
 실제 장비 write는 허용되지 않습니다.
 
-`runtime.mode: observer`에서는 잠금 배너만 표시하는 것이 아니라 그룹·장비의 모든 제어
-엔티티를 생성하지 않습니다. 카드는 목표값 대신 실제 LAN 관찰값, 마지막 확인 시각,
-`TimerON`과 Auto 설정 단서를 표시합니다. 장비별 장비 보고 출력 sensor는 Home Assistant Recorder의
-이력 그래프에서 기존 스케줄의 출력 변화를 확인하는 데 사용할 수 있습니다.
+`runtime.mode: observer`에서는 `--write-enabled`와 current qualification이 있어도 현재 데몬이
+그룹·장비 제어 엔티티를 새로 projection·publish하거나 그 command topic을 subscribe하지
+않습니다. `ha-schema`도 같은 mode를 존중합니다. public projection의
+`control_surface_diagnostic_reason`은 `runtime_mode_observer`이고, 각 entity의 기존 capability·
+qualification `diagnostic_reason`은 대체하지 않고 그대로 보존합니다. 카드는 목표값 대신 실제 LAN
+관찰값, 마지막 확인 시각, `TimerON`과 Auto 설정 단서를 표시합니다. 장비별 장비 보고
+출력 sensor는 Home Assistant Recorder의 이력 그래프에서 기존 스케줄의 출력 변화를 확인하는 데
+사용할 수 있습니다.
+
+이 억제는 현재 프로세스가 새로 만드는 표면에만 적용됩니다. 이전 control run이 broker에 남긴
+retained discovery config는 이 변경에서 삭제하지 않습니다. 현재 discovery identity에
+`topic_prefix`나 instance 성분이 없어 그 config가 이 데몬의 소유인지 증명할 수 없기 때문입니다.
+그런 entity가 화면에 남아 있는지는 `UNKNOWN`이지만 observer 프로세스는 그 command topic을
+subscribe하지 않습니다. discovery identity에 stable instance namespace를 먼저 결속한 후에만
+소유권이 증명된 retained variant를 별도 migration으로 정리합니다.
 
 장비가 로컬 시간표를 제공하면 별도 `장비 시간표` sensor가 만들어집니다. sensor 상태는
 해석에 성공한 시간 구간 수이며, `enabled`, `slot_capacity`, `entries`, `invalid_slots` 속성을
@@ -101,6 +112,8 @@ title: 리턴 및 도징
 않습니다. 메인 수류 카드와 리턴·도징 카드 모두 제어·관찰 모드에서 시간표를 접이식으로
 표시하며, 해석하지 못한 슬롯은 경고만 보여 줍니다. 이 시간표는 현재 읽기 전용입니다.
 
-여러 데몬 인스턴스에서 같은 논리 ID를 사용하는 경우 `topic_prefix`가 Home Assistant config
-entry까지 구분해 같은 데몬의 그룹·장비 엔티티만 묶습니다. 같은 `instance`가 둘 이상인데
-`topic_prefix`를 생략하면 카드는 임의 선택하지 않고 명시적인 선택을 요청합니다.
+`topic_prefix`는 여러 데몬 인스턴스의 state·command topic을 구분하지만, 현재 Home Assistant
+discovery topic의 `unique_id`와 device identifier에는 instance 성분이 없습니다. 따라서 같은
+`discovery_prefix`와 논리 ID를 쓰는 여러 데몬의 config entry 분리는 아직 구현되지 않았으며,
+stable instance namespace migration 전에는 서로의 discovery config가 충돌할 수 있습니다. 같은 `instance`가
+둘 이상인데 `topic_prefix`를 생략하면 카드는 임의 선택하지 않고 명시적인 선택을 요청합니다.

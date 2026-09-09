@@ -19,6 +19,7 @@ from jebao_flow.local_control.schedule import FreshMasterSchedulePlan
 from jebao_flow.operator_capture.app_catalog import AppFunctionKind
 
 _TOPIC_PREFIX_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\Z")
+_RUNTIME_MODE_OBSERVER_REASON = "runtime_mode_observer"
 
 
 class HomeAssistantPlatform(StrEnum):
@@ -362,10 +363,16 @@ class HomeAssistantProjection:
     group_entities: tuple[GroupHomeAssistantEntityDescriptor, ...] = ()
     group_control_entities: tuple[GroupControlHomeAssistantEntityDescriptor, ...] = ()
     group_resume_entities: tuple[GroupMemberResumeHomeAssistantEntityDescriptor, ...] = ()
+    control_surface_diagnostic_reason: str | None = None
 
     def __post_init__(self) -> None:
         _require_topic_prefix(self.discovery_prefix)
         _require_topic_prefix(self.topic_prefix)
+        if self.control_surface_diagnostic_reason not in {
+            None,
+            _RUNTIME_MODE_OBSERVER_REASON,
+        }:
+            raise ValueError("unknown Home Assistant control-surface diagnostic reason")
         identities = [(entity.platform, entity.unique_id) for entity in self.entities]
         identities.extend(
             (entity.platform, entity.unique_id) for entity in self.group_entities
@@ -398,6 +405,7 @@ class HomeAssistantProjection:
         payload = {
             "schema_version": 1,
             "language": "en",
+            "control_surface_diagnostic_reason": self.control_surface_diagnostic_reason,
             "entity_count": len(self.entities),
             "control_count": sum(entity.control_available for entity in self.entities),
             "entities": [entity.public_dict() for entity in self.entities],
@@ -458,6 +466,7 @@ def project_home_assistant(
     topic_prefix: str,
     schedule_plans: tuple[FreshMasterSchedulePlan, ...] = (),
     groups: tuple[GroupConfig, ...] = (),
+    control_surface_enabled: bool = True,
 ) -> HomeAssistantProjection:
     """Project every registered device capability and qualified per-slot Flow control."""
 
@@ -470,13 +479,22 @@ def project_home_assistant(
             item for item in catalog.functions if item.product_key == device.product_key
         )
         for descriptor in descriptors:
-            entities.append(_project_device_function(device, descriptor, topic_prefix))
+            entities.append(
+                _project_device_function(
+                    device,
+                    descriptor,
+                    topic_prefix,
+                    control_surface_enabled=control_surface_enabled,
+                )
+            )
     for descriptor in (item for item in catalog.functions if item.product_key is None):
         entities.append(_project_system_function(descriptor, topic_prefix))
 
     known_members = {device.logical_member: device for device in manifest.devices}
     for plan in schedule_plans:
         _validate_plan_members(plan, known_members)
+        if not control_surface_enabled:
+            continue
         descriptor = catalog.find(plan.master.product_key, "slave_per_slot_flow_extension")
         if not descriptor.control_exposed:
             continue
@@ -494,10 +512,14 @@ def project_home_assistant(
                     )
                 )
 
-    qualified_groups = tuple(
-        group
-        for group in groups
-        if group_control_qualification(group, manifest, catalog).qualified
+    qualified_groups = (
+        tuple(
+            group
+            for group in groups
+            if group_control_qualification(group, manifest, catalog).qualified
+        )
+        if control_surface_enabled
+        else ()
     )
     return HomeAssistantProjection(
         discovery_prefix=discovery_prefix,
@@ -512,6 +534,9 @@ def project_home_assistant(
             _project_group_member_resume(group, member.device, topic_prefix)
             for group in qualified_groups
             for member in group.members
+        ),
+        control_surface_diagnostic_reason=(
+            None if control_surface_enabled else _RUNTIME_MODE_OBSERVER_REASON
         ),
     )
 
@@ -566,9 +591,13 @@ def _project_device_function(
     device: LocalDeviceBinding,
     descriptor: LocalFunctionDescriptor,
     topic_prefix: str,
+    *,
+    control_surface_enabled: bool,
 ) -> HomeAssistantEntityDescriptor:
     base = f"{topic_prefix}/local/devices/{device.logical_member}/functions/{descriptor.function}"
-    control_available = descriptor.control_exposed_for(device.physical_identity_key)
+    control_available = control_surface_enabled and descriptor.control_exposed_for(
+        device.physical_identity_key
+    )
     platform = _platform_for(descriptor, control_available=control_available)
     control_available = control_available and platform is not HomeAssistantPlatform.SENSOR
     suffix = descriptor.function.replace(".", "_")

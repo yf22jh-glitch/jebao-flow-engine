@@ -282,3 +282,104 @@ def test_group_actual_output_is_a_command_free_diagnostic_sensor() -> None:
     assert discovery["availability"][1]["topic"] == entity.availability_topic
     assert projection.public_dict()["group_entity_count"] == 1
     assert str(projection.public_dict()).isascii()
+
+
+def test_observer_projection_suppresses_qualified_controls_without_losing_diagnostics() -> None:
+    manifest = _manifest()
+    master, slave = manifest.devices
+    group = GroupConfig(
+        id="main_flow",
+        name="Main Flow",
+        members=(
+            GroupMember(device=master.logical_member),
+            GroupMember(device=slave.logical_member),
+        ),
+    )
+    plan = FreshMasterSchedulePlan(
+        linkage_mode=NativeLinkageMode.ASYNC,
+        master=master,
+        slaves=(FreshSlaveSchedule(target=slave),),
+    )
+    catalog = build_local_control_catalog(
+        (
+            _qualification("power"),
+            _qualification("manual_flow"),
+            _qualification("slave_per_slot_flow_extension"),
+        ),
+        current_content=manifest.content,
+        _qualification_verifier_for_test=lambda _item: frozenset(
+            {master.physical_identity_key, slave.physical_identity_key}
+        ),
+    )
+    control = project_home_assistant(
+        manifest,
+        catalog,
+        discovery_prefix="homeassistant",
+        topic_prefix="jebao-flow/main",
+        schedule_plans=(plan,),
+        groups=(group,),
+    )
+    explicit_control = project_home_assistant(
+        manifest,
+        catalog,
+        discovery_prefix="homeassistant",
+        topic_prefix="jebao-flow/main",
+        schedule_plans=(plan,),
+        groups=(group,),
+        control_surface_enabled=True,
+    )
+    observer = project_home_assistant(
+        manifest,
+        catalog,
+        discovery_prefix="homeassistant",
+        topic_prefix="jebao-flow/main",
+        schedule_plans=(plan,),
+        groups=(group,),
+        control_surface_enabled=False,
+    )
+
+    assert explicit_control.public_dict() == control.public_dict()
+    assert control.control_surface_diagnostic_reason is None
+    assert control.group_control_entities
+    assert control.group_resume_entities
+    assert len([entity for entity in control.entities if entity.slot_index is not None]) == 48
+
+    control_flow = next(
+        entity
+        for entity in control.entities
+        if entity.logical_member == master.logical_member and entity.function == "manual_flow"
+    )
+    observer_flow = next(
+        entity
+        for entity in observer.entities
+        if entity.logical_member == master.logical_member and entity.function == "manual_flow"
+    )
+    assert control_flow.platform is HomeAssistantPlatform.NUMBER
+    assert observer_flow.platform is HomeAssistantPlatform.SENSOR
+    assert observer_flow.stage == control_flow.stage == "qualified"
+    assert observer_flow.diagnostic_reason == control_flow.diagnostic_reason
+    assert observer_flow.diagnostic_reason is None
+    assert observer_flow.command_topic is None
+    assert observer_flow.control_available is False
+
+    control_reasons = {
+        (entity.logical_member, entity.function): entity.diagnostic_reason
+        for entity in control.entities
+        if entity.slot_index is None
+    }
+    observer_reasons = {
+        (entity.logical_member, entity.function): entity.diagnostic_reason
+        for entity in observer.entities
+    }
+    assert observer_reasons == control_reasons
+
+    assert observer.control_surface_diagnostic_reason == "runtime_mode_observer"
+    assert str(observer.public_dict()).isascii()
+    assert observer.public_dict()["control_count"] == 0
+    assert observer.group_control_entities == ()
+    assert observer.group_resume_entities == ()
+    assert len(observer.group_entities) == 1
+    assert not [entity for entity in observer.entities if entity.slot_index is not None]
+    assert any(entity.function == "schedule" for entity in observer.entities)
+    assert all(entity.command_topic is None for entity in observer.entities)
+    assert all("command_topic" not in payload for _topic, payload in observer.discovery_records())

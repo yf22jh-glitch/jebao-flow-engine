@@ -297,6 +297,40 @@ cannot expose a control. A singleton receipt for a device remains insufficient w
 another device's complete pair. Running it against live hardware is a separate approved operation;
 this implementation and its tests did not start the service.
 
+### Observer control surface
+
+Top-level `runtime.mode: observer` takes precedence over the current `--write-enabled` invocation,
+retained qualification files, `runtime.dry_run`, and per-device write flags. Both `serve` and
+`ha-schema` treat that mode as having no control-surface authority: they do not read the
+qualification file or construct a write coordinator, and the projection contains no device scalar
+or per-slot schedule command topic, group switch, or per-member resume button. The MQTT adapter
+therefore subscribes to no command topic. Device and system diagnostics, schedule observation,
+availability, fresh device state, group actual output, and lifecycle inventory remain present.
+
+The projection reports the bounded top-level reason `runtime_mode_observer` in
+`control_surface_diagnostic_reason`. That field is additive and does not replace an entity's
+capability or qualification `diagnostic_reason`; the same catalog and manifest therefore retain the
+same per-entity explanation in control and observer projections. An already qualified function is
+projected as a command-free diagnostic sensor rather than being mislabeled as physically
+unqualified. Structurally, mode suppression changes only projected control availability;
+`diagnostic_reason_for()` continues to depend solely on catalog capability and current physical
+qualification. In `runtime.mode: control`, the mode reason is `null` and the existing qualification,
+construction, arming, and live-opt-in behavior is unchanged.
+
+This suppression describes only what the current process newly projects, publishes, routes, and
+subscribes. It deliberately sends no empty retained deletion payload. Discovery topics,
+`unique_id` values, and Home Assistant device identifiers do not yet contain `topic_prefix` or
+another stable instance component, so current configuration cannot prove that a legacy retained
+config belongs to this daemon rather than another daemon using the same discovery prefix and
+logical IDs. Broker inspection, durable prior-projection history, and an operator opt-in are not
+substituted for that proof. A pre-existing control entity may consequently remain visible, but
+whether it exists is `UNKNOWN` and this observer process does not subscribe to its command topic.
+
+The documented multi-daemon discovery separation is therefore not implemented yet. A follow-up
+must first bind discovery node ids, entity unique ids, and device identifiers to a stable instance
+namespace. Only a later, separately reviewed migration may remove retained variants inside that
+proved namespace; pre-namespace legacy config is not deleted automatically.
+
 ## Software-independent group actuation
 
 The actuator accepts one already-built `GroupTickPlan` and can be called directly for a one-shot

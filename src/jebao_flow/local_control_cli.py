@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from jebao_flow.config import RuntimeMode
 from jebao_flow.hardware_safety import HARDWARE_SAFETY_VOLUME_ID_ENV
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.compose import (
@@ -364,7 +365,10 @@ def _run(args: argparse.Namespace) -> int:
         _print_json(result.public_dict())
         return 0
     if args.command in {"ha-schema", "serve"}:
-        runtime_write_enabled = args.command == "ha-schema" or args.write_enabled
+        control_surface_enabled = prepared.config.runtime.mode is RuntimeMode.CONTROL
+        runtime_write_enabled = control_surface_enabled and (
+            args.command == "ha-schema" or args.write_enabled
+        )
         qualifications = _runtime_qualifications(
             args.qualifications,
             write_enabled=runtime_write_enabled,
@@ -386,6 +390,7 @@ def _run(args: argparse.Namespace) -> int:
             topic_prefix=prepared.config.mqtt.topic_prefix,
             schedule_plans=schedule_plans,
             groups=prepared.config.groups,
+            control_surface_enabled=control_surface_enabled,
         )
         if args.command == "ha-schema":
             _print_json(projection.public_dict())
