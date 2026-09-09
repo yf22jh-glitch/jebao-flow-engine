@@ -317,19 +317,23 @@ unqualified. Structurally, mode suppression changes only projected control avail
 qualification. In `runtime.mode: control`, the mode reason is `null` and the existing qualification,
 construction, arming, and live-opt-in behavior is unchanged.
 
-This suppression describes only what the current process newly projects, publishes, routes, and
-subscribes. It deliberately sends no empty retained deletion payload. Discovery topics,
-`unique_id` values, and Home Assistant device identifiers do not yet contain `topic_prefix` or
-another stable instance component, so current configuration cannot prove that a legacy retained
-config belongs to this daemon rather than another daemon using the same discovery prefix and
-logical IDs. Broker inspection, durable prior-projection history, and an operator opt-in are not
-substituted for that proof. A pre-existing control entity may consequently remain visible, but
-whether it exists is `UNKNOWN` and this observer process does not subscribe to its command topic.
+Newly projected Home Assistant identities now bind discovery object ids, entity `unique_id`
+values, and device identifiers to a stable instance namespace. The namespace is `instance_`
+followed by the full SHA-256 digest of the exact validated `topic_prefix`; it is independent of
+runtime mode, process identity, host data, and startup order. Device functions and schedule slots
+remain grouped by logical device, while actual-output, switch, and resume entities for one group
+remain grouped by logical group. State, command, and availability topics keep their existing exact
+`topic_prefix`-based values.
 
-The documented multi-daemon discovery separation is therefore not implemented yet. A follow-up
-must first bind discovery node ids, entity unique ids, and device identifiers to a stable instance
-namespace. Only a later, separately reviewed migration may remove retained variants inside that
-proved namespace; pre-namespace legacy config is not deleted automatically.
+This identity change is not a retained-state migration. It deliberately sends no empty retained
+deletion payload, and pre-namespace discovery configs still cannot be attributed to one daemon
+when another daemon may use the same discovery prefix and logical IDs. Their existence remains
+`UNKNOWN`. In control mode, a retained legacy entity and its namespaced replacement would remain
+actionable against the same command topic, so deployment is blocked until a separately reviewed
+owned-variant cleanup and an explicit legacy inventory, removal, and restore procedure are
+approved. Recorder history, entity/device-registry customization, area placement, and dashboard
+references are not assumed to transfer automatically to the new identities. Pre-namespace legacy
+config is never deleted automatically.
 
 ## Software-independent group actuation
 

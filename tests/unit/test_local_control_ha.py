@@ -1,8 +1,19 @@
 from datetime import UTC, datetime
 
+import pytest
+
+import jebao_flow.local_control.ha as ha_module
 from jebao_flow.groups.models import GroupConfig, GroupMember
 from jebao_flow.local_control.catalog import build_local_control_catalog
-from jebao_flow.local_control.ha import HomeAssistantPlatform, project_home_assistant
+from jebao_flow.local_control.ha import (
+    GroupControlHomeAssistantEntityDescriptor,
+    GroupHomeAssistantEntityDescriptor,
+    GroupMemberResumeHomeAssistantEntityDescriptor,
+    HomeAssistantEntityDescriptor,
+    HomeAssistantPlatform,
+    HomeAssistantProjection,
+    project_home_assistant,
+)
 from jebao_flow.local_control.install import current_protocol_schema_sha256
 from jebao_flow.local_control.models import (
     FreshInstallManifest,
@@ -53,6 +64,76 @@ def _qualification(function: str) -> QualificationBinding:
         schema_sha256=current_protocol_schema_sha256(),
         firmware_version="current",
         receipt_sha256=("e" * 64, "f" * 64),
+    )
+
+
+_ProjectedEntity = (
+    HomeAssistantEntityDescriptor
+    | GroupHomeAssistantEntityDescriptor
+    | GroupControlHomeAssistantEntityDescriptor
+    | GroupMemberResumeHomeAssistantEntityDescriptor
+)
+
+
+def _projected_entities(projection: HomeAssistantProjection) -> tuple[_ProjectedEntity, ...]:
+    return (
+        *projection.entities,
+        *projection.group_entities,
+        *projection.group_control_entities,
+        *projection.group_resume_entities,
+    )
+
+
+def _device_identifier(entity: _ProjectedEntity) -> str:
+    device = entity.mqtt_discovery_payload()["device"]
+    assert isinstance(device, dict)
+    identifiers = device["identifiers"]
+    assert isinstance(identifiers, list)
+    [identifier] = identifiers
+    assert isinstance(identifier, str)
+    return identifier
+
+
+def _qualified_projection(
+    topic_prefix: str,
+    *,
+    discovery_prefix: str = "homeassistant",
+    control_surface_enabled: bool = True,
+) -> HomeAssistantProjection:
+    manifest = _manifest()
+    master, slave = manifest.devices
+    group = GroupConfig(
+        id="main_flow",
+        name="Main Flow",
+        members=(
+            GroupMember(device=master.logical_member),
+            GroupMember(device=slave.logical_member),
+        ),
+    )
+    plan = FreshMasterSchedulePlan(
+        linkage_mode=NativeLinkageMode.ASYNC,
+        master=master,
+        slaves=(FreshSlaveSchedule(target=slave),),
+    )
+    catalog = build_local_control_catalog(
+        (
+            _qualification("power"),
+            _qualification("manual_flow"),
+            _qualification("slave_per_slot_flow_extension"),
+        ),
+        current_content=manifest.content,
+        _qualification_verifier_for_test=lambda _item: frozenset(
+            {master.physical_identity_key, slave.physical_identity_key}
+        ),
+    )
+    return project_home_assistant(
+        manifest,
+        catalog,
+        discovery_prefix=discovery_prefix,
+        topic_prefix=topic_prefix,
+        schedule_plans=(plan,),
+        groups=(group,),
+        control_surface_enabled=control_surface_enabled,
     )
 
 
@@ -383,3 +464,237 @@ def test_observer_projection_suppresses_qualified_controls_without_losing_diagno
     assert any(entity.function == "schedule" for entity in observer.entities)
     assert all(entity.command_topic is None for entity in observer.entities)
     assert all("command_topic" not in payload for _topic, payload in observer.discovery_records())
+
+
+def test_topic_prefix_namespaces_every_discovery_identity_family() -> None:
+    left = _qualified_projection("jebao-flow/left")
+    right = _qualified_projection("jebao-flow/right")
+
+    assert any(
+        entity.logical_member != "local_system" and entity.slot_index is None
+        for entity in left.entities
+    )
+    assert any(entity.logical_member == "local_system" for entity in left.entities)
+    assert any(entity.slot_index is not None for entity in left.entities)
+    assert left.group_entities
+    assert left.group_control_entities
+    assert left.group_resume_entities
+
+    identity_sets: list[tuple[set[str], set[str], set[str]]] = []
+    for projection in (left, right):
+        entities = _projected_entities(projection)
+        records = projection.discovery_records()
+        [namespace] = {entity.instance_namespace for entity in entities}
+        discovery_topics: set[str] = set()
+        unique_ids: set[str] = set()
+        device_identifiers: set[str] = set()
+
+        assert len(records) == len(entities)
+        for entity, (topic, payload) in zip(entities, records, strict=True):
+            object_id = topic.rsplit("/", 2)[-2]
+            identifier = _device_identifier(entity)
+            assert topic == (
+                f"{projection.discovery_prefix}/{entity.platform.value}/"
+                f"{entity.unique_id}/config"
+            )
+            assert payload["unique_id"] == entity.unique_id == object_id
+            assert entity.unique_id.count(namespace) == 1
+            assert object_id.count(namespace) == 1
+            assert identifier.count(namespace) == 1
+            discovery_topics.add(topic)
+            unique_ids.add(entity.unique_id)
+            device_identifiers.add(identifier)
+        identity_sets.append((discovery_topics, unique_ids, device_identifiers))
+
+    left_sets, right_sets = identity_sets
+    assert all(left_values.isdisjoint(right_values) for left_values, right_values in zip(
+        left_sets,
+        right_sets,
+        strict=True,
+    ))
+
+
+def test_topic_prefix_namespace_is_golden_deterministic_and_discovery_prefix_independent() -> None:
+    expected = (
+        "instance_ce1ffb4517be8e9224bd3b7aa88921621397bc66eb679d38817a78f24bdb1e49"
+    )
+    first = _qualified_projection("jebao-flow/main")
+    repeated = _qualified_projection("jebao-flow/main")
+    other_discovery = _qualified_projection(
+        "jebao-flow/main",
+        discovery_prefix="otherassistant",
+    )
+
+    assert len(expected) == 73
+    assert expected.isascii()
+    assert {entity.instance_namespace for entity in _projected_entities(first)} == {expected}
+    assert first.public_dict() == repeated.public_dict()
+    assert first.discovery_records() == repeated.discovery_records()
+    assert {
+        entity.unique_id for entity in _projected_entities(first)
+    } == {entity.unique_id for entity in _projected_entities(other_discovery)}
+    assert {
+        _device_identifier(entity) for entity in _projected_entities(first)
+    } == {
+        _device_identifier(entity) for entity in _projected_entities(other_discovery)
+    }
+    assert {
+        topic for topic, _payload in first.discovery_records()
+    }.isdisjoint(topic for topic, _payload in other_discovery.discovery_records())
+
+
+def test_namespaced_devices_preserve_grouping_and_existing_runtime_topics() -> None:
+    prefix = "jebao-flow/main"
+    projection = _qualified_projection(prefix)
+    namespace = next(iter(_projected_entities(projection))).instance_namespace
+    device_identifiers: dict[str, set[str]] = {}
+    for entity in projection.entities:
+        device_identifiers.setdefault(entity.logical_member, set()).add(
+            _device_identifier(entity)
+        )
+    assert all(len(identifiers) == 1 for identifiers in device_identifiers.values())
+    assert device_identifiers["local_system"] == {
+        f"jebao_flow_local_{namespace}_local_system"
+    }
+
+    group_entities = (
+        *projection.group_entities,
+        *projection.group_control_entities,
+        *projection.group_resume_entities,
+    )
+    group_identifiers = {_device_identifier(entity) for entity in group_entities}
+    assert group_identifiers == {f"jebao_flow_local_{namespace}_group_main_flow"}
+    assert all(
+        _device_identifier(entity)
+        != next(iter(device_identifiers[entity.logical_member]))
+        for entity in projection.group_resume_entities
+    )
+
+    flow = next(
+        entity
+        for entity in projection.entities
+        if entity.logical_member == "wavemaker_master" and entity.function == "manual_flow"
+    )
+    slot = next(entity for entity in projection.entities if entity.slot_index == 0)
+    system = next(
+        entity for entity in projection.entities if entity.logical_member == "local_system"
+    )
+    [actual] = projection.group_entities
+    [control] = projection.group_control_entities
+    resume = projection.group_resume_entities[0]
+
+    assert flow.state_topic == (
+        f"{prefix}/local/devices/wavemaker_master/functions/manual_flow/state"
+    )
+    assert flow.command_topic == (
+        f"{prefix}/local/devices/wavemaker_master/functions/manual_flow/set"
+    )
+    assert slot.state_topic == (
+        f"{prefix}/local/schedules/wavemaker_master_async/slaves/"
+        "wavemaker_slave/slots/0/flow/state"
+    )
+    assert slot.command_topic == (
+        f"{prefix}/local/schedules/wavemaker_master_async/slaves/"
+        "wavemaker_slave/slots/0/flow/set"
+    )
+    assert system.state_topic == f"{prefix}/local/system/functions/{system.function}/state"
+    assert actual.state_topic == f"{prefix}/local/groups/main_flow/actual-output/state"
+    assert actual.availability_topic == (
+        f"{prefix}/local/groups/main_flow/actual-output/availability"
+    )
+    assert control.command_topic == f"{prefix}/local/groups/main_flow/control/set"
+    assert resume.command_topic.endswith(
+        f"/local/groups/main_flow/members/{resume.logical_member}/resume/set"
+    )
+    assert projection.global_availability_topic == f"{prefix}/local/availability"
+    assert projection.device_availability_topic("wavemaker_master") == (
+        f"{prefix}/local/devices/wavemaker_master/availability"
+    )
+
+
+def test_instance_namespace_is_mode_independent_without_restoring_observer_controls() -> None:
+    control = _qualified_projection("jebao-flow/main")
+    observer = _qualified_projection(
+        "jebao-flow/main",
+        control_surface_enabled=False,
+    )
+    control_entities = _projected_entities(control)
+    observer_entities = _projected_entities(observer)
+    [namespace] = {entity.instance_namespace for entity in control_entities}
+
+    assert {entity.instance_namespace for entity in observer_entities} == {namespace}
+    assert {
+        _device_identifier(entity) for entity in observer_entities
+    } == {_device_identifier(entity) for entity in control_entities}
+
+    control_common = {
+        (entity.logical_member, entity.function): (
+            entity.unique_id,
+            _device_identifier(entity),
+        )
+        for entity in control.entities
+        if entity.slot_index is None
+    }
+    observer_common = {
+        (entity.logical_member, entity.function): (
+            entity.unique_id,
+            _device_identifier(entity),
+        )
+        for entity in observer.entities
+    }
+    assert observer_common == control_common
+    assert observer.group_entities[0].unique_id == control.group_entities[0].unique_id
+    assert observer.group_control_entities == ()
+    assert observer.group_resume_entities == ()
+    assert not [entity for entity in observer.entities if entity.slot_index is not None]
+    assert all(entity.command_topic is None for entity in observer.entities)
+    assert observer.control_surface_diagnostic_reason == "runtime_mode_observer"
+
+
+def test_invalid_topic_prefix_is_rejected_before_namespace_or_entity_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_call(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("invalid topic prefix reached namespace or entity construction")
+
+    monkeypatch.setattr(ha_module, "_discovery_instance_namespace", unexpected_call)
+    monkeypatch.setattr(ha_module, "_project_device_function", unexpected_call)
+
+    with pytest.raises(ValueError, match="MQTT topic prefix"):
+        project_home_assistant(
+            _manifest(),
+            build_local_control_catalog(),
+            discovery_prefix="homeassistant",
+            topic_prefix="invalid prefix",
+        )
+
+
+def test_instance_namespace_hashes_the_exact_unnormalized_topic_prefix() -> None:
+    plain = _qualified_projection("a/b")
+    trailing_slash = _qualified_projection("a/b/")
+    plain_namespace = next(iter(_projected_entities(plain))).instance_namespace
+    trailing_namespace = next(iter(_projected_entities(trailing_slash))).instance_namespace
+    plain_flow = next(
+        entity
+        for entity in plain.entities
+        if entity.logical_member == "wavemaker_master" and entity.function == "manual_flow"
+    )
+    trailing_flow = next(
+        entity
+        for entity in trailing_slash.entities
+        if entity.logical_member == "wavemaker_master" and entity.function == "manual_flow"
+    )
+
+    assert plain_namespace != trailing_namespace
+    assert plain_flow.state_topic == (
+        "a/b/local/devices/wavemaker_master/functions/manual_flow/state"
+    )
+    assert plain_flow.command_topic == (
+        "a/b/local/devices/wavemaker_master/functions/manual_flow/set"
+    )
+    assert trailing_flow.state_topic == (
+        "a/b//local/devices/wavemaker_master/functions/manual_flow/state"
+    )
+    assert trailing_flow.command_topic == (
+        "a/b//local/devices/wavemaker_master/functions/manual_flow/set"
+    )

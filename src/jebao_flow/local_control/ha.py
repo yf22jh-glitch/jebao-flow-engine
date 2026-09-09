@@ -8,8 +8,9 @@ diagnostic instead of becoming a button that merely looks supported.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from hashlib import sha256
 
 from jebao_flow.groups.models import GroupConfig
 from jebao_flow.local_control.catalog import LocalControlCatalog, LocalFunctionDescriptor
@@ -19,6 +20,7 @@ from jebao_flow.local_control.schedule import FreshMasterSchedulePlan
 from jebao_flow.operator_capture.app_catalog import AppFunctionKind
 
 _TOPIC_PREFIX_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\Z")
+_INSTANCE_NAMESPACE_RE = re.compile(r"instance_[0-9a-f]{64}\Z")
 _RUNTIME_MODE_OBSERVER_REASON = "runtime_mode_observer"
 
 
@@ -52,10 +54,12 @@ class HomeAssistantEntityDescriptor:
     native_maximum: int | None = None
     options: tuple[str, ...] = ()
     slot_index: int | None = None
+    instance_namespace: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
         public = self.public_dict()
         _require_ascii(public)
+        _require_discovery_identity(self.unique_id, self.instance_namespace)
         if self.control_available != (self.command_topic is not None):
             raise ValueError("Home Assistant command topic must match control availability")
         if self.platform is HomeAssistantPlatform.NUMBER:
@@ -92,7 +96,9 @@ class HomeAssistantEntityDescriptor:
             "unique_id": self.unique_id,
             "state_topic": self.state_topic,
             "device": {
-                "identifiers": [f"jebao_flow_local_{self.logical_member}"],
+                "identifiers": [
+                    _device_identifier(self.instance_namespace, self.logical_member)
+                ],
                 "name": _english_member_name(self.logical_member),
                 "manufacturer": "Jebao",
                 "model": "Local Control",
@@ -170,6 +176,7 @@ class GroupHomeAssistantEntityDescriptor:
     state_topic: str
     attributes_topic: str
     availability_topic: str
+    instance_namespace: str = field(kw_only=True)
 
     @property
     def platform(self) -> HomeAssistantPlatform:
@@ -181,6 +188,7 @@ class GroupHomeAssistantEntityDescriptor:
 
     def __post_init__(self) -> None:
         _require_ascii(self.public_dict())
+        _require_discovery_identity(self.unique_id, self.instance_namespace)
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -217,7 +225,9 @@ class GroupHomeAssistantEntityDescriptor:
             ],
             "availability_mode": "all",
             "device": {
-                "identifiers": [f"jebao_flow_local_group_{self.group_id}"],
+                "identifiers": [
+                    _group_device_identifier(self.instance_namespace, self.group_id)
+                ],
                 "name": f"{_english_member_name(self.group_id)} Group",
                 "manufacturer": "Jebao",
                 "model": "Local Control Group",
@@ -237,6 +247,7 @@ class GroupControlHomeAssistantEntityDescriptor:
     state_topic: str
     command_topic: str
     availability_topic: str
+    instance_namespace: str = field(kw_only=True)
 
     @property
     def platform(self) -> HomeAssistantPlatform:
@@ -244,6 +255,7 @@ class GroupControlHomeAssistantEntityDescriptor:
 
     def __post_init__(self) -> None:
         _require_ascii(self.public_dict())
+        _require_discovery_identity(self.unique_id, self.instance_namespace)
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -284,7 +296,9 @@ class GroupControlHomeAssistantEntityDescriptor:
             ],
             "availability_mode": "all",
             "device": {
-                "identifiers": [f"jebao_flow_local_group_{self.group_id}"],
+                "identifiers": [
+                    _group_device_identifier(self.instance_namespace, self.group_id)
+                ],
                 "name": f"{_english_member_name(self.group_id)} Group",
                 "manufacturer": "Jebao",
                 "model": "Local Control Group",
@@ -304,6 +318,7 @@ class GroupMemberResumeHomeAssistantEntityDescriptor:
     name: str
     command_topic: str
     availability_topic: str
+    instance_namespace: str = field(kw_only=True)
 
     @property
     def platform(self) -> HomeAssistantPlatform:
@@ -311,6 +326,7 @@ class GroupMemberResumeHomeAssistantEntityDescriptor:
 
     def __post_init__(self) -> None:
         _require_ascii(self.public_dict())
+        _require_discovery_identity(self.unique_id, self.instance_namespace)
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -345,7 +361,9 @@ class GroupMemberResumeHomeAssistantEntityDescriptor:
             ],
             "availability_mode": "all",
             "device": {
-                "identifiers": [f"jebao_flow_local_group_{self.group_id}"],
+                "identifiers": [
+                    _group_device_identifier(self.instance_namespace, self.group_id)
+                ],
                 "name": f"{_english_member_name(self.group_id)} Group",
                 "manufacturer": "Jebao",
                 "model": "Local Control Group",
@@ -368,21 +386,21 @@ class HomeAssistantProjection:
     def __post_init__(self) -> None:
         _require_topic_prefix(self.discovery_prefix)
         _require_topic_prefix(self.topic_prefix)
+        expected_namespace = _discovery_instance_namespace(self.topic_prefix)
         if self.control_surface_diagnostic_reason not in {
             None,
             _RUNTIME_MODE_OBSERVER_REASON,
         }:
             raise ValueError("unknown Home Assistant control-surface diagnostic reason")
-        identities = [(entity.platform, entity.unique_id) for entity in self.entities]
-        identities.extend(
-            (entity.platform, entity.unique_id) for entity in self.group_entities
+        entities = (
+            *self.entities,
+            *self.group_entities,
+            *self.group_control_entities,
+            *self.group_resume_entities,
         )
-        identities.extend(
-            (entity.platform, entity.unique_id) for entity in self.group_control_entities
-        )
-        identities.extend(
-            (entity.platform, entity.unique_id) for entity in self.group_resume_entities
-        )
+        if any(entity.instance_namespace != expected_namespace for entity in entities):
+            raise ValueError("Home Assistant entity uses a different instance namespace")
+        identities = [(entity.platform, entity.unique_id) for entity in entities]
         if len(identities) != len(set(identities)):
             raise ValueError("Home Assistant projection contains duplicate entities")
 
@@ -472,6 +490,7 @@ def project_home_assistant(
 
     _require_topic_prefix(discovery_prefix)
     _require_topic_prefix(topic_prefix)
+    instance_namespace = _discovery_instance_namespace(topic_prefix)
     _validate_unique_schedule_topology(schedule_plans)
     entities: list[HomeAssistantEntityDescriptor] = []
     for device in manifest.devices:
@@ -484,11 +503,18 @@ def project_home_assistant(
                     device,
                     descriptor,
                     topic_prefix,
+                    instance_namespace=instance_namespace,
                     control_surface_enabled=control_surface_enabled,
                 )
             )
     for descriptor in (item for item in catalog.functions if item.product_key is None):
-        entities.append(_project_system_function(descriptor, topic_prefix))
+        entities.append(
+            _project_system_function(
+                descriptor,
+                topic_prefix,
+                instance_namespace=instance_namespace,
+            )
+        )
 
     known_members = {device.logical_member: device for device in manifest.devices}
     for plan in schedule_plans:
@@ -509,6 +535,7 @@ def project_home_assistant(
                         slot_index,
                         topic_prefix,
                         descriptor,
+                        instance_namespace=instance_namespace,
                     )
                 )
 
@@ -525,13 +552,29 @@ def project_home_assistant(
         discovery_prefix=discovery_prefix,
         topic_prefix=topic_prefix,
         entities=tuple(entities),
-        group_entities=tuple(_project_group_output(group, topic_prefix) for group in groups),
+        group_entities=tuple(
+            _project_group_output(
+                group,
+                topic_prefix,
+                instance_namespace=instance_namespace,
+            )
+            for group in groups
+        ),
         group_control_entities=tuple(
-            _project_group_control(group, topic_prefix)
+            _project_group_control(
+                group,
+                topic_prefix,
+                instance_namespace=instance_namespace,
+            )
             for group in qualified_groups
         ),
         group_resume_entities=tuple(
-            _project_group_member_resume(group, member.device, topic_prefix)
+            _project_group_member_resume(
+                group,
+                member.device,
+                topic_prefix,
+                instance_namespace=instance_namespace,
+            )
             for group in qualified_groups
             for member in group.members
         ),
@@ -544,30 +587,36 @@ def project_home_assistant(
 def _project_group_output(
     group: GroupConfig,
     topic_prefix: str,
+    *,
+    instance_namespace: str,
 ) -> GroupHomeAssistantEntityDescriptor:
     base = f"{topic_prefix}/local/groups/{group.id}/actual-output"
     return GroupHomeAssistantEntityDescriptor(
         group_id=group.id,
-        unique_id=f"jebao_flow_local_group_{group.id}_actual_output",
+        unique_id=_unique_id(instance_namespace, f"group_{group.id}_actual_output"),
         name=f"{_english_member_name(group.id)} Actual Output",
         state_topic=f"{base}/state",
         attributes_topic=f"{base}/attributes",
         availability_topic=f"{base}/availability",
+        instance_namespace=instance_namespace,
     )
 
 
 def _project_group_control(
     group: GroupConfig,
     topic_prefix: str,
+    *,
+    instance_namespace: str,
 ) -> GroupControlHomeAssistantEntityDescriptor:
     base = f"{topic_prefix}/local/groups/{group.id}/control"
     return GroupControlHomeAssistantEntityDescriptor(
         group_id=group.id,
-        unique_id=f"jebao_flow_local_group_{group.id}_control",
+        unique_id=_unique_id(instance_namespace, f"group_{group.id}_control"),
         name=f"{_english_member_name(group.id)} Control",
         state_topic=f"{base}/state",
         command_topic=f"{base}/set",
         availability_topic=f"{base}/availability",
+        instance_namespace=instance_namespace,
     )
 
 
@@ -575,15 +624,21 @@ def _project_group_member_resume(
     group: GroupConfig,
     logical_member: str,
     topic_prefix: str,
+    *,
+    instance_namespace: str,
 ) -> GroupMemberResumeHomeAssistantEntityDescriptor:
     base = f"{topic_prefix}/local/groups/{group.id}/members/{logical_member}/resume"
     return GroupMemberResumeHomeAssistantEntityDescriptor(
         group_id=group.id,
         logical_member=logical_member,
-        unique_id=f"jebao_flow_local_group_{group.id}_{logical_member}_resume",
+        unique_id=_unique_id(
+            instance_namespace,
+            f"group_{group.id}_{logical_member}_resume",
+        ),
         name=f"Resume {_english_member_name(logical_member)} To Group",
         command_topic=f"{base}/set",
         availability_topic=f"{base}/availability",
+        instance_namespace=instance_namespace,
     )
 
 
@@ -592,6 +647,7 @@ def _project_device_function(
     descriptor: LocalFunctionDescriptor,
     topic_prefix: str,
     *,
+    instance_namespace: str,
     control_surface_enabled: bool,
 ) -> HomeAssistantEntityDescriptor:
     base = f"{topic_prefix}/local/devices/{device.logical_member}/functions/{descriptor.function}"
@@ -603,7 +659,10 @@ def _project_device_function(
     suffix = descriptor.function.replace(".", "_")
     return HomeAssistantEntityDescriptor(
         platform=platform,
-        unique_id=f"jebao_flow_local_{device.logical_member}_{suffix}",
+        unique_id=_unique_id(
+            instance_namespace,
+            f"{device.logical_member}_{suffix}",
+        ),
         name=descriptor.exposed_name,
         logical_member=device.logical_member,
         function=descriptor.function,
@@ -616,6 +675,7 @@ def _project_device_function(
         native_minimum=descriptor.native_minimum,
         native_maximum=descriptor.native_maximum,
         options=descriptor.choices,
+        instance_namespace=instance_namespace,
     )
 
 
@@ -625,6 +685,8 @@ def _project_slave_slot(
     slot_index: int,
     topic_prefix: str,
     descriptor: LocalFunctionDescriptor,
+    *,
+    instance_namespace: str,
 ) -> HomeAssistantEntityDescriptor:
     control_available = descriptor.control_exposed_for(slave.physical_identity_key)
     group_key = f"{plan.master.logical_member}_{plan.linkage_mode.value}"
@@ -634,8 +696,9 @@ def _project_slave_slot(
     )
     return HomeAssistantEntityDescriptor(
         platform=HomeAssistantPlatform.NUMBER,
-        unique_id=(
-            f"jebao_flow_local_{group_key}_{slave.logical_member}_slot_{slot_index:02d}_flow"
+        unique_id=_unique_id(
+            instance_namespace,
+            f"{group_key}_{slave.logical_member}_slot_{slot_index:02d}_flow",
         ),
         name=f"Schedule Slot {slot_index + 1} Flow",
         logical_member=slave.logical_member,
@@ -648,17 +711,20 @@ def _project_slave_slot(
         native_minimum=descriptor.native_minimum,
         native_maximum=descriptor.native_maximum,
         slot_index=slot_index,
+        instance_namespace=instance_namespace,
     )
 
 
 def _project_system_function(
     descriptor: LocalFunctionDescriptor,
     topic_prefix: str,
+    *,
+    instance_namespace: str,
 ) -> HomeAssistantEntityDescriptor:
     base = f"{topic_prefix}/local/system/functions/{descriptor.function}"
     return HomeAssistantEntityDescriptor(
         platform=HomeAssistantPlatform.SENSOR,
-        unique_id=f"jebao_flow_local_system_{descriptor.function}",
+        unique_id=_unique_id(instance_namespace, f"system_{descriptor.function}"),
         name=descriptor.exposed_name,
         logical_member="local_system",
         function=descriptor.function,
@@ -668,6 +734,7 @@ def _project_system_function(
         control_available=False,
         diagnostic_reason=descriptor.diagnostic_reason,
         entity_category="diagnostic",
+        instance_namespace=instance_namespace,
     )
 def _platform_for(
     descriptor: LocalFunctionDescriptor,
@@ -682,6 +749,25 @@ def _platform_for(
         AppFunctionKind.ENUM: HomeAssistantPlatform.SELECT,
         AppFunctionKind.ACTION: HomeAssistantPlatform.BUTTON,
     }.get(descriptor.kind, HomeAssistantPlatform.SENSOR)
+
+
+def _discovery_instance_namespace(topic_prefix: str) -> str:
+    return f"instance_{sha256(topic_prefix.encode('ascii')).hexdigest()}"
+
+
+def _unique_id(instance_namespace: str, suffix: str) -> str:
+    _require_instance_namespace(instance_namespace)
+    return f"jebao_flow_local_{instance_namespace}_{suffix}"
+
+
+def _device_identifier(instance_namespace: str, logical_member: str) -> str:
+    _require_instance_namespace(instance_namespace)
+    return f"jebao_flow_local_{instance_namespace}_{logical_member}"
+
+
+def _group_device_identifier(instance_namespace: str, group_id: str) -> str:
+    _require_instance_namespace(instance_namespace)
+    return f"jebao_flow_local_{instance_namespace}_group_{group_id}"
 
 
 def _validate_plan_members(
@@ -722,6 +808,17 @@ def _english_member_name(logical_member: str) -> str:
 def _require_topic_prefix(value: str) -> None:
     if _TOPIC_PREFIX_RE.fullmatch(value.strip("/")) is None:
         raise ValueError("MQTT topic prefix must use bounded printable ASCII segments")
+
+
+def _require_instance_namespace(value: str) -> None:
+    if _INSTANCE_NAMESPACE_RE.fullmatch(value) is None:
+        raise ValueError("Home Assistant instance namespace must be a full SHA-256 binding")
+
+
+def _require_discovery_identity(unique_id: str, instance_namespace: str) -> None:
+    _require_instance_namespace(instance_namespace)
+    if not unique_id.startswith(f"jebao_flow_local_{instance_namespace}_"):
+        raise ValueError("Home Assistant unique id is not bound to its instance namespace")
 
 
 def _require_ascii(value: object) -> None:

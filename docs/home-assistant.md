@@ -98,12 +98,19 @@ qualification `diagnostic_reason`은 대체하지 않고 그대로 보존합니�
 출력 sensor는 Home Assistant Recorder의 이력 그래프에서 기존 스케줄의 출력 변화를 확인하는 데
 사용할 수 있습니다.
 
-이 억제는 현재 프로세스가 새로 만드는 표면에만 적용됩니다. 이전 control run이 broker에 남긴
-retained discovery config는 이 변경에서 삭제하지 않습니다. 현재 discovery identity에
-`topic_prefix`나 instance 성분이 없어 그 config가 이 데몬의 소유인지 증명할 수 없기 때문입니다.
-그런 entity가 화면에 남아 있는지는 `UNKNOWN`이지만 observer 프로세스는 그 command topic을
-subscribe하지 않습니다. discovery identity에 stable instance namespace를 먼저 결속한 후에만
-소유권이 증명된 retained variant를 별도 migration으로 정리합니다.
+새로 projection하는 Home Assistant discovery object id·`unique_id`·device identifier는 exact
+`topic_prefix`의 full SHA-256에서 유도한 stable instance namespace를 공통으로 사용합니다.
+같은 instance의 device function·schedule slot은 같은 logical device로, group actual-output·switch·
+member resume는 같은 logical group으로 계속 묶입니다. state·command·availability topic은 기존
+exact `topic_prefix` 형식을 그대로 유지합니다.
+
+이 identity 변경은 retained-state migration이 아니며 empty retained deletion payload를 보내지 않습니다.
+pre-namespace legacy config가 broker·Home Assistant에 남아 있는지와 그 소유권은 `UNKNOWN`입니다.
+control mode에서 legacy entity와 namespaced replacement는 같은 command topic을 가리켜 둘 다
+조작 가능할 수 있으므로, 소유 namespace 내 variant cleanup과 legacy exact inventory·제거·복구
+절차가 별도로 검토·승인되기 전에는 실제 daemon을 이 schema로 재기동하지 않습니다.
+pre-namespace legacy config는 자동 삭제하지 않고, Recorder history·device/entity customization·area·
+dashboard reference가 새 identity로 자동 이전된다고 주장하지 않습니다.
 
 장비가 로컬 시간표를 제공하면 별도 `장비 시간표` sensor가 만들어집니다. sensor 상태는
 해석에 성공한 시간 구간 수이며, `enabled`, `slot_capacity`, `entries`, `invalid_slots` 속성을
@@ -112,8 +119,9 @@ subscribe하지 않습니다. discovery identity에 stable instance namespace를
 않습니다. 메인 수류 카드와 리턴·도징 카드 모두 제어·관찰 모드에서 시간표를 접이식으로
 표시하며, 해석하지 못한 슬롯은 경고만 보여 줍니다. 이 시간표는 현재 읽기 전용입니다.
 
-`topic_prefix`는 여러 데몬 인스턴스의 state·command topic을 구분하지만, 현재 Home Assistant
-discovery topic의 `unique_id`와 device identifier에는 instance 성분이 없습니다. 따라서 같은
-`discovery_prefix`와 논리 ID를 쓰는 여러 데몬의 config entry 분리는 아직 구현되지 않았으며,
-stable instance namespace migration 전에는 서로의 discovery config가 충돌할 수 있습니다. 같은 `instance`가
-둘 이상인데 `topic_prefix`를 생략하면 카드는 임의 선택하지 않고 명시적인 선택을 요청합니다.
+`topic_prefix`는 여러 데몬 인스턴스의 state·command topic을 구분하고, 그 exact 문자열의
+full SHA-256 namespace가 Home Assistant discovery object id·`unique_id`·device identifier도 구분합니다.
+따라서 같은 `discovery_prefix`와 논리 ID를 쓰더라도 `topic_prefix`가 다른 새 projection은
+discovery identity를 공유하지 않습니다. 단, 이 보장은 pre-namespace retained config를 이전·삭제하지
+않습니다. 같은 `instance`가 둘 이상인데 `topic_prefix`를 생략하면 카드는 임의 선택하지 않고
+명시적인 선택을 요청합니다.
