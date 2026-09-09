@@ -413,6 +413,39 @@ fresh scalar state with a typed group target, so external target drift remains `
 becoming a speculative write gate. Production construction and any broker, Home Assistant, or live
 hardware activation require a separate reviewed scope and the hardware-readiness preconditions.
 
+### Production group lifecycle inventory
+
+The local `serve` path now constructs an isolated lifecycle inventory and feeds it exactly one
+complete result tuple after each fresh device-state cycle. This is additive to the existing retained
+device truth: individual values and availability are published first, and a group construction or
+planning failure is converted to a bounded group diagnostic instead of terminating the poller or
+MQTT adapter. Current inventory is retained at `<topic-prefix>/local/groups/status`; it is diagnostic
+JSON, not a Home Assistant entity or command surface, and it contains no physical identity or
+private path. The inventory callback runs exactly once after all device-state publications succeed;
+if a device-state publish fails, the cycle loop itself terminates rather than continuing with a
+silently omitted group observation.
+
+Groups are constructed independently. Native-linked groups, products without the current local
+power/Flow encoder pair, unimplemented patterns, `fallback_constant`, missing current manifest
+members, duplicate physical identities, and empty intersections with the declared `30..75` Flow
+envelope remain `unconstructed` with a stable English reason. Per-device actuation limits use the
+intersection of current private config and that declared envelope; the planner's currently declared
+step remains unchanged. Group-level effective pattern limits remain a separate input.
+
+A read-only `serve` process reports the inventory but constructs zero supervisors and never creates
+a fake write port. With `--write-enabled`, each supported group receives the current coordinator and
+its physical plan boundary shares the same process operation lock as direct device commands and
+fresh reads. The supervisor itself remains structurally write-disarmed until an explicit group
+runtime command. This slice provides no production caller for that command, so startup and every
+fresh cycle still submit zero group plans regardless of configured group or member `enabled` values.
+
+Shutdown attempts every constructed supervisor. An unresolved mandatory OFF is re-raised outside
+the adapter's task-cancellation gather and remains an error on repeated close; it cannot become a
+clean service exit. Before a later command-transport slice can arm groups, direct per-device writes
+must also set the affected manager's manual override and group entities must remain based on fresh
+device truth. External scalar-target drift detection is still `UNKNOWN`, not an inferred success or
+new write gate.
+
 ## Product audit mapping
 
 `ENC` means deterministic bytes exist. `DEC` means deterministic status decoding exists. Neither

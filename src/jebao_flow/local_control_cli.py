@@ -27,6 +27,7 @@ from jebao_flow.local_control.dosing import (
     plan_average_interval_dosing,
     plan_daily_dosing,
 )
+from jebao_flow.local_control.group_service import LocalControlGroupService
 from jebao_flow.local_control.ha import project_home_assistant
 from jebao_flow.local_control.install import (
     build_fresh_install_manifest,
@@ -391,6 +392,13 @@ def _run(args: argparse.Namespace) -> int:
             catalog,
             write_enabled=runtime_write_enabled,
         )
+        group_service = LocalControlGroupService(
+            config=prepared.config,
+            manifest=prepared.manifest,
+            catalog=catalog,
+            coordinator=coordinator,
+            operation_lock=operation_lock,
+        )
         router = LocalControlMqttRouter(
             projection=projection,
             manifest=prepared.manifest,
@@ -420,6 +428,7 @@ def _run(args: argparse.Namespace) -> int:
                     router=router,
                     state_poller=state_poller,
                     password=_current_mqtt_password(prepared.config),
+                    group_service=group_service,
                 )
             )
         )

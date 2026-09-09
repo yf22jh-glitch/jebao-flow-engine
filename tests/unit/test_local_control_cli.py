@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from jebao_flow import local_control_cli
+from jebao_flow.config import AppConfig
 from jebao_flow.local_control.models import (
     FreshInstallManifest,
     InstallContentBindings,
@@ -788,3 +789,77 @@ def test_service_restart_binding_mismatch_fails_before_replacing_manifest(
         local_control_cli._prepare_current(args)
 
     assert replaced == []
+
+
+def test_read_only_serve_constructs_group_inventory_without_a_supervisor(
+    monkeypatch,
+) -> None:
+    config = AppConfig.model_validate(
+        {
+            "instance": {"id": "test", "name": "Test"},
+            "mqtt": {"host": "broker.invalid", "topic_prefix": "jebao-flow/test"},
+            "devices": [
+                {
+                    "id": member,
+                    "name": member.title(),
+                    "type": "wavemaker",
+                    "product_key": LOCAL_WAVEMAKER_PRO.product_key,
+                    "address": f"192.0.2.{index}",
+                    "identity": {
+                        "device_id": f"synthetic-device-{index}",
+                        "mac_address": f"0200000000{index:02x}",
+                    },
+                }
+                for index, member in enumerate(("master", "slave"), start=1)
+            ],
+            "groups": [
+                {
+                    "id": "main_flow",
+                    "name": "Main flow",
+                    "members": [{"device": "master"}, {"device": "slave"}],
+                }
+            ],
+        }
+    )
+    current = SimpleNamespace(
+        config=config,
+        manifest=_manifest(),
+        config_path=local_control_cli.Path("/current/private/config.yaml"),
+        manifest_path=local_control_cli.Path("/current/private/install.json"),
+        template_roots=(),
+    )
+    captured = {}
+
+    class _GroupService:
+        supervisor_count = 0
+
+    group_service = _GroupService()
+
+    def construct_group_service(**kwargs):
+        captured["group_kwargs"] = kwargs
+        return group_service
+
+    async def serve(adapter) -> None:
+        captured["adapter"] = adapter
+
+    monkeypatch.setattr(local_control_cli, "_prepare_current", lambda args: current)
+    monkeypatch.setattr(
+        local_control_cli,
+        "LocalControlGroupService",
+        construct_group_service,
+    )
+    monkeypatch.setattr(local_control_cli, "_serve", serve)
+
+    result = local_control_cli.main(
+        [
+            "serve",
+            "--config",
+            "/current/private/config.yaml",
+            "--role-attested-by",
+            "operator",
+        ]
+    )
+
+    assert result == 0
+    assert captured["group_kwargs"]["coordinator"] is None
+    assert captured["adapter"]._group_service is group_service  # noqa: SLF001

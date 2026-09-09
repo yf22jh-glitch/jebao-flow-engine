@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -14,7 +15,11 @@ from jebao_flow.local_control.models import (
 )
 from jebao_flow.local_control.resolver import ResolvedEndpoint
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan, FreshSlaveSchedule
-from jebao_flow.local_control.state import FreshStatePoller, LocalControlStateProjector
+from jebao_flow.local_control.state import (
+    FreshDeviceState,
+    FreshStatePoller,
+    LocalControlStateProjector,
+)
 from jebao_flow.operator_capture.schedule_model import NativeLinkageMode
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
 
@@ -305,3 +310,53 @@ async def test_resolver_output_must_keep_the_exact_current_stable_binding() -> N
         result.diagnostic_reason == "current_resolution_binding_mismatch"
         for result in results
     )
+
+
+@pytest.mark.asyncio
+async def test_run_delivers_one_complete_cycle_after_all_device_publications(
+    monkeypatch,
+) -> None:
+    manifest, catalog, projection = _projection_setup()
+    poller = FreshStatePoller(
+        manifest=manifest,
+        resolver=_Resolver((), fail=True),
+        projector=LocalControlStateProjector(
+            manifest=manifest,
+            projection=projection,
+            catalog=catalog,
+        ),
+        poll_interval_seconds=5,
+        reconnect_initial_seconds=2,
+        reconnect_max_seconds=60,
+        read_lease=_ReadLease([]),
+    )
+    results = tuple(
+        FreshDeviceState(
+            logical_member=binding.logical_member,
+            available=False,
+            diagnostic_reason="current_discovery_unavailable",
+        )
+        for binding in manifest.devices
+    )
+    events = []
+    stop_event = asyncio.Event()
+
+    async def poll_once():
+        return results
+
+    async def publish(result):
+        events.append(("publish", result.logical_member))
+
+    async def observe_cycle(cycle):
+        events.append(("cycle", cycle))
+        stop_event.set()
+
+    monkeypatch.setattr(poller, "poll_once", poll_once)
+
+    await poller.run(publish, stop_event, observe_cycle=observe_cycle)
+
+    assert events == [
+        ("publish", "master"),
+        ("publish", "slave"),
+        ("cycle", results),
+    ]

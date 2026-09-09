@@ -95,6 +95,7 @@ class FreshDeviceState:
 
 
 StatePublisher = Callable[[FreshDeviceState], Awaitable[None]]
+FreshCycleObserver = Callable[[tuple[FreshDeviceState, ...]], Awaitable[None]]
 
 
 class LocalControlStateProjector:
@@ -276,12 +277,20 @@ class FreshStatePoller:
             )
         return tuple(results)
 
-    async def run(self, publish: StatePublisher, stop_event: asyncio.Event) -> None:
+    async def run(
+        self,
+        publish: StatePublisher,
+        stop_event: asyncio.Event,
+        *,
+        observe_cycle: FreshCycleObserver | None = None,
+    ) -> None:
         backoff = self._reconnect_initial_seconds
         while not stop_event.is_set():
             results = await self.poll_once()
             for result in results:
                 await publish(result)
+            if observe_cycle is not None:
+                await observe_cycle(results)
             all_available = all(result.available for result in results)
             if all_available:
                 delay = self._poll_interval_seconds
@@ -426,6 +435,7 @@ def _canonical_json(value: object) -> str:
 
 
 __all__ = [
+    "FreshCycleObserver",
     "FreshDeviceState",
     "FreshStateError",
     "FreshStatePoller",

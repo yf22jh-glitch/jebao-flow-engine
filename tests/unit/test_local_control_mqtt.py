@@ -1,13 +1,16 @@
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
 
-from jebao_flow.config import MqttConfig
+from jebao_flow.config import AppConfig, MqttConfig
+from jebao_flow.groups.runtime import UnresolvedGroupSafetyStopError
 from jebao_flow.local_control import mqtt as mqtt_module
 from jebao_flow.local_control.catalog import build_local_control_catalog
-from jebao_flow.local_control.coordinator import LocalControlResult
+from jebao_flow.local_control.coordinator import LocalControlCoordinator, LocalControlResult
+from jebao_flow.local_control.group_service import LocalControlGroupService
 from jebao_flow.local_control.ha import project_home_assistant
 from jebao_flow.local_control.journal import TransactionPhase
 from jebao_flow.local_control.models import (
@@ -425,3 +428,236 @@ async def test_runtime_clears_device_availability_before_discovery_and_uses_curr
         ("jebao-flow/main/local/devices/master/availability", "offline"),
         ("jebao-flow/main/local/devices/slave/availability", "offline"),
     ]
+
+
+class _GroupLifecycle:
+    def __init__(self, *, close_error: Exception | None = None) -> None:
+        self.cycles = []
+        self.close_count = 0
+        self.close_error = close_error
+
+    async def observe_fresh_cycle(self, states) -> None:
+        self.cycles.append(states)
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+    def public_dict(self):
+        return {
+            "schema_version": 1,
+            "status": "group_lifecycle",
+            "configured_group_count": 1,
+            "supervisor_count": 0,
+            "groups": [
+                {
+                    "group_id": "main_flow",
+                    "state": "unconstructed",
+                    "diagnostic_reason": "unsupported_product",
+                }
+            ],
+            "physical_identity_keys_exposed": False,
+        }
+
+
+class _OneCyclePoller:
+    logical_members = ("master", "slave")
+
+    def __init__(self, results) -> None:
+        self.results = results
+
+    async def run(self, publish, stop_event, *, observe_cycle=None) -> None:
+        assert observe_cycle is not None
+        for result in self.results:
+            await publish(result)
+        await observe_cycle(self.results)
+        stop_event.set()
+
+
+@pytest.mark.asyncio
+async def test_group_inventory_and_complete_cycle_are_additive_to_device_state(
+    monkeypatch,
+) -> None:
+    projection, _coordinator, router = _setup()
+    results = (
+        FreshDeviceState(
+            logical_member="master",
+            available=False,
+            diagnostic_reason="current_discovery_unavailable",
+        ),
+        FreshDeviceState(
+            logical_member="slave",
+            available=False,
+            diagnostic_reason="current_discovery_unavailable",
+        ),
+    )
+    group_service = _GroupLifecycle()
+    client = _RunClient()
+    monkeypatch.setattr(mqtt_module.aiomqtt, "Client", lambda *args, **kwargs: client)
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
+        projection=projection,
+        router=router,
+        state_poller=_OneCyclePoller(results),  # type: ignore[arg-type]
+        group_service=group_service,
+    )
+
+    await adapter.run(asyncio.Event())
+
+    assert group_service.cycles == [results]
+    assert group_service.close_count == 1
+    group_status = [
+        json.loads(payload)
+        for topic, payload, qos, retain in client.published
+        if topic == "jebao-flow/main/local/groups/status" and qos == 1 and retain
+    ]
+    assert len(group_status) == 2
+    assert group_status[-1]["groups"][0]["diagnostic_reason"] == "unsupported_product"
+    assert (
+        "jebao-flow/main/local/devices/master/availability",
+        "offline",
+        1,
+        True,
+    ) in client.published
+
+
+@pytest.mark.asyncio
+async def test_unresolved_group_close_error_escapes_the_mqtt_adapter(monkeypatch) -> None:
+    projection, _coordinator, router = _setup()
+    client = _RunClient()
+    monkeypatch.setattr(mqtt_module.aiomqtt, "Client", lambda *args, **kwargs: client)
+    error = UnresolvedGroupSafetyStopError("main_flow")
+    group_service = _GroupLifecycle(close_error=error)
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
+        projection=projection,
+        router=router,
+        state_poller=_OneCyclePoller(()),  # type: ignore[arg-type]
+        group_service=group_service,
+    )
+    stop_event = asyncio.Event()
+    stop_event.set()
+
+    with pytest.raises(UnresolvedGroupSafetyStopError):
+        await adapter.run(stop_event)
+
+    assert group_service.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_group_cycle_callback_failure_becomes_diagnostic_without_escaping() -> None:
+    projection, _coordinator, router = _setup()
+
+    class _FailingGroupLifecycle(_GroupLifecycle):
+        async def observe_fresh_cycle(self, states) -> None:
+            del states
+            raise RuntimeError("injected group cycle failure")
+
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
+        projection=projection,
+        router=router,
+        state_poller=_OneCyclePoller(()),  # type: ignore[arg-type]
+        group_service=_FailingGroupLifecycle(),
+    )
+    client = _Client()
+
+    await adapter._observe_group_cycle(client, ())  # type: ignore[arg-type]  # noqa: SLF001
+
+    topic, payload, qos, retain = client.published[-1]
+    assert topic == "jebao-flow/main/local/groups/status"
+    assert json.loads(payload)["diagnostic_reason"] == "group_cycle_callback_failed"
+    assert (qos, retain) == (1, True)
+
+
+@pytest.mark.asyncio
+async def test_unconstructable_group_does_not_block_existing_device_state_service(
+    monkeypatch,
+) -> None:
+    projection, _coordinator, router = _setup()
+    master = _binding("master", "1")
+    slave = _binding("slave", "2")
+    manifest = FreshInstallManifest(
+        generation="0" * 32,
+        rederived_at=datetime(2026, 9, 8, tzinfo=UTC),
+        devices=(master, slave),
+        content=InstallContentBindings(
+            app_catalog_sha256="f" * 64,
+            protocol_schema_sha256="b" * 64,
+        ),
+    )
+    config = AppConfig.model_validate(
+        {
+            "instance": {"id": "test", "name": "Test"},
+            "mqtt": {"host": "broker.invalid", "topic_prefix": "jebao-flow/main"},
+            "devices": [
+                {
+                    "id": member,
+                    "name": member.title(),
+                    "type": "wavemaker",
+                    "product_key": LOCAL_WAVEMAKER_PRO.product_key,
+                    "address": f"192.0.2.{index}",
+                    "identity": {
+                        "device_id": f"synthetic-device-{index}",
+                        "mac_address": f"0200000000{index:02x}",
+                    },
+                }
+                for index, member in enumerate(("master", "slave"), start=1)
+            ],
+            "groups": [
+                {
+                    "id": "main_flow",
+                    "name": "Main flow",
+                    "members": [{"device": "master"}, {"device": "slave"}],
+                    "failure_policy": {"on_member_offline": "fallback_constant"},
+                }
+            ],
+        }
+    )
+    group_service = LocalControlGroupService(
+        config=config,
+        manifest=manifest,
+        catalog=build_local_control_catalog((), current_content=manifest.content),
+        coordinator=LocalControlCoordinator.__new__(LocalControlCoordinator),
+        operation_lock=asyncio.Lock(),
+    )
+    results = (
+        FreshDeviceState(
+            logical_member="master",
+            available=False,
+            diagnostic_reason="current_discovery_unavailable",
+        ),
+        FreshDeviceState(
+            logical_member="slave",
+            available=False,
+            diagnostic_reason="current_discovery_unavailable",
+        ),
+    )
+    client = _RunClient()
+    monkeypatch.setattr(mqtt_module.aiomqtt, "Client", lambda *args, **kwargs: client)
+    adapter = LocalControlMqttAdapter(
+        MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
+        projection=projection,
+        router=router,
+        state_poller=_OneCyclePoller(results),  # type: ignore[arg-type]
+        group_service=group_service,
+    )
+
+    await adapter.run(asyncio.Event())
+
+    assert group_service.supervisor_count == 0
+    assert (
+        "jebao-flow/main/local/devices/master/availability",
+        "offline",
+        1,
+        True,
+    ) in client.published
+    status_payload = next(
+        json.loads(payload)
+        for topic, payload, _qos, _retain in reversed(client.published)
+        if topic == "jebao-flow/main/local/groups/status"
+    )
+    assert status_payload["groups"][0]["diagnostic_reason"] == (
+        "fallback_constant_not_supported"
+    )

@@ -11,6 +11,7 @@ import asyncio
 import json
 import secrets
 from dataclasses import dataclass
+from typing import Protocol
 
 import aiomqtt
 
@@ -37,6 +38,19 @@ class LocalControlMqttError(RuntimeError):
 
 COMMAND_QOS = 0
 _PASSWORD_FROM_CONFIG = object()
+
+
+class GroupLifecycleService(Protocol):
+    """Small lifecycle surface consumed by the existing state adapter."""
+
+    async def observe_fresh_cycle(
+        self,
+        states: tuple[FreshDeviceState, ...],
+    ) -> object: ...
+
+    async def aclose(self) -> None: ...
+
+    def public_dict(self) -> dict[str, object]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +191,7 @@ class LocalControlMqttAdapter:
         router: LocalControlMqttRouter,
         state_poller: FreshStatePoller,
         password: str | None | object = _PASSWORD_FROM_CONFIG,
+        group_service: GroupLifecycleService | None = None,
     ) -> None:
         if password is not _PASSWORD_FROM_CONFIG and not (
             password is None or isinstance(password, str)
@@ -187,10 +202,21 @@ class LocalControlMqttAdapter:
         self._router = router
         self._state_poller = state_poller
         self._password = password
+        self._group_service = group_service
         self._availability = projection.global_availability_topic
         self._status = f"{projection.topic_prefix}/local/status"
+        self._group_status = f"{projection.topic_prefix}/local/groups/status"
 
     async def run(self, stop_event: asyncio.Event) -> None:
+        try:
+            await self._run_connected(stop_event)
+        finally:
+            if self._group_service is not None:
+                # Group close errors deliberately live outside the task-cancellation gather below.
+                # In particular, an unresolved mandatory OFF must escape the adapter.
+                await self._group_service.aclose()
+
+    async def _run_connected(self, stop_event: asyncio.Event) -> None:
         password = (
             self._config.resolve_password()
             if self._password is _PASSWORD_FROM_CONFIG
@@ -244,16 +270,30 @@ class LocalControlMqttAdapter:
                     qos=1,
                     retain=True,
                 )
+            if self._group_service is not None:
+                await self._publish_group_status(client)
             await client.publish(self._availability, "online", qos=1, retain=True)
 
             stop_waiter = asyncio.create_task(stop_event.wait())
             consumer = asyncio.create_task(self._consume(client))
-            state_sync = asyncio.create_task(
-                self._state_poller.run(
-                    lambda result: self._publish_fresh_state(client, result),
-                    stop_event,
+            if self._group_service is None:
+                state_sync = asyncio.create_task(
+                    self._state_poller.run(
+                        lambda result: self._publish_fresh_state(client, result),
+                        stop_event,
+                    )
                 )
-            )
+            else:
+                state_sync = asyncio.create_task(
+                    self._state_poller.run(
+                        lambda result: self._publish_fresh_state(client, result),
+                        stop_event,
+                        observe_cycle=lambda results: self._observe_group_cycle(
+                            client,
+                            results,
+                        ),
+                    )
+                )
             try:
                 done, _pending = await asyncio.wait(
                     {stop_waiter, consumer, state_sync},
@@ -276,6 +316,47 @@ class LocalControlMqttAdapter:
                         stop_waiter,
                         return_exceptions=True,
                     )
+
+    async def _observe_group_cycle(
+        self,
+        client: aiomqtt.Client,
+        results: tuple[FreshDeviceState, ...],
+    ) -> None:
+        group_service = self._group_service
+        if group_service is None:
+            return
+        try:
+            await group_service.observe_fresh_cycle(results)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await client.publish(
+                self._group_status,
+                _canonical_json(
+                    {
+                        "schema_version": 1,
+                        "status": "group_lifecycle_unavailable",
+                        "diagnostic_reason": "group_cycle_callback_failed",
+                        "physical_identity_keys_exposed": False,
+                        "private_paths_exposed": False,
+                    }
+                ),
+                qos=1,
+                retain=True,
+            )
+            return
+        await self._publish_group_status(client)
+
+    async def _publish_group_status(self, client: aiomqtt.Client) -> None:
+        group_service = self._group_service
+        if group_service is None:
+            return
+        await client.publish(
+            self._group_status,
+            _canonical_json(group_service.public_dict()),
+            qos=1,
+            retain=True,
+        )
 
     async def _consume(self, client: aiomqtt.Client) -> None:
         async for message in client.messages:
