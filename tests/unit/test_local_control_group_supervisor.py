@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 
@@ -21,6 +22,7 @@ from jebao_flow.groups.models import (
 from jebao_flow.groups.plan import DeviceActuationLimits, GroupTickPlan
 from jebao_flow.groups.runtime import (
     DeliveryCertainty,
+    GroupPlanSupersededError,
     PlanAtomicGroupDispatchRuntime,
     PreWriteDispatchError,
     StaleDispatchError,
@@ -28,6 +30,8 @@ from jebao_flow.groups.runtime import (
     WriteGuard,
 )
 from jebao_flow.local_control.group_supervisor import (
+    GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL,
+    GROUP_FORCED_OFF_WILL_REVERT,
     GroupSupervisorDisposition,
     GroupSupervisorError,
     LocalControlGroupSupervisor,
@@ -85,6 +89,76 @@ class _FailingPlanPort(_RecordingPlanPort):
         self.write_plan_call_count += 1
         assert guard() is True
         raise self._error_factory()
+
+
+class _DelayedPreSendPlanPort(_RecordingPlanPort):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.frame_count = 0
+
+    async def write_plan(
+        self,
+        plan: GroupTickPlan,
+        *,
+        request_id: str,
+        generation: int,
+        plan_identity_sha256: str,
+        guard: WriteGuard,
+        safety_token: object,
+    ) -> None:
+        del plan, request_id, generation, plan_identity_sha256, safety_token
+        self.write_plan_call_count += 1
+        self.entered.set()
+        await self.release.wait()
+        if guard() is not True:
+            raise GroupPlanSupersededError("injected frame-boundary supersede")
+        self.frame_count += 1
+
+
+class _SecondCallDelayedPlanPort(_RecordingPlanPort):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.frame_count = 0
+
+    async def write_plan(
+        self,
+        plan: GroupTickPlan,
+        *,
+        request_id: str,
+        generation: int,
+        plan_identity_sha256: str,
+        guard: WriteGuard,
+        safety_token: object,
+    ) -> None:
+        del plan, request_id, generation, plan_identity_sha256, safety_token
+        self.write_plan_call_count += 1
+        if self.write_plan_call_count == 2:
+            self.entered.set()
+            await self.release.wait()
+        assert guard() is True
+        self.frame_count += 1
+
+
+class _FailSecondPlanPort(_RecordingPlanPort):
+    async def write_plan(
+        self,
+        plan: GroupTickPlan,
+        *,
+        request_id: str,
+        generation: int,
+        plan_identity_sha256: str,
+        guard: WriteGuard,
+        safety_token: object,
+    ) -> None:
+        del plan, request_id, generation, plan_identity_sha256, safety_token
+        self.write_plan_call_count += 1
+        assert guard() is True
+        if self.write_plan_call_count == 2:
+            raise RuntimeError("injected repeated OFF failure")
 
 
 class _StalingGroupManager(GroupManager):
@@ -487,3 +561,288 @@ def test_failure_policy_stop_classifier_matches_the_plan_runtime() -> None:
     assert group_supervisor_module._is_mandatory_group_off(  # noqa: SLF001
         plan
     ) is group_runtime_module._is_mandatory_group_off(plan)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_manual_ownership_supersedes_an_ordinary_plan_at_the_frame_boundary() -> None:
+    delayed_port = _DelayedPreSendPlanPort()
+    supervisor, port, _, _ = _supervisor(port=delayed_port)
+    await supervisor.observe_fresh_cycle((_fresh("left"), _fresh("right")), now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.RUNNING, enabled=True, power=50),
+        now=2.0,
+    )
+    await delayed_port.entered.wait()
+
+    ownership = await supervisor.claim_manual_ownership(
+        "left",
+        power_on_requested=True,
+    )
+    await supervisor.note_verified_direct_power_on("left")
+    delayed_port.release.set()
+    dispatch = await supervisor.wait_idle()
+
+    assert ownership.allowed
+    assert ownership.manual_override_recorded
+    assert ownership.diagnostic_reason is None
+    assert port.write_plan_call_count == 1
+    assert delayed_port.frame_count == 0
+    assert dispatch.superseded_count == 1
+    assert dispatch.failure is None
+    assert supervisor.snapshot().manual_override_members == ("left",)
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_manual_ownership_cannot_cancel_an_accepted_mandatory_off() -> None:
+    delayed_port = _DelayedPreSendPlanPort()
+    supervisor, port, _, _ = _supervisor(port=delayed_port)
+    await supervisor.observe_fresh_cycle((_fresh("left"), _fresh("right")), now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.STOPPED, enabled=False),
+        now=2.0,
+    )
+    await delayed_port.entered.wait()
+
+    ownership = await supervisor.claim_manual_ownership(
+        "left",
+        power_on_requested=True,
+    )
+    await supervisor.note_verified_direct_power_on("left")
+    delayed_port.release.set()
+    dispatch = await supervisor.wait_idle()
+
+    assert ownership.allowed
+    assert ownership.diagnostic_reason == GROUP_FORCED_OFF_WILL_REVERT
+    assert port.write_plan_call_count == 1
+    assert delayed_port.frame_count == 1
+    assert dispatch.safety_off_succeeded_count == 1
+    assert not dispatch.safety_off_required
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_override_replans_once_then_deduplicates() -> None:
+    supervisor, port, _, _ = _supervisor()
+    fresh = (_fresh("left"), _fresh("right"))
+    await supervisor.observe_fresh_cycle(fresh, now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.RUNNING, enabled=True, power=50),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+
+    await supervisor.claim_manual_ownership("left")
+    assert port.write_plan_call_count == 1
+    await supervisor.observe_fresh_cycle(fresh, now=3.0)
+    await supervisor.wait_idle()
+    assert port.write_plan_call_count == 2
+    await supervisor.observe_fresh_cycle(fresh, now=4.0)
+    await supervisor.wait_idle()
+
+    assert port.write_plan_call_count == 2
+    assert supervisor.snapshot().manual_override_members == ("left",)
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stopped_override_warns_and_one_off_reassertion_is_bounded() -> None:
+    supervisor, port, _, _ = _supervisor()
+    fresh = (_fresh("left"), _fresh("right"))
+    await supervisor.observe_fresh_cycle(fresh, now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.STOPPED, enabled=False),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+
+    ownership = await supervisor.claim_manual_ownership(
+        "left",
+        power_on_requested=True,
+    )
+    assert ownership.allowed
+    assert ownership.manual_override_recorded
+    assert ownership.diagnostic_reason == GROUP_FORCED_OFF_WILL_REVERT
+    assert supervisor.snapshot().ownership_diagnostic_reason is None
+    await supervisor.note_verified_direct_power_on("left")
+    assert (
+        supervisor.snapshot().ownership_diagnostic_reason
+        == GROUP_FORCED_OFF_WILL_REVERT
+    )
+    assert port.write_plan_call_count == 1
+
+    await supervisor.observe_fresh_cycle(fresh, now=3.0)
+    await supervisor.wait_idle()
+    assert port.write_plan_call_count == 2
+    await supervisor.observe_fresh_cycle(fresh, now=4.0)
+    await supervisor.wait_idle()
+
+    assert port.write_plan_call_count == 2
+    assert supervisor.snapshot().ownership_diagnostic_reason is None
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_verified_power_on_each_reasserts_stopped_off_once() -> None:
+    supervisor, port, _, _ = _supervisor()
+    fresh = (_fresh("left"), _fresh("right"))
+    await supervisor.observe_fresh_cycle(fresh, now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.STOPPED, enabled=False),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+
+    for index in range(3):
+        ownership = await supervisor.claim_manual_ownership(
+            "left",
+            power_on_requested=True,
+        )
+        await supervisor.note_verified_direct_power_on("left")
+        before = port.write_plan_call_count
+        await supervisor.observe_fresh_cycle(fresh, now=3.0 + index * 2)
+        await supervisor.wait_idle()
+        assert ownership.diagnostic_reason == GROUP_FORCED_OFF_WILL_REVERT
+        assert port.write_plan_call_count == before + 1
+        await supervisor.observe_fresh_cycle(fresh, now=4.0 + index * 2)
+        await supervisor.wait_idle()
+        assert port.write_plan_call_count == before + 1
+
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_waiting_off_success_reconciles_direct_power_on_without_duplicate() -> None:
+    delayed_port = _SecondCallDelayedPlanPort()
+    supervisor, port, _, _ = _supervisor(port=delayed_port)
+    fresh = (_fresh("left"), _fresh("right"))
+    await supervisor.observe_fresh_cycle(fresh, now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.STOPPED, enabled=False),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+
+    await supervisor.claim_manual_ownership("left", power_on_requested=True)
+    await supervisor.note_verified_direct_power_on("left")
+    await supervisor.observe_fresh_cycle(fresh, now=3.0)
+    await delayed_port.entered.wait()
+    await supervisor.claim_manual_ownership("left", power_on_requested=True)
+    await supervisor.note_verified_direct_power_on("left")
+    delayed_port.release.set()
+    dispatch = await supervisor.wait_idle()
+    before = port.write_plan_call_count
+
+    cycle = await supervisor.observe_fresh_cycle(fresh, now=4.0)
+    await supervisor.wait_idle()
+
+    assert before == 2
+    assert delayed_port.frame_count == 2
+    assert dispatch.safety_off_succeeded_count == 2
+    assert cycle.disposition is GroupSupervisorDisposition.UNCHANGED_MANDATORY_OFF
+    assert port.write_plan_call_count == before
+    assert supervisor.snapshot().ownership_diagnostic_reason is None
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_watermarked_off_stays_required_without_another_port_call() -> None:
+    failing_port = _FailSecondPlanPort()
+    supervisor, port, _, _ = _supervisor(port=failing_port)
+    fresh = (_fresh("left"), _fresh("right"))
+    await supervisor.observe_fresh_cycle(fresh, now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.STOPPED, enabled=False),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+    await supervisor.claim_manual_ownership("left", power_on_requested=True)
+    await supervisor.note_verified_direct_power_on("left")
+
+    await supervisor.observe_fresh_cycle(fresh, now=3.0)
+    failed = await supervisor.wait_idle()
+    deferred = await supervisor.observe_fresh_cycle(fresh, now=4.0)
+
+    assert port.write_plan_call_count == 2
+    assert failed.safety_off_succeeded_count == 1
+    assert failed.safety_off_required
+    assert deferred.disposition is GroupSupervisorDisposition.DEFERRED_SAFETY_OFF
+    assert deferred.dispatch.safety_off_deferred_count == 1
+    assert port.write_plan_call_count == 2
+    with pytest.raises(UnresolvedGroupSafetyStopError):
+        await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_non_power_redeclaration_only_pays_the_first_ownership_cost() -> None:
+    supervisor, port, _, _ = _supervisor()
+    fresh = (_fresh("left"), _fresh("right"))
+    await supervisor.observe_fresh_cycle(fresh, now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.STOPPED, enabled=False),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+
+    first = await supervisor.claim_manual_ownership("left")
+    await supervisor.observe_fresh_cycle(fresh, now=3.0)
+    await supervisor.wait_idle()
+    after_first = port.write_plan_call_count
+    repeated = await supervisor.claim_manual_ownership("left")
+    await supervisor.observe_fresh_cycle(fresh, now=4.0)
+    await supervisor.wait_idle()
+
+    assert first.diagnostic_reason is None
+    assert repeated.diagnostic_reason is None
+    assert after_first == 2
+    assert port.write_plan_call_count == after_first
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_power_on_watermark_does_not_change_ordinary_plan_deduplication() -> None:
+    supervisor, port, _, _ = _supervisor()
+    fresh = (_fresh("left"), _fresh("right"))
+    await supervisor.observe_fresh_cycle(fresh, now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.RUNNING, enabled=True, power=50),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+    await supervisor.claim_manual_ownership("left", power_on_requested=True)
+    await supervisor.note_verified_direct_power_on("left")
+    await supervisor.observe_fresh_cycle(fresh, now=3.0)
+    await supervisor.wait_idle()
+    after_first = port.write_plan_call_count
+
+    await supervisor.claim_manual_ownership("left", power_on_requested=True)
+    await supervisor.note_verified_direct_power_on("left")
+    await supervisor.observe_fresh_cycle(fresh, now=4.0)
+    await supervisor.wait_idle()
+
+    assert after_first == 2
+    assert port.write_plan_call_count == after_first
+    assert supervisor.snapshot().ownership_diagnostic_reason is None
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_emergency_stop_rejects_without_recording_override_or_new_plan() -> None:
+    supervisor, port, manager, _ = _supervisor()
+    await supervisor.observe_fresh_cycle((_fresh("left"), _fresh("right")), now=1.0)
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.EMERGENCY_STOP, enabled=False),
+        now=2.0,
+    )
+    await supervisor.wait_idle()
+    generation_before = manager.generation
+
+    ownership = await supervisor.claim_manual_ownership("left")
+
+    assert not ownership.allowed
+    assert not ownership.manual_override_recorded
+    assert ownership.diagnostic_reason == GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL
+    assert manager.generation == generation_before
+    assert supervisor.snapshot().manual_override_members == ()
+    assert port.write_plan_call_count == 1
+    await supervisor.aclose()

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+import jebao_flow.local_control.state as state_module
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.ha import project_home_assistant
 from jebao_flow.local_control.models import (
@@ -238,6 +239,7 @@ async def test_poller_resolves_now_reads_once_and_closes_without_a_write_session
     [result] = await poller.poll_once()
 
     assert result.available is True
+    assert result.observed_power is True
     assert events == [
         "shared_lock",
         "connect",
@@ -247,6 +249,52 @@ async def test_poller_resolves_now_reads_once_and_closes_without_a_write_session
         "shared_unlock",
     ]
     assert not hasattr(_Session("address", b"", []), "send_raw_control")
+
+
+def test_unqualified_projection_keeps_typed_power_with_one_status_decode(monkeypatch) -> None:
+    manifest, _catalog, _projection = _projection_setup()
+    target = manifest.devices[0]
+    single_manifest = manifest.model_copy(update={"devices": (target,)})
+    unqualified_catalog = build_local_control_catalog(
+        (),
+        current_content=single_manifest.content,
+    )
+    projection = project_home_assistant(
+        single_manifest,
+        unqualified_catalog,
+        discovery_prefix="homeassistant",
+        topic_prefix="jebao-flow/test",
+    )
+    real_schema = state_module.get_product_schema(target.product_key)
+    decode_calls = 0
+
+    class _CountingSchema:
+        def decode_status(self, raw_status: bytes):
+            nonlocal decode_calls
+            decode_calls += 1
+            return real_schema.decode_status(raw_status)
+
+    monkeypatch.setattr(state_module, "get_product_schema", lambda _key: _CountingSchema())
+    projector = LocalControlStateProjector(
+        manifest=single_manifest,
+        projection=projection,
+        catalog=unqualified_catalog,
+    )
+
+    projected = projector.project_fresh_state(
+        target,
+        _status(),
+        observed_at=datetime(2026, 9, 8, 6, 2, tzinfo=UTC),
+    )
+
+    power_entity = next(
+        entity
+        for entity in projection.entities
+        if entity.logical_member == target.logical_member and entity.function == "power"
+    )
+    assert power_entity.control_available is False
+    assert projected.observed_power is True
+    assert decode_calls == 1
 
 
 @pytest.mark.asyncio

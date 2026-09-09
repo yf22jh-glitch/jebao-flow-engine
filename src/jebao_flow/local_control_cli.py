@@ -381,6 +381,7 @@ def _run(args: argparse.Namespace) -> int:
             discovery_prefix=prepared.config.mqtt.discovery_prefix,
             topic_prefix=prepared.config.mqtt.topic_prefix,
             schedule_plans=schedule_plans,
+            groups=prepared.config.groups,
         )
         if args.command == "ha-schema":
             _print_json(projection.public_dict())
@@ -406,6 +407,7 @@ def _run(args: argparse.Namespace) -> int:
             schedule_plans=schedule_plans,
             coordinator=coordinator,
             operation_lock=operation_lock,
+            ownership_service=group_service,
         )
         state_poller = FreshStatePoller(
             manifest=prepared.manifest,

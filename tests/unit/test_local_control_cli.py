@@ -837,6 +837,7 @@ def test_read_only_serve_constructs_group_inventory_without_a_supervisor(
 
     def construct_group_service(**kwargs):
         captured["group_kwargs"] = kwargs
+        group_service.operation_lock = kwargs["operation_lock"]
         return group_service
 
     async def serve(adapter) -> None:
@@ -863,3 +864,4 @@ def test_read_only_serve_constructs_group_inventory_without_a_supervisor(
     assert result == 0
     assert captured["group_kwargs"]["coordinator"] is None
     assert captured["adapter"]._group_service is group_service  # noqa: SLF001
+    assert captured["adapter"]._router._ownership_service is group_service  # noqa: SLF001

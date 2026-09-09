@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+from jebao_flow.groups.models import GroupConfig, GroupMember
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.ha import HomeAssistantPlatform, project_home_assistant
 from jebao_flow.local_control.install import current_protocol_schema_sha256
@@ -249,3 +250,35 @@ def test_same_product_device_without_receipts_remains_diagnostic() -> None:
     assert slave.control_available is False
     assert slave.stage == "app_static"
     assert slave.diagnostic_reason == "physical_device_not_qualified"
+
+
+def test_group_actual_output_is_a_command_free_diagnostic_sensor() -> None:
+    manifest = _manifest()
+    group = GroupConfig(
+        id="main_flow",
+        name="Main Flow",
+        members=(
+            GroupMember(device="wavemaker_master"),
+            GroupMember(device="wavemaker_slave"),
+        ),
+    )
+
+    projection = project_home_assistant(
+        manifest,
+        build_local_control_catalog((), current_content=manifest.content),
+        discovery_prefix="homeassistant",
+        topic_prefix="jebao-flow/main",
+        groups=(group,),
+    )
+
+    [entity] = projection.group_entities
+    discovery = entity.mqtt_discovery_payload()
+    assert entity.platform is HomeAssistantPlatform.SENSOR
+    assert entity.group_id == "main_flow"
+    assert entity.command_topic is None
+    assert "command_topic" not in discovery
+    assert discovery["entity_category"] == "diagnostic"
+    assert discovery["availability_mode"] == "all"
+    assert discovery["availability"][1]["topic"] == entity.availability_topic
+    assert projection.public_dict()["group_entity_count"] == 1
+    assert str(projection.public_dict()).isascii()

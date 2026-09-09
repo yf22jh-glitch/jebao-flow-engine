@@ -22,9 +22,12 @@ from jebao_flow.groups.runtime import (
     group_plan_identity_sha256,
 )
 from jebao_flow.local_control.state import FreshDeviceState
+from jebao_flow.patterns.base import is_group_enabled
 from jebao_flow.protocol.models import DeviceTarget
 
 _CANONICAL_OFF = DeviceTarget(enabled=False, power=0)
+GROUP_FORCED_OFF_WILL_REVERT = "group_forced_off_will_revert_next_cycle"
+GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL = "group_emergency_stop_blocks_direct_control"
 
 
 class GroupSupervisorError(RuntimeError):
@@ -63,6 +66,27 @@ class GroupSupervisorCycle:
 
 
 @dataclass(frozen=True, slots=True)
+class GroupManualOwnershipDecision:
+    """Pre-journal decision for one direct-device ownership declaration."""
+
+    group_id: str
+    logical_member: str
+    allowed: bool
+    manual_override_recorded: bool
+    diagnostic_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.group_id.isascii() or not self.logical_member.isascii():
+            raise ValueError("manual ownership identifiers must use ASCII")
+        if type(self.allowed) is not bool or type(self.manual_override_recorded) is not bool:
+            raise TypeError("manual ownership flags must be boolean")
+        if not self.allowed and self.manual_override_recorded:
+            raise ValueError("rejected direct control cannot record manual ownership")
+        if self.diagnostic_reason is not None and not self.diagnostic_reason.isascii():
+            raise ValueError("manual ownership diagnostics must use ASCII")
+
+
+@dataclass(frozen=True, slots=True)
 class GroupSupervisorSnapshot:
     """Bounded in-memory lifecycle diagnostics without physical identity material."""
 
@@ -73,6 +97,8 @@ class GroupSupervisorSnapshot:
     runtime_submit_count: int
     write_disarmed_count: int
     mandatory_off_suppressed_count: int
+    manual_override_members: tuple[str, ...]
+    ownership_diagnostic_reason: str | None
     last_plan_generation: int | None
     last_plan_identity_sha256: str | None
     dispatch: GroupPlanDispatchSnapshot
@@ -110,6 +136,8 @@ class LocalControlGroupSupervisor:
         self._runtime_submit_count = 0
         self._write_disarmed_count = 0
         self._mandatory_off_suppressed_count = 0
+        self._manual_override_members: tuple[str, ...] = ()
+        self._safety_off_success_watermark: int | None = None
         self._last_plan_generation: int | None = None
         self._last_plan_identity_sha256: str | None = None
 
@@ -165,7 +193,65 @@ class LocalControlGroupSupervisor:
             self._armed = True
             return self._finish_cycle(plan, force_mandatory_off=True)
 
+    async def claim_manual_ownership(
+        self,
+        logical_member: str,
+        *,
+        power_on_requested: bool = False,
+    ) -> GroupManualOwnershipDecision:
+        """Record direct ownership without constructing or submitting a replacement plan."""
+
+        if type(power_on_requested) is not bool:
+            raise TypeError("direct power-on marker must be boolean")
+        async with self._operation_lock:
+            self._require_open()
+            if logical_member not in self._member_ids:
+                raise GroupSupervisorError("manual ownership target is not a group member")
+            runtime = self._manager.runtime
+            if self._armed and runtime.state is GroupState.EMERGENCY_STOP:
+                return GroupManualOwnershipDecision(
+                    group_id=self.group_id,
+                    logical_member=logical_member,
+                    allowed=False,
+                    manual_override_recorded=False,
+                    diagnostic_reason=GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL,
+                )
+            forced_off = self._armed and (
+                runtime.state is GroupState.STOPPED
+                or not is_group_enabled(self._manager.group, runtime)
+            )
+            self._manager.set_manual_override(logical_member)
+            overridden = {*self._manual_override_members, logical_member}
+            self._manual_override_members = tuple(
+                member
+                for member in self._member_ids
+                if member in overridden
+            )
+            return GroupManualOwnershipDecision(
+                group_id=self.group_id,
+                logical_member=logical_member,
+                allowed=True,
+                manual_override_recorded=True,
+                diagnostic_reason=(
+                    GROUP_FORCED_OFF_WILL_REVERT
+                    if forced_off and power_on_requested
+                    else None
+                ),
+            )
+
+    async def note_verified_direct_power_on(self, logical_member: str) -> None:
+        """Record the runtime OFF-success watermark after verified direct power-on."""
+
+        async with self._operation_lock:
+            self._require_open()
+            if logical_member not in self._member_ids:
+                raise GroupSupervisorError("verified direct target is not a group member")
+            self._safety_off_success_watermark = (
+                self._runtime.snapshot().safety_off_succeeded_count
+            )
+
     def snapshot(self) -> GroupSupervisorSnapshot:
+        dispatch = self._runtime.snapshot()
         return GroupSupervisorSnapshot(
             group_id=self.group_id,
             armed=self._armed,
@@ -174,9 +260,11 @@ class LocalControlGroupSupervisor:
             runtime_submit_count=self._runtime_submit_count,
             write_disarmed_count=self._write_disarmed_count,
             mandatory_off_suppressed_count=self._mandatory_off_suppressed_count,
+            manual_override_members=self._manual_override_members,
+            ownership_diagnostic_reason=self._ownership_diagnostic_reason(dispatch),
             last_plan_generation=self._last_plan_generation,
             last_plan_identity_sha256=self._last_plan_identity_sha256,
-            dispatch=self._runtime.snapshot(),
+            dispatch=dispatch,
         )
 
     async def wait_idle(self) -> GroupPlanDispatchSnapshot:
@@ -199,6 +287,7 @@ class LocalControlGroupSupervisor:
         force_mandatory_off: bool,
     ) -> GroupSupervisorCycle:
         identity = group_plan_identity_sha256(plan)
+        self._manual_override_members = plan.manual_override_devices
         self._cycle_count += 1
         self._last_plan_generation = plan.generation
         self._last_plan_identity_sha256 = identity
@@ -216,6 +305,7 @@ class LocalControlGroupSupervisor:
         if (
             mandatory_off
             and not force_mandatory_off
+            and self._direct_power_on_is_reconciled(current_dispatch)
             and _runtime_holds_mandatory_off(current_dispatch, identity)
         ):
             self._mandatory_off_suppressed_count += 1
@@ -241,6 +331,30 @@ class LocalControlGroupSupervisor:
             disposition=disposition,
             dispatch=dispatch,
         )
+
+    def _direct_power_on_is_reconciled(
+        self,
+        dispatch: GroupPlanDispatchSnapshot,
+    ) -> bool:
+        watermark = self._safety_off_success_watermark
+        return watermark is None or dispatch.safety_off_succeeded_count > watermark
+
+    def _ownership_diagnostic_reason(
+        self,
+        dispatch: GroupPlanDispatchSnapshot,
+    ) -> str | None:
+        if not self._armed:
+            return None
+        runtime = self._manager.runtime
+        if runtime.state is GroupState.EMERGENCY_STOP:
+            return GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL
+        forced_off = runtime.state is GroupState.STOPPED or not is_group_enabled(
+            self._manager.group,
+            runtime,
+        )
+        if forced_off and not self._direct_power_on_is_reconciled(dispatch):
+            return GROUP_FORCED_OFF_WILL_REVERT
+        return None
 
     def _fresh_availability(
         self,
@@ -298,6 +412,9 @@ def _runtime_holds_mandatory_off(
 
 
 __all__ = [
+    "GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL",
+    "GROUP_FORCED_OFF_WILL_REVERT",
+    "GroupManualOwnershipDecision",
     "GroupSupervisorCycle",
     "GroupSupervisorDisposition",
     "GroupSupervisorError",

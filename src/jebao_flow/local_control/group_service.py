@@ -30,6 +30,8 @@ from jebao_flow.local_control.catalog import LocalControlCatalog
 from jebao_flow.local_control.coordinator import LocalControlCoordinator
 from jebao_flow.local_control.group import SoftwareIndependentGroupActuator
 from jebao_flow.local_control.group_supervisor import (
+    GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL,
+    GROUP_FORCED_OFF_WILL_REVERT,
     GroupSupervisorCycle,
     LocalControlGroupSupervisor,
 )
@@ -52,6 +54,72 @@ class GroupLifecycleState(StrEnum):
     CYCLE_FAILED = "cycle_failed"
 
 
+class GroupActualOutput(StrEnum):
+    """Fresh config-relative member power aggregation, never desired state."""
+
+    OFF = "off"
+    ON = "on"
+    MIXED = "mixed"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class DirectControlOwnershipDecision:
+    """Bounded pre-journal ownership result for one existing direct-device command."""
+
+    logical_member: str
+    group_id: str | None
+    allowed: bool
+    manual_override_recorded: bool
+    diagnostic_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.logical_member.isascii() or (
+            self.group_id is not None and not self.group_id.isascii()
+        ):
+            raise ValueError("direct-control ownership identifiers must use ASCII")
+        if type(self.allowed) is not bool or type(self.manual_override_recorded) is not bool:
+            raise TypeError("direct-control ownership flags must be boolean")
+        if not self.allowed and self.manual_override_recorded:
+            raise ValueError("rejected direct control cannot record manual ownership")
+        if self.diagnostic_reason is not None and not self.diagnostic_reason.isascii():
+            raise ValueError("direct-control ownership diagnostics must use ASCII")
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "logical_member": self.logical_member,
+            "group_id": self.group_id,
+            "allowed": self.allowed,
+            "manual_override_recorded": self.manual_override_recorded,
+            "diagnostic_reason": self.diagnostic_reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GroupOutputState:
+    """One logical group's fresh power truth and separately reported ownership state."""
+
+    group_id: str
+    actual_output: GroupActualOutput
+    install_generation: str
+    manual_override_members: tuple[str, ...]
+    ownership_diagnostic_reason: str | None
+
+    @property
+    def available(self) -> bool:
+        return self.actual_output is not GroupActualOutput.UNKNOWN
+
+    def attributes_dict(self) -> dict[str, object]:
+        return {
+            "actual_output": self.actual_output.value,
+            "config_relative": True,
+            "install_generation": self.install_generation,
+            "manual_override_members": list(self.manual_override_members),
+            "ownership_diagnostic_reason": self.ownership_diagnostic_reason,
+            "pattern_conformance": "unknown",
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class GroupLifecycleItem:
     """Public logical-group inventory without physical identity material."""
@@ -64,6 +132,11 @@ class GroupLifecycleItem:
     cycle_failure_count: int
     last_cycle_disposition: str | None
     diagnostic_reason: str | None
+    actual_output: GroupActualOutput
+    actual_output_available: bool
+    install_generation: str
+    manual_override_members: tuple[str, ...]
+    ownership_diagnostic_reason: str | None
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -75,6 +148,12 @@ class GroupLifecycleItem:
             "cycle_failure_count": self.cycle_failure_count,
             "last_cycle_disposition": self.last_cycle_disposition,
             "diagnostic_reason": self.diagnostic_reason,
+            "actual_output": self.actual_output.value,
+            "actual_output_available": self.actual_output_available,
+            "install_generation": self.install_generation,
+            "manual_override_members": list(self.manual_override_members),
+            "ownership_diagnostic_reason": self.ownership_diagnostic_reason,
+            "pattern_conformance": "unknown",
         }
 
 
@@ -112,9 +191,13 @@ class GroupLifecycleSnapshot:
 class _ManagedGroup:
     group_id: str
     member_ids: tuple[str, ...]
+    member_enabled: tuple[tuple[str, bool], ...]
     supervisor: LocalControlGroupSupervisor | None
     state: GroupLifecycleState
     diagnostic_reason: str | None
+    actual_output: GroupActualOutput = GroupActualOutput.UNKNOWN
+    manual_override_members: tuple[str, ...] = ()
+    ownership_diagnostic_reason: str | None = None
     cycle_count: int = 0
     cycle_failure_count: int = 0
     last_cycle_disposition: str | None = None
@@ -191,6 +274,8 @@ class LocalControlGroupService:
             raise TypeError("group lifecycle requires the shared operation lock")
 
         self._expected_members = tuple(device.logical_member for device in manifest.devices)
+        self._install_generation = manifest.generation
+        self._operation_lock = operation_lock
         self._fresh_cycle_count = 0
         self._closed = False
         devices_by_id = {device.id: device for device in config.devices}
@@ -206,23 +291,24 @@ class LocalControlGroupService:
             )
             for group in config.groups
         )
+        self._group_by_member: dict[str, _ManagedGroup] = {}
+        for item in self._groups:
+            for member_id in item.member_ids:
+                if member_id in self._group_by_member:
+                    raise ValueError("one device cannot belong to multiple local-control groups")
+                self._group_by_member[member_id] = item
 
     @property
     def supervisor_count(self) -> int:
         return sum(item.supervisor is not None for item in self._groups)
 
+    @property
+    def operation_lock(self) -> asyncio.Lock:
+        return self._operation_lock
+
     def snapshot(self) -> GroupLifecycleSnapshot:
         groups = tuple(
-            GroupLifecycleItem(
-                group_id=item.group_id,
-                member_count=len(item.member_ids),
-                state=item.state,
-                supervisor_constructed=item.supervisor is not None,
-                cycle_count=item.cycle_count,
-                cycle_failure_count=item.cycle_failure_count,
-                last_cycle_disposition=item.last_cycle_disposition,
-                diagnostic_reason=item.diagnostic_reason,
-            )
+            self._lifecycle_item(item)
             for item in self._groups
         )
         return GroupLifecycleSnapshot(
@@ -236,6 +322,72 @@ class LocalControlGroupService:
     def public_dict(self) -> dict[str, object]:
         return self.snapshot().public_dict()
 
+    def group_output_states(self) -> tuple[GroupOutputState, ...]:
+        """Return every configured group's current fresh truth without physical identifiers."""
+
+        return tuple(
+            self._group_output_state(item)
+            for item in self._groups
+        )
+
+    async def claim_direct_ownership(
+        self,
+        logical_member: str,
+        *,
+        power_on_requested: bool = False,
+    ) -> DirectControlOwnershipDecision:
+        """Declare manual ownership without planning or submitting replacement group work."""
+
+        if self._closed:
+            raise LocalControlGroupServiceError("group lifecycle is closed")
+        item = self._group_by_member.get(logical_member)
+        if item is None:
+            return DirectControlOwnershipDecision(
+                logical_member=logical_member,
+                group_id=None,
+                allowed=True,
+                manual_override_recorded=False,
+            )
+        supervisor = item.supervisor
+        if supervisor is None:
+            return DirectControlOwnershipDecision(
+                logical_member=logical_member,
+                group_id=item.group_id,
+                allowed=True,
+                manual_override_recorded=False,
+            )
+        decision = await supervisor.claim_manual_ownership(
+            logical_member,
+            power_on_requested=power_on_requested,
+        )
+        supervisor_snapshot = supervisor.snapshot()
+        item.manual_override_members = supervisor_snapshot.manual_override_members
+        item.ownership_diagnostic_reason = (
+            supervisor_snapshot.ownership_diagnostic_reason
+        )
+        return DirectControlOwnershipDecision(
+            logical_member=logical_member,
+            group_id=item.group_id,
+            allowed=decision.allowed,
+            manual_override_recorded=decision.manual_override_recorded,
+            diagnostic_reason=decision.diagnostic_reason,
+        )
+
+    async def note_verified_direct_power_on(self, logical_member: str) -> None:
+        """Record a verified power-on watermark without submitting group work."""
+
+        if self._closed:
+            raise LocalControlGroupServiceError("group lifecycle is closed")
+        item = self._group_by_member.get(logical_member)
+        if item is None or item.supervisor is None:
+            return
+        await item.supervisor.note_verified_direct_power_on(logical_member)
+        supervisor_snapshot = item.supervisor.snapshot()
+        item.manual_override_members = supervisor_snapshot.manual_override_members
+        item.ownership_diagnostic_reason = (
+            supervisor_snapshot.ownership_diagnostic_reason
+        )
+
     async def observe_fresh_cycle(
         self,
         states: Iterable[FreshDeviceState],
@@ -246,10 +398,13 @@ class LocalControlGroupService:
         copied = tuple(states)
         by_member = self._complete_fresh_cycle(copied)
         if by_member is None:
+            for item in self._groups:
+                item.actual_output = GroupActualOutput.UNKNOWN
             self._mark_all_constructed_failed("fresh_cycle_binding_mismatch")
             return self.snapshot()
 
         for item in self._groups:
+            item.actual_output = _group_actual_output(item, by_member)
             supervisor = item.supervisor
             if supervisor is None:
                 continue
@@ -311,6 +466,7 @@ class LocalControlGroupService:
         operation_lock: asyncio.Lock,
     ) -> _ManagedGroup:
         member_ids = tuple(member.device for member in group.members)
+        member_enabled = tuple((member.device, member.enabled) for member in group.members)
         try:
             self._require_supported_group(group)
             bindings, device_limits = self._current_group_inputs(
@@ -336,6 +492,7 @@ class LocalControlGroupService:
             return _ManagedGroup(
                 group_id=group.id,
                 member_ids=member_ids,
+                member_enabled=member_enabled,
                 supervisor=None,
                 state=GroupLifecycleState.UNCONSTRUCTED,
                 diagnostic_reason=error.reason,
@@ -344,6 +501,7 @@ class LocalControlGroupService:
             return _ManagedGroup(
                 group_id=group.id,
                 member_ids=member_ids,
+                member_enabled=member_enabled,
                 supervisor=None,
                 state=GroupLifecycleState.UNCONSTRUCTED,
                 diagnostic_reason="group_construction_failed",
@@ -351,9 +509,52 @@ class LocalControlGroupService:
         return _ManagedGroup(
             group_id=group.id,
             member_ids=member_ids,
+            member_enabled=member_enabled,
             supervisor=supervisor,
             state=GroupLifecycleState.SUPERVISED,
             diagnostic_reason=None,
+        )
+
+    def _lifecycle_item(self, item: _ManagedGroup) -> GroupLifecycleItem:
+        manual_override_members = item.manual_override_members
+        ownership_diagnostic_reason = item.ownership_diagnostic_reason
+        if item.supervisor is not None:
+            supervisor_snapshot = item.supervisor.snapshot()
+            manual_override_members = supervisor_snapshot.manual_override_members
+            ownership_diagnostic_reason = (
+                supervisor_snapshot.ownership_diagnostic_reason
+            )
+        return GroupLifecycleItem(
+            group_id=item.group_id,
+            member_count=len(item.member_ids),
+            state=item.state,
+            supervisor_constructed=item.supervisor is not None,
+            cycle_count=item.cycle_count,
+            cycle_failure_count=item.cycle_failure_count,
+            last_cycle_disposition=item.last_cycle_disposition,
+            diagnostic_reason=item.diagnostic_reason,
+            actual_output=item.actual_output,
+            actual_output_available=item.actual_output is not GroupActualOutput.UNKNOWN,
+            install_generation=self._install_generation,
+            manual_override_members=manual_override_members,
+            ownership_diagnostic_reason=ownership_diagnostic_reason,
+        )
+
+    def _group_output_state(self, item: _ManagedGroup) -> GroupOutputState:
+        manual_override_members = item.manual_override_members
+        ownership_diagnostic_reason = item.ownership_diagnostic_reason
+        if item.supervisor is not None:
+            supervisor_snapshot = item.supervisor.snapshot()
+            manual_override_members = supervisor_snapshot.manual_override_members
+            ownership_diagnostic_reason = (
+                supervisor_snapshot.ownership_diagnostic_reason
+            )
+        return GroupOutputState(
+            group_id=item.group_id,
+            actual_output=item.actual_output,
+            install_generation=self._install_generation,
+            manual_override_members=manual_override_members,
+            ownership_diagnostic_reason=ownership_diagnostic_reason,
         )
 
     @staticmethod
@@ -437,6 +638,7 @@ class LocalControlGroupService:
         item.diagnostic_reason = None
         item.cycle_count += 1
         item.last_cycle_disposition = cycle.disposition.value
+        item.manual_override_members = cycle.plan.manual_override_devices
 
     def _mark_all_constructed_failed(self, reason: str) -> None:
         for item in self._groups:
@@ -444,10 +646,32 @@ class LocalControlGroupService:
                 self._mark_cycle_failed(item, reason)
 
 
+def _group_actual_output(
+    item: _ManagedGroup,
+    by_member: dict[str, FreshDeviceState],
+) -> GroupActualOutput:
+    observed: dict[str, bool] = {}
+    for member_id in item.member_ids:
+        state = by_member.get(member_id)
+        if state is None or not state.available or state.observed_power is None:
+            return GroupActualOutput.UNKNOWN
+        observed[member_id] = state.observed_power
+    if all(value is False for value in observed.values()):
+        return GroupActualOutput.OFF
+    if all(observed[member_id] is enabled for member_id, enabled in item.member_enabled):
+        return GroupActualOutput.ON
+    return GroupActualOutput.MIXED
+
+
 __all__ = [
+    "DirectControlOwnershipDecision",
+    "GROUP_EMERGENCY_STOP_BLOCKS_DIRECT_CONTROL",
+    "GROUP_FORCED_OFF_WILL_REVERT",
+    "GroupActualOutput",
     "GroupLifecycleItem",
     "GroupLifecycleSnapshot",
     "GroupLifecycleState",
+    "GroupOutputState",
     "LocalControlGroupService",
     "LocalControlGroupServiceError",
 ]

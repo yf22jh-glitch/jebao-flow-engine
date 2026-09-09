@@ -11,6 +11,8 @@ from jebao_flow.groups.models import (
     GroupDefaults,
     GroupExecutionStrategy,
     GroupMember,
+    GroupRuntime,
+    GroupState,
     NativeLinkageRelation,
     NativePairConfig,
     OfflinePolicy,
@@ -21,6 +23,8 @@ from jebao_flow.local_control import group_service as group_service_module
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.coordinator import LocalControlCoordinator
 from jebao_flow.local_control.group_service import (
+    GROUP_FORCED_OFF_WILL_REVERT,
+    GroupActualOutput,
     GroupLifecycleState,
     LocalControlGroupService,
 )
@@ -151,6 +155,28 @@ def _fresh(manifest: FreshInstallManifest, *, available: bool = True):
             available=available,
             observed_at=_OBSERVED_AT if available else None,
             diagnostic_reason=None if available else "current_discovery_unavailable",
+        )
+        for binding in manifest.devices
+    )
+
+
+def _fresh_power(
+    manifest: FreshInstallManifest,
+    values: dict[str, bool | None],
+):
+    return tuple(
+        FreshDeviceState(
+            logical_member=binding.logical_member,
+            available=values[binding.logical_member] is not None,
+            observed_at=(
+                _OBSERVED_AT if values[binding.logical_member] is not None else None
+            ),
+            diagnostic_reason=(
+                None
+                if values[binding.logical_member] is not None
+                else "fresh_read_unavailable"
+            ),
+            observed_power=values[binding.logical_member],
         )
         for binding in manifest.devices
     )
@@ -514,3 +540,132 @@ def test_public_inventory_is_bounded_ascii_and_exposes_no_physical_identity() ->
     assert manifest.devices[0].physical_identity_key not in encoded
     assert service.public_dict()["physical_identity_keys_exposed"] is False
     assert service.public_dict()["private_paths_exposed"] is False
+
+
+@pytest.mark.asyncio
+async def test_group_actual_output_uses_fresh_power_not_qualification_or_ownership() -> None:
+    group = _group(
+        "main_flow",
+        ("left", "right"),
+        first_member_enabled=False,
+    )
+    config, manifest = _current_inputs((group,))
+    service = LocalControlGroupService(
+        config=config,
+        manifest=manifest,
+        catalog=_catalog(manifest),
+        coordinator=None,
+        operation_lock=asyncio.Lock(),
+    )
+
+    on_snapshot = await service.observe_fresh_cycle(
+        _fresh_power(manifest, {"left": False, "right": True})
+    )
+    assert on_snapshot.groups[0].actual_output is GroupActualOutput.ON
+    assert on_snapshot.groups[0].actual_output_available
+    assert on_snapshot.groups[0].manual_override_members == ()
+    assert on_snapshot.groups[0].install_generation == manifest.generation
+
+    mixed_snapshot = await service.observe_fresh_cycle(
+        _fresh_power(manifest, {"left": True, "right": True})
+    )
+    assert mixed_snapshot.groups[0].actual_output is GroupActualOutput.MIXED
+
+    off_snapshot = await service.observe_fresh_cycle(
+        _fresh_power(manifest, {"left": False, "right": False})
+    )
+    assert off_snapshot.groups[0].actual_output is GroupActualOutput.OFF
+
+    unknown_snapshot = await service.observe_fresh_cycle(
+        _fresh_power(manifest, {"left": False, "right": None})
+    )
+    assert unknown_snapshot.groups[0].actual_output is GroupActualOutput.UNKNOWN
+    assert not unknown_snapshot.groups[0].actual_output_available
+
+
+@pytest.mark.asyncio
+async def test_direct_ownership_is_separate_from_actual_output_and_does_not_submit(
+    monkeypatch,
+) -> None:
+    config, manifest = _current_inputs((_group("main_flow", ("left", "right")),))
+    _RecordingActuator.calls = []
+    monkeypatch.setattr(
+        group_service_module,
+        "SoftwareIndependentGroupActuator",
+        _RecordingActuator,
+    )
+    service = LocalControlGroupService(
+        config=config,
+        manifest=manifest,
+        catalog=_catalog(manifest),
+        coordinator=_coordinator_without_io(),
+        operation_lock=asyncio.Lock(),
+    )
+    await service.observe_fresh_cycle(
+        _fresh_power(manifest, {"left": True, "right": True})
+    )
+
+    async with service.operation_lock:
+        ownership = await asyncio.wait_for(
+            service.claim_direct_ownership("left"),
+            timeout=1,
+        )
+    snapshot = service.snapshot()
+
+    assert ownership.allowed
+    assert ownership.manual_override_recorded
+    assert ownership.diagnostic_reason is None
+    assert snapshot.groups[0].manual_override_members == ("left",)
+    assert snapshot.groups[0].actual_output is GroupActualOutput.ON
+    assert _RecordingActuator.calls == []
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stopped_direct_ownership_is_allowed_and_visible_as_a_warning(
+    monkeypatch,
+) -> None:
+    config, manifest = _current_inputs((_group("main_flow", ("left", "right")),))
+    _RecordingActuator.calls = []
+    monkeypatch.setattr(
+        group_service_module,
+        "SoftwareIndependentGroupActuator",
+        _RecordingActuator,
+    )
+    service = LocalControlGroupService(
+        config=config,
+        manifest=manifest,
+        catalog=_catalog(manifest),
+        coordinator=_coordinator_without_io(),
+        operation_lock=asyncio.Lock(),
+    )
+    await service.observe_fresh_cycle(
+        _fresh_power(manifest, {"left": False, "right": False})
+    )
+    supervisor = service._groups[0].supervisor  # noqa: SLF001
+    assert supervisor is not None
+    await supervisor.apply_runtime_command(
+        GroupRuntime(state=GroupState.STOPPED, enabled=False)
+    )
+    await supervisor.wait_idle()
+
+    async with service.operation_lock:
+        ownership = await service.claim_direct_ownership(
+            "left",
+            power_on_requested=True,
+        )
+        before_verified = service.snapshot().groups[0]
+        await service.note_verified_direct_power_on("left")
+
+    assert ownership.allowed
+    assert ownership.diagnostic_reason == GROUP_FORCED_OFF_WILL_REVERT
+    assert before_verified.ownership_diagnostic_reason is None
+    assert service.snapshot().groups[0].ownership_diagnostic_reason == (
+        GROUP_FORCED_OFF_WILL_REVERT
+    )
+    await service.observe_fresh_cycle(
+        _fresh_power(manifest, {"left": False, "right": False})
+    )
+    await supervisor.wait_idle()
+    assert service.snapshot().groups[0].ownership_diagnostic_reason is None
+    await service.aclose()

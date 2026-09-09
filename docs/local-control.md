@@ -446,6 +446,63 @@ must also set the affected manager's manual override and group entities must rem
 device truth. External scalar-target drift detection is still `UNKNOWN`, not an inferred success or
 new write gate.
 
+### Fresh group output and direct-device ownership
+
+Each configured group now has a command-free Home Assistant diagnostic sensor backed only by the
+complete fresh device-state cycle. The existing status decode also produces one typed power value;
+this does not add a read, a second decode, or a qualification dependency. A member that is
+unavailable, lacks a power field, or reports a non-boolean power value makes the group output
+`unknown` and keeps the group entity unavailable. Otherwise the aggregate is `off` when every
+member is physically off, `on` when configured enabled members are on and configured disabled
+members are off, and `mixed` for every other combination.
+
+This aggregate is power truth, not desired state or proof that the current Flow matches the group
+pattern. Its attributes include the current install generation, the bounded logical manual-override
+member list, and `pattern_conformance: unknown`. Manual ownership never changes the aggregate by
+itself, and a direct command result never updates it optimistically. The sensor state and
+availability are published only after the individual device-state publications for that fresh
+cycle have succeeded. The manual-override list follows the planner's current report, so after a plan
+cycle it enumerates config-enabled overridden members rather than claiming a complete ownership
+ledger for disabled members. A group-output inventory mismatch makes group output unavailable and
+publishes a bounded lifecycle diagnostic instead of terminating device-state synchronization. No
+group command topic, switch, or button is exposed by this slice.
+
+Existing qualified direct-device scalar and schedule commands declare manual ownership after their
+payload has been parsed and before the current coordinator operation begins. The declaration and
+the coordinator write run under the same process operation lock. It advances the manager's control
+epoch but does not submit a replacement group plan. An ordinary plan already waiting on that lock
+therefore fails its guard again at the frame boundary after it reacquires the lock and cannot
+overwrite the direct value. The next successful fresh cycle may perform one plan-wide reevaluation
+for the remaining group-owned members; the following unchanged cycle is deduplicated.
+
+Manual ownership is an operator declaration, not a claim that the direct write succeeded, so it
+remains set if later coordinator preflight rejects the operation. A stopped or config-disabled
+armed group still permits every direct control operation. Only a direct `power=true` operation that
+the coordinator durably returns as `VERIFIED` carries
+`group_forced_off_will_revert_next_cycle`. While the same process operation lock is still held, that
+result records the group's current `safety_off_succeeded_count` as a supervisor-local watermark. An
+unchanged mandatory-OFF plan is suppressed only when no such watermark exists or a later mandatory
+OFF success has advanced the counter beyond it. Thus an OFF already waiting on the lock can satisfy
+the reconciliation without a duplicate plan-wide call; otherwise the next complete fresh cycle
+submits one OFF check, and the following unchanged cycle is suppressed.
+
+The canonical OFF check changes power and physical output only. It does not roll back the scalar
+written by a direct `manual_flow` or schedule operation, and those operations, `power=false`,
+preflight failures, and non-verified `power=true` results carry neither the watermark nor the revert
+warning. A member's first manual-ownership declaration still changes the plan identity once, so a
+stopped group may pay one plan-wide OFF check for that ownership transition regardless of function
+or coordinator result; redeclaring the same member does not repeat that cost. An uncertain direct
+record remains under the existing operator-resolution authority, while the next fresh cycle reports
+physical power truth without treating a group plan as recovery or PASS.
+
+An armed emergency-stopped group takes precedence over disabled/stopped handling: it rejects direct
+control before a request id, durable journal, or physical frame is created and reports
+`group_emergency_stop_blocks_direct_control`. That rejection does not record an override, because
+changing the control epoch would itself create another mandatory-OFF plan. An already accepted
+mandatory OFF remains uncancellable by a later ordinary generation. In the current production
+surface no group command caller exists, so these armed-state interactions are fault-injection
+contracts for the later command slice rather than newly enabled live behavior.
+
 ## Product audit mapping
 
 `ENC` means deterministic bytes exist. `DEC` means deterministic status decoding exists. Neither

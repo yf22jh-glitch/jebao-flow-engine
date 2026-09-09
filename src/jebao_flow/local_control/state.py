@@ -80,6 +80,7 @@ class FreshDeviceState:
     publications: tuple[StatePublication, ...] = ()
     observed_at: datetime | None = None
     diagnostic_reason: str | None = None
+    observed_power: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.logical_member.isascii():
@@ -90,8 +91,24 @@ class FreshDeviceState:
             raise ValueError("available state cannot carry an unavailability reason")
         if not self.available and self.publications:
             raise ValueError("unavailable state cannot publish unverified values")
+        if self.observed_power is not None and type(self.observed_power) is not bool:
+            raise TypeError("observed power must be boolean or null")
+        if not self.available and self.observed_power is not None:
+            raise ValueError("unavailable state cannot carry observed power")
         if self.diagnostic_reason is not None and not self.diagnostic_reason.isascii():
             raise ValueError("state diagnostics must use ASCII")
+
+
+@dataclass(frozen=True, slots=True)
+class FreshStateProjection:
+    """One decoded status projection, including qualification-independent power truth."""
+
+    publications: tuple[StatePublication, ...]
+    observed_power: bool | None
+
+    def __post_init__(self) -> None:
+        if self.observed_power is not None and type(self.observed_power) is not bool:
+            raise TypeError("projected power must be boolean or null")
 
 
 StatePublisher = Callable[[FreshDeviceState], Awaitable[None]]
@@ -131,6 +148,23 @@ class LocalControlStateProjector:
         *,
         observed_at: datetime,
     ) -> tuple[StatePublication, ...]:
+        """Preserve the existing publication-only API for direct callers."""
+
+        return self.project_fresh_state(
+            target,
+            raw_status,
+            observed_at=observed_at,
+        ).publications
+
+    def project_fresh_state(
+        self,
+        target: LocalDeviceBinding,
+        raw_status: bytes,
+        *,
+        observed_at: datetime,
+    ) -> FreshStateProjection:
+        """Decode once and return both public entities and typed physical power truth."""
+
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise ValueError("fresh state timestamp must be timezone-aware")
         schema = get_product_schema(target.product_key)
@@ -187,7 +221,17 @@ class LocalControlStateProjector:
             publications.append(
                 StatePublication(entity.state_topic, _canonical_json(diagnostic))
             )
-        return tuple(publications)
+        try:
+            power_descriptor = self._catalog.find(target.product_key, "power")
+        except KeyError:
+            observed_power = None
+        else:
+            candidate = _primary_observed_value(power_descriptor, decoded)
+            observed_power = candidate if type(candidate) is bool else None
+        return FreshStateProjection(
+            publications=tuple(publications),
+            observed_power=observed_power,
+        )
 
 
 class FreshStatePoller:
@@ -263,7 +307,11 @@ class FreshStatePoller:
                 continue
             observed_at = self._now()
             try:
-                publications = self._projector.project(target, raw_status, observed_at=observed_at)
+                projection = self._projector.project_fresh_state(
+                    target,
+                    raw_status,
+                    observed_at=observed_at,
+                )
             except Exception:
                 results.append(_unavailable(target, "fresh_projection_unavailable"))
                 continue
@@ -271,8 +319,9 @@ class FreshStatePoller:
                 FreshDeviceState(
                     logical_member=target.logical_member,
                     available=True,
-                    publications=publications,
+                    publications=projection.publications,
                     observed_at=observed_at,
+                    observed_power=projection.observed_power,
                 )
             )
         return tuple(results)
@@ -437,6 +486,7 @@ def _canonical_json(value: object) -> str:
 __all__ = [
     "FreshCycleObserver",
     "FreshDeviceState",
+    "FreshStateProjection",
     "FreshStateError",
     "FreshStatePoller",
     "LocalControlStateProjector",

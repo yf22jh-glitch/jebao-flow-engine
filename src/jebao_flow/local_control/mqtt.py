@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 import aiomqtt
@@ -18,6 +18,11 @@ import aiomqtt
 from jebao_flow.config import MqttConfig
 from jebao_flow.local_control.catalog import LocalControlCatalog
 from jebao_flow.local_control.coordinator import LocalControlCoordinator, LocalControlResult
+from jebao_flow.local_control.group_service import (
+    GROUP_FORCED_OFF_WILL_REVERT,
+    DirectControlOwnershipDecision,
+    GroupOutputState,
+)
 from jebao_flow.local_control.ha import (
     HomeAssistantEntityDescriptor,
     HomeAssistantPlatform,
@@ -36,6 +41,16 @@ class LocalControlMqttError(RuntimeError):
     """A command topic or payload did not match the published local-control contract."""
 
 
+class LocalControlCommandConflictError(LocalControlMqttError):
+    """A stable pre-journal ownership conflict rejected one direct command."""
+
+    def __init__(self, diagnostic_reason: str) -> None:
+        if not diagnostic_reason or not diagnostic_reason.isascii():
+            raise ValueError("command conflict reason must be non-empty ASCII")
+        self.diagnostic_reason = diagnostic_reason
+        super().__init__(diagnostic_reason)
+
+
 COMMAND_QOS = 0
 _PASSWORD_FROM_CONFIG = object()
 
@@ -52,6 +67,24 @@ class GroupLifecycleService(Protocol):
 
     def public_dict(self) -> dict[str, object]: ...
 
+    def group_output_states(self) -> tuple[GroupOutputState, ...]: ...
+
+
+class DirectControlOwnershipService(Protocol):
+    """Pre-journal ownership boundary used by existing direct-device routes."""
+
+    @property
+    def operation_lock(self) -> asyncio.Lock: ...
+
+    async def claim_direct_ownership(
+        self,
+        logical_member: str,
+        *,
+        power_on_requested: bool = False,
+    ) -> DirectControlOwnershipDecision: ...
+
+    async def note_verified_direct_power_on(self, logical_member: str) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class RoutedCommandResult:
@@ -59,9 +92,13 @@ class RoutedCommandResult:
     state_topic: str | None
     state_value: str | None
     result: LocalControlResult
+    ownership: DirectControlOwnershipDecision | None = None
 
     def public_result(self) -> dict[str, object]:
-        return self.result.public_dict()
+        payload = self.result.public_dict()
+        if self.ownership is not None:
+            payload["direct_control_ownership"] = self.ownership.public_dict()
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,9 +126,15 @@ class LocalControlMqttRouter:
         schedule_plans: tuple[FreshMasterSchedulePlan, ...],
         coordinator: LocalControlCoordinator | None,
         operation_lock: asyncio.Lock | None = None,
+        ownership_service: DirectControlOwnershipService | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._operation_lock = operation_lock
+        self._ownership_service = ownership_service
+        if ownership_service is not None and (
+            operation_lock is None or ownership_service.operation_lock is not operation_lock
+        ):
+            raise ValueError("direct ownership and device writes require one shared operation lock")
         device_by_member = {device.logical_member: device for device in manifest.devices}
         self._routes: dict[str, _ScalarRoute | _ScheduleRoute] = {}
         plans_by_topic: dict[str, tuple[FreshMasterSchedulePlan, int]] = {}
@@ -154,6 +197,31 @@ class LocalControlMqttRouter:
                 "MQTT topic is not a published qualified control"
             ) from error
         value = _parse_entity_value(route.entity, payload)
+        logical_member = (
+            route.target.logical_member
+            if isinstance(route, _ScalarRoute)
+            else route.plan.slaves[route.slave_index].target.logical_member
+        )
+        power_on_requested = (
+            isinstance(route, _ScalarRoute)
+            and route.entity.function == "power"
+            and value is True
+        )
+        ownership = (
+            None
+            if self._ownership_service is None
+            else await self._ownership_service.claim_direct_ownership(
+                logical_member,
+                power_on_requested=power_on_requested,
+            )
+        )
+        if ownership is not None and not ownership.allowed:
+            reason = ownership.diagnostic_reason
+            if reason is None:
+                raise LocalControlMqttError(
+                    "rejected direct-control ownership requires a diagnostic reason"
+                )
+            raise LocalControlCommandConflictError(reason)
         request_id = f"mqtt_{secrets.token_hex(16)}"
         if isinstance(route, _ScalarRoute):
             intent = LocalControlIntent(
@@ -172,11 +240,19 @@ class LocalControlMqttRouter:
                 slot_index=route.entity.slot_index,
                 flow=value,
             )
+        if self._ownership_service is not None and power_on_requested and result.accepted:
+            await self._ownership_service.note_verified_direct_power_on(logical_member)
+        elif (
+            ownership is not None
+            and ownership.diagnostic_reason == GROUP_FORCED_OFF_WILL_REVERT
+        ):
+            ownership = replace(ownership, diagnostic_reason=None)
         return RoutedCommandResult(
             request_id=request_id,
             state_topic=route.entity.state_topic,
             state_value=_state_value(route.entity, value) if result.accepted else None,
             result=result,
+            ownership=ownership,
         )
 
 
@@ -239,6 +315,13 @@ class LocalControlMqttAdapter:
             for logical_member in self._state_poller.logical_members:
                 await client.publish(
                     self._projection.device_availability_topic(logical_member),
+                    "offline",
+                    qos=1,
+                    retain=True,
+                )
+            for entity in self._projection.group_entities:
+                await client.publish(
+                    entity.availability_topic,
                     "offline",
                     qos=1,
                     retain=True,
@@ -330,6 +413,7 @@ class LocalControlMqttAdapter:
         except asyncio.CancelledError:
             raise
         except Exception:
+            await self._mark_group_outputs_unavailable(client)
             await client.publish(
                 self._group_status,
                 _canonical_json(
@@ -346,6 +430,7 @@ class LocalControlMqttAdapter:
             )
             return
         await self._publish_group_status(client)
+        await self._publish_group_outputs(client)
 
     async def _publish_group_status(self, client: aiomqtt.Client) -> None:
         group_service = self._group_service
@@ -358,6 +443,63 @@ class LocalControlMqttAdapter:
             retain=True,
         )
 
+    async def _publish_group_outputs(self, client: aiomqtt.Client) -> None:
+        if not self._projection.group_entities:
+            return
+        group_service = self._group_service
+        if group_service is None:
+            await self._mark_group_outputs_unavailable(client)
+            return
+        outputs = group_service.group_output_states()
+        by_group = {output.group_id: output for output in outputs}
+        expected = {entity.group_id for entity in self._projection.group_entities}
+        if len(by_group) != len(outputs) or set(by_group) != expected:
+            await self._mark_group_outputs_unavailable(client)
+            await client.publish(
+                self._group_status,
+                _canonical_json(
+                    {
+                        "schema_version": 1,
+                        "status": "group_lifecycle_unavailable",
+                        "diagnostic_reason": "group_output_inventory_mismatch",
+                        "physical_identity_keys_exposed": False,
+                        "private_paths_exposed": False,
+                    }
+                ),
+                qos=1,
+                retain=True,
+            )
+            return
+        for entity in self._projection.group_entities:
+            output = by_group[entity.group_id]
+            await client.publish(
+                entity.state_topic,
+                output.actual_output.value,
+                qos=1,
+                retain=True,
+            )
+            await client.publish(
+                entity.attributes_topic,
+                _canonical_json(output.attributes_dict()),
+                qos=1,
+                retain=True,
+            )
+            await client.publish(
+                entity.availability_topic,
+                "online" if output.available else "offline",
+                qos=1,
+                retain=True,
+            )
+
+    async def _mark_group_outputs_unavailable(self, client: aiomqtt.Client) -> None:
+        for entity in self._projection.group_entities:
+            await client.publish(
+                entity.availability_topic,
+                "offline",
+                qos=1,
+                retain=True,
+            )
+
     async def _consume(self, client: aiomqtt.Client) -> None:
         async for message in client.messages:
             if bool(message.retain):
@@ -368,11 +510,16 @@ class LocalControlMqttAdapter:
                 continue
             try:
                 routed = await self._router.handle(str(message.topic), message.payload)
+            except LocalControlCommandConflictError as error:
+                await self._publish_rejection(client, error.diagnostic_reason)
+                await self._publish_group_status(client)
+                continue
             except Exception as error:
                 await self._publish_rejection(
                     client,
                     f"command_rejected_{type(error).__name__}",
                 )
+                await self._publish_group_status(client)
                 continue
             await client.publish(
                 f"{self._projection.topic_prefix}/local/requests/"
@@ -392,6 +539,8 @@ class LocalControlMqttAdapter:
                     qos=1,
                     retain=True,
                 )
+            if routed.ownership is not None:
+                await self._publish_group_status(client)
 
     async def _publish_fresh_state(
         self,
@@ -489,6 +638,8 @@ def _canonical_json(value: object) -> str:
 
 
 __all__ = [
+    "DirectControlOwnershipService",
+    "LocalControlCommandConflictError",
     "LocalControlMqttAdapter",
     "LocalControlMqttError",
     "LocalControlMqttRouter",
