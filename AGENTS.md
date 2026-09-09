@@ -1021,10 +1021,11 @@ current `--write-enabled` coordinator가 존재할 때만 구성합니다.
 per-device `DeviceActuationLimits`는 current private config의 device limit와 선언된 local-control Flow
 안전 봉투 `30..75`의 교집합으로 유도합니다. group-level effective limit와 device 봉투를 합치지 않고,
 config에 없는 firmware step을 추측하지 않으며 현재 planner capability의 기본 step을 그대로 사용합니다.
-완료된 `FreshStatePoller.poll_once()` 한 번당 정확히 한 번, 일부가 아닌 전체 결과 tuple을 inventory에
-전달합니다. 각 supervised group은 자기 member를 logical key로 골라 `observe_fresh_cycle()`을 한 번만
-호출하며 별도 `tick()`을 겹쳐 호출하지 않습니다. planner 시간은 monotonic clock을 사용하고
-`observed_at` wall clock을 generation·identity·gate로 사용하지 않습니다.
+device-state publication이 모두 성공한 fresh cycle마다 정확히 한 번, 일부가 아닌 전체 결과 tuple을
+inventory에 전달합니다. device-state publish가 실패하면 callback만 조용히 누락한 채 다음 cycle로
+계속하지 않고 cycle loop 자체를 종료합니다. 각 supervised group은 자기 member를 logical key로 골라
+`observe_fresh_cycle()`을 한 번만 호출하며 별도 `tick()`을 겹쳐 호출하지 않습니다. planner 시간은
+monotonic clock을 사용하고 `observed_at` wall clock을 generation·identity·gate로 사용하지 않습니다.
 
 모든 group plan port는 기존 device router·fresh poller와 같은 process `operation_lock` 아래에서 물리
 경계를 통과하도록 구성합니다. 이 slice에는 group을 arm하는 production caller가 없어 frame이 나갈 수
@@ -1051,6 +1052,117 @@ diagnostic만 내보내고 physical identity나 private path를 노출하지 않
 활성화에는 `docs/hardware-readiness.md`의 fresh preflight·exact restore·on-site 승인·현장 감시·중단
 수단이 별도로 필요하고, 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`은 유지합니다. 같은 production
 lifecycle 격리 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
+
+### 2026-09-09 fresh group output·device manual ownership 결속 범위 확장
+
+production group lifecycle commit `b2f9828678f0a12811d6c2f2f6f0714f87e52cca`의 완료 보고와 함께 다음
+단계를 production daemon·MQTT·Home Assistant 연결로 제시한 직후, repository maintainer는
+“이어서 진행하자”로 답했습니다. 이번 B1은 그 특정 답변에 **source·test·offline 검증 범위로 좁게
+결속**하며, 직전 하위절이 남긴 별도 검토·승인 요구를 이 범위에서 충족합니다. 최초 group command는
+바로 열지 않고 두 slice로 나누며, B1은 decoded device truth의 read-only group output과 기존
+direct-device command의 manual ownership 결속까지만 다룹니다. group ON/OFF command는 별도 B2 정책과
+검토 뒤에만 열고, 실제 broker·Home Assistant·장비·앱·원격 환경 실행 승인이 아닙니다.
+
+이번 작업이 닫을 질문은 qualification이나 desired state와 무관한 fresh decoded power를 config-relative
+group output으로 과장 없이 투영할 수 있는가, 그리고 기존 direct-device command가 group manager에
+manual ownership을 먼저 기록해 일반 group plan의 frame-before-send guard를 무효화하면서도 새 group
+write caller를 만들지 않을 수 있는가입니다. 근거는 firmware 가설이 아니라 decoded status dataflow,
+manager generation guard의 static trace와 fault injection입니다.
+
+허용 범위는 다음 파일로 한정합니다.
+
+- `src/jebao_flow/local_control/group_service.py`, `group_supervisor.py`
+- `src/jebao_flow/local_control/state.py`, `ha.py`, `mqtt.py`
+- `src/jebao_flow/local_control_cli.py`
+- `tests/unit/test_local_control_*`
+- `docs/local-control.md`
+
+이 목록은 직전 하위절에서 무변경으로 둔 `group_supervisor.py`와 아직 열지 않았던 `ha.py`를 이번 B1에
+한해서 명시적으로 다시 엽니다. `src/jebao_flow/groups/*`, `src/jebao_flow/local_control/group.py`,
+`coordinator.py`, `lease.py`, `device_writer.py`, `journal.py`, `src/jebao_flow/mqtt/*`,
+`src/jebao_flow/app.py`, `custom_components/*`, `src/jebao_flow/protocol/*`, `src/jebao_flow/devices/*`,
+기존 여섯 frozen source와 그 직접 테스트, `docs/runs/*`는 수정하지 않습니다. old MQTT/group service나
+`devices.*` observer를 import하거나 우회 write 경로로 재사용하지 않습니다.
+
+이번 source 변경은 기존 read-only device-state와 group supervisor/runtime 의미에 대한 가산적 변경으로
+한정합니다. `tests/unit/test_local_control_group_supervisor.py`,
+`test_local_control_group_service.py`, `test_local_control_state.py`, `test_local_control_ha.py`,
+`test_local_control_mqtt.py`, `test_local_control_cli.py`의 기존 단정을 완화하거나 삭제하지 않으며, 필요하면
+별도 repository maintainer 승인을 먼저 받습니다. supervisor의 write-disarmed startup, disposition 다섯
+종, exact manager-produced plan provenance, mandatory OFF 보존과 sticky close 의미를 그대로 유지합니다.
+`group_supervisor.py` 변경은 manual-ownership 접근에 필요한 최소 가산 변경에 한정하고 arming·disposition·
+close 의미를 바꾸지 않습니다.
+
+typed power truth는 이미 한 번 수행한 product schema `decode_status()` 결과와 catalog descriptor의 field를
+직접 결속해 유도합니다. 새 device I/O나 두 번째 decode를 추가하지 않고, HA control exposure 또는
+qualification 여부와 무관하게 읽을 수 있어야 합니다. unavailable state에는 typed truth를 싣지 않고,
+field가 없거나 bool이 아니면 추측하지 않고 group output을 `unknown`으로 둡니다.
+
+group actual output은 complete fresh cycle의 물리 power truth만 뜻합니다. member 하나라도 unavailable이거나
+power가 없으면 `unknown`, 모든 member가 OFF면 `off`, config에서 enabled인 member가 모두 ON이고 disabled인
+member가 모두 OFF면 `on`, 나머지는 `mixed`입니다. manual override 여부는 이 네 값 계산에 섞지 않고
+bounded logical `manual_override_members`와 ownership 진단으로 분리합니다. config 상대적 판정임을 current
+install generation과 함께 표시합니다. `on`은 power 집계일 뿐 current Flow·pattern이 계획과 일치한다는
+판정이 아니며, scalar target drift는 계속 `UNKNOWN`입니다.
+
+Home Assistant에는 이 actual output을 읽는 command-free diagnostic sensor만 가산적으로 추가합니다.
+group output state는 direct command result나 desired runtime으로 낙관 갱신하지 않고 successful fresh cycle
+뒤에만 publish합니다. unknown이면 group entity availability를 current로 주장하지 않습니다. 이번 B1에서
+group command topic·Start/Stop button·switch를 만들지 않고,
+`LocalControlGroupSupervisor.apply_runtime_command()`의 production caller는 계속 0개입니다.
+
+기존 direct-device MQTT route는 payload를 먼저 parse하고 대상 member의 supervised group ownership 상태를
+확인한 뒤, 같은 process `operation_lock`을 유지한 채 아래 규율로 기존 coordinator write를 수행합니다.
+scalar와 direct schedule route를 모두 같은 규율로 처리합니다. invalid payload는 ownership이나 journal을
+만들지 않습니다. `EMERGENCY_STOP`이 아닌 경우 manual declaration은
+`GroupManager.set_manual_override()`로 generation·control epoch만 전진시키고 새 group plan을 즉시 submit하지
+않습니다. 그 generation 변화만으로 이미 대기 중인 ordinary plan의 `manager.is_current` pre-send guard가
+false가 됩니다. old ordinary plan은 shared lock을 다시 얻은 뒤에도 frame 직전 pre-send guard에서 폐기되어
+direct value를 덮지 않습니다. override는 운영자가 direct ownership을 선택했다는 뜻이므로 이후 coordinator
+preflight가 frame 전에 거부돼도 유지합니다.
+
+direct/group ownership 충돌은 다음 네 경우를 구분합니다. unarmed group과 armed ordinary group은 manual
+override를 기록한 뒤 direct write를 허용합니다. armed group이 `STOPPED`이거나 config에서 disabled이면 direct
+write를 허용하되 command result와 group diagnostic에 stable English reason
+`group_forced_off_will_revert_next_cycle`을 싣습니다. 다음 successful fresh cycle의 전체 canonical OFF가 그
+direct value를 되돌릴 수 있다는 뜻이며, 이를 조용히 숨기거나 유지 보장으로 표현하지 않습니다. armed
+`EMERGENCY_STOP`에서는 stable reason `group_emergency_stop_blocks_direct_control`로 coordinator와 durable
+journal 이전에 거부하고 physical frame을 0회로 유지합니다. 이 branch는 manual override도 기록하지
+않습니다. 거부된 command가 control epoch을 올려 다음 fresh cycle의 mandatory OFF 재write를 만드는 경로를
+차단하기 위해서입니다. 국소 direct write가 emergency stop을 무력화할 수 없다는 기존 안전 의미를
+보존하는 것이며, `STOPPED`까지 같은 거부로 넓히지 않습니다. 두 stable reason은 예외 class 이름에서
+유도하지 않고 command result·status에 위 문자열 그대로 publish합니다.
+
+manual override는 이미 수락된 mandatory canonical OFF의 safety token을 취소하지 않습니다. 따라서 group
+OFF가 진행 중일 때 direct write는 그 OFF에 의해 덮일 수 있으며, 이번 B1은 그 반대를 보장한다고
+서술하지 않습니다. 이번 B1 production에는 group을 arm하는 caller가 없어 그 경합을 새로 만들지 않습니다.
+armed ordinary group의 fault injection에서는 override 자체가 submit 0회임을 고정하고, 다음 successful fresh
+cycle의 새 plan identity가 dispatch 가능한 남은 member를 포함한 plan-wide write를 정확히 1회 만들며 그 다음
+unchanged cycle은 추가 `GroupPlanPort.write_plan()` 0회로 dedupe됨을 기록합니다. 이는 per-member applied
+tracking을 새로 발명하지 않은 plan-atomic ownership 전이의 유계 비용입니다.
+
+최소 회귀는 (1) unqualified·diagnostic-only entity에서도 decoded bool power truth가 I/O 추가 없이 남음,
+(2) `off`·`on`·`mixed`·`unknown`과 member disabled·manual override 조합이 actual/ownership을 섞지 않음,
+(3) group HA sensor에 command topic이 없고 direct command 결과가 state를 바꾸지 않음, (4) invalid payload는
+override도 frame도 0회, valid direct scalar·schedule payload는 override가 coordinator보다 먼저 실행됨,
+(5) manual generation 변화가 대기 중 ordinary plan을 pre-send에서 폐기하며 override 시점 submit은 0회,
+(6) 이미 수락된 mandatory OFF는 override로 취소되지 않음, (7) armed ordinary group이 override 뒤 첫 fresh
+cycle에서 idle까지 기다린 뒤 `GroupPlanPort.write_plan()` 호출을 정확히 1회 만들고 다음 unchanged cycle은
+추가 호출 0회, (8) armed
+`STOPPED`에서는 direct write 성공과 `group_forced_off_will_revert_next_cycle`을 함께 보고하고 다음 cycle의
+canonical OFF가 idle까지 `GroupPlanPort.write_plan()` 정확히 1회 호출된 뒤 반복되지 않음, (9) armed
+`EMERGENCY_STOP`에서는
+`group_emergency_stop_blocks_direct_control`로 journal·frame 0회에 거부함, (10) 기존 read-only
+startup·publish·shutdown과 public redaction 단정이 그대로 통과함을 고정합니다.
+
+B1 source·offline test landing은 broker·Home Assistant·실제 device를 연결하거나 group write를 승인하지
+않습니다. B2에서 command surface를 열기 전에는 identity-based command verdict, 유계 wait, qualification
+진단을 별도 정책과 적대적 검토로 결속합니다. group command는 shared lock을 이미 소유하는
+`LocalControlMqttRouter.handle()`을 경유하지 않고 별도 route에서 runtime worker의 완료를 기다려야 합니다.
+실제 활성화에는
+`docs/hardware-readiness.md`의 fresh preflight·exact restore·on-site 승인·현장 감시·중단 수단이 필요하고,
+하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`은 유지합니다. 같은 truth·ownership 질문을 반복해 정보가
+늘지 않으면 §7 예산에 따라 park합니다.
 
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
