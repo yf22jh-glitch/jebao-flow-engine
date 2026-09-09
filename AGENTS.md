@@ -1717,6 +1717,142 @@ broker·Home Assistant·device·app·원격 환경 실행과 장비 write를 포
 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`, frozen native harness를 유지합니다. 같은 discovery namespace
 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
 
+### 2026-09-09 Home Assistant owned discovery variant cleanup D1c 범위 확장
+
+D1b source·docs·offline test commit `4740705ab043a916eea74dddb3e047e67ae8626a`의 완료를 보고한 뒤
+repository maintainer는 “이어서 진행하자”고 답했습니다. 이 발언은 다음 제품 작업을 계속하라는
+요청이며 D1c 기능을 이름으로 선택하거나 broker retained state, Home Assistant, actual deployment,
+장비·앱·원격 환경 실행 및 장비 write를 승인한 발언이 아닙니다. D1c의 선택과 아래 경계는 그 뒤
+current source의 read-only static trace와 적대적 검토에서 정했으며 후속 slice의 상시 승인으로
+일반화하지 않습니다.
+
+D1은 위 MQTT 테스트의 기존 deletion 0 단정을 완화하려면 별도·사전 repository maintainer 결정을
+요구했습니다. maintainer의 일반적인 “이어서 진행하자”는 그 결정을 묻기 전에 나온 발언이므로
+그 면제로 취급하지 않습니다. maintainer가 답할 좁은 질문은
+`test_observer_adapter_does_not_publish_discovery_deletions`의 “모든 discovery payload가 non-empty”
+단정 하나를 “current non-empty config와 current namespace의 owned `V - C` tombstone이 정확히
+분할되고 다른 retained deletion은 0개”라는 더 강한 단정으로 교체해도 되는가입니다. 이 결정은
+그 테스트 하나·그 단정 하나에만 적용하며, 답이 나오기 전까지 D1c source slice는 park합니다.
+
+이번 작업이 닫을 질문은 D1b가 결속한 current instance namespace와 current topology 안에서,
+mode·qualification 전환으로 더 이상 publish하지 않는 Home Assistant discovery platform variant만
+current entity와 구조적으로 구분해 제거하면서 다른 namespace, pre-namespace legacy, runtime MQTT
+topic과 B1~D1b의 장비 제어 의미를 바꾸지 않을 수 있는가입니다. 근거는 firmware 가설이 아니라
+current projection의 entity construction과 adapter startup ordering에 대한 static trace, namespace·set
+difference·publish ordering 회귀입니다. source·offline test landing 자체는 §3 P1을 주장하지 않고,
+D1b가 기록한 pre-namespace actionable duplicate-control deployment blocker도 해제하지 않습니다.
+
+이 확장은 다음 파일로 한정합니다.
+
+- owned discovery variant 집합 유도에 한한 `src/jebao_flow/local_control/ha.py`
+- bounded tombstone publish와 startup ordering에 한한 `src/jebao_flow/local_control/mqtt.py`
+- 필요한 회귀에 한한 `tests/unit/test_local_control_ha.py`, `test_local_control_mqtt.py`
+- cleanup 경계 기록에 한한 `docs/local-control.md`, `docs/home-assistant.md`
+
+`src/jebao_flow/config.py`, `src/jebao_flow/groups/*`, `src/jebao_flow/local_control/catalog.py`,
+`group_command.py`, `group_service.py`, `group_supervisor.py`, `state.py`, `group.py`, `coordinator.py`,
+`lease.py`, `device_writer.py`, `journal.py`, `local_control_cli.py`, old `src/jebao_flow/mqtt/*`,
+`src/jebao_flow/app.py`, `custom_components/*`, `src/jebao_flow/protocol/*`, `src/jebao_flow/devices/*`,
+기존 여섯 frozen source와 그 직접 테스트, `docs/runs/*`는 수정하지 않습니다. 새 config field,
+operator opt-in, broker query, retained inventory read, durable prior-projection history를 만들지 않습니다.
+
+projection은 raw deletion topic을 외부에서 받지 않고, D1b의 current instance namespace와 current
+`discovery_prefix` 안의 `(HomeAssistantPlatform, namespaced unique_id)` variant 집합을 current
+config·manifest·catalog·group·schedule topology에서만 유도합니다. 모든 current discovery identity를
+포함한 potential variant 집합을 `V`, 이번 projection이 실제 publish하는 identity 집합을 `C`라 할 때
+tombstone 집합은 정확히 `V - C`입니다. identity를 topic으로 바꿀 때는 D1b가 고정한
+`{discovery_prefix}/{component}/{unique_id}/config` 형식만 사용합니다. 따라서 tombstone 집합과
+current discovery topic 집합의 교집합은 구조적으로 0이고, arbitrary topic string이나 state topic
+역파싱을 deletion authority로 사용하지 않습니다.
+
+`V`는 projection 결과에서 역산하지 않고 raw manifest devices × catalog functions, validated schedule
+plans × slaves × 48, config groups × members에서 **mode·qualification filter보다 먼저** 유도합니다.
+`control_surface_enabled`, qualification receipt, `control_exposed`, per-device physical qualification·write
+flag는 `V`를 바꾸지 않고 `C`와의 분할만 바꿉니다. `V`는 다음 bounded 상위집합입니다.
+
+- non-system device function마다 current SENSOR variant와, 기존 `_platform_for()`가 그
+  `descriptor.kind`를 control 가능으로 접었을 때 SENSOR가 아닌 경우의 SWITCH·NUMBER·SELECT·BUTTON
+  variant를 함께 포함합니다. 새 kind-to-platform 표를 복제하지 않습니다.
+- current schedule plan의 검증된 slave마다 `slot_index 0..47`의 NUMBER variant를 포함합니다.
+- current group마다 group SWITCH와 current member별 resume BUTTON variant를 포함합니다.
+- system function과 group actual-output은 양 mode에서 유지되는 current SENSOR만 포함하고 alternate
+  variant를 만들지 않습니다.
+
+`HomeAssistantPlatform.BINARY_SENSOR`는 current source에 발행 경로가 없으므로 `V`에 추측으로
+추가하지 않습니다. 상한은 `48 × Σ|plan.slaves| + Σ(device function당 최대 2 variant) +
+Σ(group당 1 switch + |members| buttons)`에 양 mode의 current-only SENSOR를 더한 current topology
+함수이며, reconnect 횟수나 broker history에 따라 커지지 않습니다.
+
+존재한 적 없는 potential topic에 대한 zero-byte retained publish는 broker의 no-op이고, 집합 크기는
+current topology에 의해 유계입니다. 반면 current config에서 제거된 device·group·member·schedule,
+과거 `descriptor.kind`, 과거 `discovery_prefix`, 다른 instance namespace와 pre-namespace object id는
+`V`에 추측으로 복원하지 않으며 자동 삭제하지 않습니다. 이 범위 밖 retained state는 `UNKNOWN`으로
+남기고 D1b가 요구한 별도 exact legacy inventory·제거·복구 절차가 담당합니다. schedule topology는
+각 invocation의 `--schedule-pair`가 있으면 그것을, 없으면 current config의 `native_pair`를 소비하므로,
+이 입력이 빠지거나 바뀌어 더 이상 유도되지 않는 과거 slot topic도 D1c가 정리했다고 주장하지 않습니다.
+
+여기서 “owned”는 exact `topic_prefix`가 한 daemon instance에 유일하다는 operator configuration
+불변식 아래에서만 성립합니다. current code에는 이 유일성을 host 간에 강제하는 namespace lease가
+없고 per-device write lock도 그 역할을 하지 않습니다. 같은 exact `topic_prefix`를 두 daemon이 다른
+mode·qualification으로 공유하면 namespace도 같아 한쪽 `V - C`가 다른 쪽 current discovery를
+삭제할 수 있습니다. 이를 추측성 lock이나 새 config gate로 막지 않고, 코드가 강제하지 않는 조건과
+상호 삭제 failure mode를 문서화해 actual deployment NO-GO의 추가 근거로 유지합니다.
+
+adapter는 MQTT connection마다 먼저 기존 순서대로 global·device·group availability를 `offline`으로
+publish한 뒤, command topic을 subscribe하기 **전에** 정렬·중복 제거된 tombstone topic 각각에 exact
+zero-byte payload `b""`, QoS 1, `retain=True`를 정확히 한 번 publish합니다. 그 뒤에만 current command
+topic subscribe, non-empty current discovery config publish, diagnostic state와 availability `online`을
+진행합니다. 이 순서는 daemon 자신의 tombstone 발행 국면 동안 command subscription을 열지 않지만,
+broker 전달과 Home Assistant 처리는 비동기이므로 화면의 stale actionable window가 완전히 닫혔다고
+주장하지 않습니다. tombstone publish가 실패하면 subscription·current discovery·online으로 진행하지 않고
+기존 MQTT 오류 전파와 offline availability를 유지합니다. 같은 mode의 재기동에서도 alternate
+tombstone은 connection당 다시 한 번 나갈 수 있으며 이는 idempotent입니다. 근거 없이 0회라고
+주장하거나 broker history를 조회해 최적화하지 않습니다.
+
+삭제 범위는 discovery config topic으로만 한정합니다. pre-namespace와 다른 namespace의 discovery,
+current discovery, device·group state, command, availability, lifecycle status에는 empty payload를
+publish하지 않습니다. current config payload는 계속 canonical non-empty JSON, QoS 1, retained로
+publish하고, runtime command QoS 0·retained/duplicate rejection·single consumer·fresh state·shutdown task
+의미는 바꾸지 않습니다. 새 task·subscription·write path·journal·coordinator·stable reason·firmware
+gate를 만들지 않으며 public projection field 집합과 `schema_version` 1도 바꾸지 않습니다.
+zero-length 외의 `null`, `{}` 또는 JSON empty string은 Home Assistant deletion이 아니라 잘못된 config가
+되므로 사용하지 않습니다. stale와 current entity가 같은 state·command·availability topic을 공유하므로
+그 topic을 지우면 current entity까지 손상되는 것이 이 금지의 load-bearing 근거입니다.
+
+이 D1c는 D1과 D1b가 고정한 “deletion 목적 empty retained publish 0회”를 **current D1b namespace의
+`V - C` discovery config에 한해서만** 대체합니다. 그 외 topic의 0회 의미와 observer control surface
+0개·qualification 미열람·capability diagnostic 보존은 그대로입니다.
+repository maintainer가 위 좁은 질문을 승인하면,
+`test_observer_adapter_does_not_publish_discovery_deletions`의 모든 discovery payload가 non-empty라는
+기존 한 단정만 이 좁은 supersession을 반영해 current non-empty config와 owned tombstone을 정확히
+분할하는 더 강한 단정으로 교체합니다. 그 밖의 기존 테스트와 단정은 완화·삭제하지 않습니다.
+
+회귀는 최소한 (1) tombstone 집합과 current discovery·모든 state·모든 command·모든 availability topic
+네 집합의 교집합이 각각 0, (2) 모든 tombstone object id가 current namespace를 정확히 한 번 포함하고
+current `discovery_prefix`의 exact topic 형식을 쓰며 다른 prefix·namespace·pre-namespace id가 0개,
+(3) 같은 raw topology의 observer·control 및 qualified·unqualified projection에서 `tombstone ∪ current`
+합집합은 동일하고 분할만 이동하며 observer 쪽 tombstone에 qualified device non-SENSOR, slot NUMBER,
+group SWITCH·resume BUTTON이 포함되고 current SENSOR·group actual·system diagnostic은 제외됨,
+(4) adapter combined event ordering에서 모든 tombstone이 마지막 availability-offline publish 뒤, 첫
+subscribe와 첫 current discovery publish 앞에 있고 sorted unique topic마다 exact `b""`/QoS 1/retained로
+정확히 한 번이며 connect 전체 empty publish 총수가 정확히 `|V - C|`이고 current topic과
+state·command·availability에는 empty publish 0회, (5) 위 상한을
+초과하지 않고 연속 두 connection이 같은 deterministic tombstone sequence를 만들며 current topology에서
+제거한 group·member·schedule과 과거 discovery prefix를 추측하지 않음, (6) device variant는 기존
+`_platform_for()` 결과를 그대로 소비해 kind mapping을 복제하지 않고 미매핑 kind와 BINARY_SENSOR를
+대상에 추가하지 않음, (7) tombstone publish fault injection이 subscription·current discovery·online을
+0회로 유지하고 예외를 전파, (8) D1 observer의 control topic subscription 0·reason 보존과 D1b
+namespace·topic-byte 불변, B1~C1의 write-disarmed startup·plan provenance·mandatory OFF·watermark·verdict·
+sticky close 및 full read-only suite가 그대로 통과함을 고정합니다.
+
+D1c source·offline test landing은 owned cleanup algorithm만 저장소에 추가하며 실제 MQTT connection,
+broker retained mutation, Home Assistant, daemon restart·deployment, device·app·원격 환경 실행과 장비
+write를 포함하지 않습니다. D1c 뒤에도 pre-namespace actionable legacy는 그대로일 수 있으므로 exact
+inventory·제거·복구 절차가 별도 검토·승인되기 전에는 D1b identity schema를 deploy하지 않습니다.
+같은 `topic_prefix` 유일성과 Home Assistant의 tombstone 처리 완료를 daemon이 증명하지 못하므로
+D1c 자체도 그 deployment blocker를 해제하지 않습니다.
+하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`, frozen native harness를 유지합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
