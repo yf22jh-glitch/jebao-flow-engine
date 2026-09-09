@@ -1590,6 +1590,133 @@ D1 source·offline test landing은 actual deployment를 재기동하거나 broke
 필요합니다. 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`, frozen native harness를 유지합니다. 같은
 observer-surface 질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
 
+### 2026-09-09 Home Assistant discovery instance namespace D1b 범위 확장
+
+observer control-surface suppression commit `cc68af25fa73104d06688ab296b7f5d0c6c2a9f0`의 완료를
+보고한 뒤 repository maintainer는 “다음 가자”고 답했습니다. 이 발언은 actual deployment나
+broker retained-state migration을 활성화하라는 승인이 아니라, 직전 D1이 명시한 후속 제품
+경계를 source·test·offline 검증으로 계속하라는 요청입니다. D1b 선택과 세부 설계는 그 발언
+이후의 read-only static trace와 적대적 검토에서 정했으며, 이를 후속 slice의 상시 승인이나
+broker·Home Assistant·장비·앱·원격 환경 실행 및 장비 write 승인으로 일반화하지 않습니다.
+D1이 “D1c와 migration 비용을 별도 정책·적대적 검토에 먼저 결속”하라고 설정한 선행
+조건은 아래의 device 단위 migration 비용, D1c의 namespaced-variant 한계, 이 적대적 검토로
+이행합니다. 이 이행은 D1c 자체의 source·deployment를 승인하지 않으며 D1c는 여전히 별도
+정책과 적대적 검토를 필요로 합니다.
+
+이번 작업이 닫을 질문은 같은 `discovery_prefix`와 논리 device·group id를 쓰는 두 daemon이 서로
+다른 `topic_prefix`를 갖는 경우, Home Assistant discovery object id·entity `unique_id`·device
+identifier를 stable instance namespace에 같이 결속해 서로의 discovery identity를 공유하지 않게
+하면서 state·command·availability topic과 B1~D1의 의미를 변경하지 않을 수 있는가입니다.
+근거는 firmware 가설이 아니라 current Home Assistant projection의 identity 생성과 MQTT topic
+구성에 대한 static trace, 서로 다른 prefix를 가진 projection 사이의 set-intersection regression입니다.
+이는 §3 P1을 주장하거나 write-path gate를 늘리는 작업이 아니라, D1에서 명시한 multi-daemon
+discovery identity divergence를 닫는 작업입니다.
+
+이 확장은 다음 파일로 한정합니다.
+
+- `src/jebao_flow/local_control/ha.py`
+- 필요한 회귀에 한한 `tests/unit/test_local_control_ha.py`, `test_local_control_mqtt.py`
+- identity·migration 경계 기록에 한한 `docs/local-control.md`, `docs/home-assistant.md`
+
+`src/jebao_flow/config.py`, `src/jebao_flow/groups/*`, `src/jebao_flow/local_control/catalog.py`,
+`group_command.py`, `group_service.py`, `group_supervisor.py`, `state.py`, `group.py`, `coordinator.py`, `lease.py`,
+`device_writer.py`, `journal.py`, `mqtt.py`, `local_control_cli.py`, old `src/jebao_flow/mqtt/*`,
+`src/jebao_flow/app.py`, `custom_components/*`, `src/jebao_flow/protocol/*`, `src/jebao_flow/devices/*`, 기존
+여섯 frozen source와 그 직접 테스트, `docs/runs/*`는 수정하지 않습니다. 새 config field·operator
+opt-in·broker query·durable prior-projection history를 만들지 않습니다.
+
+instance namespace는 기존 규칙으로 검증된 **exact `topic_prefix` ASCII byte string**의 full,
+non-truncated SHA-256 hex digest에 `instance_`를 붙인 고정 73-character printable ASCII 값으로
+유도합니다. `project_home_assistant()`는 기존 prefix 규칙을 먼저 검증한 뒤에만 namespace를
+hashing하고 entity를 생성합니다. Python process hash, PID, IP·port, hostname, filesystem path, mtime, current clock, startup order를
+소비하지 않습니다. digest 전에 `strip()`이나 segment 치환을 하지 않으며, 실제 MQTT topic을 만드는
+exact prefix가 다르면 namespace binding의 입력도 다르게 유지합니다. `discovery_prefix`는 이
+namespace 입력에 포함하지 않습니다. discovery prefix가 다르면 discovery topic 경계가 이미 분리되고,
+같은 discovery prefix 안에서 instance를 구분하는 static config 값은 `topic_prefix`이기 때문입니다.
+`instance.id`를 섞지 않아 같은 MQTT command tree가 discovery identity 두 벌로 나뉘지 않고, stdlib
+SHA-256 외의 새 import boundary를 만들지 않습니다.
+
+이 namespace를 device function, system function, slave schedule slot, group actual-output sensor, group
+switch, per-member resume button의 **모든** `unique_id`에 동일하게 넣습니다. current discovery topic
+형식은 `{discovery_prefix}/{component}/{object_id}/config`이고 optional node-id segment를 쓰지 않으며,
+`object_id` 자리에 namespaced `unique_id`를 그대로 사용합니다. D1의 “node id” 표현은 이 현재
+object-id segment를 가리킨 것이며, D1b에서 새 discovery topic segment나 두 번째 namespace를
+만들지 않습니다. `docs/local-control.md`의 “discovery node ids” 표현도 이 source 구조에 맞게
+“discovery object ids”로 정정합니다. Home Assistant device identifier에도 같은 namespace를 넣되, 한 instance 안의
+device function·schedule slot은 `(namespace, logical_member)`당 정확히 한 logical device identifier로
+묶고 system function은 같은 namespace의 `local_system` device로 묶습니다. group actual·switch·resume는
+같은 `(namespace, group_id)`에 대해 byte-identical group device identifier를 쓰며 member resume를 member
+device로 옮기지 않습니다. namespace는 internal projection constructor에 required keyword-only 인자로
+전파하고 state topic에서 역파싱하거나 silent legacy default를 두지 않습니다. human-readable entity name과
+model·manufacturer는 바꾸지 않습니다.
+
+같은 exact `topic_prefix`와 같은 logical config는 process restart·observer/control mode와 무관하게 같은
+namespace를 유도합니다. 다른 prefix를 가진 두 projection은 같은 `discovery_prefix`를 써도
+discovery topic, entity `unique_id`, Home Assistant device identifier 집합이 겹치지 않아야 합니다.
+state·command·global/device/group availability topic은 기존 exact `topic_prefix` 문자열을 그대로 사용하며
+이 slice에서 한 byte도 바꾸지 않습니다. public projection의 기존 field 집합과 `runtime_mode_observer`
+의미도 바꾸지 않고 `schema_version` 1을 유지하며, namespace는 이미 공개되는 discovery
+identity 내부에만 듭니다.
+
+이 변경은 실제 활성화하면 기존 모든 Home Assistant entity의 `unique_id`·device identifier·discovery
+object id를 바꾸므로 새 entity·device set을 만듭니다. Recorder history, entity/device-registry area·name
+customization, dashboard reference의 연속성은 자동 보존된다고 주장하지 않으며 이 migration 비용을
+docs에 명시합니다.
+D1b는 retained discovery config를 삭제하거나 tombstone을 publish하지 않으며, pre-namespace
+legacy entity의 존재·소유권은 `UNKNOWN`으로 남깁니다. 후속 D1c는 이 namespaced identity 안의
+mode·qualification variant만 자동 정리할 수 있고 pre-namespace legacy config를 자동 삭제하지
+않습니다. state·command topic이 byte-identical하므로 CONTROL mode에서 D1b를 배포하면 legacy와
+namespaced entity가 같은 물리 명령 topic을 가리키는 동작 가능한 중복 control로 남습니다. 화면에서 둘은
+같은 state를 보여 ghost를 구분할 근거도 없으며, 운영자의 중복 조작이 동일 write를 두 번
+만들 수 있어 **deployment 시점에는 §3 duplicate-write P1 위험**입니다. OBSERVER mode에서는
+현재 process가 command topic을 subscribe하지 않으므로 중복 diagnostic surface이지 장비 write P1은 아닙니다.
+platform이 discovery topic의 component segment이므로 한 pre-namespace logical entity가 mode·qualification
+전환 이력에 따라 sensor·number·switch·select·button 등 한 벌 이상의 legacy variant를 남길
+수 있음도 exact inventory 비용에 포함합니다.
+
+D1b→D1c만으로는 pre-namespace legacy의 소유권을 새로 증명할 수 없어 위 중복을 제거하지
+못하며, 배포 가능 상태로 종결되지 않습니다. legacy 제거는 소유권 근거·exact inventory·복구
+경로를 갖춘 별도 정책과 repository maintainer 승인, `docs/hardware-readiness.md`의 on-site 절차 아래
+Home Assistant device/entity 제거 또는 의도적 broker cleanup으로만 수행합니다. 이는 D1b·D1c 코드 범위
+밖입니다. 따라서 **D1b source landing 자체는 §3 P1이 아니지만**, D1c와 legacy migration 절차가
+둘 다 별도로 검토·승인되기 전에 broker·Home Assistant에 배포하거나 실제 daemon을 이 identity
+schema로 재기동하지 않습니다.
+
+`tests/unit/test_local_control_group_supervisor.py`, `test_local_control_group_service.py`,
+`test_local_control_group_command.py`, `test_local_control_group_transport.py`,
+`test_local_control_state.py`, `test_local_control_ha.py`, `test_local_control_mqtt.py`,
+`test_local_control_cli.py`의 기존 단정은 완화하거나 삭제하지 않으며, 필요하면 별도 repository
+maintainer 승인을 먼저 받습니다. B1~D1의 fresh device truth, write-disarmed startup, exact
+manager-produced plan provenance, disposition 다섯 종, mandatory OFF token·dedupe 우회, direct-power
+watermark, identity-based eight-stage verdict, unresolved OFF sticky close, observer command-surface 0개·diagnostic
+보존·empty retained publish 0회 의미를 변경하지 않습니다.
+
+회귀는 최소한 (1) control 표면이 있는 같은 manifest·catalog·group·schedule·`discovery_prefix`에서 다른 두
+`topic_prefix`를 쓰면 모든 entity family를 포함한 discovery topic, `unique_id`, Home Assistant
+device identifier 집합의 교집합이 각각 0개, (2) 같은 exact prefix의 반복 projection은 세 집합이
+완전히 동일하고 namespace가 `instance_` + exact prefix의 full SHA-256 lowercase hex와 일치하며
+고정 prefix `jebao-flow/main`에서 golden value
+`instance_ce1ffb4517be8e9224bd3b7aa88921621397bc66eb679d38817a78f24bdb1e49`인 73-character printable ASCII,
+(3) device·system·schedule slot·group actual·switch·resume 전부의
+`unique_id`·discovery object id·device identifier에 namespace가 **정확히 한 번** 들어가고 새 topic
+segment가 생기지 않음, (4) device entity는 `(namespace, logical_member)`당 device identifier 하나를
+쓰고 system은 `local_system`으로 묶이며, group actual·switch·resume의 같은 `group_id`는 byte-identical
+group device identifier를 쓰고 resume가 member device로 옮겨지지 않음, (5) invalid `topic_prefix`는
+namespace hashing·entity construction 전에 거부됨, (6) 같은 input의 state·command·global/device/group
+availability topic이 D1b 전 exact 문자열과 동일, (7) 같은 prefix의 observer·control projection이
+같은 namespace를 쓰고 두 mode에 공통으로 존재하는 device·system·group-actual identity와 device identifier가
+byte-identical하고 전체 Home Assistant device identifier 집합도 두 mode에서 동일하며 D1의 observer
+control 0개·diagnostic reason 보존·empty retained publish 0회가 그대로,
+(8) `a/b`와 `a/b/`는 서로 다른 namespace이고 각자의 exact state·command topic과 정합하여
+digest 전 normalization이 없음, (9) 다른 `discovery_prefix`는 namespace 입력을 바꾸지 않지만 discovery
+topic을 분리함, (10) 기존 B1~D1과 read-only startup·fresh publish·timeout·shutdown·redaction 단정이
+그대로 통과하고 새 MQTT task·subscription·empty retained publish가 0개임을 고정합니다.
+
+D1b source·offline test landing은 identity schema만 저장소에 추가하며 actual deployment, daemon restart,
+broker·Home Assistant·device·app·원격 환경 실행과 장비 write를 포함하지 않습니다. 하드웨어
+`NO-GO / BLOCKING`과 Q2 `UNKNOWN`, frozen native harness를 유지합니다. 같은 discovery namespace
+질문을 반복해 정보가 늘지 않으면 §7 예산에 따라 park합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
