@@ -1853,6 +1853,15 @@ inventory·제거·복구 절차가 별도 검토·승인되기 전에는 D1b id
 D1c 자체도 그 deployment blocker를 해제하지 않습니다.
 하드웨어 `NO-GO / BLOCKING`과 Q2 `UNKNOWN`, frozen native harness를 유지합니다.
 
+#### 2026-09-09 D1c 단일 회귀 교체 승인
+
+repository maintainer는 위의 좁은 질문에 “응 진행해”라고 답했습니다. 이 답은
+`test_observer_adapter_does_not_publish_discovery_deletions`의 “모든 discovery payload가 non-empty”
+단정 하나를, current non-empty config와 current namespace의 owned `V - C` tombstone이 정확히
+분할되고 다른 retained deletion은 0개라는 단정으로 교체하는 것만 승인합니다. 이에 따라 D1c
+source·offline 회귀의 park를 해제합니다. broker retained mutation, Home Assistant, daemon deployment,
+장비·앱·원격 환경 실행과 장비 write 승인으로 넓히지 않으며, 다른 기존 단정은 완화·삭제하지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
