@@ -2148,6 +2148,76 @@ config entry 0)을 다시 확인합니다. 이 확인은 host-local이고 cross-
 않습니다. 하드웨어 `NO-GO / BLOCKING`, Q2 `UNKNOWN`, frozen native harness와 일반 daemon·old MQTT
 경로의 동결은 유지합니다.
 
+### 2026-09-10 Local Wavemaker Pro active-template positive binding D1g
+
+repository maintainer의 “다음 진행하자”는 qualification 경로의 다음 선행조건을 계속 해소하라는
+지시로 받습니다. 이 절은 installed app과 private install input의 read-only 정적 감사, 그 증거를
+current observer manifest에 결속하는 작업까지만 승인합니다. 제바오 앱 조작, local-control의 장비
+write, qualification receipt 발급이나 control mode 활성화 승인은 아닙니다. 기존 D1e observer의
+stop-first 교체와 read-only 검증만 그 절이 이미 승인한 범위 안에서 재사용합니다.
+
+이번 작업이 닫을 질문은 **현재 설치된 Jebao Aqua app build와 현재 결속된 Local Wavemaker Pro의
+product identity에 대해, 세 cache 후보 중 실제 loader가 선택하는 template bytes를 “newest cache”
+추측 없이 positive evidence로 특정할 수 있는가**입니다. qualification receipt를 아무리 정확히
+만들어도 fresh manifest의 `template_sha256` set이 비어 있으면 `catalog.py`의 기존 membership gate에서
+control qualification이 성립하지 않으므로, 첫 code-driven write 승인보다 이 증거와 manifest 결속이
+먼저입니다. 해당 gate와 `qualification.py`를 완화하거나 수정하지 않습니다.
+
+read-only static trace는 app을 실행하거나 app·broker·장비·network에 접촉하지 않고 installed app
+version `3.4.18`, build `341800000`, Hermes bytecode version 96의 bundle을 분석했습니다. bundle bytes의
+SHA-256은 `97b8eb17a915b8071dcef16c177f1e5bc3ab31e154510c69e6d3f9af2a533c71`이고,
+분석에는 hermes-dec commit `a0f18f97ab661eb8ed659c8c683a0d21ea619e69`을 임시 경로에서만
+사용했습니다. decompiler, decompiled source와 raw app/cache 산출물은 저장소에 넣지 않습니다.
+
+증거 사슬은 다음과 같습니다. 현재 persisted device list의 exact product key는 원문 대신 SHA-256
+`38136f879949c06a8099c94adf98b0c02ee88318f28e44556a017a56b691922e`로 결속합니다. 등록 장비
+page는 그 `device.productKey`를 `getItemForPk`에 주고, current compiled product config array에서
+일치하는 단일 config object를 얻어 `templates.asyncGetComponent(config)`와 `goToDevicePage`로
+전달합니다. 그 object의 template download URL은 하나이며 원문 대신 SHA-256
+`c1aaf3dcf32d94d301029bfb57baff863d00b5d91af48551c0dd251cf5b72756`로 결속합니다. URL에서
+결정적으로 유도되는 현재 cache root의 `index.js`는 182,637 bytes이고 SHA-256
+`c1ed7f76a979b7e1176a20306d0cfb8385461305bc7b0fdf9d396781f0cfc1b5`입니다. 같은 product key의
+bundle 출현은 이 config object와 `experienceProducts` list 하나뿐이고, 후자는 Experience Center의
+제품 목록 filter·sort에만 쓰이며 등록 장비 loader의 config 선택이나 template path를 바꾸지 않습니다.
+따라서 다른 두 cache candidate는 오래돼 보이기 때문이 아니라 **current config URL로부터 도달할 수
+없기 때문에** 이번 binding에서 제외합니다.
+
+`asyncGetComponent`의 현재 분기도 함께 고정합니다. `templateDownloadUrl`이 없을 때만
+`templateId`로 이미 등록된 component를 조회합니다. URL이 있으면 app은 URL의 MD5를 in-memory data
+key와 cache directory locator로 사용하고, 성공 상태의 component가 있으면 그것을 반환합니다. 그렇지
+않으면 같은 URL의 exact root에서 기존 `index.js` 또는 `index.html`을 먼저 읽고 component 생성에
+성공하면 network download 없이 사용합니다. 파일이 없거나 component 생성이 실패할 때만 같은 URL을
+download·unzip하고 다시 생성합니다. 이 경로에는 newest-directory scan, mtime 선택, version·ETag
+비교나 다른 bundled-template fallback이 없습니다. **MD5는 vendor app의 cache locator를 재현한 값일
+뿐 Jebao repository의 identity나 승인 근거가 아니며**, 우리 결속은 exact template bytes의 SHA-256만
+사용합니다. 두 파일이 모두 있으면 loader는 `index.html` fallback component를 `index.js` eval보다
+우선하지만, 위 current exact root에는 `index.js`만 존재하고 `index.html`은 없습니다. 따라서 이번에
+실제로 선택되는 bytes는 위 182,637-byte `index.js` 하나입니다.
+
+이 positive binding의 유효 범위는 위 exact app version·build·bundle digest, product-key digest,
+URL digest와 template-content digest의 조합뿐입니다. app bundle·persisted product identity·compiled
+config URL이 바뀌거나 cache가 다시 download·교체되면 active bytes를 재검증하고 새 근거로 다시
+결속해야 합니다. 같은 URL이라도 remote bytes가 영원히 같다고 추측하지 않습니다. 다른 product
+family, 다른 app version, firmware acceptance나 장비 write 동작으로 일반화하지 않고, public app
+catalog 전체의 `active_template_version="unresolved"`를 이 한 product의 증거로 덮어쓰지 않습니다.
+
+이번 결속은 source code 변경 없이 기존 install pipeline을 사용합니다. reviewed template root는
+private install input으로만 제공하고 `prepare-*`를 새로 유도합니다. 성공 조건은 fresh manifest가
+`template_count=1`이고 `template_sha256` set이 위 exact content digest 하나와 일치하며, current app
+version·app catalog·schema·stable role binding도 기존 install 검증을 통과하는 것입니다. broad cache
+root나 세 후보 전체를 입력으로 주지 않습니다. `template_count=1`은 이 slice의 단일-product 범위를
+반영하며 후속 product에 대해 별도 positive binding이 생기면 그 검증된 digest를 추가할 수 있습니다.
+digest가 다르거나 count가 1이 아니면 qualification을 열지 않고 멈춥니다. private root·product key·
+URL·cache locator 원문은 public output, log, exception, commit이나 `docs/runs/`에 기록하지 않습니다.
+
+manifest 재결속을 배포할 때는 running observer를 먼저 완전히 정지하고 새 observer 한 instance만
+시작해 중첩을 0으로 유지합니다. 시작 직전에 D1e의 네 precondition을 다시 확인하고, 6/6 fresh
+online, observer command surface 0, old daemon 0, role-binding digest 불변과 manifest의 exact template
+count·digest를 확인합니다. 이는 장비 read-only observer 교체이며 qualification producer는 이 확인이
+통과할 때까지 park합니다. 이 작업은 §4 hardware run이나 frozen native harness의 해제가 아니고,
+재배포 결과는 앞선 observer 조작과 같이 새 append-only `docs/runs/` 기록으로 남깁니다. 하드웨어
+`NO-GO / BLOCKING`, Q2 `UNKNOWN`, 일반 daemon·old MQTT 경로 동결을 유지합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
