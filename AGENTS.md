@@ -2218,6 +2218,117 @@ count·digest를 확인합니다. 이는 장비 read-only observer 교체이며 
 재배포 결과는 앞선 observer 조작과 같이 새 append-only `docs/runs/` 기록으로 남깁니다. 하드웨어
 `NO-GO / BLOCKING`, Q2 `UNKNOWN`, 일반 daemon·old MQTT 경로 동결을 유지합니다.
 
+### 2026-09-10 local-control manual-flow qualification producer D1h
+
+D1g의 manifest 결속과 observer 교체 결과는
+[`docs/runs/2026-09-10-local-observer-active-template-binding.md`](docs/runs/2026-09-10-local-observer-active-template-binding.md)에
+먼저 기록하고 commit `ff9bdc5`로 source 수정 전에 고정했습니다. repository maintainer의 “이어서
+진행하자”는 이 다음 단계인 qualification producer의 정책·source·offline 회귀를 진행하라는
+지시로 받습니다. 이 승인은 제바오 앱 조작이나 장비 write를 실행하는 승인이 아니며, 실제 operation은
+producer가 offline으로 완성·검토된 뒤 한 대·한 기능·세 planned frame을 명시해 한 번만 별도로 묻습니다.
+
+이번 작업이 닫을 질문은 **기존 local-control writer·lease·journal과 qualification verifier를 완화하지
+않고, 한 Local Wavemaker Pro의 `manual_flow`에 대한 same-value → 1..5%p 하향 → exact restore를
+crash-safe한 단일 operation으로 실행하고, 실제 변화와 계획된 복원을 증명하는 receipt 두 장만 만들 수
+있는가**입니다. 이는 firmware 결과를 fake로 미리 정하는 작업이 아니라, static trace와 durable
+fault-injection으로 write 순서·복원 권한·증거 발급의 코드 내부 계약을 닫는 작업입니다.
+
+producer는 기존 `LocalControlJournalStore`의 **request record 하나**를 operation journal로 사용하고,
+그 record에 `same_value`, `lower_power`, `planned_restore` 세 `JournalAction`을 첫 send 전에 모두
+durably 생성합니다. action 0과 1이 `VERIFIED`, action 2가 `PREPARED`인 동안 transaction은 계속
+`EXECUTING`이므로, step 뒤 원래 값으로 돌아가야 할 의무가 terminal success로 오인되지 않습니다.
+이 조합이 `LOWER_POWER_ACTIVE`의 보유 상태이고 복원 권한은 세 request로 쪼개지지 않습니다. 각
+action은 `FORWARD_ATTEMPTING`을 fsync한 뒤에만 send하고, ACK bytes를 blob으로 보존한 뒤 fresh
+readback을 exact 검증해야 `VERIFIED`로 이동합니다. record의 `intent_sha256`은 target·function·
+baseline·step·두 phase request id와 app/content/firmware epoch를 담은 canonical operation-intent
+blob의 digest이며, 그 blob도 첫 send 전에 같은 store에 보존해 terminal 뒤 offline finalization이
+휘발성 process state에 의존하지 않게 합니다. 기존 recovery가 다른 unfinished request를 거부하므로
+phase별 record 세 개는 서로의 복구를 막습니다. 따라서 operation record 하나와 action 세 개를 유지합니다.
+
+세 action은 각각 새 strict resolution과 새 `ConnectedDeviceWriter` / authenticated session을
+사용합니다. 같은 writer instance가 같은 payload digest를 다시 보내지 않는 기존 duplicate guard는
+수정하거나 우회하지 않습니다. same-value와 planned restore의 payload가 byte 동일해도 중간에 실제
+하향 step이 있고 writer instance가 서로 다르므로, 세 frame은 각 phase의 독립 send입니다. producer는
+`observe_many()`를 쓰지 않고 strict `resolve()`만 사용하며 absent·ambiguous·binding mismatch면
+첫 send 전에는 send 0으로, step 뒤에는 forward 재개 없이 recovery-required로 갑니다.
+
+same-value는 기존 first-write 계약의 transport-reachability phase라 `no_change`여도 정확히 한 번
+send하고 ACK·fresh exact readback을 journal에 남기지만 receipt는 만들지 않습니다. 하향 step과
+**계획된** restore만 서로 다른 receipt request id로 `LocalControlQualificationReceipt` 두 장을
+만듭니다. planned restore는 자기 ACK·readback을 가진 세 번째 일급 action이고, crash recovery의
+rollback action과 합치지 않습니다. crash·cancel·ACK 오류·readback mismatch에서 forward test phase를
+재시도하거나 이어서 수행하지 않으며, 기존 journal recovery는 fresh strict resolution 뒤 baseline만
+exact restore하고 receipt를 0장으로 유지합니다.
+
+정상 operation은 세 action의 exact readback 뒤 transaction을 `VERIFIED`로 먼저 durably terminalize한
+다음 receipt와 qualification binding을 offline finalization합니다. receipt는 step과 planned restore의
+canonical intent, exact control payload, raw ACK, exact canonical observed fields의 SHA-256을 결속하고,
+binding file은 두 receipt digest를 명시합니다. terminal journal 뒤 artifact finalization이 중단되면 같은
+operation id의 재실행은 network·send 없이 exact journal evidence만으로 finalization할 수 있지만,
+non-terminal journal은 recovery 외 어떤 forward phase도 재개하지 않습니다. receipt 하나만 남거나
+binding 생성이 실패한 상태는 qualification으로 취급하지 않습니다. 재진입에서 receipt나 binding의
+기존 파일이 canonical expected bytes와 byte 동일하고 기대 SHA-256과 일치하면 verify-and-accept하고,
+다른 bytes이거나 digest가 다르면 덮어쓰지 않고 거부합니다. 이는 no-clobber를 유지하면서 terminal
+finalization을 멱등으로 만듭니다.
+
+pre-send envelope은 `devices/verification.py`의 값비싼 안전 지식을 느슨하게 다시 만들지 않고 다음을
+코드에서 강제합니다. 대상은 current manifest와 private config가 같은 stable physical identity로
+결속한 Local Wavemaker Pro 한 대이고 기능은 `manual_flow` 하나입니다. fresh decoded state는 online,
+power ON, `Mode=constant`, `TimerON=false`, `Linkage=independent`, 현재 Flow `<=45`여야 합니다. step은
+1..5 percentage point **하향만** 허용하고, 현재값·착지값·복원값은 current device config의
+`limits.min_power` / `limits.max_power`와 기존 writer의 30..75 encoder envelope 안에 있어야 합니다.
+값을 clamp하거나 상향·경계 밖 값을 대신 선택하지 않고 send 전에 실패합니다.
+
+content/version epoch도 receipt 생산 전에 고정합니다. current manifest의 app-catalog digest와 current
+protocol-schema digest가 설치 bytes와 exact 일치하고, D1g가 결속한 active template digest가 fresh
+manifest set에 명시적으로 하나 존재해야 합니다. app version은 그 catalog source와 같아야 하고,
+strict discovery가 돌려준 printable firmware version 하나를 결정적으로 선택해 세 phase에서 동일한지
+확인합니다. config·manifest·content binding이 operation 동안 바뀌면 baseline 복원 뒤 receipt 0장으로
+끝냅니다. `template_count=0`이나 추측한 newest cache를 producer 쪽에서 보정하지 않습니다.
+
+receipt root와 output qualification file은 owner-only `0700` / `0600`, no-symlink, no-clobber,
+link-count 1을 요구하고 file·parent directory fsync와 exact readback 뒤에만 usable로 보고합니다.
+receipt filename은 canonical bytes의 SHA-256과 일치해야 하며 existing verifier가 그대로 읽어 두
+distinct request와 같은 physical identity를 확인해야 성공입니다. public stdout·stderr·log·exception은
+opaque operation/target id, phase, count, UTC, digest만 담고 logical member 원문·address·MAC·vendor
+device id·status/payload/ACK bytes, credential과 private path를 노출하지 않습니다.
+
+source 범위는 새 `src/jebao_flow/local_control/qualification_producer.py`, 자체
+`src/jebao_flow/local_control_qualification_cli.py`, 그 두 전용 unit test, 가산적 import-boundary test,
+`docs/local-control.md`, 그리고 별도 console entry를 위한 `pyproject.toml`로 한정합니다.
+`qualification.py` verifier, `catalog.py` membership gate, `coordinator.py`, `journal.py`, `lease.py`,
+`device_writer.py`, config·HA·MQTT·groups, frozen six와 직접 테스트, `devices/verification.py`, old daemon·
+old MQTT, `custom_components/*`는 수정하지 않습니다. 기존 regular control surface를 활성화하거나 running
+observer를 이 source landing에서 교체하지 않습니다. 새 CLI는 명시적 `--write-enabled` 없이는 producer
+operation을 시작하지 않으며, 이 opt-in은 별도 live operation 승인이나 envelope 검증을 대신하지 않습니다.
+
+offline 회귀는 최소한 다음을 고정합니다. (1) TimerON·non-constant·power OFF·non-independent·current
+상한 초과·step 0 또는 >5·상향·config/encoder envelope 밖 각각 send 0, (2) strict resolver absent·
+ambiguous·binding mismatch send 0, (3) 세 action과 모든 rollback blob이 첫 send보다 먼저 durable이고
+phase mapping이 위 operation journal 하나에 있음, (4) same-value는 journaled·sent·verified이되 receipt
+0이고 세 phase가 writer/session 세 개를 써 duplicate guard를 바꾸지 않음, (5) 성공 경로는 send 정확히
+3회와 step·planned-restore receipt 정확히 2장이고 existing verifier가 그 physical key만 자격화,
+(6) ACK 또는 exact readback 불일치·send fault·cancel은 receipt 0과 recovery-required이고 어떤 forward
+payload도 재전송하지 않음, (7) step 뒤 crash recovery는 baseline만 복원하고 test step을 재개하지 않으며
+receipt 0, (8) canonical receipt·digest filename·0700/0600·O_NOFOLLOW/O_EXCL·file/parent fsync fault를
+fail-closed로 검증, (9) app/catalog/template/schema/firmware epoch 불일치면 receipt 0, (10) terminal 뒤
+artifact finalization 재개는 network·writer·send 0임을 검증합니다. 기존 verifier·coordinator·writer
+회귀의 assert는 삭제·완화하지 않습니다.
+
+§3의 wrong-device는 strict current resolution, out-of-envelope은 send 전 exact envelope, duplicate
+write는 journal-first phase와 writer instance별 single-send, rollback 권한은 operation record 하나와
+preinstalled baseline blobs, real FAIL의 PASS 오판은 ACK와 fresh exact readback의 동시 요구로 막습니다.
+이는 기존 안전핵심을 재사용한 것이며 정상 regular write에 새 gate를 추가하지 않습니다. producer
+source·offline test가 landing되고 별도 적대적 검토가 끝날 때까지 앱 preconditioning과 장비 write는
+0회로 유지합니다. 그 뒤 묻는 성공 경로는 현재 켜진 Pro 한 대를 앱에서 `constant 40% · TimerOFF ·
+independent`로 맞추고 `manual_flow` same-value 1회 → 1%p 하향 1회 → 40% planned restore 1회이며,
+다른 장비·기능은 건드리지 않습니다. 실제 run은 observer를 먼저 정지해 qualifier 한 process만 장비
+session을 소유하고, terminal restore 확인 뒤 observer를 다시 시작합니다. 실패·crash recovery 권한은
+그 질문에서 planned 세 frame과 분리해 명시합니다. 시작 전 D1e precondition 네 개를 다시 확인하고,
+재시작 뒤 6/6 fresh·command surface 0·old daemon 0·role-binding digest 불변을 확인합니다. 하드웨어
+`NO-GO / BLOCKING`, Q2 `UNKNOWN`,
+frozen native harness와 일반 daemon·old MQTT 경로 동결을 유지합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
