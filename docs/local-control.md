@@ -306,6 +306,42 @@ cannot expose a control. A singleton receipt for a device remains insufficient w
 another device's complete pair. Running it against live hardware is a separate approved operation;
 this implementation and its tests did not start the service.
 
+### Manual-flow qualification producer
+
+`jebao-flow-local-qualify` is a separate, explicit first-write tool for one current Local
+Wavemaker Pro `manual_flow` binding. It does not enable the regular control surface. A `run`
+requires `--write-enabled`, an opaque operation id, one privately selected current target, a
+1..5 percentage-point downward step, the reviewed active-template SHA-256, and a no-clobber
+qualification output path. The flag is only an invocation opt-in; it does not replace a separately
+approved live operation or any current envelope check.
+
+The producer creates one local-control journal record with three actions before the first frame:
+same-value, the exact downward step, and the exact planned restore. Every action uses a new strict
+endpoint resolution and a new authenticated writer session. The same-value frame is sent and
+verified as transport-reachability evidence but creates no receipt. Only the changed step and the
+planned restore create the two distinct ACK/readback receipts required by the unchanged verifier.
+The transaction cannot become `VERIFIED` while the planned restore is still pending.
+
+Receipt and binding files are finalized only after the journal is durably terminal and the device
+has exact-read-back at its original value. Re-entering the same terminal operation performs no
+discovery and creates no writer: byte-identical, digest-matching files are verified and accepted,
+while any different existing content is left untouched and rejected. An unfinished operation may
+only use `recover`; recovery freshly resolves the stable device, restores the original baseline,
+never resumes a test phase, and never creates a receipt.
+
+The send envelope is fixed before the first frame and rechecked at every phase: device on,
+`constant`, TimerOFF, `independent`, current Flow no greater than 45, a downward step of 1..5, and
+both values inside the current private config limits and the existing 30..75 encoder range. The
+current config, manifest generation, app catalog, selected template, protocol sources, and
+discovered firmware must remain byte/content-bound for the whole operation. Values are never
+clamped or substituted to make the run proceed.
+
+No live qualification was performed while landing this source. For a later separately approved
+operation, stop the observer first so the qualifier is the only device-session owner; after a
+terminal planned restore or separately authorized recovery, restart the observer and recheck its
+read-only surface. The native ASYNC harness, old daemon/MQTT path, verifier, catalog membership
+gate, journal, lease, coordinator, and writer remain unchanged.
+
 ### Observer control surface
 
 Top-level `runtime.mode: observer` takes precedence over the current `--write-enabled` invocation,

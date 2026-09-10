@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "jebao_flow" / "local_control"
 CLI = ROOT / "src" / "jebao_flow" / "local_control_cli.py"
+QUALIFICATION_CLI = ROOT / "src" / "jebao_flow" / "local_control_qualification_cli.py"
 
 FROZEN_MODULES = {
     "jebao_flow.devices.schedule_linkage",
@@ -37,14 +38,14 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_frozen_harness_is_absent_from_every_local_control_source() -> None:
-    for path in (*PACKAGE.glob("*.py"), CLI):
+    for path in (*PACKAGE.glob("*.py"), CLI, QUALIFICATION_CLI):
         assert _imports(path).isdisjoint(FROZEN_MODULES), path.name
 
 
 def test_write_protocol_imports_exist_only_at_the_device_writer_edge() -> None:
     importers = {
         path.name: _imports(path) & WRITE_PROTOCOL_MODULES
-        for path in (*PACKAGE.glob("*.py"), CLI)
+        for path in (*PACKAGE.glob("*.py"), CLI, QUALIFICATION_CLI)
         if _imports(path) & WRITE_PROTOCOL_MODULES
     }
 
@@ -137,6 +138,8 @@ def test_write_runtime_and_cli_import_closure_still_excludes_the_frozen_harness(
         "jebao_flow.local_control.lease",
         "jebao_flow.local_control.mqtt",
         "jebao_flow.local_control_cli",
+        "jebao_flow.local_control.qualification_producer",
+        "jebao_flow.local_control_qualification_cli",
     )
     script = (
         "import importlib,json,sys;"
@@ -158,6 +161,19 @@ def test_write_runtime_and_cli_import_closure_still_excludes_the_frozen_harness(
     assert closure.isdisjoint(FROZEN_MODULES)
     assert "jebao_flow.hardware_test" not in closure
     assert not any(name.startswith("jebao_flow.devices") for name in closure)
+
+
+def test_qualification_producer_uses_only_the_current_write_edge() -> None:
+    producer = PACKAGE / "qualification_producer.py"
+    imports = _imports(producer)
+    source = producer.read_text(encoding="utf-8")
+
+    assert imports.isdisjoint(FROZEN_MODULES)
+    assert not any(name.startswith("jebao_flow.devices") for name in imports)
+    assert not any(name.startswith("jebao_flow.protocol") for name in imports)
+    assert "observe_many" not in source
+    assert "ConnectedDeviceWriter" in source
+    assert "LocalControlJournalStore" in source
 
 
 def test_production_group_transport_calls_the_service_not_the_supervisor() -> None:

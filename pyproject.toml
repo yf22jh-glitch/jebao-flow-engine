@@ -44,6 +44,7 @@ jebao-flow-q2-epoch = "jebao_flow.q2_epoch_cli:main"
 jebao-flow-hardware-safety = "jebao_flow.hardware_safety_cli:main"
 jebao-flow-observe = "jebao_flow.operator_capture_cli:main"
 jebao-flow-local = "jebao_flow.local_control_cli:main"
+jebao-flow-local-qualify = "jebao_flow.local_control_qualification_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/yf22jh-glitch/jebao-flow-engine"
