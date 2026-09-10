@@ -96,6 +96,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-10 local observer discovery target 감사](2026-09-10-local-observer-discovery-target-audit.md) | directed exact match 2 / broadcast response 0 / write 0 | absent 두 장비는 online이며, stale unicast target 2개가 2/6 absent의 직접 원인임을 확인 |
 | [2026-09-10 local observer target 임시 갱신](2026-09-10-local-observer-target-refresh.md) | fresh online 6 / absent·ambiguous 0 / write 0 | stale unicast 2개를 current exact-match 주소로 임시 갱신해 6/6 관측 복구; DHCP reservation은 미확정 |
 | [2026-09-10 local observer DHCP reservation](2026-09-10-local-observer-dhcp-reservations.md) | reservation 6 / dnsmasq·DNS PASS / device write 0 | current lease 6개를 static reservation으로 고정하고 기존 host 29개 불변 확인; target drift 영구 원인 해소 |
+| [2026-09-10 local observer active-template 결속](2026-09-10-local-observer-active-template-binding.md) | template 1 / fresh online 6 / command 0 / device write 0 | current app loader가 선택한 exact Pro template SHA-256을 manifest에 결속하고 observer-only 표면 불변 확인 |
 
 ## 새 실행 기록 템플릿
 
