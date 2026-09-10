@@ -94,6 +94,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-10 local observer 첫 활성화](2026-09-10-local-observer-first-activation.md) | native entity 86 / exact discovery 4 of 6 / write 0 | native HA 등록 PASS; 한 target 누락이 read-only batch 전체를 unavailable로 접는 mismatch-isolation 결함 확인 |
 | [2026-09-10 local observer endpoint 격리](2026-09-10-local-observer-endpoint-isolation.md) | fresh online 4 / absent 2 / write 0 | D1f target별 격리 PASS; exact-matched 4개는 fresh state를 발행하고 absent 2개만 unavailable |
 | [2026-09-10 local observer discovery target 감사](2026-09-10-local-observer-discovery-target-audit.md) | directed exact match 2 / broadcast response 0 / write 0 | absent 두 장비는 online이며, stale unicast target 2개가 2/6 absent의 직접 원인임을 확인 |
+| [2026-09-10 local observer target 임시 갱신](2026-09-10-local-observer-target-refresh.md) | fresh online 6 / absent·ambiguous 0 / write 0 | stale unicast 2개를 current exact-match 주소로 임시 갱신해 6/6 관측 복구; DHCP reservation은 미확정 |
 
 ## 새 실행 기록 템플릿
 
