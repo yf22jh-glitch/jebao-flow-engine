@@ -2495,6 +2495,93 @@ readback predicate 재사용과 terminal recovery readback으로 막습니다. �
 비차단 진단을 새 gate로 키우지 않고 run record에 남깁니다. Q1·Q2와 frozen native ASYNC 하네스는 이
 slice에서 계속 `UNKNOWN`·동결 상태입니다.
 
+### 2026-09-11 immutable local-control qualification-set 병합 D1k
+
+M2의 actual recovery·supervised restart·bounded soak·external app drift는 각각 append-only 실기
+기록과 독립 검토로 닫혔습니다. M3에서 다음 장비·기능의 receipt를 더 만들기 전에 닫을 질문은
+**현재 persistent control의 자격 입력을 덮어쓰거나 약화하지 않고, 기존과 새 receipt를 정확히
+검증한 새 immutable qualification set으로 합쳐 의도한 `(product, function, physical identity)`
+surface만 다음 deployment generation에 전달할 수 있는가**입니다. 이 slice는 offline artifact
+composition만 수행하고 app·broker·device·network에 접촉하거나 장비 write를 하지 않습니다.
+
+qualification receipt는 fixed owner-only hardware-safety receipt root의 content-addressed 파일이고,
+`QualificationBinding`은 `(product_key, function)`마다 하나입니다. 같은 key의 장비가 여럿이면 한
+binding의 receipt tuple에 함께 들어가며, 각 physical identity가 서로 다른 verified request 두 개
+이상을 가져야만 `qualified_physical_identity_keys()`가 그 identity를 반환합니다. 같은 binding을
+공유하는 receipt의 app/catalog/template/schema/firmware 필드는 전부 같아야 합니다. 두 Pro의 firmware
+일치는 현재 시점 관측을 merger 전제로 복사하지 않고, **병합 결과를 existing verifier로 다시
+검증하는 시점**에 재판정합니다. Bar처럼 product key가 다른 binding에는 Pro firmware 일치를 요구하지
+않습니다.
+
+merger library는 optional current set, 하나의 candidate set, 새 output path와 운영자 의도에서 유도한
+하나 이상의 expected-add triple `(product_key, function, physical_identity_key)`을 입력으로 받습니다.
+CLI는 raw physical identity key를 argv로 받지 않고 private logical member와 function만 받은 뒤 read-only
+current manifest의 exact 한 device binding에서 product와 physical key를 유도합니다. manifest를
+재유도하거나 쓰지 않으며, unknown·duplicate logical member는 output 전에 거부합니다. current와
+candidate의 모든 binding을 먼저 `verify_qualification_receipts()`로 검증하고, 각 binding 안의 기존
+distinct request 계약을 유지하며 전체 verified result에서도 request id 중복을 허용하지 않습니다.
+같은 `(product_key, function)`이 양쪽에 있으면 receipt digest의 집합 합집합만 만들되 나머지 다섯
+version/content 필드가 byte 동일해야 합니다. 다른 key는 가산적으로 추가합니다. current-only의
+영향받지 않은 binding은 seven evidence field와 receipt digest 집합이 exact 동일해야 하고, 허용되는
+변화는 아래 canonical 순서뿐입니다. 첫 merge에서 기존 producer 순서가 lexicographic이 아니면 이
+순서만 정당하게 바뀔 수 있습니다. `min_length=2`, key 유일성, seven-field receipt 교차검사,
+canonical receipt bytes와 digest filename 검증은 삭제·완화하지 않습니다. merger는 receipt를 새로
+설치·이동·복사하지 않고, producer가 fixed content-addressed root에 설치한 artifact를 digest로 참조해
+existing verifier로 읽기만 합니다.
+
+candidate의 binding 수나 receipt 수를 `1`·`2`로 하드코딩하지 않습니다. 대신 병합 결과의 binding
+key 집합은 `current keys ∪ expected-add의 (product,function) keys`와 정확히 같고, 각 binding을 existing
+verifier로 다시 읽어 도출한 qualified surface triple 집합은
+`current qualified surface ∪ expected-add triples`와 정확히 같아야 합니다. expected-add는 current
+surface와 겹치지 않는 명시적 추가분이어야 하며, 결과의 초과와 부족을 모두 거부합니다. 이 검사는
+후보가 의도 밖 장비를 함께 자격화하는 과다 노출과 기존 자격이 조용히 사라지는 과소 노출을 동시에
+막습니다. caller가 candidate 자체를 의도라고 주장한 값을 다시 믿지 않고 verified result에서
+재유도합니다.
+
+결정론적 output은 binding을 `(product_key, function)`으로 정렬하고, 각 binding 내부
+`receipt_sha256`를 lexicographic 정렬한 뒤 compact ASCII JSON과 trailing newline으로 직렬화합니다.
+이 정렬은 authorization 의미를 추가하는 gate가 아니라 merger 재실행과 후속 Compose input의
+byte-identical 결정성을 위한 것입니다. output은 owner-only `0700` parent 아래 새 `0600` regular
+file로만 설치하고 symlink·hard link·unsafe uid/mode와 size 초과를 거부합니다. random temporary file을
+write·fsync한 뒤 no-clobber link로 publish하고 parent를 fsync하며 exact reload와 전체 verifier·surface
+검사를 다시 통과해야 성공입니다. 같은 output path에 expected bytes가 이미 있으면 verify-and-accept,
+다른 bytes면 기존 파일을 바꾸거나 지우지 않고 거부합니다. current·candidate 파일과 running Compose
+generation은 성공·실패 모두 mutation하지 않습니다.
+
+이 output은 실행 중 service가 직접 읽는 파일이 아니라 후속 `prepare-compose --qualifications`가 새
+private generation 안의 `qualifications.json`으로 재정규화할 source입니다. 따라서 이 slice에서는
+manifest·role binding·Compose generation을 재유도하거나 service를 재기동하지 않습니다. 후속 배포
+결속은 bundle descriptor가 기록한 actual `qualifications.json` SHA-256을 근거로 별도 확인하며, 실패
+시 rollback은 현재 generation을 그대로 유지하는 것입니다.
+
+source 범위는 새 `src/jebao_flow/local_control/qualification_set.py`, 별도
+`src/jebao_flow/local_control_qualification_set_cli.py`, 두 전용 unit test, 가산적
+`tests/unit/test_local_control_import_boundary.py`, `docs/local-control.md`, console entry를 위한
+`pyproject.toml`로 한정합니다. `qualification.py` verifier·models, qualification producer와
+`local_control_qualification_cli.py` recovery route, catalog·compose·install·config, coordinator·writer·
+journal·lease, HA·MQTT·groups, frozen six와 직접 테스트, old daemon·old MQTT, `custom_components/*`는
+수정하지 않습니다. CLI의 private logical member와 input/output path는 help와 public JSON에 노출하지
+않고, raw physical identity key도 argv·stdout·stderr에 싣지 않습니다. 결과는
+binding/receipt/qualified-pair/addition count와 output SHA-256만 보고합니다.
+
+offline 회귀는 최소한 다음을 고정합니다. (1) current 부재 시 verified candidate로 새 set 생성,
+(2) 같은 key·같은 seven fields는 receipt union, (3) firmware를 포함한 어느 field든 다르면 output 0,
+(4) 결과 binding key와 qualified surface가 선언 union과 정확히 일치하며 초과·부족 각각 거부,
+(5) 영향받지 않은 current binding의 evidence field·receipt set 동일과 canonical order 외 변화 0,
+(6) missing·digest mismatch·noncanonical·duplicate request
+receipt 거부, (7) input 순서와 receipt 순서를 섞어도 output bytes 동일, (8) 동일 output 재실행은
+verify-and-accept하고 다른 existing bytes는 mutation 없이 거부, (9) unsafe parent/file·symlink·hard
+link·fsync/reload fault는 fail-closed, (10) current·candidate·running generation mutation 0,
+(11) CLI의 logical member가 current manifest의 exact 한 binding으로 expected triple을 유도하며 raw
+physical key를 argv에 요구하지 않음, (12) import closure에 device/network/write/frozen module이 없고
+기존 verifier·producer·catalog 회귀 assert를 삭제·완화하지 않습니다.
+
+이 작업은 device write operation이 아니므로 §3의 직접 physical-write 범주는 열리지 않습니다.
+간접 위험인 command-surface 과다·과소는 verified exact result union과 immutable no-clobber generation으로
+막습니다. 정책·source가 각각 별도 Claude 검토와 commit을 마친 뒤에만 두 번째 Pro
+`manual_flow` qualification으로 이동합니다. Flow `<=50` 승인 경계, persistent 단일 authority,
+Q1·Q2의 M6 필수·현재 `UNKNOWN`, frozen native 하네스 동결은 그대로 유지합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
