@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 16:40 KST
+마지막 갱신: 2026-09-11 16:49 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -80,7 +80,12 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 
 ### M3 — 3대 수류모터의 group-required qualification
 
-- [ ] 현재 group의 멤버별 부족 qualification을 논리 역할·기능 단위로 산출
+- [x] 현재 group의 멤버별 부족 qualification을 논리 역할·기능 단위로 산출
+  - Pro 2대 + 바형 1대 중 Pro 1대의 `manual_flow`만 qualified
+  - 추가 필요: 나머지 2대의 `manual_flow`와 3대 모두의 `power` receipt pair
+- [x] 두 Pro의 current firmware provenance가 모두 존재하고 byte 동일함을 write-free fresh resolution으로 확인
+- [x] 바형은 current resolution·firmware provenance가 있으나 manifest에는 아직 Pro active template 1개만
+  결속된 상태임을 확인
 - [ ] Pro 두 대와 바형 한 대의 active template/content binding을 positive evidence로 결속
 - [ ] 각 멤버 `manual_flow` qualification 계획과 exact scalar restore 가능성을 확정
 - [ ] 각 멤버 `power` qualification producer/operation의 안전한 OFF·ON 순서와 rollback 권한 확정
@@ -157,7 +162,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 현재 상태
 
-- [x] reviewed persistent control service 1개 실행 중, restart 0
+- [x] reviewed persistent control service 1개 실행 중, reconnect 실기 뒤 restart 1
 - [x] 장비 6/6 관측 상태 유지
 - [x] HA 업데이트·재부팅 0
 - [x] 선택 Pro `manual_flow` qualification 완료 (`40 -> 39 -> 40`, receipt 2장)
@@ -209,6 +214,18 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [ ] 30분 bounded soak에서 restart 증가·unexpected write·unfinished journal `0`과 fresh cycle 수 확인
 - [ ] 외부 app state drift를 별도 write-free observer evidence로 확인하고 exact baseline 복원
 - [ ] reconnect·drift·soak append-only run record·Claude 검토·commit
+
+## M3 선행 정적 조사
+
+- [x] qualification binding은 `(product_key, function)`별 하나지만 receipt는 2장 이상을 허용하고,
+  physical identity별 2장을 세므로 같은 firmware의 두 Pro receipt 4장을 한 binding에 합칠 수 있음을 확인
+- [x] 기존 producer의 receipt 파일은 content-addressed additive이고, 병목은 no-clobber 단일 binding 파일
+  writer뿐임을 확인
+- [ ] 기존 binding 전수 검증 → 새 receipt 병합 → atomic replacement → 자기 출력 재검증의 최소 offline
+  qualification-set merger 정책을 결속
+- [ ] Pro 경로는 동작 불변으로 유지하고 Bar precondition만 family별로 추가하는 최소 범위를 결속
+- [ ] `power`의 OFF 실패는 safer-OFF 유지, planned ON 실패는 rollback OFF이며 자동 재기동하지 않는
+  물리 결과와 현장 복원 절차를 정책에 명시
 
 ## 실패 시 행동
 
