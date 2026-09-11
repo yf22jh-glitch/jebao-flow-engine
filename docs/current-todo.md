@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 16:11 KST
+마지막 갱신: 2026-09-11 16:21 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -70,8 +70,8 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] forward-only drill source·CLI·offline regression 구현
 - [x] source snapshot Claude 적대적 검토·필수 finding 반영·landing (`a91e4b6`)
 - [x] 통제된 failure 1회에서 recovery frame 실제 전송·baseline exact restore·terminal journal 확인
-- [ ] recovery run record·독립 검토·commit; 그 전에는 device·function qualification 확대 금지
-- [ ] Jebao service 재시작 뒤 stale command replay 0·control surface 1·6/6 fresh 확인
+- [x] recovery run record·독립 검토·commit `0a62fb2`; 그 전에는 device·function qualification 확대 금지
+- [x] Jebao service 재시작 뒤 stale command replay 0·control surface 1·6/6 fresh 확인
 - [ ] MQTT broker reconnect 뒤 retained command 소비 0·상태/availability 재발행 확인
 - [ ] 외부 state drift를 fresh read가 반영하고 old state를 성공으로 재사용하지 않는지 확인
 - [ ] daemon 자동 recovery가 없음을 운영 계약으로 고정하고 unfinished journal 감시·CLI recover 절차 마련
@@ -184,7 +184,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] M0 단회 MQTT 실기 종료 시 observer-only 복귀 및 Flow 40·6/6 fresh·command surface 0 확인
 - [x] 이후 M1에서 persistent qualified control로 전환했으며 현재 상태는 위 `현재 상태`가 단일 출처
 
-## 현재 열린 작업 — M2 actual recovery
+## M2 actual recovery 작업 이력 (완료)
 
 - [x] 실제 미검증 분기를 `40 -> 39` forward 적용 뒤 readback 직전 지정 fault로 고정
 - [x] production `verify_prepared_readback` 재사용과 fault adapter의 recovery process 격리
@@ -197,7 +197,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] fresh preflight → control stop-first → forward 39 → actual recovery 40
 - [x] terminal `ROLLED_BACK`·recovery physical write 1·unfinished 0·receipt 증가 0 확인
 - [x] persistent control 복귀·6/6 fresh·Flow 40·stale command replay 0 확인
-- [ ] append-only recovery run record·Claude 검토·commit
+- [x] append-only recovery run record·Claude 검토·commit `0a62fb2`
 
 ## 실패 시 행동
 
@@ -264,3 +264,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   `ROLLED_BACK` revision 6, unfinished 0, receipt 2 불변, independent fresh Flow 40으로 종료.
 - 16:10 KST — persistent control 재기동 PASS: service 1/restart 0, 6/6 fresh, Flow 40, journal tree
   불변, command surface 1, retained command 0, group control·resume 0, old daemon 0.
+- 16:16 KST — 별도 strict process가 endpoint resolution에 그치지 않고 장비 6대 모두 새 authenticated
+  state read를 완료. selected target exact Flow 40·unfinished journal 0 재확인.
+- 16:20 KST — actual-recovery run record v2를 Claude가 독립 재계산해 P1·필수 finding 0·GO 확인.
+  append-only record와 index를 commit `0a62fb2`로 랜딩하고 M2 핵심 recovery 질문을 완료 처리.
