@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 19:22 KST
+마지막 갱신: 2026-09-12 00:14 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -44,8 +44,19 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   `ad5681f`; 근거: [`second Pro manual-flow qualification`](runs/2026-09-11-local-manual-flow-qualification-second-pro.md)
 - [x] 최종 현재 시간대 적용값 `sine`·Flow `45`·frequency `40`, TimerON을 앱 화면과 authenticated
   fresh read로 교차확인
-- [ ] 재개 시 candidate·current qualification set merge부터 시작. 새 generation·deploy·추가 live
-  operation은 사용자 지시대로 아직 시작하지 않음
+- [x] candidate·current qualification set을 새 immutable source로 exact merge하고 병합 결과의
+  binding·surface union을 재검증; running config·generation·service·device write는 불변
+- [x] 공식 앱 범위 `30..100`과 달리 local-control 전반에 들어간 `30..75` 상한은 사용자 승인
+  근거가 없음을 source·policy history로 확인; 사용자가 `30..100` 정정을 명시 지시
+- [x] D1l 정책 결속·Claude 독립 검토·commit `0add7c7`
+- [x] catalog·scalar writer·qualification encoder·group·local schedule·read-only schedule model을
+  app-declared `30..100`에 결속하고 protocol-schema dependency closure·회귀·문서를 함께 정정;
+  전체 `2521` tests·Ruff와 Claude 독립 검토 PASS, source commit `fe10bd5`
+- [x] 첫 번째 Pro 새 schema 재자격: existing control `41 -> 40` 1회 + qualifier
+  `40 -> 39 -> 40` 3회, exact readback·receipt `2`, run commit `8647f86`
+- [ ] 두 번째 Pro를 같은 새 schema에서 `40 -> 39 -> 40`으로 재자격
+- [ ] 두 새 candidate만 fresh immutable set으로 만들고, 그때만 새 generation을 한 번 배포.
+  old-schema merge는 미배포 obsolete artifact로 보존
 
 ## 완성까지 전체 로드맵
 
@@ -105,6 +116,18 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] current installed app bundle의 Bar product→template URL→exact cache root 경로를 write-free로 재결속해
   active Bar template digest 하나를 positive evidence로 특정; 다른 candidate 1개는 current URL에서
   unreachable임을 확인
+- [ ] D1l Flow capability 정정
+  - [x] 사용자 미승인 `75`가 catalog·writer·qualification producer·group·local schedule·schedule
+    model에 복제됐음을 전수 확인하고, 제품 범위 `30..100`과 agent operation 상한 `50`을 분리
+  - [x] 제품 범위는 app catalog에서 유도하고 consumer별 숫자 복제 제거; 더 좁은 config limit와의
+    교집합은 group·qualification producer에 유지하고 direct HA/MQTT는 app range 그대로 사용
+  - [x] hash 밖 `schedule_model.py`가 hashed `local_control/schedule.py` 동작을 바꾸던 dependency hole을
+    protocol-schema digest closure에 포함
+  - [x] source·회귀 landing `fe10bd5`: 전체 `2521` tests·Ruff PASS, frozen six·직접 tests 불변,
+    Claude staged source review finding `0`
+  - [ ] 기존 qualification이 stale해지는 설계를 우회하지 않고 두 Pro receipt를 새로 획득
+    - [x] 첫 번째 Pro 새-schema receipt pair: `40 -> 39 -> 40`, run `8647f86`
+    - [ ] 두 번째 Pro 새-schema receipt pair
 - [ ] Pro 두 대와 바형 한 대의 active template/content binding을 positive evidence로 결속
 - [ ] 각 멤버 `manual_flow` qualification 계획과 exact scalar restore 가능성을 확정
   - [x] 두 번째 Pro를 current manifest·fresh resolution에서 정확히 하나로 선택하고 6/6 authenticated
@@ -180,6 +203,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 ### M7 — HA 표면·배포·수류모터 마감
 
 - [ ] HA native discovery의 장비/그룹 entity·unique id·availability·command topic 수를 expected set과 대조
+- [ ] D1l에서 정정한 공식 앱 Flow 범위 `30..100`이 최종 HA/MQTT surface와 exact 일치하는지 확인
 - [ ] pre-namespace/legacy retained discovery inventory → owned tombstone → 복구 절차를 완결
 - [ ] observer/control 전환과 generation pruning에서 owned stale discovery만 정리되는지 확인
 - [ ] D1i가 idle로 인정한 terminal parked exact-restore disposition을 검증된 절차로 finalize하거나
@@ -294,15 +318,21 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 사용자 조작 필요 여부
 
-- 현재: **두 번째 Pro 앱 precondition 1건 필요.** 현재 읽힌 값은 power ON·`constant`·
-  `independent`·TimerON·Flow `30`; Jebao 앱에서 TimerOFF·Flow `40`으로만 바꾼 뒤 알려주기
-- 그 밖의 상시 HA `number` 엔티티 노출과 Jebao 실기·필요 상태 변경의 에이전트 실행은 사용자 승인 완료
-- 실기 공통 상한: Flow `<=50`; 각 operation의 더 낮은 고정 envelope이 있으면 그 값을 우선
-- 위 `50`은 현재 에이전트 실기의 승인 경계이며 global runtime gate는 아님. 현재 direct HA/MQTT
-  number의 기술적 범위 `30..75`는 사용자가 쓰지 않고, 범위 축소는 M7 surface 항목에서 별도 처리
-- HA Core 재기동: 사용자가 추후 직접 수행 예정이며 agent는 업데이트·재기동·설정 변경을 실행하지 않음
-- 사용자가 HA Core 재기동 직전에 알림; retained command·journal baseline을
-  먼저 잡고 재기동 후 unexpected Jebao write `0`을 read-only로 확인
+- 현재: **두 번째 Pro 앱 precondition 1건 필요.** 현재 TimerON의 적용 중인 schedule은
+  `sine`·Flow `45`·frequency `40`입니다. 앱에서 그 두 번째 Pro만 TimerOFF·manual Flow `40`으로
+  바꾸고, power ON·`constant`·`independent`는 유지한 뒤 알려주기. qualification 뒤에는 agent가
+  정확한 확인 시점에 TimerON 복귀를 다시 요청
+- 상시 HA `number` 엔티티 추가 노출 자체와 Jebao 실기·필요 상태 변경의 에이전트 실행은 사용자 승인 완료.
+  승인 없던 `75`는 D1l에서 app-declared `30..100`으로 정정 완료했으며 새 generation 배포만 남음
+- 현재 attended 실기 가이드: Flow `<=50`; 각 operation의 더 낮은 고정 envelope이 있으면 그 값을 우선.
+  이는 운전 중인 수조의 갑작스러운 유량 충격을 줄이기 위한 조작 계획값이며 capability·영구 상한·
+  input validation gate가 아님
+- 공식 앱 catalog와 D1l source는 `30..100`; current direct HA/MQTT는 아직 old generation의
+  `30..75`이므로 최종 배포 전후 범위를 같은 현재값으로 서술하지 않음
+- HA Core 재기동: 사용자가 추후 직접 수행 예정이며 agent는 업데이트·재기동·설정 변경을 실행하지 않음.
+  D1l 두-Pro 배포·postcheck가 끝나 agent가 안전하다고 알리기 전에는 대기
+- 이후 사용자가 HA Core 재기동 직전에 알림; retained command·journal baseline을 먼저 잡고
+  재기동 후 unexpected Jebao write `0`을 read-only로 확인
 
 ## 진행 로그
 
@@ -384,3 +414,27 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   `1`, Pro firmware distinct `1`, qualification surface `1`, unfinished `0`, legacy idle. 대상이 TimerON·
   Flow `30`이라 1-step qualifier는 29 하한 밖이고 Timer 조건도 불충족하므로 write 전에 정지.
   사용자 앱 precondition TimerOFF·Flow `40`을 요청하고 Claude live-plan 검토를 병행.
+- 23:04 KST — 두 번째 Pro candidate와 current qualification을 offline no-clobber source로 exact merge.
+  binding `1`, receipt `4`, qualified physical pair `2`, output SHA-256 `daf69b9a…`; current config·manifest·
+  qualification·candidate·running service와 device/broker 접촉은 불변.
+- 23:18 KST — 사용자 이의로 새 generation·deploy를 직전에서 일시정지. 공식 app catalog는
+  `manual_flow 30..100`이지만 local catalog의 `_SAFE_FLOW_MAXIMUM=75`는 agent-authored policy commit
+  `c40e6b3`과 source commit `a58da60e`에서 추가됐고, 사용자의 직접 `75` 지정은 저장소 이력에서
+  확인되지 않음. Claude에 승인 해석과 최소 정정 경로의 독립 검토를 요청.
+- 23:27 KST — `75` 전수 감사에서 catalog/HA뿐 아니라 scalar writer·qualification encoder·group·
+  local schedule·read-only schedule model의 같은 제한을 확인. 다른 app capability override는 없고,
+  `45` 계열은 attended/first-write 실기 전용 상한으로 제품 범위와 분리됨. 사용자의 `30..100` 명시
+  정정에 따라 전체 계열을 한 번에 고치고, schema-bound receipt를 우회하지 않고 두 Pro를 새로
+  자격 검증한 뒤 한 번만 배포하는 D1l 순서를 Claude와 교차검토.
+- 23:49 KST — D1l 정책을 Claude final GO 뒤 commit `0add7c7`로 랜딩. source의 Flow consumer를
+  app-declared range에 결속하고 schedule-model dependency를 schema digest에 포함했으며, 잘못된
+  `75% safety ceiling` 주석도 configured per-device limit 표현으로 정정. Ruff와 영향 회귀 `141`,
+  전체 `2521` tests PASS; frozen six·직접 tests delta `0`. staged source snapshot을 Claude에게
+  적대적 검토 요청하고, old generation·running surface `1`·장비 상태는 변경하지 않음.
+- 00:00 KST — Claude source review finding·P1 `0` 뒤 D1l source를 commit `fe10bd5`로 랜딩. old
+  generation을 유지한 채 새 one-shot image와 manifest/schema 결속을 준비하고, 첫 번째 Pro의
+  unexplained 시작 Flow `41`을 series last-recorded `40`으로 current qualified write 1회 복귀시킴.
+- 00:00 KST — persistent control stop-first 뒤 첫 번째 Pro를 새 schema에서 `40 -> 39 -> 40`으로
+  재자격. qualifier physical write `3`, exact readback `3`, receipt `2`, final Flow `40`, unfinished
+  journal `0`; old service·surface `1` 정상 복귀. append-only 기록을 Claude final GO 뒤 commit
+  `8647f86`으로 랜딩하고 두 번째 Pro 앱 precondition 대기로 이동.
