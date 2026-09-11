@@ -2582,6 +2582,65 @@ physical key를 argv에 요구하지 않음, (12) import closure에 device/netwo
 `manual_flow` qualification으로 이동합니다. Flow `<=50` 승인 경계, persistent 단일 authority,
 Q1·Q2의 M6 필수·현재 `UNKNOWN`, frozen native 하네스 동결은 그대로 유지합니다.
 
+### 2026-09-11 Flow 범위 `30..100` 정정 D1l
+
+repository maintainer이자 on-site hardware approver인 사용자는 local-control에 들어간 Flow 상한
+`75`를 자신이 요청하거나 승인한 값이 아니라고 명시적으로 정정하고, Jebao app과 일치하는
+`30..100`으로 수정하도록 지시했습니다. 기존 app catalog도 Local Wavemaker Pro를 포함한 해당
+manual Flow를 `30..100`으로 선언합니다. 따라서 2026-09-08 local-first 부분 해제의 `30..75`
+문구와 그 값을 복제한 후속 policy는 이 절로 supersede합니다. `75`를 observed manual register나
+example config에서 가져와 제품 최대·encoder 최대·안전 최대라고 다시 해석하지 않습니다.
+
+정정 범위는 local-control catalog·HA/MQTT number validation, scalar writer, software-independent
+group envelope, local schedule composition, qualification producer의 encoder 범위, write-free schedule
+model과 그 직접 tests/docs입니다. 하한 `30`과 상한 `100`은 각 app function의 declared range에서
+유도하고, consumer마다 hard-coded `75`나 `100`을 복제하지 않습니다. 자체 integer range가 없는
+`slave_per_slot_flow_extension`은 같은 Pro의 app-declared `manual_flow` range에 결속합니다. current
+private config처럼 capability보다 좁거나 같은 per-device limit는 group envelope과 qualification
+producer에서 operator 설정으로서 계속 교집합을 이룹니다. direct HA/MQTT number는 config limit와
+교집합을 만들지 않고 catalog descriptor의 `30..100` 전체를 그대로 공개·수용합니다. 기존 frozen
+native ASYNC write 하네스 여섯 파일과 그 직접 테스트는 수정하지 않습니다.
+과거 `docs/runs/`의 `30..75`는 당시 배포가 실제로 광고한 범위에 대한 append-only 사실이므로
+고치지 않고, 정정 배포를 새 run record로 남깁니다.
+
+`local_control/schedule.py`의 동작은 `operator_capture/schedule_model.py`의 Flow range 상수에
+의존하지만 현재 `current_protocol_schema_sha256()`는 전자만 hash하고 후자를 빠뜨렸습니다. 이 상태는
+hash 밖 dependency만 바꿔도 기존 receipt가 current로 남는 static-trace FAIL-to-PASS 경로이므로,
+이번에 `schedule_model.py`도 protocol-schema digest 입력에 넣고 그 closure를 회귀로 고정합니다.
+이는 frozen native ASYNC 하네스의 schema를 바꾸거나 해제하는 작업이 아닙니다.
+
+이 제품 범위 정정은 현재 live 실기의 유량 충격 방지 가이드와 별개입니다. 사용자가 지정한 agent
+실기 조작값 `<=50`은 돌아가는 수조에 갑작스러운 유량 변화를 주지 않기 위한 이번 작업의 attended
+operation bound일 뿐, 장비 capability·영구 설정 상한·입력 validation gate가 아닙니다.
+qualification producer의 `45`도 first-write 실기 전용 baseline 제한이며 제품·앱·HA 범위가 아니므로
+이번 정정에서 `100`으로 승격하지 않습니다. 향후 그 전용 제한을 바꾸려면 별도 operation 근거와
+사용자 지시를 요구합니다. 정정된 HA/MQTT number는 사람에게 app과 같은 `30..100`을 공개하고 그
+범위를 수용하며, direct HA 사용을 `50` 이하로 기술적으로 제한하지 않는다는 결과를 사용자에게
+공개하고 run record에 남깁니다. `hardware_test.py`의 attended maximum `45`와 frozen
+`schedule_flow_experiment_cli.py`의 `45`도 제품 capability가 아닌 별도 실기 한계이므로 이번
+정정 범위 밖에 두고 완화하지 않습니다.
+
+`device_writer.py`와 `local_control/schedule.py`는 protocol-schema digest의 입력이므로 이번 정정은
+기존 두 Pro의 receipt를 의도적으로 stale하게 만듭니다. 이 content binding을 완화·제외하거나 기존
+receipt를 변환하지 않습니다. source 정정과 offline 회귀 자체는 device write `0`이고, 정정 source를
+배포하기 전 두 Pro 각각을 새 schema에서 기존 fixed `40 -> 39 -> 40` qualification operation으로
+재자격합니다. 각 operation의 최대 agent Flow는 `40`, physical write는 `3`회이고, 이미 승인된
+`<=50` Jebao 실기 범위 안에서 별도 append-only run record를 먼저 landing합니다. 앞서 만든 old-schema
+merged set은 변경·삭제하지 않고 미배포 obsolete artifact로 남깁니다. 두 새 candidate를 fresh set으로
+결속한 뒤에만 새 generation을 한 번 배포하며, 그 전에는 현재 old generation의 surface를 유지합니다.
+group capability는 `30..100`으로 정직하게 고치지만 아직 qualified write surface는 `0`입니다. M4에서
+처음 arm하기 전에는 그 attended 실기의 configured·calculated output을 유량 충격 방지 가이드 `<=50`에
+맞춰 검산하며, capability 최대 `100`을 그 실기의 계획값으로 자동 재사용하지 않습니다.
+
+offline 회귀는 최소한 다음을 고정합니다. (1) 각 integer Flow descriptor range가 해당 app function의
+declared range와 같음, (2) `slave_per_slot_flow_extension` range가 같은 Pro의 `manual_flow` range와
+같고 `None`이 아님, (3) scalar writer의 허용 경계와 descriptor range가 다시 갈라지지 않음,
+(4) `schedule_model.py`가 protocol-schema digest 입력에 포함됨, (5) 그 파일의 range source bytes만
+바뀌어도 digest가 바뀜, (6) 더 좁은 config limit와의 교집합은 group과 qualification producer에서
+계속 유지됨, (7) `_SAFE_FIRST_WRITE_MAXIMUM = 45` 불변, (8) frozen six와 직접 tests 무수정 및
+import closure 불변, (9) 기존 `30..75` 결과 단정을 app-declared 관계로 교체하고 `100`은 허용·`101`은
+거부함입니다. 기존 assert를 삭제하거나 입력 `100`을 거부하는 새 fake로 관계 검사를 대신하지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
