@@ -102,6 +102,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-11 local manual-flow qualification success](2026-09-11-local-manual-flow-qualification-success.md) | write 3 / verified 3 / receipt 2 / final 40% | sequence-confirmed empty ACK body를 보존해 `40 -> 39 -> 40` exact readback과 qualification binding 완결 |
 | [2026-09-11 local-control MQTT manual-flow](2026-09-11-local-control-mqtt-manual-flow.md) | MQTT write 2 / verified 2 / final 40% / observer 복귀 | qualified Pro 한 대의 `manual_flow`에 `40 -> 39 -> 40`을 적용하고 durable journal·fresh readback·observer-only 복귀 확인 |
 | [2026-09-11 local-control qualified activation](2026-09-11-local-control-qualified-activation.md) | persistent control 1 / fresh online 6 / startup write 0 | qualified `manual_flow` number 1개를 상시 노출하고 journal 불변·retained command 0·group armed 0 확인 |
+| [2026-09-11 local-control actual recovery](2026-09-11-local-control-actual-recovery.md) | forward write 1 / recovery write 1 / terminal rollback / final 40% | 지정 readback fault 뒤 production recovery가 stored rollback을 실제 전송해 exact baseline 복원 |
 
 ## 새 실행 기록 템플릿
 
