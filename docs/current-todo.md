@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 17:25 KST
+마지막 갱신: 2026-09-11 17:35 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -218,6 +218,12 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] 30분 bounded soak에서 restart 증가·unexpected write·unfinished journal `0`과 fresh cycle 수 확인
   - 1,800초 동안 restart 추가·command·device/global offline event `0`, fresh cycle `+127`
 - [ ] 외부 app state drift를 별도 write-free observer evidence로 확인하고 exact baseline 복원
+  - [x] 조작 전 direct authenticated fresh read: `6/6`, 대상 `Flow 40`·power ON
+  - [x] 조작 전 durable baseline: journal operations `5`·blobs `12`·unfinished `0`, receipt `2`,
+    canonical tree digest 두 종류 보존
+  - [ ] on-site app에서 해당 qualified Pro의 `Flow 40 -> 41`만 변경
+  - [ ] direct fresh read와 HA/MQTT state가 `41`을 반영하고 journal·receipt가 불변임을 확인
+  - [ ] on-site app에서 `41 -> 40` 복원 후 direct fresh read·HA/MQTT·durable baseline 재확인
 - [x] reconnect·soak append-only run record·Claude v2 검토·commit `5ffbfec`
   - run snapshot digest `388dfb9a…`, 삭제 `0`, redaction `0`, P1 `0`
 - [ ] external drift는 agent device write `0`의 별도 run record로 기록
