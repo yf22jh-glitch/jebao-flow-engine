@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 16:25 KST
+마지막 갱신: 2026-09-11 16:27 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -93,6 +93,7 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 ### M4 — software-independent 3대 그룹 실장비 commissioning
 
 - [ ] 세 장비를 app에서 `independent`·안전한 Timer 상태와 승인 출력으로 precondition
+- [ ] private group config와 example의 pattern `power`·`max_power`를 사용자 승인 상한 `50` 이하로 결속
 - [ ] group write 경로가 같은 `/hardware-safety` 전역 lease·비상정지 latch에 참여하고 다른
   physical workflow와 실제로 상호배제되는지 확인
 - [ ] Constant 최소 출력 one-shot: plan-atomic journal·멤버별 exact readback·final state 확인
@@ -199,6 +200,16 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] persistent control 복귀·6/6 fresh·Flow 40·stale command replay 0 확인
 - [x] append-only recovery run record·Claude 검토·commit `0a62fb2`
 
+## 현재 열린 작업 — M2 reconnect·drift·soak
+
+- [x] control service 단일 인스턴스·host network·restart policy `unless-stopped`·restart `0` read-only 확인
+- [ ] control container만 pause하고 broker retained availability `offline`을 관측한 뒤 unpause
+- [ ] process restart `0 -> 1`, availability `online`, state 재발행·6/6 fresh 확인
+- [ ] reconnect 전후 journal·receipt tree 불변, unfinished `0`, retained command 소비·device write `0` 확인
+- [ ] 30분 bounded soak에서 restart 증가·unexpected write·unfinished journal `0`과 fresh cycle 수 확인
+- [ ] 외부 app state drift를 별도 write-free observer evidence로 확인하고 exact baseline 복원
+- [ ] reconnect·drift·soak append-only run record·Claude 검토·commit
+
 ## 실패 시 행동
 
 - persistent command 실패: forward retry·다른 command 없이 unfinished journal을 확인하고 같은 request의
@@ -271,3 +282,6 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - 16:24 KST — `restore_on_reconnect`를 동작하는 토글로 오해하지 않도록 example에서 제거하고 model
   호환 필드는 유지. daemon 자동 recovery 없음·fresh unfinished inventory·별도 mutation-free recovery
   절차를 `docs/local-control.md`에 고정해 commit `cbebf50`으로 랜딩.
+- 16:27 KST — reconnect preflight에서 control service 1·Compose managed·host network·restart policy
+  `unless-stopped`·restart 0을 확인. shared broker 대신 control container만 pause하고 retained `offline`
+  will을 실제 관측한 뒤 unpause하는 단일-client 격리 절차를 Claude와 확정(P1·물리 blocker 0).
