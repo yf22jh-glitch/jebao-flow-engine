@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 16:49 KST
+마지막 갱신: 2026-09-11 17:00 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -90,8 +90,9 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [ ] 각 멤버 `manual_flow` qualification 계획과 exact scalar restore 가능성을 확정
 - [ ] 각 멤버 `power` qualification producer/operation의 안전한 OFF·ON 순서와 rollback 권한 확정
 - [ ] 필요한 source는 기존 journal·lease·identity·single-write를 재사용해 offline 검토·landing
-- [ ] 새 `power` qualification write가 기존 `/hardware-safety` 전역 lease·비상정지 latch에 참여하고
-  다른 physical workflow와 실제로 상호배제되는지 확인
+- [ ] 새 `power` qualification write가 기존 deployment-wide global lock과
+  `physical_identity_key`별 device lock을 그대로 사용하고 새 lock namespace를 만들지 않으며, 기존
+  manual-flow 경로와 같은 장비 key로 상호배제됨을 회귀로 고정
 - [ ] 3대 모두 `manual_flow`·`power` receipt pair 확보; 다른 장비·기능은 계속 diagnostic
 - [ ] group switch 1개와 member resume 3개만 새 command surface로 투영되는지 확인
 
@@ -221,8 +222,12 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   physical identity별 2장을 세므로 같은 firmware의 두 Pro receipt 4장을 한 binding에 합칠 수 있음을 확인
 - [x] 기존 producer의 receipt 파일은 content-addressed additive이고, 병목은 no-clobber 단일 binding 파일
   writer뿐임을 확인
-- [ ] 기존 binding 전수 검증 → 새 receipt 병합 → atomic replacement → 자기 출력 재검증의 최소 offline
-  qualification-set merger 정책을 결속
+- [ ] 기존 binding 전수 검증 → 새 receipt 병합 → 새 immutable output no-clobber 생성 → 자기 출력 재검증의
+  최소 offline qualification-set merger 정책을 결속
+- [x] in-place 교체 대신 기존+candidate를 검증해 새 owner-only immutable qualification-set 파일을
+  no-clobber로 만들고, 다음 Compose generation이 이를 재정규화하는 구조를 선택
+- [ ] 병합 결과 binding 집합과 physical-key 집합을 운영자가 선언한 정확한 union으로 양방향 검증하고,
+  binding과 내부 receipt digest를 모두 결정적으로 정렬하는 계약을 정책에 고정
 - [ ] Pro 경로는 동작 불변으로 유지하고 Bar precondition만 family별로 추가하는 최소 범위를 결속
 - [ ] `power`의 OFF 실패는 safer-OFF 유지, planned ON 실패는 rollback OFF이며 자동 재기동하지 않는
   물리 결과와 현장 복원 절차를 정책에 명시
