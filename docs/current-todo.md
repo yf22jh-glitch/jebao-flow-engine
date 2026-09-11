@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 17:00 KST
+마지막 갱신: 2026-09-11 17:25 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -76,7 +76,7 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [ ] 외부 state drift를 fresh read가 반영하고 old state를 성공으로 재사용하지 않는지 확인
 - [x] daemon 자동 recovery가 없음을 운영 계약으로 고정하고 unfinished journal 감시·CLI recover 절차 마련
 - [x] `restore_on_reconnect`가 현재 미참조 설정임을 example에서 제거하고 inert 호환 필드로 명시
-- [ ] 단기 soak에서 unexpected write·unfinished journal·service restart 0 확인
+- [x] 단기 soak에서 unexpected write·unfinished journal·service restart 0 확인
 
 ### M3 — 3대 수류모터의 group-required qualification
 
@@ -86,6 +86,9 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] 두 Pro의 current firmware provenance가 모두 존재하고 byte 동일함을 write-free fresh resolution으로 확인
 - [x] 바형은 current resolution·firmware provenance가 있으나 manifest에는 아직 Pro active template 1개만
   결속된 상태임을 확인
+- [x] current installed app bundle의 Bar product→template URL→exact cache root 경로를 write-free로 재결속해
+  active Bar template digest 하나를 positive evidence로 특정; 다른 candidate 1개는 current URL에서
+  unreachable임을 확인
 - [ ] Pro 두 대와 바형 한 대의 active template/content binding을 positive evidence로 결속
 - [ ] 각 멤버 `manual_flow` qualification 계획과 exact scalar restore 가능성을 확정
 - [ ] 각 멤버 `power` qualification producer/operation의 안전한 OFF·ON 순서와 rollback 권한 확정
@@ -212,9 +215,12 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] control container만 pause하고 broker retained availability `offline`을 관측한 뒤 unpause
 - [x] process restart `0 -> 1`, availability `online`, state 재발행·6/6 fresh 확인
 - [x] reconnect 전후 journal·receipt tree 불변, unfinished `0`, retained command 소비·device write `0` 확인
-- [ ] 30분 bounded soak에서 restart 증가·unexpected write·unfinished journal `0`과 fresh cycle 수 확인
+- [x] 30분 bounded soak에서 restart 증가·unexpected write·unfinished journal `0`과 fresh cycle 수 확인
+  - 1,800초 동안 restart 추가·command·device/global offline event `0`, fresh cycle `+127`
 - [ ] 외부 app state drift를 별도 write-free observer evidence로 확인하고 exact baseline 복원
-- [ ] reconnect·drift·soak append-only run record·Claude 검토·commit
+- [x] reconnect·soak append-only run record·Claude v2 검토·commit `5ffbfec`
+  - run snapshot digest `388dfb9a…`, 삭제 `0`, redaction `0`, P1 `0`
+- [ ] external drift는 agent device write `0`의 별도 run record로 기록
 
 ## M3 선행 정적 조사
 
