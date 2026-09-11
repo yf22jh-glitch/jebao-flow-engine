@@ -653,8 +653,6 @@ class ManualFlowQualificationProducer:
         )
         try:
             acknowledgement = await writer.send_once(prepared.forward_payload, permit)
-            if not acknowledgement:
-                raise QualificationProductionError("qualification acknowledgement is empty")
             acknowledgement_sha256 = self._journal.install_blob(acknowledgement)
             record = self._save_action(
                 record,

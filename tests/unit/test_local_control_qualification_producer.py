@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -381,10 +382,6 @@ async def test_envelope_rejections_send_nothing(
             QualificationProductionError,
         ),
         (
-            _Session([_status(flow=40)], [], acknowledgement=b""),
-            QualificationProductionError,
-        ),
-        (
             _Session(
                 [_status(flow=40)],
                 [],
@@ -419,6 +416,49 @@ async def test_first_phase_faults_never_retry_or_issue_receipts(
     assert record.actions[0].phase is ActionPhase.UNCERTAIN
     assert len(session.sent) == 1
     assert not tuple((tmp_path / "receipts").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_empty_ack_body_is_preserved_after_the_session_confirms_the_response(
+    tmp_path: Path,
+) -> None:
+    target = _binding()
+    epoch = _epoch(target=target)
+    endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
+    baseline = _status(flow=40)
+    lower = _status(flow=39)
+    sent: list[bytes] = []
+    producer, journal, _lease = _producer(
+        tmp_path,
+        epoch_provider=lambda: epoch,
+        resolver=_Resolver(endpoint),
+        writer_factory=_WriterFactory(
+            [
+                _Session([baseline, baseline], sent, acknowledgement=b""),
+                _Session([baseline, lower], sent, acknowledgement=b""),
+                _Session([lower, baseline], sent, acknowledgement=b""),
+            ]
+        ),
+    )
+
+    result = await producer.execute("qualification_empty_ack", downward_step=1)
+
+    empty_sha256 = hashlib.sha256(b"").hexdigest()
+    assert result.phase is TransactionPhase.VERIFIED
+    assert result.physical_write_count == 3
+    assert result.receipt_count == 2
+    assert len(sent) == 3
+    record = journal.load("qualification_empty_ack")
+    assert record is not None
+    assert all(action.acknowledgement_sha256 == empty_sha256 for action in record.actions)
+    assert journal.load_blob(empty_sha256) == b""
+    binding = _qualification_binding(tmp_path)
+    receipts = verify_qualification_receipts(
+        binding,
+        _receipt_root_for_test=tmp_path / "receipts",
+    )
+    assert len(receipts) == 2
+    assert all(receipt.acknowledgement_sha256 == empty_sha256 for receipt in receipts)
 
 
 @pytest.mark.asyncio

@@ -322,6 +322,12 @@ verified as transport-reachability evidence but creates no receipt. Only the cha
 planned restore create the two distinct ACK/readback receipts required by the unchanged verifier.
 The transaction cannot become `VERIFIED` while the planned restore is still pending.
 
+`GizwitsSession.send_raw_control()` returns only the bytes after the response sequence number. An
+empty returned body is therefore valid ACK evidence once the session has already received a
+`SERIAL_CONTROL_RESPONSE` with the exact request sequence; it is preserved as the SHA-256 of empty
+bytes and is not reclassified as a missing ACK. A timeout, wrong response command, truncated
+sequence, sequence mismatch, or exact fresh-readback mismatch still fails closed.
+
 Receipt and binding files are finalized only after the journal is durably terminal and the device
 has exact-read-back at its original value. Re-entering the same terminal operation performs no
 discovery and creates no writer: byte-identical, digest-matching files are verified and accepted,
