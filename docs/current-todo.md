@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 15:57 KST
+마지막 갱신: 2026-09-11 16:11 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -69,7 +69,7 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] D1j 정책 commit `4689a6e`
 - [x] forward-only drill source·CLI·offline regression 구현
 - [x] source snapshot Claude 적대적 검토·필수 finding 반영·landing (`a91e4b6`)
-- [ ] 통제된 failure 1회에서 recovery frame 실제 전송·baseline exact restore·terminal journal 확인
+- [x] 통제된 failure 1회에서 recovery frame 실제 전송·baseline exact restore·terminal journal 확인
 - [ ] recovery run record·독립 검토·commit; 그 전에는 device·function qualification 확대 금지
 - [ ] Jebao service 재시작 뒤 stale command replay 0·control surface 1·6/6 fresh 확인
 - [ ] MQTT broker reconnect 뒤 retained command 소비 0·상태/availability 재발행 확인
@@ -193,10 +193,10 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] forward-only drill source·CLI·offline regression 작성
 - [x] targeted 21·full 2497·changed-file Ruff 검증과 Claude source 검토(P1 0)
 - [x] reviewed source landing (`a91e4b6`)
-- [ ] private deployment 결속
-- [ ] fresh preflight → control stop-first → forward 39 → actual recovery 40
-- [ ] terminal `ROLLED_BACK`·recovery physical write 1·unfinished 0·receipt 증가 0 확인
-- [ ] persistent control 복귀·6/6 fresh·Flow 40·stale command replay 0 확인
+- [x] private deployment 결속: source/image Python 133-file tree SHA-256 exact
+- [x] fresh preflight → control stop-first → forward 39 → actual recovery 40
+- [x] terminal `ROLLED_BACK`·recovery physical write 1·unfinished 0·receipt 증가 0 확인
+- [x] persistent control 복귀·6/6 fresh·Flow 40·stale command replay 0 확인
 - [ ] append-only recovery run record·Claude 검토·commit
 
 ## 실패 시 행동
@@ -255,3 +255,12 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   process로 결속한 D1j 정책을 Claude 검토 결과에 맞춰 commit `4689a6e`로 랜딩. source 구현 시작.
 - 15:57 KST — M2 forward-only recovery drill source·CLI·offline 회귀 완료. targeted 21·full 2497·
   changed-file Ruff PASS와 Claude P1 0·landing GO를 확인하고 commit `a91e4b6`으로 랜딩.
+- 16:02 KST — reviewed drill image build와 source 결속 PASS: local/remote Python 133-file path+content
+  SHA-256 exact, CLI entry point 설치 확인. persistent control은 계속 실행되고 device write 0.
+- 16:05 KST — live 직전 fresh preflight PASS: 6/6 fresh, target ON·TimerOFF·constant·independent·Flow
+  40, qualified target 1, receipt 2, unfinished 0, legacy idle, template·role binding exact.
+- 16:09 KST — control stop-first 뒤 forward 40→39 physical write 1과 지정 readback fault를 확인하고,
+  별도 production recovery process가 rollback 39→40을 physical write 1회로 수행. journal은
+  `ROLLED_BACK` revision 6, unfinished 0, receipt 2 불변, independent fresh Flow 40으로 종료.
+- 16:10 KST — persistent control 재기동 PASS: service 1/restart 0, 6/6 fresh, Flow 40, journal tree
+  불변, command surface 1, retained command 0, group control·resume 0, old daemon 0.
