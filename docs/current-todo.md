@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 16:27 KST
+마지막 갱신: 2026-09-11 16:40 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -72,7 +72,7 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] 통제된 failure 1회에서 recovery frame 실제 전송·baseline exact restore·terminal journal 확인
 - [x] recovery run record·독립 검토·commit `0a62fb2`; 그 전에는 device·function qualification 확대 금지
 - [x] Jebao service 재시작 뒤 stale command replay 0·control surface 1·6/6 fresh 확인
-- [ ] MQTT broker reconnect 뒤 retained command 소비 0·상태/availability 재발행 확인
+- [x] MQTT broker disconnect 뒤 process restart·retained command 소비 0·상태/availability 재발행 확인
 - [ ] 외부 state drift를 fresh read가 반영하고 old state를 성공으로 재사용하지 않는지 확인
 - [x] daemon 자동 recovery가 없음을 운영 계약으로 고정하고 unfinished journal 감시·CLI recover 절차 마련
 - [x] `restore_on_reconnect`가 현재 미참조 설정임을 example에서 제거하고 inert 호환 필드로 명시
@@ -203,9 +203,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 ## 현재 열린 작업 — M2 reconnect·drift·soak
 
 - [x] control service 단일 인스턴스·host network·restart policy `unless-stopped`·restart `0` read-only 확인
-- [ ] control container만 pause하고 broker retained availability `offline`을 관측한 뒤 unpause
-- [ ] process restart `0 -> 1`, availability `online`, state 재발행·6/6 fresh 확인
-- [ ] reconnect 전후 journal·receipt tree 불변, unfinished `0`, retained command 소비·device write `0` 확인
+- [x] control container만 pause하고 broker retained availability `offline`을 관측한 뒤 unpause
+- [x] process restart `0 -> 1`, availability `online`, state 재발행·6/6 fresh 확인
+- [x] reconnect 전후 journal·receipt tree 불변, unfinished `0`, retained command 소비·device write `0` 확인
 - [ ] 30분 bounded soak에서 restart 증가·unexpected write·unfinished journal `0`과 fresh cycle 수 확인
 - [ ] 외부 app state drift를 별도 write-free observer evidence로 확인하고 exact baseline 복원
 - [ ] reconnect·drift·soak append-only run record·Claude 검토·commit
@@ -285,3 +285,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - 16:27 KST — reconnect preflight에서 control service 1·Compose managed·host network·restart policy
   `unless-stopped`·restart 0을 확인. shared broker 대신 control container만 pause하고 retained `offline`
   will을 실제 관측한 뒤 unpause하는 단일-client 격리 절차를 Claude와 확정(P1·물리 blocker 0).
+- 16:35~16:37 KST — control container만 pause. broker retained `offline`을 실제 관측한 뒤 unpause했고
+  1.8초 안에 새 process `online`을 관측. restart 0→1, device availability 6·state 73·group event 4
+  재발행, retained command 0, journal·qualification tree 불변, unfinished 0, receipt 2를 확인.
+- 16:39 KST — 별도 strict postcheck PASS: 장비 6/6 authenticated fresh, target ON·TimerOFF·constant·
+  independent·Flow 40, command surface 1, group supervisor 1/armed 0, old daemon 0. 새 process 안정화
+  뒤 warning/error 0.
