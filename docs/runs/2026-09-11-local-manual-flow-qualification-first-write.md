@@ -89,3 +89,14 @@
   완화하지 않고 qualification을 park합니다. 코드 내부 진단 공백을 수정해야 한다면 이 기록을
   선행 근거로 별도 policy/source slice와 offline 회귀를 거친 뒤, 새 live operation은 maintainer와
   on-site hardware approver의 별도 명시 승인으로만 검토합니다.
+
+## 검토 후 정정
+
+- 위 기록의 `durable FORWARD_ATTEMPTING`은 terminal journal이 직접 보존한 중간 phase가 아니라
+  producer의 send 경계 코드와 terminal action 결과를 결합한 추론입니다. journal store는 current
+  revision 하나만 보존하므로, 이 실행의 보존 artifact가 직접 증명하는 것은 terminal revision과
+  action 결과입니다. 따라서 중간 phase가 recovery 직전 어떤 값으로 durably 남아 있었는지는
+  증거등급 (b) 사실로 승격하지 않습니다.
+- 위 `exact baseline recovery`는 restore frame을 송신한 경로가 아닙니다. 이 실행에서 직접 확인한
+  것은 fresh strict read가 이미 baseline `40%`와 일치해 `baseline_already_present`로 종료된
+  **frame 0 recovery**입니다. exact-restore frame 송신 경로가 실기 검증됐다고 주장하지 않습니다.
