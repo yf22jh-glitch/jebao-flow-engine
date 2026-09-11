@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 17:35 KST
+마지막 갱신: 2026-09-11 18:00 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -70,13 +70,20 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] forward-only drill source·CLI·offline regression 구현
 - [x] source snapshot Claude 적대적 검토·필수 finding 반영·landing (`a91e4b6`)
 - [x] 통제된 failure 1회에서 recovery frame 실제 전송·baseline exact restore·terminal journal 확인
-- [x] recovery run record·독립 검토·commit `0a62fb2`; 그 전에는 device·function qualification 확대 금지
-- [x] Jebao service 재시작 뒤 stale command replay 0·control surface 1·6/6 fresh 확인
-- [x] MQTT broker disconnect 뒤 process restart·retained command 소비 0·상태/availability 재발행 확인
-- [ ] 외부 state drift를 fresh read가 반영하고 old state를 성공으로 재사용하지 않는지 확인
-- [x] daemon 자동 recovery가 없음을 운영 계약으로 고정하고 unfinished journal 감시·CLI recover 절차 마련
-- [x] `restore_on_reconnect`가 현재 미참조 설정임을 example에서 제거하고 inert 호환 필드로 명시
-- [x] 단기 soak에서 unexpected write·unfinished journal·service restart 0 확인
+- [x] recovery run record·독립 검토·commit `0a62fb2`; 근거:
+  [`local-control actual recovery`](runs/2026-09-11-local-control-actual-recovery.md)
+- [x] Jebao service 재시작 뒤 stale command replay 0·control surface 1·6/6 fresh 확인; 근거:
+  [`reconnect and bounded soak`](runs/2026-09-11-local-control-reconnect-soak.md)
+- [x] MQTT broker disconnect 뒤 process restart·retained command 소비 0·상태/availability 재발행 확인;
+  근거: [`reconnect and bounded soak`](runs/2026-09-11-local-control-reconnect-soak.md)
+- [x] 외부 state drift를 fresh read가 반영하고 old state를 성공으로 재사용하지 않는지 확인; 근거:
+  [`external app drift`](runs/2026-09-11-local-control-external-app-drift.md)
+- [x] daemon 자동 recovery가 없음을 운영 계약으로 고정하고 unfinished journal 감시·CLI recover 절차 마련;
+  근거: [`local-control 운영 문서`](local-control.md)
+- [x] `restore_on_reconnect`가 현재 미참조 설정임을 example에서 제거하고 inert 호환 필드로 명시;
+  근거: [`local-control 운영 문서`](local-control.md)
+- [x] 1,800초 bounded soak에서 unexpected write·unfinished journal·추가 service restart 0 확인; 근거:
+  [`reconnect and bounded soak`](runs/2026-09-11-local-control-reconnect-soak.md)
 
 ### M3 — 3대 수류모터의 group-required qualification
 
@@ -172,7 +179,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] 선택 Pro `manual_flow` qualification 완료 (`40 -> 39 -> 40`, receipt 2장)
 - [x] MQTT 실기 `40 -> 39 -> 40` 완료, 각 command exact readback·terminal journal 확인
 - [x] 현재 Flow 40·장비 6/6 fresh·qualified control 1·group armed 0
-- [x] Claude 1차 독립 검토 수신·반영
+- [x] M2 recovery·restart/reconnect·bounded soak·external drift 전 항목 완료
+- [x] Claude 최종 독립 검토 수신·반영; M3 immutable qualification-set merger가 현재 작업
 
 ## M0~M1 작업 이력 (완료)
 
@@ -209,7 +217,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] persistent control 복귀·6/6 fresh·Flow 40·stale command replay 0 확인
 - [x] append-only recovery run record·Claude 검토·commit `0a62fb2`
 
-## 현재 열린 작업 — M2 reconnect·drift·soak
+## M2 reconnect·drift·soak 작업 이력 (완료)
 
 - [x] control service 단일 인스턴스·host network·restart policy `unless-stopped`·restart `0` read-only 확인
 - [x] control container만 pause하고 broker retained availability `offline`을 관측한 뒤 unpause
@@ -217,16 +225,18 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] reconnect 전후 journal·receipt tree 불변, unfinished `0`, retained command 소비·device write `0` 확인
 - [x] 30분 bounded soak에서 restart 증가·unexpected write·unfinished journal `0`과 fresh cycle 수 확인
   - 1,800초 동안 restart 추가·command·device/global offline event `0`, fresh cycle `+127`
-- [ ] 외부 app state drift를 별도 write-free observer evidence로 확인하고 exact baseline 복원
+- [x] 외부 app state drift를 별도 agent-write-free observer evidence로 확인하고 exact baseline 복원
   - [x] 조작 전 direct authenticated fresh read: `6/6`, 대상 `Flow 40`·power ON
   - [x] 조작 전 durable baseline: journal operations `5`·blobs `12`·unfinished `0`, receipt `2`,
     canonical tree digest 두 종류 보존
-  - [ ] on-site app에서 해당 qualified Pro의 `Flow 40 -> 41`만 변경
-  - [ ] direct fresh read와 HA/MQTT state가 `41`을 반영하고 journal·receipt가 불변임을 확인
-  - [ ] on-site app에서 `41 -> 40` 복원 후 direct fresh read·HA/MQTT·durable baseline 재확인
+  - [x] on-site app에서 해당 qualified Pro의 `Flow 40 -> 41`만 변경
+  - [x] direct fresh read와 HA/MQTT state가 `41`을 반영하고 journal·receipt가 불변임을 확인
+  - [x] on-site app에서 `41 -> 40` 복원 후 direct fresh read·HA/MQTT·durable baseline 재확인
 - [x] reconnect·soak append-only run record·Claude v2 검토·commit `5ffbfec`
   - run snapshot digest `388dfb9a…`, 삭제 `0`, redaction `0`, P1 `0`
-- [ ] external drift는 agent device write `0`의 별도 run record로 기록
+- [x] external drift를 agent device write `0`의 별도 run record로 기록·Claude v2 검토·commit
+  `0508de5`
+  - final snapshot digest `cff21722…`, 삭제 `0`, redaction `0`, P1 `0`
 
 ## M3 선행 정적 조사
 
@@ -260,6 +270,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - 위 `50`은 현재 에이전트 실기의 승인 경계이며 global runtime gate는 아님. 현재 direct HA/MQTT
   number의 기술적 범위 `30..75`는 사용자가 쓰지 않고, 범위 축소는 M7 surface 항목에서 별도 처리
 - HA 재부팅/업데이트: 예정 없음
+- 사용자가 후속 HA Core 재기동을 할 때는 직전에 알림; retained command·journal baseline을
+  먼저 잡고 재기동 후 unexpected Jebao write `0`을 read-only로 확인
 
 ## 진행 로그
 
@@ -325,3 +337,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - 16:39 KST — 별도 strict postcheck PASS: 장비 6/6 authenticated fresh, target ON·TimerOFF·constant·
   independent·Flow 40, command surface 1, group supervisor 1/armed 0, old daemon 0. 새 process 안정화
   뒤 warning/error 0.
+- 17:35~17:50 KST — 사용자가 Jebao app에서 qualified Pro의 Flow를 `40 -> 41 -> 40`으로 변경·복원.
+  두 경계에서 separate authenticated fresh read와 retained state가 각각 `41`·`40`을 반영했고,
+  agent device write·journal/qualification 변화는 `0`임을 확인.
+- 18:00 KST — external drift run record를 Claude가 최종 재계산해 P1·필수 finding `0`, landing GO.
+  append-only record와 index를 commit `0508de5`로 랜딩해 M2 전 항목을 완료하고 M3 merger로 이동.
