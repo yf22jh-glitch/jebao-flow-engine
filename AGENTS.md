@@ -2329,6 +2329,72 @@ session을 소유하고, terminal restore 확인 뒤 observer를 다시 시작�
 `NO-GO / BLOCKING`, Q2 `UNKNOWN`,
 frozen native harness와 일반 daemon·old MQTT 경로 동결을 유지합니다.
 
+### 2026-09-11 terminal exact-restore tombstone의 local-control idle 판정 D1i
+
+D1h qualification의 live preflight 결과는
+[`docs/runs/2026-09-11-local-qualification-terminal-tombstone-interlock.md`](docs/runs/2026-09-11-local-qualification-terminal-tombstone-interlock.md)에
+먼저 기록하고 commit `563c9f0`으로 source 수정 전에 고정했습니다. repository maintainer가 승인한
+한 장비·한 기능·세 planned frame operation은 그대로 유효하지만, preflight는 observer stop과
+qualification CLI 실행 전에 멈췄고 장비 write는 0회였습니다. 이번 작업이 닫을 질문은 **보존된
+exact-restore terminal replay barrier를 삭제하거나 약화하지 않으면서, unrelated local-control
+operation의 liveness 판정에서 그 barrier를 진행 중 journal로 오인하지 않을 수 있는가**입니다.
+
+current `local_control/lease.py`는 native-linkage, verification, schedule-linkage,
+temporary-schedule, exact-restore journal 다섯 경로를 모두 파일 존재만으로 non-idle로 판정하지만,
+intent 세 경로는 hardened local parser로 terminal envelope을 확인해 idle로 인정합니다. exact-restore
+journal에는 별도 intent가 없고 terminal `parked_unqualified` disposition이 같은 journal path의
+tombstone으로 남습니다. 따라서 tombstone을 삭제하면 idle이면서 정직하게 보존하면 non-idle인 현재
+판정은 방향이 반대입니다. exact-restore 자신의 disposition/archive 검증과 재실행 거부가 replay
+권한을 소유하고, local-control lease의 질문은 legacy write가 현재 비행 중인지에 한정합니다.
+이전 D1 계열 subsection들이 `lease.py`를 무변경 목록에 고정했으므로, 이 subsection만 그 파일을
+아래 한 predicate 범위로 명시적으로 다시 엽니다. 다른 subsection의 무변경 경계를 일반 해제하지
+않습니다.
+
+변경은 `exact_restore_journal_path()` 하나를 별도 predicate로 분리해 **파일 부재 또는 exact version-2
+`parked_unqualified` terminal envelope만** idle로 인정합니다. native-linkage, verification,
+schedule-linkage, temporary-schedule journal 네 경로는 계속 파일 존재만으로 non-idle이고, 기존 intent
+세 경로의 terminal 판정도 바꾸지 않습니다. malformed·잘린 JSON·size 초과·다른 version·phase·key
+집합에 해당하는 exact-restore 파일은 모두 non-idle입니다. terminal envelope은 exact key
+집합, `version=2`, `journal_format=2`, bounded operation id, exact `ERD-` disposition id와 lowercase
+SHA-256 세 필드의 형식을 검사합니다. lease에서 operation·disposition·journal snapshot digest를
+재유도하거나 암호학적 backing·qualification을 주장하지 않으며, 그 권위는 기존 disposition과 archive
+verifier에 그대로 둡니다.
+
+파일 검사는 기존 `_terminal_intent_or_absent()`와 같은 저수준 안전 경계를 유지합니다.
+`O_NOFOLLOW`가 없으면 거부하고, open 전 `lstat`과 open 뒤 `fstat`·재조회에서 owner uid, regular file,
+mode `0600`, link count 1, size 상한과 `(st_dev, st_ino)` 동일성을 확인합니다. symlink·non-regular·uid
+불일치·mode 불일치·hard link·inode 교체·read 오류는 전부 non-idle입니다. 이 검사는
+`exact_restore_disposition`, `exact_restore_receipts`, `exact_restore`, `protocol/*`, frozen harness나
+read-only collector를 import하지 않는 stdlib-only envelope parser입니다. global exact-restore guard
+lease를 획득한 상태에서 이 predicate와 이후 per-device lease를 잇는 기존 순서는 바꾸지 않습니다.
+
+tombstone과 영구 archive는 **삭제·개명·이동·소비·재작성하지 않습니다.** exact-restore disposition의
+`outcome != parked_unqualified` 재실행 거부, successor admission, archive backing과 journal store는
+수정하지 않습니다. local-control producer가 lease를 우회하거나 별도 lock/journal namespace를 만들지
+않고, 어떤 journal이든 단순 존재를 idle로 일반화하지 않습니다. 이 변경은 검증된 terminal liveness
+오탐 하나만 제거하므로 regular write의 identity·envelope·single-write·journal·rollback gate를
+완화하지 않고 §2의 과도 gate 제거 방향에 해당합니다. 현재 결함은 안전한 false-negative이고 §3
+P1으로 과장하지 않습니다.
+
+source 범위는 `src/jebao_flow/local_control/lease.py`,
+`tests/unit/test_local_control_lease.py`, 가산적
+`tests/unit/test_local_control_import_boundary.py`와 이 경계를 설명하는 `docs/local-control.md`로
+한정합니다. `exact_restore*`, `hardware_safety.py`, qualification producer·verifier, coordinator,
+device writer, journal, config·HA·MQTT·groups, frozen six와 그 직접 테스트, old daemon·old MQTT,
+`custom_components/*`는 수정하지 않습니다. offline source·회귀가 landing되고 별도 적대적 검토가
+끝날 때까지 observer를 정지하거나 qualification CLI와 장비 write를 실행하지 않습니다.
+
+offline 회귀는 최소한 다음을 고정합니다. (1) exact terminal parked envelope만 idle이며 파일 부재도
+기존대로 idle, (2) malformed·non-terminal·다른 phase/version·잘린 JSON·size 초과는 non-idle,
+(3) symlink·non-regular·uid·mode·link-count·inode 불일치는 각각 non-idle, (4) 나머지 journal 네
+경로는 존재만으로 계속 non-idle, (5) 기존 intent 세 경로 판정 불변, (6) `lease.py` import closure에
+`protocol/*`·exact-restore disposition/archive·frozen module이 없음, (7) production tombstone serializer와
+동일한 safe fixture는 idle이고 required terminal field 한 byte 불일치는 non-idle, (8) 기존 lease·coordinator·
+writer 회귀 assert를 삭제·완화하지 않음입니다. source landing 뒤 actual private tombstone을 mutation
+없이 다시 읽어 idle을 확인한 뒤에만 이미 승인된 qualification preflight를 처음부터 재개합니다.
+하드웨어 `NO-GO / BLOCKING`, Q2 `UNKNOWN`, frozen native harness와 일반 daemon·old MQTT 경로 동결을
+유지합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
