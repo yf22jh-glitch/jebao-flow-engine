@@ -350,6 +350,51 @@ gate, journal, coordinator, and writer remain unchanged. The later D1i lease cha
 the exact terminal parked tombstone described under recovery semantics; it does not alter this
 producer's write, recovery, or evidence contract.
 
+### Immutable qualification-set composition
+
+`jebao-flow-local-qualification-set` is an offline composer for receipts that a qualification
+producer has already installed in the fixed content-addressed hardware-safety receipt directory.
+It never creates, moves, copies, or rewrites a receipt and imports no device, network, writer, or
+native-linkage module. It also leaves the current qualification source, install manifest, and
+running Compose generation unchanged.
+
+The command accepts an optional current set, one candidate set, and a new no-clobber output path.
+Each intended addition is named by private logical member and public function; the command reads
+the current manifest only to resolve that member to exactly one current product and physical
+identity. It does not accept a raw physical identity on the command line or report logical member,
+physical identity, or private paths in its public JSON. In a generated deployment it reads the
+current owner-only hardware-safety volume-identity file into process memory before validating the
+same mounted receipt root; it neither reports nor rewrites that value.
+
+```text
+jebao-flow-local-qualification-set \
+  --current <current-qualification-source> \
+  --candidate <new-candidate-source> \
+  --output <new-immutable-source> \
+  --manifest <current-install-manifest> \
+  --expect-add <logical-member> <function>
+```
+
+Every current and candidate binding is first checked by the unchanged receipt verifier. Bindings
+with the same `(product_key, function)` may merge only their receipt-digest sets and only when all
+seven version/content fields agree; other binding keys are additive. The merged result is verified
+again, and its binding keys and verified `(product, function, physical identity)` surface must equal
+the current verified surface plus exactly the operator-declared additions. This rejects both an
+unexpectedly broadened command surface and silent loss of an existing qualification. Distinct
+request ids remain global across the whole result, and the existing two-receipt-per-identity,
+canonical-receipt, digest, firmware, and content checks are not relaxed.
+
+Output bindings are sorted by `(product_key, function)`, and each binding's receipt digests are
+sorted lexicographically before compact ASCII JSON with one trailing newline is written. A random
+owner-only temporary file is fsynced and linked into a new owner-only destination without replacing
+anything. Byte-identical re-entry is verified and accepted; different existing bytes, unsafe
+metadata, a missing receipt, or any reload/verification failure leave every prior input untouched.
+
+The immutable output is only a source for a later separately reviewed
+`prepare-compose --qualifications` operation. The deployment evidence is the
+`qualifications.json` SHA-256 in that new generation's bundle descriptor, not merely the composer's
+source-file digest. Creating the set alone neither enables a control nor changes the service.
+
 ### Observer control surface
 
 Top-level `runtime.mode: observer` takes precedence over the current `--write-enabled` invocation,
