@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 18:38 KST
+마지막 갱신: 2026-09-11 19:22 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -37,6 +37,15 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - 사용자 앱 조작이 새로 필요하면 그 지점에서만 요청한다.
 - frozen native ASYNC 하네스, old daemon·old MQTT 경로는 건드리지 않는다.
 - Claude는 독립 정적 검토 역할을 유지한다.
+
+## 현재 대기 지점
+
+- [x] 두 번째 Pro `manual_flow` candidate qualification과 현재 Timer schedule 상태 기록·독립검토·commit
+  `ad5681f`; 근거: [`second Pro manual-flow qualification`](runs/2026-09-11-local-manual-flow-qualification-second-pro.md)
+- [x] 최종 현재 시간대 적용값 `sine`·Flow `45`·frequency `40`, TimerON을 앱 화면과 authenticated
+  fresh read로 교차확인
+- [ ] 재개 시 candidate·current qualification set merge부터 시작. 새 generation·deploy·추가 live
+  operation은 사용자 지시대로 아직 시작하지 않음
 
 ## 완성까지 전체 로드맵
 
@@ -100,8 +109,22 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [ ] 각 멤버 `manual_flow` qualification 계획과 exact scalar restore 가능성을 확정
   - [x] 두 번째 Pro를 current manifest·fresh resolution에서 정확히 하나로 선택하고 6/6 authenticated
     fresh, firmware 동일, unfinished `0`, legacy idle을 확인
-  - [ ] 두 번째 Pro 앱 precondition: power ON·`constant`·`independent` 유지, TimerOFF·Flow `40`
-  - [ ] 기존 producer 무수정으로 `40 -> 39 -> 40`, receipt pair candidate 생성·exact restore 확인
+  - [x] 두 번째 Pro 앱 precondition: power ON·`constant`·`independent` 유지, TimerOFF·Flow `40`
+    - 사용자 앱 변경 뒤 agent fresh read로 exact state와 장비 `6/6`, unfinished `0`, legacy idle,
+      retained command `0`을 재확인
+  - [x] 기존 producer 무수정으로 `40 -> 39 -> 40`, receipt pair candidate 생성·exact restore 확인
+    - physical write `3`, terminal `VERIFIED` revision `10`, action `3/3` verified, receipt `2`
+    - candidate는 아직 running qualification input에 합치지 않아 두 번째 Pro command surface `0`
+    - persistent control 복귀 후 availability online·장비 `6/6`·retained command `0`·unfinished `0`
+    - run record·Claude 독립검토·commit `ad5681f` 완료
+  - [x] 두 번째 Pro의 TimerON schedule ownership 복원과 종료 상태를 authenticated fresh read로 확인
+    - 종료 상태는 power ON·TimerON·`independent`; latent manual `Flow 40`이며 원래 latent `Flow 30`과
+      byte-exact 동일 상태는 아님
+    - 현재 시간대 `18:11–23:59`의 적용 slot은 `sine`·Flow `45`·frequency `40`으로 사용자 앱
+      화면과 direct fresh read가 일치; 다른 시간대 slot은 현재 상태 판정에 사용하지 않음
+    - schedule decode는 유효 slot `14`, invalid `0`; 이번 agent qualification write는 schedule을
+      수정하지 않고 `39`·`40`만 사용
+    - 실행 전 schedule image를 보존하지 않아 전체 schedule의 pre/post byte-exact 불변은 주장하지 않음
 - [ ] 각 멤버 `power` qualification producer/operation의 안전한 OFF·ON 순서와 rollback 권한 확정
 - [ ] 필요한 source는 기존 journal·lease·identity·single-write를 재사용해 offline 검토·landing
 - [ ] 새 `power` qualification write가 기존 deployment-wide global lock과
