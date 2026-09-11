@@ -98,6 +98,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-10 local observer DHCP reservation](2026-09-10-local-observer-dhcp-reservations.md) | reservation 6 / dnsmasq·DNS PASS / device write 0 | current lease 6개를 static reservation으로 고정하고 기존 host 29개 불변 확인; target drift 영구 원인 해소 |
 | [2026-09-10 local observer active-template 결속](2026-09-10-local-observer-active-template-binding.md) | template 1 / fresh online 6 / command 0 / device write 0 | current app loader가 선택한 exact Pro template SHA-256을 manifest에 결속하고 observer-only 표면 불변 확인 |
 | [2026-09-11 local qualification terminal tombstone interlock](2026-09-11-local-qualification-terminal-tombstone-interlock.md) | terminal parked artifact / qualification write 0 | valid exact-restore parked tombstone을 lease가 non-idle로 오인해 observer stop·device I/O 전에 qualification을 차단함 |
+| [2026-09-11 local manual-flow qualification first write](2026-09-11-local-manual-flow-qualification-first-write.md) | same-value send boundary 1 / ACK 0 / lower·planned restore 0 | 첫 frame ACK 증거 부재로 즉시 fail-closed; baseline 40% 확인 뒤 recovery terminal, receipt 0 |
 
 ## 새 실행 기록 템플릿
 
