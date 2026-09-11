@@ -141,7 +141,10 @@ def compile_slave_schedules(
         if mode_code == 7 and flow == 0:
             continue
         if not SAFE_FLOW_MINIMUM <= flow <= SAFE_FLOW_MAXIMUM:
-            raise ValueError("current master slot Flow is outside the declared 30..75 envelope")
+            raise ValueError(
+                "current master slot Flow is outside the declared "
+                f"{SAFE_FLOW_MINIMUM}..{SAFE_FLOW_MAXIMUM} app range"
+            )
 
     compiled: list[CompiledSlaveSchedule] = []
     for slave in plan.slaves:
@@ -164,7 +167,10 @@ def compile_slave_schedules(
             if not (flow == 0 and master_slot[4] == 7) and not (
                 SAFE_FLOW_MINIMUM <= flow <= SAFE_FLOW_MAXIMUM
             ):
-                raise ValueError("current slave slot Flow is outside the declared 30..75 envelope")
+                raise ValueError(
+                    "current slave slot Flow is outside the declared "
+                    f"{SAFE_FLOW_MINIMUM}..{SAFE_FLOW_MAXIMUM} app range"
+                )
             image[start + 5] = flow
         exact, _ = _validate_current_master_image(image)
         _assert_only_flow_differs(master, exact)
@@ -212,7 +218,10 @@ def compile_fresh_slave_flow_update(
     if isinstance(flow, bool) or not isinstance(flow, int):
         raise TypeError("slave Flow must be an integer")
     if not SAFE_FLOW_MINIMUM <= flow <= SAFE_FLOW_MAXIMUM:
-        raise ValueError("slave Flow must stay inside the declared 30..75 envelope")
+        raise ValueError(
+            "slave Flow must stay inside the declared "
+            f"{SAFE_FLOW_MINIMUM}..{SAFE_FLOW_MAXIMUM} app range"
+        )
 
     master_image, active = _validate_current_master_image(current_master_image)
     slave_image, slave_active = _validate_current_master_image(current_slave_image)
@@ -234,7 +243,10 @@ def compile_fresh_slave_flow_update(
         if not (
             selected_flow == 0 and master_slot[4] == 7
         ) and not SAFE_FLOW_MINIMUM <= selected_flow <= SAFE_FLOW_MAXIMUM:
-            raise ValueError("current slave slot Flow is outside the declared 30..75 envelope")
+            raise ValueError(
+                "current slave slot Flow is outside the declared "
+                f"{SAFE_FLOW_MINIMUM}..{SAFE_FLOW_MAXIMUM} app range"
+            )
         image[start + 5] = selected_flow
 
     exact = bytes(image)

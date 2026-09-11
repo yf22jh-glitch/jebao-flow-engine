@@ -91,7 +91,7 @@ Inheritance is therefore a local daemon composition, not a firmware claim:
    and require exact readback.
 
 This operation is available for both `sync` and `async`. It never reads a stored schedule or an old
-install manifest. A Home Assistant projection creates 48 independent `30..75` Flow number entities
+install manifest. A Home Assistant projection creates 48 independent `30..100` Flow number entities
 for every slave whose own physical identity has two verified receipts. The master is a fresh
 read-only composition source, so it does not need a write receipt for this operation. An inactive
 master slot remains visible as a position but is not written; the current master image decides
@@ -337,8 +337,9 @@ never resumes a test phase, and never creates a receipt.
 
 The send envelope is fixed before the first frame and rechecked at every phase: device on,
 `constant`, TimerOFF, `independent`, current Flow no greater than 45, a downward step of 1..5, and
-both values inside the current private config limits and the existing 30..75 encoder range. The
-current config, manifest generation, app catalog, selected template, protocol sources, and
+both values inside the current private config limits and the app-declared `30..100` encoder range.
+The 45 ceiling is an attended first-write bound, not the device capability or Home Assistant input
+range. The current config, manifest generation, app catalog, selected template, protocol sources, and
 discovered firmware must remain byte/content-bound for the whole operation. Values are never
 clamped or substituted to make the run proceed.
 
@@ -655,10 +656,10 @@ silently omitted group observation.
 
 Groups are constructed independently. Native-linked groups, products without the current local
 power/Flow encoder pair, unimplemented patterns, `fallback_constant`, missing current manifest
-members, duplicate physical identities, and empty intersections with the declared `30..75` Flow
-envelope remain `unconstructed` with a stable English reason. Per-device actuation limits use the
-intersection of current private config and that declared envelope; the planner's currently declared
-step remains unchanged. Group-level effective pattern limits remain a separate input.
+members, duplicate physical identities, and empty intersections with the app-declared `30..100`
+Flow range remain `unconstructed` with a stable English reason. Per-device actuation limits use the
+intersection of current private config and that declared app range; the planner's currently
+declared step remains unchanged. Group-level effective pattern limits remain a separate input.
 
 A read-only `serve` process reports the inventory but constructs zero supervisors and never creates
 a fake write port. With `--write-enabled`, each supported group receives the current coordinator and

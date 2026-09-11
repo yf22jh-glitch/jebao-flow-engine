@@ -82,10 +82,17 @@ def test_generator_qualification_is_consumed_once_and_exposes_only_that_control(
     )
 
     descriptor = catalog.validate_intent(_intent("manual_flow", 45))
+    app_function = next(
+        function
+        for function in LOCAL_WAVEMAKER_PRO_APP.functions
+        if function.name == "manual_flow"
+    )
 
     assert descriptor.control_exposed is True
-    assert descriptor.native_minimum == 30
-    assert descriptor.native_maximum == 75
+    assert (descriptor.native_minimum, descriptor.native_maximum) == (
+        app_function.app_minimum,
+        app_function.app_maximum,
+    )
     with pytest.raises(ValueError, match="not qualified"):
         catalog.validate_intent(_intent("power", True))
 
@@ -175,7 +182,7 @@ def test_clock_builder_does_not_claim_an_end_to_end_control_surface() -> None:
     assert descriptor.diagnostic_reason == "app writes YMD and zero-prefixed HMS in one command"
 
 
-@pytest.mark.parametrize("value", (29, 76, True, "45"))
+@pytest.mark.parametrize("value", (29, 101, True, "45"))
 def test_flow_control_declares_and_enforces_same_ha_native_range(value: object) -> None:
     catalog = build_local_control_catalog(
         (_qualification("manual_flow"),),
@@ -184,6 +191,18 @@ def test_flow_control_declares_and_enforces_same_ha_native_range(value: object) 
     )
     with pytest.raises((TypeError, ValueError)):
         catalog.validate_intent(_intent("manual_flow", value))
+
+
+def test_flow_control_accepts_the_app_declared_maximum() -> None:
+    catalog = build_local_control_catalog(
+        (_qualification("manual_flow"),),
+        current_content=_content(),
+        _qualification_verifier_for_test=lambda _item: _verified_keys("5"),
+    )
+
+    descriptor = catalog.validate_intent(_intent("manual_flow", 100))
+
+    assert descriptor.native_maximum == 100
 
 
 def test_qualification_must_bind_current_install_content() -> None:

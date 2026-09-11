@@ -51,8 +51,6 @@ from jebao_flow.local_control.group_supervisor import (
 from jebao_flow.local_control.models import FreshInstallManifest, LocalDeviceBinding
 from jebao_flow.local_control.state import FreshDeviceState
 
-_GROUP_FLOW_MINIMUM = 30
-_GROUP_FLOW_MAXIMUM = 75
 GROUP_COMMAND_COMPLETION_TIMEOUT_SECONDS = 2.0
 
 
@@ -1000,10 +998,15 @@ class LocalControlGroupService:
                 raise _GroupConstructionUnavailable("unsupported_product") from error
             if not power.encoding_available or not manual_flow.encoding_available:
                 raise _GroupConstructionUnavailable("unsupported_product")
+            if (
+                type(manual_flow.native_minimum) is not int
+                or type(manual_flow.native_maximum) is not int
+            ):
+                raise _GroupConstructionUnavailable("safe_flow_range_missing")
 
             configured_limits = configured.limits
-            minimum = max(configured_limits.min_power, _GROUP_FLOW_MINIMUM)
-            maximum = min(configured_limits.max_power, _GROUP_FLOW_MAXIMUM)
+            minimum = max(configured_limits.min_power, manual_flow.native_minimum)
+            maximum = min(configured_limits.max_power, manual_flow.native_maximum)
             if minimum > maximum:
                 raise _GroupConstructionUnavailable("safe_flow_intersection_empty")
             bindings[member_id] = binding

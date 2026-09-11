@@ -72,10 +72,14 @@ def test_slave_inherits_entire_master_schedule_and_overrides_only_flow() -> None
     assert plan.materialize_slave_slots("slave_b")[0].flow == 45
 
 
-@pytest.mark.parametrize("flow", [0, 29, 76, 100])
-def test_schedule_model_keeps_declared_safety_envelope(flow: int) -> None:
-    with pytest.raises(ValueError, match="30..75"):
+@pytest.mark.parametrize("flow", [0, 29, 101])
+def test_schedule_model_keeps_declared_app_range(flow: int) -> None:
+    with pytest.raises(ValueError, match="30..100"):
         SlaveFlowOverride(slot_index=0, flow=flow)
+
+
+def test_schedule_model_accepts_the_app_declared_maximum() -> None:
+    assert SlaveFlowOverride(slot_index=0, flow=100).flow == 100
 
 
 def test_master_schedule_requires_all_ordered_slots() -> None:

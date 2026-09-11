@@ -117,15 +117,15 @@ def test_untouched_app_feed_duration_above_old_decoder_limit_is_preserved() -> N
     assert compiled.image == current
 
 
-def test_active_non_feed_master_flow_outside_safety_envelope_is_rejected() -> None:
+def test_active_non_feed_master_flow_outside_app_range_is_rejected() -> None:
     plan = FreshMasterSchedulePlan(
         linkage_mode=NativeLinkageMode.SYNC,
         master=_binding("master", "a"),
         slaves=(FreshSlaveSchedule(target=_binding("slave", "b")),),
     )
 
-    with pytest.raises(ValueError, match="30..75"):
-        invalid = _master_image(_slot(flow=100))
+    with pytest.raises(ValueError, match="30..100"):
+        invalid = _master_image(_slot(flow=101))
         compile_slave_schedules(plan, invalid, {"b" * 64: invalid})
 
 

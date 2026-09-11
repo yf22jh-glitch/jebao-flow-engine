@@ -35,12 +35,11 @@ from jebao_flow.local_control.coordinator import (
 )
 from jebao_flow.local_control.journal import TransactionPhase
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
+from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 from jebao_flow.protocol.models import DeviceTarget
 from jebao_flow.protocol.profiles import DC_PUMP_PRO, LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
 
 _REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,128}\Z")
-_GROUP_FLOW_MINIMUM = 30
-_GROUP_FLOW_MAXIMUM = 75
 _SUPPORTED_PRODUCT_KEYS = frozenset(
     {
         LOCAL_WAVEMAKER_PRO.product_key,
@@ -358,8 +357,16 @@ class SoftwareIndependentGroupActuator:
             return
         if not decision.requested_target.enabled:
             raise ValueError("group normalization cannot turn a requested OFF target on")
-        if not _GROUP_FLOW_MINIMUM <= target.power <= _GROUP_FLOW_MAXIMUM:
-            raise ValueError("group Flow must stay inside the declared 30..75 envelope")
+        binding = self._bindings[decision.device]
+        flow_minimum, flow_maximum = declared_app_integer_range(
+            binding.product_key,
+            "manual_flow",
+        )
+        if not flow_minimum <= target.power <= flow_maximum:
+            raise ValueError(
+                "group Flow must stay inside the declared "
+                f"{flow_minimum}..{flow_maximum} app range"
+            )
         if not trusted_limits.min_power <= target.power <= trusted_limits.max_power:
             raise ValueError("group target is outside its bound device limits")
         if target.power > decision.effective_max_power:

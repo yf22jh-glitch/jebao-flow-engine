@@ -56,14 +56,15 @@ from jebao_flow.local_control.qualification import (
     verify_qualification_receipts,
 )
 from jebao_flow.local_control.resolver import ResolvedEndpoint
-from jebao_flow.operator_capture.app_catalog import public_app_catalog
+from jebao_flow.operator_capture.app_catalog import (
+    declared_app_integer_range,
+    public_app_catalog,
+)
 from jebao_flow.operator_capture.paths import durable_private_path
 
 _MAX_PRIVATE_INPUT_BYTES = 1024 * 1024
 _MAX_ARTIFACT_BYTES = 1024 * 1024
 _SAFE_FIRST_WRITE_MAXIMUM = 45
-_ENCODER_FLOW_MINIMUM = 30
-_ENCODER_FLOW_MAXIMUM = 75
 _EXPECTED_FAMILY = "local_wavemaker_pro"
 _FUNCTION = "manual_flow"
 _ACTION_IDS = ("same_value", "lower_power", "planned_restore")
@@ -831,9 +832,13 @@ class ManualFlowQualificationProducer:
     ) -> None:
         self._require_state_envelope(epoch, state)
         lower = state.flow - downward_step
+        encoder_minimum, encoder_maximum = declared_app_integer_range(
+            epoch.target.product_key,
+            _FUNCTION,
+        )
         if (
             not epoch.min_power <= lower <= epoch.max_power
-            or not _ENCODER_FLOW_MINIMUM <= lower <= _ENCODER_FLOW_MAXIMUM
+            or not encoder_minimum <= lower <= encoder_maximum
         ):
             raise QualificationProductionError("current state is outside the first-write envelope")
 
@@ -842,6 +847,10 @@ class ManualFlowQualificationProducer:
         epoch: QualificationEpoch,
         state: ManualFlowState,
     ) -> None:
+        encoder_minimum, encoder_maximum = declared_app_integer_range(
+            epoch.target.product_key,
+            _FUNCTION,
+        )
         if (
             state.enabled is not True
             or state.timer_enabled is not False
@@ -849,7 +858,7 @@ class ManualFlowQualificationProducer:
             or state.linkage != "independent"
             or state.flow > _SAFE_FIRST_WRITE_MAXIMUM
             or not epoch.min_power <= state.flow <= epoch.max_power
-            or not _ENCODER_FLOW_MINIMUM <= state.flow <= _ENCODER_FLOW_MAXIMUM
+            or not encoder_minimum <= state.flow <= encoder_maximum
         ):
             raise QualificationProductionError("current state is outside the first-write envelope")
 
@@ -956,11 +965,15 @@ def _manual_flow_state(
     status: bytes,
 ) -> ManualFlowState:
     values: dict[str, object] = {}
+    encoder_minimum, _encoder_maximum = declared_app_integer_range(
+        target.product_key,
+        _FUNCTION,
+    )
     probes = (
         ("schedule_enable", False, ("SwitchON", "TimerON")),
         ("linkage_role", "independent", ("Linkage",)),
         ("manual_mode", "constant", ("Mode",)),
-        ("manual_flow", _ENCODER_FLOW_MINIMUM, ("Flow",)),
+        ("manual_flow", encoder_minimum, ("Flow",)),
     )
     for index, (function, value, fields) in enumerate(probes):
         prepared = writer.prepare_scalar(

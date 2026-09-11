@@ -1,6 +1,10 @@
 import hashlib
 
-from jebao_flow.operator_capture.app_catalog import public_app_catalog
+from jebao_flow.operator_capture.app_catalog import (
+    REGISTERED_APP_PRODUCTS,
+    declared_app_integer_range,
+    public_app_catalog,
+)
 from jebao_flow.operator_capture.catalog import summarize_frame
 from jebao_flow.protocol.codec import GizwitsCommand, GizwitsFrame
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
@@ -116,6 +120,17 @@ def test_registered_app_catalog_covers_every_observed_product_family() -> None:
     assert extension["count"] == 48
     assert extension["confidence"] == "accepted_capture_required"
     assert "UNKNOWN" in extension["caveat"]
+
+
+def test_declared_integer_ranges_are_read_from_the_product_function() -> None:
+    for product in REGISTERED_APP_PRODUCTS.values():
+        for function in product.functions:
+            if function.name not in {"manual_flow", "slave_common_flow"}:
+                continue
+            assert declared_app_integer_range(product.product_key, function.name) == (
+                function.app_minimum,
+                function.app_maximum,
+            )
 
 
 def test_public_app_catalog_is_english_ascii_only() -> None:

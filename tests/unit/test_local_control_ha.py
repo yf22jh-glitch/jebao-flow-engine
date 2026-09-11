@@ -22,7 +22,10 @@ from jebao_flow.local_control.models import (
     QualificationBinding,
 )
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan, FreshSlaveSchedule
-from jebao_flow.operator_capture.app_catalog import APP_SHELL_FUNCTIONS
+from jebao_flow.operator_capture.app_catalog import (
+    APP_SHELL_FUNCTIONS,
+    declared_app_integer_range,
+)
 from jebao_flow.operator_capture.schedule_model import NativeLinkageMode
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
 
@@ -195,7 +198,7 @@ def test_unqualified_functions_are_english_diagnostics_without_commands() -> Non
     assert str(projection.public_dict()).isascii()
 
 
-def test_qualified_scalar_uses_native_clamped_number_contract() -> None:
+def test_qualified_scalar_uses_app_declared_number_contract() -> None:
     projection = project_home_assistant(
         _manifest(),
         build_local_control_catalog(
@@ -213,11 +216,16 @@ def test_qualified_scalar_uses_native_clamped_number_contract() -> None:
     )
 
     assert flow.platform is HomeAssistantPlatform.NUMBER
-    assert flow.native_minimum == 30
-    assert flow.native_maximum == 75
+    declared_range = declared_app_integer_range(
+        LOCAL_WAVEMAKER_PRO.product_key,
+        "manual_flow",
+    )
+    assert (flow.native_minimum, flow.native_maximum) == declared_range
     assert flow.command_topic is not None
-    assert flow.mqtt_discovery_payload()["min"] == 30
-    assert flow.mqtt_discovery_payload()["max"] == 75
+    assert (
+        flow.mqtt_discovery_payload()["min"],
+        flow.mqtt_discovery_payload()["max"],
+    ) == declared_range
     assert flow.mqtt_discovery_payload()["qos"] == 0
     assert flow.mqtt_discovery_payload()["optimistic"] is False
     assert flow.mqtt_discovery_payload()["availability_mode"] == "all"
@@ -277,7 +285,11 @@ def test_priority_schedule_projects_independent_flow_for_every_slave_slot() -> N
     assert len(slots) == 48
     assert [entity.slot_index for entity in slots] == list(range(48))
     assert all(entity.logical_member == "wavemaker_slave" for entity in slots)
-    assert all((entity.native_minimum, entity.native_maximum) == (30, 75) for entity in slots)
+    assert all(
+        (entity.native_minimum, entity.native_maximum)
+        == declared_app_integer_range(LOCAL_WAVEMAKER_PRO.product_key, "manual_flow")
+        for entity in slots
+    )
     assert all(entity.command_topic is not None for entity in slots)
 
 

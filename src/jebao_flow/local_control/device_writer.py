@@ -19,6 +19,7 @@ from jebao_flow.local_control.lease import LocalControlSendPermit
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.resolver import ResolvedEndpoint
 from jebao_flow.local_control.schedule import CompiledSlaveSchedule
+from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 from jebao_flow.protocol.control import CONTROL_ACTION, build_control_payload
 from jebao_flow.protocol.control_session import GizwitsSession
 from jebao_flow.protocol.profiles import get_product_schema
@@ -222,8 +223,14 @@ class ConnectedDeviceWriter:
         if intent.function in _FLOW_FUNCTIONS:
             if isinstance(intent.value, bool) or not isinstance(intent.value, int):
                 raise TypeError("Flow control requires an integer")
-            if not 30 <= intent.value <= 75:
-                raise ValueError("Flow control must stay inside the declared 30..75 envelope")
+            minimum, maximum = declared_app_integer_range(
+                intent.target.product_key,
+                intent.function,
+            )
+            if not minimum <= intent.value <= maximum:
+                raise ValueError(
+                    f"Flow control must stay inside the declared {minimum}..{maximum} app range"
+                )
 
         schema = get_product_schema(intent.target.product_key)
         values = schema.decode_status(current_status)

@@ -17,6 +17,7 @@ from jebao_flow.local_control.device_writer import (
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.resolver import ResolvedEndpoint
 from jebao_flow.local_control.schedule import CompiledSlaveSchedule
+from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 from jebao_flow.operator_capture.schedule_model import NativeLinkageMode
 from jebao_flow.protocol.control import build_control_payload
 from jebao_flow.protocol.profiles import (
@@ -112,6 +113,39 @@ async def test_scalar_writer_prepares_fresh_rollback_and_sends_once() -> None:
     assert len(session.sent) == 1
     with pytest.raises(LocalDeviceWriteError, match="never resends"):
         await writer.send_once(prepared.forward_payload, _Lease())
+
+
+def test_scalar_writer_uses_the_same_app_declared_flow_range() -> None:
+    minimum, maximum = declared_app_integer_range(
+        LOCAL_WAVEMAKER_PRO.product_key,
+        "manual_flow",
+    )
+    writer = ConnectedDeviceWriter(
+        ResolvedEndpoint(_binding(), "runtime-address"),
+        session_factory=_Session,
+    )
+
+    prepared = writer.prepare_scalar(
+        LocalControlIntent(
+            request_id="request_app_maximum",
+            target=_binding(),
+            function="manual_flow",
+            value=maximum,
+        ),
+        _status(flow=40),
+    )
+
+    assert json.loads(prepared.expected_readback) == {"Flow": maximum}
+    with pytest.raises(ValueError, match=rf"{minimum}..{maximum}"):
+        writer.prepare_scalar(
+            LocalControlIntent(
+                request_id="request_above_app_maximum",
+                target=_binding(),
+                function="manual_flow",
+                value=maximum + 1,
+            ),
+            _status(flow=40),
+        )
 
 
 @pytest.mark.asyncio

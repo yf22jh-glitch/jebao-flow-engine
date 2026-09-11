@@ -411,7 +411,7 @@ def test_device_limits_use_the_config_and_declared_flow_intersection(monkeypatch
 
     assert service.supervisor_count == 1
     assert _RecordingActuator.limits["left"].min_power == 30
-    assert _RecordingActuator.limits["left"].max_power == 75
+    assert _RecordingActuator.limits["left"].max_power == 100
     assert _RecordingActuator.limits["left"].power_step == 1
     assert _RecordingActuator.limits["right"].min_power == 40
     assert _RecordingActuator.limits["right"].max_power == 70
@@ -420,7 +420,7 @@ def test_device_limits_use_the_config_and_declared_flow_intersection(monkeypatch
 def test_empty_safe_flow_intersection_is_an_isolated_diagnostic() -> None:
     config, manifest = _current_inputs(
         (_group("main_flow", ("left", "right")),),
-        limits={"left": (80, 90)},
+        limits={"left": (10, 20)},
     )
 
     service = LocalControlGroupService(

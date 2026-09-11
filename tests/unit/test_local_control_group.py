@@ -93,6 +93,7 @@ def _decision(
     *,
     action: MemberAction = MemberAction.DISPATCH,
     control_epoch: int = 0,
+    limits: DeviceActuationLimits = LIMITS,
 ) -> MemberDecision:
     return MemberDecision(
         device=member,
@@ -101,8 +102,8 @@ def _decision(
         target=target if action is MemberAction.DISPATCH else None,
         requested_power=target.power,
         normalized_power=target.power if action is MemberAction.DISPATCH else None,
-        limits_used=LIMITS,
-        effective_max_power=LIMITS.max_power,
+        limits_used=limits,
+        effective_max_power=limits.max_power,
         control_epoch=control_epoch,
     )
 
@@ -288,14 +289,42 @@ def _actuator(
     coordinator: LocalControlCoordinator,
     left: LocalDeviceBinding,
     right: LocalDeviceBinding,
+    *,
+    limits: DeviceActuationLimits = LIMITS,
 ) -> SoftwareIndependentGroupActuator:
     return SoftwareIndependentGroupActuator(
         group_id="main_flow",
         member_ids=("left", "right"),
         bindings={"right": right, "left": left},
-        device_limits={"right": LIMITS, "left": LIMITS},
+        device_limits={"right": limits, "left": limits},
         coordinator=coordinator,
     )
+
+
+def test_group_validation_uses_the_app_declared_flow_range() -> None:
+    left = _binding("left", "a")
+    right = _binding("right", "b")
+    limits = DeviceActuationLimits(min_power=0, max_power=100)
+    coordinator = LocalControlCoordinator.__new__(LocalControlCoordinator)
+    actuator = _actuator(coordinator, left, right, limits=limits)
+
+    actuator.validate_plan(
+        _plan(
+            (
+                _decision("left", DeviceTarget(enabled=True, power=100), limits=limits),
+                _decision("right", DeviceTarget(enabled=True, power=100), limits=limits),
+            )
+        )
+    )
+    with pytest.raises(ValueError, match="30..100"):
+        actuator.validate_plan(
+            _plan(
+                (
+                    _decision("left", DeviceTarget(enabled=True, power=29), limits=limits),
+                    _decision("right", DeviceTarget(enabled=True, power=100), limits=limits),
+                )
+            )
+        )
 
 
 @pytest.mark.asyncio

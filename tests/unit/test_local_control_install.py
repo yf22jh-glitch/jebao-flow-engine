@@ -176,3 +176,19 @@ def test_protocol_binding_includes_the_actual_writer_and_composition_sources(
     local_control_root = Path(install.__file__).resolve().parent
     assert local_control_root / "device_writer.py" in resolved
     assert local_control_root / "schedule.py" in resolved
+    assert Path(install.schedule_model.__file__).resolve() in resolved
+
+
+def test_protocol_binding_changes_with_schedule_model_range_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "schedule_model.py"
+    source.write_bytes(b"flow-range-source-v1")
+    monkeypatch.setattr(install.schedule_model, "__file__", str(source))
+
+    before = install.current_protocol_schema_sha256()
+    source.write_bytes(b"flow-range-source-v2")
+    after = install.current_protocol_schema_sha256()
+
+    assert after != before

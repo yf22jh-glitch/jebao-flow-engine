@@ -18,6 +18,7 @@ from jebao_flow.local_control.models import (
     InstallContentBindings,
     LocalDeviceBinding,
 )
+from jebao_flow.operator_capture import schedule_model
 from jebao_flow.operator_capture.app_catalog import public_app_catalog
 from jebao_flow.operator_capture.paths import durable_private_path
 from jebao_flow.physical_identity import (
@@ -105,6 +106,7 @@ def current_protocol_schema_sha256() -> str:
             str(schedule_path.with_name("schema.py")),
             str(local_control_path / "device_writer.py"),
             str(local_control_path / "schedule.py"),
+            schedule_model.__file__,
         )
     )
 

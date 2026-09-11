@@ -118,8 +118,9 @@ Assistant의 이름과 상태 문자열은 ASCII 영문만 허용하며 앱 arti
 | `QUALIFIED` | 별도 승인 실측과 ACK/readback 영수증 2/2 | 해당 physical device에만 control 노출; 현재 영수증 0 |
 
 `OBSERVED`를 곧바로 control로 노출하지 않습니다. UI control의 존재는 지원된다는 주장과 같기
-때문입니다. 구현된 HA control의 native 범위도 앱의 `0..100`을 보여 준 뒤 뒤에서 clamp하지 않고,
-저장소의 안전 envelope인 `30..75`를 UI 자체가 정직하게 표시합니다.
+때문입니다. qualification된 Flow control의 HA native 범위는 앱이 선언한 운전 범위 `30..100`과
+같습니다. 현재 agent 실기의 `<=50` 계획값은 수조의 갑작스러운 유량 변화를 줄이기 위한 별도
+attended-operation 가이드이며 HA 입력 validation이나 제품 capability 범위가 아닙니다.
 
 승격은 아래 순서를 건너뛰지 않습니다.
 
@@ -161,12 +162,12 @@ automation cloud를 로컬 runtime 의존성으로 복제한다는 뜻은 아닙
 `NativeSchedulePlan`은 정확히 48칸인 Pro master slot vector와 하나 이상의 logical slave를
 가집니다. 각 칸은 active schedule 또는 명시적인 unused 상태이며, runtime은 master의
 time/mode/frequency/feed/custom-frequency bytes를 slave에 복사합니다. 각 active slot의 Flow는
-그 slave의 fresh current image에서 보존하고 명시된 `30..75` override만 교체합니다. current
+그 slave의 fresh current image에서 보존하고 명시된 app-declared `30..100` override만 교체합니다. current
 slave slot이 unused인 경우에만 master Flow로 시작합니다. 따라서 bulk composition이 이전에
 설정한 slave별 Flow를 조용히 master 값으로 되돌리지 않습니다. 앱의 공통 slave `Flow`도 slot별
 `AutoFlow`와 합치지 않고 별도 operation으로 둡니다.
 
-Sync와 Async 모두 같은 desired-state 모델을 쓰며 48개 원소 각각에 안전 envelope를
+Sync와 Async 모두 같은 desired-state 모델을 쓰며 48개 원소 각각에 declared app range를
 적용합니다. Pro의 slot byte `5`는 mode와 무관한 Flow이지만 다른 제품군에서는 같은 위치가
 feed time일 수 있으므로 이 모델을 일반화하지 않습니다. Pro raw image의 date/time 영역은
 device-owned로 고정하고 inert 모델과 미래 schedule writer가 소유하지 않습니다. 앱 UI에는

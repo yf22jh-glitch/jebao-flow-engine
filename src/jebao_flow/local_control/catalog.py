@@ -21,17 +21,8 @@ from jebao_flow.operator_capture.app_catalog import (
     AppFunction,
     AppFunctionKind,
     CapabilityConfidence,
+    declared_app_integer_range,
 )
-
-_FLOW_FUNCTIONS = frozenset(
-    {
-        "manual_flow",
-        "slave_common_flow",
-        "slave_per_slot_flow_extension",
-    }
-)
-_SAFE_FLOW_MINIMUM = 30
-_SAFE_FLOW_MAXIMUM = 75
 
 _ENCODABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
     "50dbc92221fd4d33ae69a1fedd43b555": frozenset(
@@ -320,7 +311,7 @@ def build_local_control_catalog(
                 raise ValueError("qualified hardware control has no deterministic encoder")
             unqualified_stage = _initial_stage(function)
             stage = CapabilityStage.QUALIFIED if binding is not None else unqualified_stage
-            native_minimum, native_maximum = _native_range(function)
+            native_minimum, native_maximum = _native_range(product.product_key, function)
             functions.append(
                 LocalFunctionDescriptor(
                     product_key=product.product_key,
@@ -412,9 +403,12 @@ def _diagnostic_reason(
     return "deterministic_encoder_unavailable"
 
 
-def _native_range(function: AppFunction) -> tuple[int | None, int | None]:
-    if function.name in _FLOW_FUNCTIONS:
-        return _SAFE_FLOW_MINIMUM, _SAFE_FLOW_MAXIMUM
+def _native_range(
+    product_key: str,
+    function: AppFunction,
+) -> tuple[int | None, int | None]:
+    if function.name == "slave_per_slot_flow_extension":
+        return declared_app_integer_range(product_key, "manual_flow")
     return function.app_minimum, function.app_maximum
 
 

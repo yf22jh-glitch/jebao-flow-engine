@@ -567,7 +567,7 @@ class LanJebaoDevice(JebaoDevice):
                 # A feed slot may deliberately stop the pump, so zero is the sole exception to
                 # the configured operating minimum.  Every non-zero value still passes the same
                 # min/max/step gate as another scheduled mode; otherwise a nominal feed slot
-                # carrying (for example) 100 could bypass a device's 75% safety ceiling.
+                # could bypass that device's configured operating ceiling.
                 if entry.mode != "feed" or flow != 0:
                     self._validate_power(flow)
             normalized[slot_index] = wire

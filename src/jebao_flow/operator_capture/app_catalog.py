@@ -537,6 +537,26 @@ REGISTERED_APP_PRODUCTS = {
     )
 }
 
+
+def declared_app_integer_range(product_key: str, function_name: str) -> tuple[int, int]:
+    """Return one product function's audited integer range without copying numeric policy."""
+
+    try:
+        product = REGISTERED_APP_PRODUCTS[product_key]
+    except KeyError as error:
+        raise KeyError("product is not in the registered app catalog") from error
+    matches = tuple(function for function in product.functions if function.name == function_name)
+    if len(matches) != 1:
+        raise KeyError("function is not unique in the registered app catalog")
+    function = matches[0]
+    if (
+        function.kind is not AppFunctionKind.INTEGER
+        or function.app_minimum is None
+        or function.app_maximum is None
+    ):
+        raise ValueError("app function does not declare a complete integer range")
+    return function.app_minimum, function.app_maximum
+
 APP_SHELL_FUNCTIONS = (
     AppFunction("device_discovery_and_binding", AppFunctionKind.DEVICE_LIFECYCLE),
     AppFunction(
@@ -616,5 +636,6 @@ __all__ = [
     "AppFunctionKind",
     "AppProductCatalog",
     "CapabilityConfidence",
+    "declared_app_integer_range",
     "public_app_catalog",
 ]

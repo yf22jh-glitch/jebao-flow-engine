@@ -292,7 +292,7 @@ async def test_invalid_direct_payload_never_claims_ownership_or_calls_the_coordi
     entity = next(item for item in projection.entities if item.slot_index == 0)
 
     with pytest.raises(LocalControlMqttError, match="native range"):
-        await router.handle(entity.command_topic or "", "99")
+        await router.handle(entity.command_topic or "", "101")
 
     assert ownership.calls == []
     assert coordinator.scalar == []
@@ -351,7 +351,7 @@ async def test_router_rejects_unpublished_and_out_of_range_commands() -> None:
     with pytest.raises(LocalControlMqttError, match="published"):
         await router.handle("jebao-flow/main/local/not-published", "45")
     with pytest.raises(LocalControlMqttError, match="native range"):
-        await router.handle(entity.command_topic or "", "99")
+        await router.handle(entity.command_topic or "", "101")
 
 
 @pytest.mark.asyncio

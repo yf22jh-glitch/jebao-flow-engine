@@ -10,12 +10,15 @@ import re
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
+from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 from jebao_flow.operator_capture.capability import AppExpressibility, DeviceSupport
 from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
 
 PRO_SCHEDULE_SLOT_COUNT = 48
-SAFE_FLOW_MINIMUM = 30
-SAFE_FLOW_MAXIMUM = 75
+SAFE_FLOW_MINIMUM, SAFE_FLOW_MAXIMUM = declared_app_integer_range(
+    LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+    "manual_flow",
+)
 _PRO_MODES = {
     "pulse",
     "sine",
@@ -227,7 +230,7 @@ def _validate_safe_flow(value: int) -> None:
         raise TypeError("flow must be an integer")
     if not SAFE_FLOW_MINIMUM <= value <= SAFE_FLOW_MAXIMUM:
         raise ValueError(
-            f"flow must stay inside the declared {SAFE_FLOW_MINIMUM}..{SAFE_FLOW_MAXIMUM} envelope"
+            f"flow must stay inside the declared {SAFE_FLOW_MINIMUM}..{SAFE_FLOW_MAXIMUM} app range"
         )
 
 
