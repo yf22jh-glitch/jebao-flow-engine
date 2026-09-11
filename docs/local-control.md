@@ -894,6 +894,23 @@ verified exact device readback. That state is a verified point-in-time observati
 an external app can never change the device later. Public MQTT/HA state uses logical member names
 and English ASCII labels only; raw physical identifiers and current addresses remain private.
 
+`devices[].control.restore_on_reconnect` is retained only for configuration compatibility. The
+current local-control runtime does not read the value, and neither `true` nor `false` causes a device
+write at service startup or MQTT/device reconnect. Operators must not treat it as either an
+automatic-restore promise or a switch that disables a restore path.
+
+The daemon does not call `LocalControlCoordinator.recover()` automatically. A non-terminal journal
+therefore remains a visible blocking recovery obligation instead of being replayed after a process
+or broker reconnect. Operational monitoring inventories
+`LocalControlJournalStore.unfinished_records()` from a fresh process against the current identified
+hardware-safety root. When exactly one expected request remains, ordinary command authority stays
+stopped and the reviewed mutation-free command
+`jebao-flow-local-qualify recover --operation-id <same-opaque-id> --write-enabled` reconciles that
+record without resuming its forward action. Control returns only after the journal is terminal and
+an independent fresh read confirms the recorded baseline. An unexpected or multiple unfinished
+inventory is reported and left untouched; it is never guessed, automatically retried, or hidden by
+restarting the service.
+
 ### Bounded actual-recovery drill
 
 `jebao-flow-local-recovery-drill` is a forward-only, attended diagnostic for the one still-unproven

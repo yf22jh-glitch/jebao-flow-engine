@@ -47,7 +47,6 @@ devices:
       max_power: 80
     control:
       minimum_command_interval_ms: 1000
-      restore_on_reconnect: true
       # Keep false until a reviewed low-output hardware test.
       allow_hardware_writes: false
       readback_delay_ms: 500
@@ -62,7 +61,6 @@ devices:
       max_power: 75
     control:
       minimum_command_interval_ms: 1000
-      restore_on_reconnect: true
       allow_hardware_writes: false
       readback_delay_ms: 500
       readback_attempts: 3
@@ -76,7 +74,6 @@ devices:
       max_power: 75
     control:
       minimum_command_interval_ms: 1000
-      restore_on_reconnect: true
       allow_hardware_writes: false
       readback_delay_ms: 500
       readback_attempts: 3
