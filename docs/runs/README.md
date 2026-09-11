@@ -105,6 +105,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-11 local-control actual recovery](2026-09-11-local-control-actual-recovery.md) | forward write 1 / recovery write 1 / terminal rollback / final 40% | 지정 readback fault 뒤 production recovery가 stored rollback을 실제 전송해 exact baseline 복원 |
 | [2026-09-11 local-control reconnect and bounded soak](2026-09-11-local-control-reconnect-soak.md) | broker loss / restart 0→1 / soak 1,800초 / device write 0 | retained offline을 관측해 supervised restart를 확인하고 command·journal 변화 없이 6/6 fresh 유지 |
 | [2026-09-11 local-control external app drift](2026-09-11-local-control-external-app-drift.md) | app Flow 40→41→40 / agent write 0 / final 40 | external drift를 direct fresh read와 retained state에 반영하고 journal·qualification 불변 확인 |
+| [2026-09-11 second Pro manual-flow qualification](2026-09-11-local-manual-flow-qualification-second-pro.md) | write 3 / verified 3 / receipt 2 / candidate only | 두 번째 Pro `40 -> 39 -> 40` exact readback과 TimerON 뒤 active schedule `sine`·Flow 45 확인; surface 미개방 |
 
 ## 새 실행 기록 템플릿
 
