@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import stat
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -28,6 +29,21 @@ from jebao_flow.hardware_safety import (
 )
 
 _MAX_SAFETY_ARTIFACT_BYTES = 1024 * 1024
+_EXACT_RESTORE_OPERATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_EXACT_RESTORE_DISPOSITION_ID_PATTERN = re.compile(r"^ERD-[0-9a-f]{32}$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_PARKED_TOMBSTONE_KEYS = frozenset(
+    {
+        "version",
+        "journal_format",
+        "operation_id",
+        "phase",
+        "operation_sha256",
+        "disposition_id",
+        "disposition_sha256",
+        "journal_snapshot_sha256",
+    }
+)
 
 
 class LocalControlLeaseError(RuntimeError):
@@ -223,9 +239,10 @@ def _legacy_write_workflows_idle() -> bool:
         verification_journal_path(),
         schedule_linkage_journal_path(),
         temporary_schedule_journal_path(),
-        exact_restore_journal_path(),
     )
     if any(not _artifact_absent(path) for path in journal_paths):
+        return False
+    if not _terminal_parked_exact_restore_or_absent(exact_restore_journal_path()):
         return False
     return all(
         _terminal_intent_or_absent(path)
@@ -245,6 +262,113 @@ def _artifact_absent(path: Path) -> bool:
     except OSError:
         return False
     return False
+
+
+def _terminal_parked_exact_restore_or_absent(path: Path) -> bool:
+    """Accept only the exact terminal liveness envelope, without importing its workflow."""
+
+    if not hasattr(os, "O_NOFOLLOW"):
+        return False
+    try:
+        named = path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(named.st_mode)
+        or named.st_uid != os.geteuid()
+        or stat.S_IMODE(named.st_mode) != 0o600
+        or named.st_nlink != 1
+        or named.st_size > _MAX_SAFETY_ARTIFACT_BYTES
+    ):
+        return False
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or opened.st_size > _MAX_SAFETY_ARTIFACT_BYTES
+            or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            return False
+        payload = bytearray()
+        while chunk := os.read(descriptor, 65536):
+            payload.extend(chunk)
+            if len(payload) > _MAX_SAFETY_ARTIFACT_BYTES:
+                return False
+        reread = os.fstat(descriptor)
+        current = path.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(reread.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or reread.st_uid != os.geteuid()
+            or current.st_uid != os.geteuid()
+            or stat.S_IMODE(reread.st_mode) != 0o600
+            or stat.S_IMODE(current.st_mode) != 0o600
+            or reread.st_nlink != 1
+            or current.st_nlink != 1
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (reread.st_dev, reread.st_ino, reread.st_size)
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (current.st_dev, current.st_ino, current.st_size)
+            or len(payload) != opened.st_size
+        ):
+            return False
+        decoded = json.loads(payload, object_pairs_hook=_unique_json_object)
+        canonical = (
+            json.dumps(
+                decoded,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+        if bytes(payload) != canonical:
+            return False
+    except (OSError, RecursionError, TypeError, ValueError):
+        return False
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return (
+        isinstance(decoded, dict)
+        and set(decoded) == _PARKED_TOMBSTONE_KEYS
+        and type(decoded.get("version")) is int
+        and decoded["version"] == 2
+        and type(decoded.get("journal_format")) is int
+        and decoded["journal_format"] == 2
+        and decoded.get("phase") == "parked_unqualified"
+        and isinstance(decoded.get("operation_id"), str)
+        and _EXACT_RESTORE_OPERATION_ID_PATTERN.fullmatch(decoded["operation_id"]) is not None
+        and isinstance(decoded.get("disposition_id"), str)
+        and _EXACT_RESTORE_DISPOSITION_ID_PATTERN.fullmatch(decoded["disposition_id"]) is not None
+        and all(
+            isinstance(decoded.get(key), str)
+            and _SHA256_PATTERN.fullmatch(decoded[key]) is not None
+            for key in (
+                "operation_sha256",
+                "disposition_sha256",
+                "journal_snapshot_sha256",
+            )
+        )
+    )
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    decoded: dict[str, object] = {}
+    for key, value in pairs:
+        if key in decoded:
+            raise ValueError("duplicate JSON key")
+        decoded[key] = value
+    return decoded
 
 
 def _terminal_intent_or_absent(path: Path) -> bool:

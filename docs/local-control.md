@@ -336,11 +336,13 @@ current config, manifest generation, app catalog, selected template, protocol so
 discovered firmware must remain byte/content-bound for the whole operation. Values are never
 clamped or substituted to make the run proceed.
 
-No live qualification was performed while landing this source. For a later separately approved
+No live qualification was performed while landing this producer. For a later separately approved
 operation, stop the observer first so the qualifier is the only device-session owner; after a
 terminal planned restore or separately authorized recovery, restart the observer and recheck its
 read-only surface. The native ASYNC harness, old daemon/MQTT path, verifier, catalog membership
-gate, journal, lease, coordinator, and writer remain unchanged.
+gate, journal, coordinator, and writer remain unchanged. The later D1i lease change only recognizes
+the exact terminal parked tombstone described under recovery semantics; it does not alter this
+producer's write, recovery, or evidence contract.
 
 ### Observer control surface
 
@@ -860,9 +862,14 @@ The product-by-product symbols, ranges, template surface, and unresolved call pa
 The local-control journal is independent from the exact-restore journal and has one non-overridable
 location inside the identified hardware-safety root. Before a physical send, the code acquires the
 existing deployment-wide operation lock, rejects every live native-linkage, verification,
-schedule-linkage, temporary-schedule, or exact-restore journal, accepts only absent or terminal
-legacy intent envelopes, and acquires `<physical_identity_key>.lock` for every target. Any other
-unfinished local-control transaction blocks a new request until recovery terminalizes it.
+schedule-linkage, or temporary-schedule journal, accepts only absent or terminal legacy intent
+envelopes, and acquires `<physical_identity_key>.lock` for every target. The exact-restore journal
+path is idle only when absent or when its owner-only file is the exact version-2
+`parked_unqualified` terminal tombstone envelope. That narrow recognition answers only whether the
+legacy workflow is still in flight; it does not qualify the old operation or replace the existing
+archive/replay verification. Malformed, non-terminal, unsafe-metadata, or future-version files stay
+blocked. The tombstone is never consumed or changed by local control. Any other unfinished
+local-control transaction blocks a new request until recovery terminalizes it.
 
 Each forward frame is preceded by a fresh baseline read and durable `PREPARED` state. The journal is
 advanced to `FORWARD_ATTEMPTING` before send. A missing ACK or readback never causes an automatic

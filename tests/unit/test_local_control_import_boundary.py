@@ -195,3 +195,40 @@ def test_per_device_lock_uses_the_stable_physical_key_filename() -> None:
     assert "configuration_fingerprint" not in source
     assert "getpid" not in source
     assert "hostname" not in source
+
+
+def test_lease_terminal_parser_does_not_import_exact_restore_or_protocol_modules() -> None:
+    imports = _imports(PACKAGE / "lease.py")
+
+    assert "jebao_flow.exact_restore_guard" in imports
+    assert not any(
+        (name.startswith("jebao_flow.exact_restore") and name != "jebao_flow.exact_restore_guard")
+        or name.startswith(("jebao_flow.protocol", "jebao_flow.read_only_collector"))
+        for name in imports
+    )
+
+    script = (
+        "import importlib,json,sys;"
+        "importlib.import_module('jebao_flow.local_control');"
+        "before=set(sys.modules);"
+        "importlib.import_module('jebao_flow.local_control.lease');"
+        "print(json.dumps(sorted(name for name in set(sys.modules)-before "
+        "if name.startswith('jebao_flow.'))))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0
+    assert completed.stderr == ""
+    added_closure = set(json.loads(completed.stdout))
+    assert "jebao_flow.exact_restore_guard" in added_closure
+    assert not any(
+        (name.startswith("jebao_flow.exact_restore") and name != "jebao_flow.exact_restore_guard")
+        or name.startswith(("jebao_flow.protocol", "jebao_flow.read_only_collector"))
+        or name in FROZEN_MODULES
+        for name in added_closure
+    )

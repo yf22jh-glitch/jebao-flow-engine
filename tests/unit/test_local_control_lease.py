@@ -15,6 +15,27 @@ from jebao_flow.local_control.lease import (
 )
 
 
+def _parked_tombstone() -> dict[str, object]:
+    return {
+        "version": 2,
+        "journal_format": 2,
+        "operation_id": "safe-operation-id",
+        "phase": "parked_unqualified",
+        "operation_sha256": "a" * 64,
+        "disposition_id": f"ERD-{'b' * 32}",
+        "disposition_sha256": "c" * 64,
+        "journal_snapshot_sha256": "d" * 64,
+    }
+
+
+def _write_private_json(path: Path, payload: object) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+
 def _lease(tmp_path: Path, *, idle: bool = True) -> LocalControlLease:
     guard = ExactRestoreGuard._for_test(
         operation_lock_path=tmp_path / "hardware-operation.lock",
@@ -88,12 +109,139 @@ def test_fixed_workflow_inventory_blocks_every_live_journal_and_accepts_terminal
         "verification_journal_path",
         "schedule_linkage_journal_path",
         "temporary_schedule_journal_path",
-        "exact_restore_journal_path",
     ):
         paths[name].write_text("{}", encoding="ascii")
         paths[name].chmod(0o600)
         assert lease_module._legacy_write_workflows_idle() is False
         paths[name].unlink()
+
+    _write_private_json(paths["exact_restore_journal_path"], {})
+    assert lease_module._legacy_write_workflows_idle() is False
+    _write_private_json(paths["exact_restore_journal_path"], _parked_tombstone())
+    assert lease_module._legacy_write_workflows_idle() is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("version", 1),
+        ("version", 2.0),
+        ("journal_format", 1),
+        ("journal_format", True),
+        ("operation_id", "contains spaces"),
+        ("phase", "parked"),
+        ("operation_sha256", "A" * 64),
+        ("disposition_id", "ERD-not-a-digest"),
+        ("disposition_sha256", "c" * 63),
+        ("journal_snapshot_sha256", "g" * 64),
+    ),
+)
+def test_exact_restore_tombstone_requires_the_exact_terminal_envelope(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    path = tmp_path / "exact-restore.json"
+    payload = _parked_tombstone()
+    payload[field] = value
+    _write_private_json(path, payload)
+
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is False
+
+
+def test_exact_restore_tombstone_rejects_extra_duplicate_truncated_and_oversize_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "exact-restore.json"
+    payload = _parked_tombstone()
+    payload["unexpected"] = True
+    _write_private_json(path, payload)
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is False
+
+    path.write_text(
+        '{"version":2,"version":2}',
+        encoding="ascii",
+    )
+    path.chmod(0o600)
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is False
+
+    path.write_text('{"version":', encoding="ascii")
+    path.chmod(0o600)
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is False
+
+    _write_private_json(path, _parked_tombstone())
+    path.write_bytes(path.read_bytes()[:-1] + b" \n")
+    path.chmod(0o600)
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is False
+
+    monkeypatch.setattr(lease_module, "_MAX_SAFETY_ARTIFACT_BYTES", 8)
+    path.write_text("{}" + " " * 8, encoding="ascii")
+    path.chmod(0o600)
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is False
+
+
+def test_exact_restore_tombstone_is_idle_only_as_a_safe_regular_owner_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "exact-restore.json"
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is True
+
+    _write_private_json(path, _parked_tombstone())
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is True
+
+    path.chmod(0o644)
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is False
+    path.chmod(0o600)
+
+    linked = tmp_path / "linked.json"
+    os.link(path, linked)
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is False
+    linked.unlink()
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is True
+
+    monkeypatch.setattr(lease_module.os, "geteuid", lambda: os.getuid() + 1)
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is False
+
+
+def test_exact_restore_tombstone_requires_nofollow_support(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "exact-restore.json"
+    _write_private_json(path, _parked_tombstone())
+    monkeypatch.delattr(lease_module.os, "O_NOFOLLOW")
+
+    assert lease_module._terminal_parked_exact_restore_or_absent(path) is False
+
+
+def test_exact_restore_tombstone_rejects_symlink_nonregular_and_inode_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target.json"
+    _write_private_json(target, _parked_tombstone())
+    symlink = tmp_path / "symlink.json"
+    symlink.symlink_to(target)
+    assert lease_module._terminal_parked_exact_restore_or_absent(symlink) is False
+
+    directory = tmp_path / "directory"
+    directory.mkdir(mode=0o700)
+    assert lease_module._terminal_parked_exact_restore_or_absent(directory) is False
+
+    original_stat = Path.stat
+
+    def changed_inode(selected: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        metadata = original_stat(selected, follow_symlinks=follow_symlinks)
+        if selected == target and not follow_symlinks:
+            fields = list(metadata)
+            fields[1] += 1
+            return os.stat_result(fields)
+        return metadata
+
+    monkeypatch.setattr(Path, "stat", changed_inode)
+    assert lease_module._terminal_parked_exact_restore_or_absent(target) is False
 
 
 def test_nonterminal_or_malformed_intent_never_counts_as_idle(
