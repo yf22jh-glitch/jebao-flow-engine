@@ -2395,6 +2395,106 @@ writer 회귀 assert를 삭제·완화하지 않음입니다. source landing 뒤
 하드웨어 `NO-GO / BLOCKING`, Q2 `UNKNOWN`, frozen native harness와 일반 daemon·old MQTT 경로 동결을
 유지합니다.
 
+### 2026-09-11 local-control actual recovery frame 검증 D1j
+
+qualified control의 첫 MQTT write와 qualification write는 terminal journal·exact readback까지
+확인했지만, 실제 `LocalControlCoordinator.recover()`가 rollback payload를 장비에 보내는 분기는 아직
+실기 0회입니다. 첫 qualification 실패는 fresh state가 이미 baseline이라 recovery frame 0으로
+종결됐습니다. 이번 작업이 닫을 질문은 **production coordinator·writer·journal·lease를 완화하거나
+복제하지 않고, 통제된 한 번의 forward-readback fault 뒤 기존 운영용 recovery CLI가 저장된 scalar
+rollback payload를 정확히 한 번 보내 baseline을 exact restore할 수 있는가**입니다.
+
+repository maintainer이자 on-site hardware approver인 사용자는 Jebao 실기와 이미 확인된 상태의 필요한
+변경을 에이전트가 별도 반복 질문 없이 진행하도록 명시 승인했고, 모든 Flow의 상한을 `50`으로
+지정했습니다. 이번 operation은 그 안의 고정 `39..40`만 사용합니다. 이 승인은 HA Core 업데이트·
+재부팅·HA 설정 변경을 포함하지 않고, frozen native ASYNC 하네스는 별도 해제 commit 요건을 그대로
+유지합니다. 이 `50`은 현재 에이전트 operation의 승인·검토 경계이며 global runtime gate가 아닙니다.
+현재 direct HA/MQTT number는 catalog native range `30..75`를 기술적으로 받을 수 있으므로 사용자가
+쓰지 않는 행위적 통제를 유지하고, 후속 direct surface 범위 축소는 별도 제품 slice로 다룹니다.
+
+drill은 qualified Local Wavemaker Pro 한 대의 `manual_flow`만 대상으로 하고 exact operation은
+`40 -> 39 -> 40`입니다. 첫 `40 -> 39`는 normal `LocalControlCoordinator.execute()`와 real
+`ConnectedDeviceWriter`가 수행합니다. 새 forward-only writer adapter는 coordinator의 기존
+`writer_factory` seam에 instance-local wrapper 객체로만 주입하고 module-global 치환이나 import-time
+patch를 하지 않으며, 모든 connect·prepare·send·readback·close를 그대로 delegate합니다.
+`prepare_scalar()`가 반환한 exact `PreparedDeviceWrite`를 보관하고, real writer가 돌려준 fresh
+readback에 **production `verify_prepared_readback(prepared, readback)` 자체**를 적용해 True일 때만
+bytes를 바꾸거나 숨겨진 비교를 추가하지 않고 지정 fault를 정확히 한 번 raise합니다. predicate가
+False이면 readback을 그대로 coordinator에 반환해 기존 `forward_readback_mismatch` 경로가 판정하며,
+transport·permit·identity·qualification 오류도 지정 fault로 바꾸지 않습니다.
+
+그 지정 fault는 coordinator의 기존 `forward_readback_unavailable` / `UNCERTAIN` /
+`RECOVERY_REQUIRED` write-ahead 경로를 실제 journal에 남깁니다. forward CLI는 cause가 지정 fault이고
+freshly reloaded journal이 그 exact non-terminal 상태임을 확인한 경우에만 계획된 forward phase 완료로
+보고합니다. 이 시점의 장비 상태는 production predicate가 확인한 `39`이고 forward physical write는
+정확히 1회입니다. 다른 오류가 발생하면 새 request로 retry하거나 다음 forward를 보내지 않고, 존재하는
+unfinished journal의 기존 recovery 권한만 사용합니다.
+
+복구는 drill module이나 adapter가 호출하지 않습니다. forward process가 완전히 종료된 뒤 **별도
+프로세스의 기존 `jebao-flow-local-qualify recover --operation-id <같은 request id>
+--write-enabled`**만 실행합니다. 이 recovery subcommand는 current Compose input을 검증한 뒤 config를
+읽어 unwrapped production coordinator를 만들고, install manifest를 재유도하거나 교체하지 않습니다.
+따라서 recovery의 resolver·lease·writer·readback에는 drill adapter가 import되거나 도달할 수 없습니다.
+recovery coordinator는 qualification 없이 구성되고 `recover()`도 current qualification을 요구하지
+않으므로, forward와 recovery 사이 자격 상태가 바뀌어도 baseline 복원 권한을 잃지 않습니다. existing recovery는
+fresh current가 baseline이 아님을 확인하고 stored rollback payload `40`을
+`ROLLBACK_ATTEMPTING` durable 저장 뒤 정확히 한 번 보내며, ACK와 production exact baseline readback이
+모두 맞아야 action·transaction을 `ROLLED_BACK`으로 terminalize합니다. actual recovery
+`physical_write_count`는 정확히 1이어야 하고, 0이면 baseline-already-present 분기일 뿐 이번 질문의
+PASS가 아닙니다. 복구 실패는 `ROLLBACK_UNCERTAIN` 권한을 보존하고 추가 write나 자동 retry를 하지
+않습니다.
+
+새 fault artifact 종류는 만들지 않습니다. journal의 `forward_readback_unavailable` diagnostic은
+production 문자열이며 synthetic provenance 자체를 증명하지 않습니다. append-only run record가 opaque
+request id, forward CLI의 지정-fault 확인, terminal journal digest·revision·referenced blob, recovery
+`physical_write_count=1`, independent pre/post fresh readback과 UTC span을 함께 결속합니다. raw frame을
+보존하지 않으면 structured journal 주장은 (b), operator fresh observation은 (c)로 구분하고 (a)를
+주장하지 않습니다. receipt·qualification binding과 command surface는 추가하지 않습니다.
+
+live 순서는 persistent control service를 먼저 정지해 device authority를 하나로 만들고, D1e current
+precondition 네 개와 reviewed source/image, unfinished local journal 0, legacy idle, 6/6 fresh, target의
+power ON·TimerOFF·constant·independent·Flow 40, current template·role·qualification binding, 동일
+hardware-safety volume을 확인합니다. forward CLI와 recovery CLI는 겹치지 않고 차례로 한 프로세스씩
+실행합니다. 성공 조건은 physical write 총 2회(`39` forward 1 + `40` recovery 1), receipt 증가 0,
+terminal `ROLLED_BACK`, unfinished 0, independent fresh Flow 40입니다. 그 뒤 reviewed persistent control
+service 1개를 재기동해 6/6 fresh·command surface 1·retained command 0·old daemon 0·role-binding 불변을
+확인합니다. HA Core 업데이트·재부팅·설정 변경은 하지 않습니다.
+
+source 범위는 새 `src/jebao_flow/local_control/recovery_drill.py`, forward-only
+`src/jebao_flow/local_control_recovery_drill_cli.py`, 두 전용 unit test, 가산적
+`tests/unit/test_local_control_import_boundary.py`, `docs/local-control.md`, console entry를 위한
+`pyproject.toml`로 한정합니다. `local_control_cli.py`와
+`local_control_qualification_cli.py`의 기존 recovery 경로, coordinator, device writer, journal, lease,
+qualification producer·verifier, catalog, config·HA·MQTT·groups, frozen six와 그 직접 테스트, old
+daemon·old MQTT, `custom_components/*`는 수정하지 않습니다. CLI는 explicit
+`--write-enabled`, opaque request id와 private logical target을 요구하고 public 출력에는 address·MAC·
+vendor id·payload·ACK bytes·credential·private path를 내보내지 않습니다.
+
+offline 회귀는 최소한 다음을 고정합니다. (1) adapter는 production
+`verify_prepared_readback()`가 True일 때만 정확히 한 번 지정 fault를 raise, (2) False이면 bytes를
+그대로 반환해 coordinator의 `forward_readback_mismatch`와 recovery-required가 유지, (3) transport·
+permit 오류는 지정 fault로 오분류하지 않고 기존 fail-closed 경로 유지, (4) 지정 fault 뒤 journal은
+`UNCERTAIN` / `forward_readback_unavailable` / `RECOVERY_REQUIRED`이고 다섯 blob과 rollback payload는
+coordinator가 만든 exact prepared 값, (5) 그 record를 unwrapped production coordinator가 복구하면
+rollback frame 1회·`ROLLED_BACK`·`physical_write_count=1`, (6) drill source에는 `recover()` 호출 경로가
+없고 recovery process import closure에도 drill adapter가 없음, (7) baseline-already-present recovery
+write 0은 drill PASS가 아님, (8) wrong target·unqualified function·Flow 40 이외 baseline·39 이외
+destination·unfinished journal은 first send 0, (9) forward와 recovery의 total send count가 2를 넘지
+않고 receipt artifact 0, (10) frozen harness·`devices/*` import가 없습니다. 기존 coordinator·writer·
+journal·lease assert는 삭제·완화하지 않습니다. (11) forward CLI는 cause가 지정 fault이고 freshly
+reloaded journal이 `UNCERTAIN` / `forward_readback_unavailable` / `RECOVERY_REQUIRED`인 경우에만
+planned-forward-complete를 보고하며, 다른 cause나 journal 상태는 non-success exit이고 계획 완료를
+주장하지 않습니다. (12) adapter `close()`는 delegate close를 정확히 한 번 호출하고 그 예외를 삼키지
+않습니다.
+
+이 slice는 정상 persistent write 경로에 새 gate를 추가하지 않고, test-only fake가 아닌 real device
+state에서 기존 recovery의 미실행 분기 하나를 검증합니다. wrong-device는 current strict resolution과
+qualification, out-of-envelope은 고정 `39..40`, duplicate write는 서로 다른 process와 기존
+single-send, rollback-journal loss는 기존 write-ahead store, real FAIL의 PASS 오판은 production exact
+readback predicate 재사용과 terminal recovery readback으로 막습니다. 물리 위험 또는 §3 P1이 아니면
+비차단 진단을 새 gate로 키우지 않고 run record에 남깁니다. Q1·Q2와 frozen native ASYNC 하네스는 이
+slice에서 계속 `UNKNOWN`·동결 상태입니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
