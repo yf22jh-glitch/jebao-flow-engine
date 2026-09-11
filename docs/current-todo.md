@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 18:00 KST
+마지막 갱신: 2026-09-11 18:32 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -244,12 +244,15 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   physical identity별 2장을 세므로 같은 firmware의 두 Pro receipt 4장을 한 binding에 합칠 수 있음을 확인
 - [x] 기존 producer의 receipt 파일은 content-addressed additive이고, 병목은 no-clobber 단일 binding 파일
   writer뿐임을 확인
-- [ ] 기존 binding 전수 검증 → 새 receipt 병합 → 새 immutable output no-clobber 생성 → 자기 출력 재검증의
-  최소 offline qualification-set merger 정책을 결속
+- [x] 기존 binding 전수 검증 → 새 receipt 병합 → 새 immutable output no-clobber 생성 → 자기 출력 재검증의
+  최소 offline qualification-set merger 정책 결속·Claude 검토·commit `5c3317d`
 - [x] in-place 교체 대신 기존+candidate를 검증해 새 owner-only immutable qualification-set 파일을
   no-clobber로 만들고, 다음 Compose generation이 이를 재정규화하는 구조를 선택
-- [ ] 병합 결과 binding 집합과 physical-key 집합을 운영자가 선언한 정확한 union으로 양방향 검증하고,
-  binding과 내부 receipt digest를 모두 결정적으로 정렬하는 계약을 정책에 고정
+- [x] 병합 결과 binding 집합과 `(product, function, physical identity)` surface를 운영자가 선언한
+  정확한 union으로 양방향 검증하고, binding과 내부 receipt digest를 결정적으로 정렬하는 계약을
+  정책에 고정
+- [x] immutable qualification-set merger source·CLI·29개 전용/경계 회귀 구현, 전체 Ruff·pytest
+  `2516 passed`, Claude v2 적대적 검토 P1·blocker `0`, commit `5619ee9`
 - [ ] Pro 경로는 동작 불변으로 유지하고 Bar precondition만 family별로 추가하는 최소 범위를 결속
 - [ ] `power`의 OFF 실패는 safer-OFF 유지, planned ON 실패는 rollback OFF이며 자동 재기동하지 않는
   물리 결과와 현장 복원 절차를 정책에 명시
@@ -269,8 +272,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - 실기 공통 상한: Flow `<=50`; 각 operation의 더 낮은 고정 envelope이 있으면 그 값을 우선
 - 위 `50`은 현재 에이전트 실기의 승인 경계이며 global runtime gate는 아님. 현재 direct HA/MQTT
   number의 기술적 범위 `30..75`는 사용자가 쓰지 않고, 범위 축소는 M7 surface 항목에서 별도 처리
-- HA 재부팅/업데이트: 예정 없음
-- 사용자가 후속 HA Core 재기동을 할 때는 직전에 알림; retained command·journal baseline을
+- HA Core 재기동: 사용자가 추후 직접 수행 예정이며 agent는 업데이트·재기동·설정 변경을 실행하지 않음
+- 사용자가 HA Core 재기동 직전에 알림; retained command·journal baseline을
   먼저 잡고 재기동 후 unexpected Jebao write `0`을 read-only로 확인
 
 ## 진행 로그
@@ -342,3 +345,10 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   agent device write·journal/qualification 변화는 `0`임을 확인.
 - 18:00 KST — external drift run record를 Claude가 최종 재계산해 P1·필수 finding `0`, landing GO.
   append-only record와 index를 commit `0508de5`로 랜딩해 M2 전 항목을 완료하고 M3 merger로 이동.
+- 18:09 KST — M3 immutable qualification-set merger D1k 정책을 Claude가 두 snapshot 모두 재계산해
+  finding·P1 `0`, GO 확인. raw physical key 대신 current manifest의 logical member에서 기대 surface를
+  유도하고 receipt 이동 0·기존 generation 무변경을 고정해 commit `5c3317d`로 랜딩. source 구현 시작.
+- 18:32 KST — D1k merger source v2를 network-none에서 전용/경계 29개와 전체 `2516` tests, Ruff로
+  검증. Claude가 staged digest `d384dc09…`를 재계산해 P1·blocker `0`, final GO. current 배포 입력·
+  receipt mutation 0과 exact surface/no-clobber를 유지한 commit `5619ee9`로 랜딩. 두 번째 Pro
+  `manual_flow` preflight로 이동.
