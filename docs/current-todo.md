@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 15:37 KST
+마지막 갱신: 2026-09-11 15:57 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -67,8 +67,8 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] recovery는 current manifest를 바꾸는 일반 CLI가 아니라 mutation-free qualification recovery CLI를
   별도 production process로 사용하도록 고정
 - [x] D1j 정책 commit `4689a6e`
-- [ ] forward-only drill source·CLI·offline regression 구현
-- [ ] source snapshot Claude 적대적 검토·필수 finding 반영·landing
+- [x] forward-only drill source·CLI·offline regression 구현
+- [x] source snapshot Claude 적대적 검토·필수 finding 반영·landing (`a91e4b6`)
 - [ ] 통제된 failure 1회에서 recovery frame 실제 전송·baseline exact restore·terminal journal 확인
 - [ ] recovery run record·독립 검토·commit; 그 전에는 device·function qualification 확대 금지
 - [ ] Jebao service 재시작 뒤 stale command replay 0·control surface 1·6/6 fresh 확인
@@ -190,9 +190,10 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] production `verify_prepared_readback` 재사용과 fault adapter의 recovery process 격리
 - [x] 별도 process의 mutation-free production recovery route를 고정
 - [x] 정책·회귀 계약 Claude 독립 검토와 D1j 정책 commit
-- [ ] forward-only drill source·CLI·offline regression 작성
-- [ ] targeted/full/Ruff 검증과 Claude source 검토
-- [ ] reviewed source landing·private deployment 결속
+- [x] forward-only drill source·CLI·offline regression 작성
+- [x] targeted 21·full 2497·changed-file Ruff 검증과 Claude source 검토(P1 0)
+- [x] reviewed source landing (`a91e4b6`)
+- [ ] private deployment 결속
 - [ ] fresh preflight → control stop-first → forward 39 → actual recovery 40
 - [ ] terminal `ROLLED_BACK`·recovery physical write 1·unfinished 0·receipt 증가 0 확인
 - [ ] persistent control 복귀·6/6 fresh·Flow 40·stale command replay 0 확인
@@ -252,3 +253,5 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   진행하도록 명시 승인. Claude에게 승인 경계를 공유하고 M2는 고정 `40 -> 39 -> 40`으로 유지.
 - 15:37 KST — actual recovery drill을 forward-only injected fault와 별도 mutation-free production recovery
   process로 결속한 D1j 정책을 Claude 검토 결과에 맞춰 commit `4689a6e`로 랜딩. source 구현 시작.
+- 15:57 KST — M2 forward-only recovery drill source·CLI·offline 회귀 완료. targeted 21·full 2497·
+  changed-file Ruff PASS와 Claude P1 0·landing GO를 확인하고 commit `a91e4b6`으로 랜딩.
