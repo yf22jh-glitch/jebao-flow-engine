@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 15:18 KST
+마지막 갱신: 2026-09-11 15:37 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -63,7 +63,12 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 
 ### M2 — 상시 direct-control 운영 안정성
 
-- [ ] actual-recovery write의 최소 bounded failure-injection 설계·offline 검증·Claude review
+- [x] actual-recovery write의 최소 bounded failure-injection 설계·정책 결속·Claude review
+- [x] recovery는 current manifest를 바꾸는 일반 CLI가 아니라 mutation-free qualification recovery CLI를
+  별도 production process로 사용하도록 고정
+- [x] D1j 정책 commit `4689a6e`
+- [ ] forward-only drill source·CLI·offline regression 구현
+- [ ] source snapshot Claude 적대적 검토·필수 finding 반영·landing
 - [ ] 통제된 failure 1회에서 recovery frame 실제 전송·baseline exact restore·terminal journal 확인
 - [ ] recovery run record·독립 검토·commit; 그 전에는 device·function qualification 확대 금지
 - [ ] Jebao service 재시작 뒤 stale command replay 0·control surface 1·6/6 fresh 확인
@@ -179,36 +184,19 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] M0 단회 MQTT 실기 종료 시 observer-only 복귀 및 Flow 40·6/6 fresh·command surface 0 확인
 - [x] 이후 M1에서 persistent qualified control로 전환했으며 현재 상태는 위 `현재 상태`가 단일 출처
 
-## 진행 중
+## 현재 열린 작업 — M2 actual recovery
 
-- [x] 상시 activation 직전 fresh preflight
-- [x] 상시 control activation이 만드는 HA MQTT discovery `number` 1개 영구 노출 범위 확인
-- [x] observer stop-first·control 단독 기동
-- [x] broker·fresh-state·retained-command postcheck
-- [x] 안정화 후 journal/runtime 최종 postcheck
-- [x] activation append-only run record 초안 작성
-- [x] Claude 독립 검토·필수 정정 반영
-- [x] 정정본 재결속·run record commit `0c64f96`
-- [ ] M2 actual-recovery 최소 실기 설계·source contract 확인
-
-## 다음 순서
-
-- [x] append-only `docs/runs/` 기록 작성
-- [x] Claude 최종 독립 검토
-- [x] Claude 필수 정정 반영본 재결속
-- [x] run record 커밋 (`2f23343`)
-- [x] To-do를 run record와 분리해 저장소 문서로 관리
-- [x] 다음 Jebao-only 단계의 current contract·precondition 확인
-- [x] 상시 qualified-control Compose를 current private input에서 재유도
-- [x] fresh activation preflight: observer 1, 6/6 fresh, Flow 40, unfinished 0, qualified control 1
-- [x] HA Core mutation 없이 생기는 retained MQTT discovery command surface의 상시 노출 범위 확정
-- [x] observer stop-first·control 단독 기동
-- [x] startup write 0·6/6 fresh·control 1·group armed 0 확인
-- [x] activation append-only 기록·Claude 검토·커밋 (`0c64f96`)
-- [ ] actual-recovery write 계획을 기존 journal·coordinator 권한 안에서 고정
-- [ ] 필요한 offline source/test slice만 작성·Claude 적대적 검토·landing
-- [ ] fresh preflight → bounded recovery 실기 → exact baseline 확인
-- [ ] recovery run record·Claude 검토·커밋
+- [x] 실제 미검증 분기를 `40 -> 39` forward 적용 뒤 readback 직전 지정 fault로 고정
+- [x] production `verify_prepared_readback` 재사용과 fault adapter의 recovery process 격리
+- [x] 별도 process의 mutation-free production recovery route를 고정
+- [x] 정책·회귀 계약 Claude 독립 검토와 D1j 정책 commit
+- [ ] forward-only drill source·CLI·offline regression 작성
+- [ ] targeted/full/Ruff 검증과 Claude source 검토
+- [ ] reviewed source landing·private deployment 결속
+- [ ] fresh preflight → control stop-first → forward 39 → actual recovery 40
+- [ ] terminal `ROLLED_BACK`·recovery physical write 1·unfinished 0·receipt 증가 0 확인
+- [ ] persistent control 복귀·6/6 fresh·Flow 40·stale command replay 0 확인
+- [ ] append-only recovery run record·Claude 검토·commit
 
 ## 실패 시 행동
 
@@ -220,7 +208,11 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 사용자 조작 필요 여부
 
-- 현재: 없음. 상시 HA `number` 엔티티 1개 노출은 사용자 승인 완료
+- 현재: 없음. 상시 HA `number` 엔티티 1개 노출과 Jebao 실기·필요 상태 변경의 에이전트 실행은
+  사용자 승인 완료
+- 실기 공통 상한: Flow `<=50`; 각 operation의 더 낮은 고정 envelope이 있으면 그 값을 우선
+- 위 `50`은 현재 에이전트 실기의 승인 경계이며 global runtime gate는 아님. 현재 direct HA/MQTT
+  number의 기술적 범위 `30..75`는 사용자가 쓰지 않고, 범위 축소는 M7 surface 항목에서 별도 처리
 - HA 재부팅/업데이트: 예정 없음
 
 ## 진행 로그
@@ -256,3 +248,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - 15:18 KST — Claude의 M0~M8 독립 검토를 반영해 전역 safety lease·latch, native slot-flow capability 자격,
   parked exact-restore disposition 종결, command interval 실측을 완료선에 추가. M6는 상시 service가 아닌
   별도 유인 operation임을 고정하고, M2 actual-recovery fault 경로의 source contract를 분석 중.
+- 15:29 KST — 사용자가 Flow 50 이하의 Jebao 실기와 필요한 상태 변경을 에이전트가 반복 승인 없이
+  진행하도록 명시 승인. Claude에게 승인 경계를 공유하고 M2는 고정 `40 -> 39 -> 40`으로 유지.
+- 15:37 KST — actual recovery drill을 forward-only injected fault와 별도 mutation-free production recovery
+  process로 결속한 D1j 정책을 Claude 검토 결과에 맞춰 commit `4689a6e`로 랜딩. source 구현 시작.
