@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-11 18:32 KST
+마지막 갱신: 2026-09-11 18:38 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -98,6 +98,10 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   unreachable임을 확인
 - [ ] Pro 두 대와 바형 한 대의 active template/content binding을 positive evidence로 결속
 - [ ] 각 멤버 `manual_flow` qualification 계획과 exact scalar restore 가능성을 확정
+  - [x] 두 번째 Pro를 current manifest·fresh resolution에서 정확히 하나로 선택하고 6/6 authenticated
+    fresh, firmware 동일, unfinished `0`, legacy idle을 확인
+  - [ ] 두 번째 Pro 앱 precondition: power ON·`constant`·`independent` 유지, TimerOFF·Flow `40`
+  - [ ] 기존 producer 무수정으로 `40 -> 39 -> 40`, receipt pair candidate 생성·exact restore 확인
 - [ ] 각 멤버 `power` qualification producer/operation의 안전한 OFF·ON 순서와 rollback 권한 확정
 - [ ] 필요한 source는 기존 journal·lease·identity·single-write를 재사용해 offline 검토·landing
 - [ ] 새 `power` qualification write가 기존 deployment-wide global lock과
@@ -267,8 +271,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 사용자 조작 필요 여부
 
-- 현재: 없음. 상시 HA `number` 엔티티 1개 노출과 Jebao 실기·필요 상태 변경의 에이전트 실행은
-  사용자 승인 완료
+- 현재: **두 번째 Pro 앱 precondition 1건 필요.** 현재 읽힌 값은 power ON·`constant`·
+  `independent`·TimerON·Flow `30`; Jebao 앱에서 TimerOFF·Flow `40`으로만 바꾼 뒤 알려주기
+- 그 밖의 상시 HA `number` 엔티티 노출과 Jebao 실기·필요 상태 변경의 에이전트 실행은 사용자 승인 완료
 - 실기 공통 상한: Flow `<=50`; 각 operation의 더 낮은 고정 envelope이 있으면 그 값을 우선
 - 위 `50`은 현재 에이전트 실기의 승인 경계이며 global runtime gate는 아님. 현재 direct HA/MQTT
   number의 기술적 범위 `30..75`는 사용자가 쓰지 않고, 범위 축소는 M7 surface 항목에서 별도 처리
@@ -352,3 +357,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   검증. Claude가 staged digest `d384dc09…`를 재계산해 P1·blocker `0`, final GO. current 배포 입력·
   receipt mutation 0과 exact surface/no-clobber를 유지한 commit `5619ee9`로 랜딩. 두 번째 Pro
   `manual_flow` preflight로 이동.
+- 18:38 KST — 두 번째 Pro read-only preflight PASS: manifest/fresh `6/6`, Pro `2`, unqualified Pro
+  `1`, Pro firmware distinct `1`, qualification surface `1`, unfinished `0`, legacy idle. 대상이 TimerON·
+  Flow `30`이라 1-step qualifier는 29 하한 밖이고 Timer 조건도 불충족하므로 write 전에 정지.
+  사용자 앱 precondition TimerOFF·Flow `40`을 요청하고 Claude live-plan 검토를 병행.
