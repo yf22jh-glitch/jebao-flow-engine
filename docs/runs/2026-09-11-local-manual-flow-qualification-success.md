@@ -84,3 +84,17 @@
 - 다음에 필요한 것: 현재 observer-only 배포는 그대로 유지합니다. regular control activation이나
   Home Assistant command entity 노출은 이 qualification artifact를 current deployment input으로
   명시적으로 결속하고 별도 승인·stop-first 절차를 거치는 후속 operation입니다.
+
+## 검토 후 재발 방지 보강 (append-only)
+
+- 다음에 이 지점을 다시 만나지 않으려면 operator one-shot wrapper는 빈 환경값을 `Path('.')`로
+  바꾸기 전에 거부하고, reviewed template root와 no-clobber qualification output을 명시하며,
+  manifest generation과 Compose runtime generation을 서로 다른 값으로 읽어 검증해야 합니다. 또한
+  post-check는 공개된 diagnostic field만 사용하고, 다음 lifecycle operation 전에는 현재 Compose
+  generation을 다시 유도해 dependency stage까지 정상 실행 가능하게 해야 합니다. 이 항목은 이번
+  성공 실행에서 구현됐다는 주장이 아니라 다음 operation 전의 재발 방지 조건입니다.
+- observer container를 직접 시작한 판단은 장비 operation이 terminal verified·Flow `40`이었다는
+  사실만으로 정당화하지 않습니다. 이번 observer 복구에 한해 instance 1개, observer mode,
+  write opt-in 없음, old daemon 0개, device 6/6 matched·fresh, absent·ambiguous 0개와 role-binding
+  불변을 명시적으로 확인해 수용했습니다. pruning된 dependency stage 자체는 이 우회로 검증되지
+  않았으므로 다음 Compose lifecycle operation 전에 current generation을 다시 준비해야 합니다.
