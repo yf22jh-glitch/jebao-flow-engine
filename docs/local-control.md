@@ -894,6 +894,34 @@ verified exact device readback. That state is a verified point-in-time observati
 an external app can never change the device later. Public MQTT/HA state uses logical member names
 and English ASCII labels only; raw physical identifiers and current addresses remain private.
 
+### Bounded actual-recovery drill
+
+`jebao-flow-local-recovery-drill` is a forward-only, attended diagnostic for the one still-unproven
+rollback branch. It accepts one already qualified Local Wavemaker Pro `manual_flow` target at exact
+Flow 40, delegates the normal journal-first write to Flow 39, and calls the production
+`verify_prepared_readback()` predicate on the real fresh readback. Only after that predicate succeeds
+does its instance-local writer wrapper raise one designated fault. It never changes readback bytes,
+retries the frame, calls recovery, or imports the frozen native-linkage harness.
+
+Successful forward-drill output means only that exactly one acknowledged Flow-39 write was followed
+by the expected durable `RECOVERY_REQUIRED` / `UNCERTAIN` /
+`forward_readback_unavailable` journal. The forward process must then exit completely. Recovery is a
+separate invocation of the existing mutation-free production path:
+
+```text
+jebao-flow-local-qualify recover \
+  --operation-id <same-opaque-id> \
+  --write-enabled
+```
+
+The similarly named `jebao-flow-local recover` command is not used for this drill because its normal
+input-preparation path replaces the install manifest. Drill PASS additionally requires the separate
+recovery process to send the stored Flow-40 rollback payload exactly once, verify exact baseline
+readback, terminalize the journal as `ROLLED_BACK`, leave no unfinished local-control record, and
+create no qualification receipt. A zero-write `baseline_already_present` recovery is safe but does
+not answer this drill's question. The persistent control service remains stopped until exact Flow 40
+is independently confirmed, then the reviewed service is restored and checked again.
+
 ## Still requiring evidence
 
 The code is ready for isolated and simulator review, but hardware controls remain hidden until
