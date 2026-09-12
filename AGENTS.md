@@ -2717,16 +2717,18 @@ family profile은 product 이름이나 README의 pairing 설명으로 추측하�
 catalog descriptor와 기존 `ConnectedDeviceWriter.prepare_scalar()` mapping에 결속합니다. Pro profile은
 기존 probe 순서와 값인 `schedule_enable=false`에서 `SwitchON`·`TimerON`,
 `linkage_role=independent`, `manual_mode=constant`, `manual_flow=<declared minimum>`을 그대로 유지합니다.
-Bar는 `schedule_enable` write shape가 `SwitchON`을 포함하지 않으므로 `power=true` probe로 `SwitchON`을
-별도 읽고, 이어 `schedule_enable=false`의 `TimerON`, `linkage_role=independent`,
-`manual_mode=constant`, `manual_flow=<declared minimum>`을 읽습니다. Bar에도 `Linkage` register가 있고
-current fresh read가 `independent`를 돌려줬으므로 이를 생략하지 않습니다. Pro linkage choices
+Bar의 `schedule_enable`은 app 상태에 따라 command shape가 달라 deterministic encoder가 의도적으로
+없으므로 이를 새로 열거나 `prepare_scalar()`로 가장하지 않습니다. Bar는 production product schema의
+strict status decoder로 `TimerON`을 read-only 추출하고, `power=true` probe의 `SwitchON`,
+`linkage_role=independent`, `manual_mode=constant`, `manual_flow=<declared minimum>` 네 scalar mapping을
+기존 writer로 검증합니다. Bar에도 `Linkage` register가 있고 current fresh read가 `independent`를
+돌려줬으므로 이를 생략하지 않습니다. Pro linkage choices
 `independent/master/sync_slave/async_slave`와 Bar choices `independent/master/slave`는 서로 복사하지
 않고 product descriptor의 실제 어휘를 유지합니다.
 
-여기서 profile의 4개·5개 probe는 current status field mapping을 유도하는 send `0`의
-`prepare_scalar()` 호출입니다. physical frame은 두 family 모두 same-value·하향·planned restore의
-정확히 3회뿐이며, Bar profile이 probe 하나를 더 쓴다는 사실을 다섯 frame 승인으로 해석하지 않습니다.
+여기서 Pro의 네 probe와 Bar의 네 scalar probe·한 decoded field read는 current status field를
+유도하는 send `0` 검사입니다. physical frame은 두 family 모두 same-value·하향·planned restore의
+정확히 3회뿐이며, status inspection 개수를 frame 승인으로 해석하지 않습니다.
 
 두 family 모두 live admission은 power ON, TimerOFF, `Mode=constant`, `Linkage=independent`, current
 Flow와 하향 착지값이 config·app declared range 안, current Flow `<=45`, downward step `1..5`라는 기존
@@ -2747,10 +2749,10 @@ artifact mutation은 0입니다.
 
 offline 회귀는 최소한 다음을 고정합니다. (1) 기존 Pro success가 같은 4 probe와
 `40 -> 39 -> 40`, writer/session 3개, journal action 3개, receipt 2장을 유지, (2) Bar success가 별도
-power probe를 포함한 5 probe로 current `SwitchON`을 읽고 같은 exact 3-write·2-receipt 계약을 사용,
+power probe와 strict schema decoder의 `TimerON` read를 사용하고 같은 exact 3-write·2-receipt 계약을 사용,
 (3) Bar `classic`·Flow `91`·TimerON·power OFF·non-independent 각각 send 0, journal 0, receipt 0,
 (4) 지원하지 않는 family나 manual-flow encoder 부재는 writer·network 전에 거부, (5) Bar의 app-declared
-mode/linkage 어휘와 writer scalar field가 바뀌면 기존 product-scoped 구성 검증이 fail-closed,
+mode/linkage 어휘, schema `TimerON`, writer scalar field가 바뀌면 기존 product-scoped 구성 검증이 fail-closed,
 (6) strict resolution·epoch·single-write·journal-first·ACK/readback·recovery·artifact no-clobber 관련 기존
 assert를 삭제하거나 완화하지 않음입니다. 테스트용 Bar status는 production `LOCAL_WAVEMAKER` schema
 bytes를 사용하며 firmware 동작을 새 fake knob로 만들지 않습니다.
