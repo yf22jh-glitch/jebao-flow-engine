@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-12 23:18 KST
+마지막 갱신: 2026-09-13 00:04 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -49,8 +49,10 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   HA range `30..100`, discovery `86/86` exact, startup write `0`, fresh `6/6`, group surface `0`;
   근거: [`two-Pro qualified-control deployment`](runs/2026-09-12-two-pro-qualified-control-deployment.md),
   run commit `c6fe660`, HA surface 승인 경위 append-only 정정 `fe8a99a`
-- [ ] Bar active template을 current manifest에 write-free로 결속하고 새 generation의 입력·rollback을
-  준비하되, Bar `manual_flow` live qualification 직전에는 멈춤
+- [x] Bar active template을 current manifest에 write-free로 결속하고 새 generation에 배포;
+  기존 discovery·두 Pro control byte 불변, Bar diagnostic `13`·command `0`, startup write `0`;
+  근거: [`Bar active-template deployment`](runs/2026-09-12-local-bar-active-template-deployment.md),
+  run commit `df6b055`
 - [ ] Bar family precondition source와 `power` qualification source·offline 회귀를 준비하고 검토·landing;
   현장 감시가 필요한 live write는 별도 경계로 유지
 
@@ -129,7 +131,11 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   - HA retained discovery `86/86` exact, 두 number `30..100`, fresh `6/6`, startup device write `0`
   - run [`two-Pro qualified-control deployment`](runs/2026-09-12-two-pro-qualified-control-deployment.md),
     commit `c6fe660`, 승인 경위 정정 `fe8a99a`
-- [ ] Pro 두 대와 바형 한 대의 active template/content binding을 positive evidence로 결속
+- [x] Pro 두 대와 바형 한 대의 active template/content binding을 positive evidence로 결속
+  - template membership `1 -> 2`, 기존 Pro receipt `4` current·ignored `0`, Bar diagnostic
+    entity `13`·command `0`, discovery `86/86` byte exact, fresh `6/6`
+  - run [`Bar active-template deployment`](runs/2026-09-12-local-bar-active-template-deployment.md),
+    commit `df6b055`
 - [ ] 각 멤버 `manual_flow` qualification 계획과 exact scalar restore 가능성을 확정
   - [x] 두 번째 Pro를 current manifest·fresh resolution에서 정확히 하나로 선택하고 6/6 authenticated
     fresh, firmware 동일, unfinished `0`, legacy idle을 확인
@@ -233,7 +239,12 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] MQTT 실기 `40 -> 39 -> 40` 완료, 각 command exact readback·terminal journal 확인
 - [x] 장비 6/6 fresh·qualified control 2·HA Flow range `30..100`·group armed 0
 - [x] M2 recovery·restart/reconnect·bounded soak·external drift 전 항목 완료
-- [x] D1l source와 두-Pro merge·deployment 완료; M3의 다음 작업은 Bar template write-free 결속
+- [x] D1l source와 두-Pro merge·deployment 완료; direct `manual_flow` control `2`, HA Flow range
+  `30..100`, startup write `0`
+- [x] Bar template membership `2` 배포 완료; 기존 direct control `2`·discovery `86` byte 불변,
+  Bar diagnostic `13`·command `0`, fresh `6/6`, startup write `0`
+- [x] M3의 다음 작업은 Pro 동작을 보존하는 Bar family precondition과 power qualification source의
+  offline 검토·landing이며, 첫 Bar physical write 직전에 다시 멈춤
 
 ## M0~M1 작업 이력 (완료)
 
@@ -306,6 +317,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   정책에 고정
 - [x] immutable qualification-set merger source·CLI·29개 전용/경계 회귀 구현, 전체 Ruff·pytest
   `2516 passed`, Claude v2 적대적 검토 P1·blocker `0`, commit `5619ee9`
+- [x] Bar positive template bytes를 append-only static record로 재결속하고 별도 durable root·두-template
+  manifest로 배포; 기존 Pro control·전체 discovery byte 불변, journal·receipt tree 불변, commit
+  `df6b055`
 - [ ] Pro 경로는 동작 불변으로 유지하고 Bar precondition만 family별로 추가하는 최소 범위를 결속
 - [ ] `power`의 OFF 실패는 safer-OFF 유지, planned ON 실패는 rollback OFF이며 자동 재기동하지 않는
   물리 결과와 현장 복원 절차를 정책에 명시
@@ -320,8 +334,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 사용자 조작 필요 여부
 
-- 현재: **사용자 조작 없음.** Bar template binding과 live source 준비는 write-free로 진행 가능하며,
-  Bar `manual_flow` 또는 3대 `power` 실기 직전에만 현장 감시 가능 여부를 다시 확인
+- 현재: **사용자 조작 없음.** Bar template binding 배포는 완료됐고 family/power source와 offline
+  회귀를 준비합니다. Bar `manual_flow` 또는 3대 `power` 첫 physical write 직전에만 현장 감시·전원
+  차단 수단을 다시 확인하고, 앱 precondition이 필요하면 그 지점에서 요청합니다.
 - 상시 HA `number` 엔티티 추가 노출 자체와 Jebao 실기·필요 상태 변경의 에이전트 실행은 사용자 승인 완료.
   승인 없던 `75`는 D1l에서 app-declared `30..100`으로 정정·배포 완료
 - 현재 attended 실기 가이드: agent 목적값은 Flow `<=50`로 계획하고 갑작스러운 step·여러 펌프 동시
@@ -442,3 +457,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   만든 단일 D1l generation 배포 완료. persistent control `1`, direct control `2`, HA range
   `30..100`, discovery `86/86` exact, authenticated fresh `6/6`, startup write·group surface `0`,
   journal·receipt tree byte 동일을 확인. run record commit `c6fe660`, 승인 경위 정정 `fe8a99a`.
+- 23:57 KST — current app loader에서 재결속한 Bar template을 별도 durable root와 새 immutable
+  generation에 배포. template membership `1 -> 2`, 기존 Pro receipt `4` current·control `2`, Bar
+  diagnostic entity `13`·command `0`, discovery `86/86` pre/post byte 동일, fresh `6/6`, startup write·
+  journal·receipt 변화 `0`을 확인하고 append-only run `df6b055`로 랜딩.
