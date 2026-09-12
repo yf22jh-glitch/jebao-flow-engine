@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-12 00:14 KST
+마지막 갱신: 2026-09-12 23:18 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -40,23 +40,19 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 
 ## 현재 대기 지점
 
-- [x] 두 번째 Pro `manual_flow` candidate qualification과 현재 Timer schedule 상태 기록·독립검토·commit
-  `ad5681f`; 근거: [`second Pro manual-flow qualification`](runs/2026-09-11-local-manual-flow-qualification-second-pro.md)
-- [x] 최종 현재 시간대 적용값 `sine`·Flow `45`·frequency `40`, TimerON을 앱 화면과 authenticated
-  fresh read로 교차확인
-- [x] candidate·current qualification set을 새 immutable source로 exact merge하고 병합 결과의
-  binding·surface union을 재검증; running config·generation·service·device write는 불변
-- [x] 공식 앱 범위 `30..100`과 달리 local-control 전반에 들어간 `30..75` 상한은 사용자 승인
-  근거가 없음을 source·policy history로 확인; 사용자가 `30..100` 정정을 명시 지시
-- [x] D1l 정책 결속·Claude 독립 검토·commit `0add7c7`
-- [x] catalog·scalar writer·qualification encoder·group·local schedule·read-only schedule model을
-  app-declared `30..100`에 결속하고 protocol-schema dependency closure·회귀·문서를 함께 정정;
-  전체 `2521` tests·Ruff와 Claude 독립 검토 PASS, source commit `fe10bd5`
-- [x] 첫 번째 Pro 새 schema 재자격: existing control `41 -> 40` 1회 + qualifier
-  `40 -> 39 -> 40` 3회, exact readback·receipt `2`, run commit `8647f86`
-- [ ] 두 번째 Pro를 같은 새 schema에서 `40 -> 39 -> 40`으로 재자격
-- [ ] 두 새 candidate만 fresh immutable set으로 만들고, 그때만 새 generation을 한 번 배포.
-  old-schema merge는 미배포 obsolete artifact로 보존
+- [x] 두 Pro를 D1l 새 schema에서 각각 `40 -> 39 -> 40`으로 재자격하고 receipt `4`장 확보;
+  근거: [`first Pro requalification`](runs/2026-09-12-local-manual-flow-requalification-first-pro.md),
+  [`second Pro requalification`](runs/2026-09-12-local-manual-flow-requalification-second-pro.md)
+- [x] 두 candidate만 fresh immutable set으로 exact merge하고 binding `1`·receipt `4`·qualified pair
+  `2`를 재검증
+- [x] 한 Compose generation으로 정확히 두 Pro의 persistent `manual_flow` surface를 배포;
+  HA range `30..100`, discovery `86/86` exact, startup write `0`, fresh `6/6`, group surface `0`;
+  근거: [`two-Pro qualified-control deployment`](runs/2026-09-12-two-pro-qualified-control-deployment.md),
+  run commit `c6fe660`, HA surface 승인 경위 append-only 정정 `fe8a99a`
+- [ ] Bar active template을 current manifest에 write-free로 결속하고 새 generation의 입력·rollback을
+  준비하되, Bar `manual_flow` live qualification 직전에는 멈춤
+- [ ] Bar family precondition source와 `power` qualification source·offline 회귀를 준비하고 검토·landing;
+  현장 감시가 필요한 live write는 별도 경계로 유지
 
 ## 완성까지 전체 로드맵
 
@@ -116,7 +112,7 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] current installed app bundle의 Bar product→template URL→exact cache root 경로를 write-free로 재결속해
   active Bar template digest 하나를 positive evidence로 특정; 다른 candidate 1개는 current URL에서
   unreachable임을 확인
-- [ ] D1l Flow capability 정정
+- [x] D1l Flow capability 정정
   - [x] 사용자 미승인 `75`가 catalog·writer·qualification producer·group·local schedule·schedule
     model에 복제됐음을 전수 확인하고, 제품 범위 `30..100`과 agent operation 상한 `50`을 분리
   - [x] 제품 범위는 app catalog에서 유도하고 consumer별 숫자 복제 제거; 더 좁은 config limit와의
@@ -125,9 +121,14 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
     protocol-schema digest closure에 포함
   - [x] source·회귀 landing `fe10bd5`: 전체 `2521` tests·Ruff PASS, frozen six·직접 tests 불변,
     Claude staged source review finding `0`
-  - [ ] 기존 qualification이 stale해지는 설계를 우회하지 않고 두 Pro receipt를 새로 획득
+  - [x] 기존 qualification이 stale해지는 설계를 우회하지 않고 두 Pro receipt를 새로 획득
     - [x] 첫 번째 Pro 새-schema receipt pair: `40 -> 39 -> 40`, run `8647f86`
-    - [ ] 두 번째 Pro 새-schema receipt pair
+    - [x] 두 번째 Pro 새-schema receipt pair: `40 -> 39 -> 40`, run `24b808a`
+- [x] 두 Pro 새-schema candidate를 fresh immutable set으로 merge하고 단일 generation에 배포
+  - exact qualified pair `2`, write-allowed member `2`, direct `manual_flow` surface `2`
+  - HA retained discovery `86/86` exact, 두 number `30..100`, fresh `6/6`, startup device write `0`
+  - run [`two-Pro qualified-control deployment`](runs/2026-09-12-two-pro-qualified-control-deployment.md),
+    commit `c6fe660`, 승인 경위 정정 `fe8a99a`
 - [ ] Pro 두 대와 바형 한 대의 active template/content binding을 positive evidence로 결속
 - [ ] 각 멤버 `manual_flow` qualification 계획과 exact scalar restore 가능성을 확정
   - [x] 두 번째 Pro를 current manifest·fresh resolution에서 정확히 하나로 선택하고 6/6 authenticated
@@ -159,7 +160,8 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 ### M4 — software-independent 3대 그룹 실장비 commissioning
 
 - [ ] 세 장비를 app에서 `independent`·안전한 Timer 상태와 승인 출력으로 precondition
-- [ ] private group config와 example의 pattern `power`·`max_power`를 사용자 승인 상한 `50` 이하로 결속
+- [ ] capability·영구 config 상한을 임의 축소하지 않고, attended commissioning의 목적값·step 크기·
+  동시 변경 대수를 수조 충격 방지 관점에서 검산; agent가 보내는 목적값은 `50` 이하로 계획
 - [ ] group write 경로가 같은 `/hardware-safety` 전역 lease·비상정지 latch에 참여하고 다른
   physical workflow와 실제로 상호배제되는지 확인
 - [ ] Constant 최소 출력 one-shot: plan-atomic journal·멤버별 exact readback·final state 확인
@@ -224,14 +226,14 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 현재 상태
 
-- [x] reviewed persistent control service 1개 실행 중, reconnect 실기 뒤 restart 1
+- [x] reviewed persistent control service 1개 실행 중, 최종 generation restart 0
 - [x] 장비 6/6 관측 상태 유지
 - [x] HA 업데이트·재부팅 0
-- [x] 선택 Pro `manual_flow` qualification 완료 (`40 -> 39 -> 40`, receipt 2장)
+- [x] 두 Pro `manual_flow` qualification 완료 (각 `40 -> 39 -> 40`, receipt 합계 4장)
 - [x] MQTT 실기 `40 -> 39 -> 40` 완료, 각 command exact readback·terminal journal 확인
-- [x] 현재 Flow 40·장비 6/6 fresh·qualified control 1·group armed 0
+- [x] 장비 6/6 fresh·qualified control 2·HA Flow range `30..100`·group armed 0
 - [x] M2 recovery·restart/reconnect·bounded soak·external drift 전 항목 완료
-- [x] Claude 최종 독립 검토 수신·반영; M3 immutable qualification-set merger가 현재 작업
+- [x] D1l source와 두-Pro merge·deployment 완료; M3의 다음 작업은 Bar template write-free 결속
 
 ## M0~M1 작업 이력 (완료)
 
@@ -318,21 +320,16 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 사용자 조작 필요 여부
 
-- 현재: **두 번째 Pro 앱 precondition 1건 필요.** 현재 TimerON의 적용 중인 schedule은
-  `sine`·Flow `45`·frequency `40`입니다. 앱에서 그 두 번째 Pro만 TimerOFF·manual Flow `40`으로
-  바꾸고, power ON·`constant`·`independent`는 유지한 뒤 알려주기. qualification 뒤에는 agent가
-  정확한 확인 시점에 TimerON 복귀를 다시 요청
+- 현재: **사용자 조작 없음.** Bar template binding과 live source 준비는 write-free로 진행 가능하며,
+  Bar `manual_flow` 또는 3대 `power` 실기 직전에만 현장 감시 가능 여부를 다시 확인
 - 상시 HA `number` 엔티티 추가 노출 자체와 Jebao 실기·필요 상태 변경의 에이전트 실행은 사용자 승인 완료.
-  승인 없던 `75`는 D1l에서 app-declared `30..100`으로 정정 완료했으며 새 generation 배포만 남음
-- 현재 attended 실기 가이드: Flow `<=50`; 각 operation의 더 낮은 고정 envelope이 있으면 그 값을 우선.
-  이는 운전 중인 수조의 갑작스러운 유량 충격을 줄이기 위한 조작 계획값이며 capability·영구 상한·
-  input validation gate가 아님
-- 공식 앱 catalog와 D1l source는 `30..100`; current direct HA/MQTT는 아직 old generation의
-  `30..75`이므로 최종 배포 전후 범위를 같은 현재값으로 서술하지 않음
+  승인 없던 `75`는 D1l에서 app-declared `30..100`으로 정정·배포 완료
+- 현재 attended 실기 가이드: agent 목적값은 Flow `<=50`로 계획하고 갑작스러운 step·여러 펌프 동시
+  변화를 피함. 이는 capability·영구 상한·사람의 HA 입력 제한이 아니며, direct HA/MQTT는 제품 범위
+  `30..100`을 공개·수용
 - HA Core 재기동: 사용자가 추후 직접 수행 예정이며 agent는 업데이트·재기동·설정 변경을 실행하지 않음.
-  D1l 두-Pro 배포·postcheck가 끝나 agent가 안전하다고 알리기 전에는 대기
-- 이후 사용자가 HA Core 재기동 직전에 알림; retained command·journal baseline을 먼저 잡고
-  재기동 후 unexpected Jebao write `0`을 read-only로 확인
+  D1l 두-Pro 배포 postcheck는 완료됐으므로 재기동 가능하나, 직전에 알리면 retained command·journal
+  baseline을 잡고 재기동 후 unexpected Jebao write `0`을 read-only로 확인
 
 ## 진행 로그
 
@@ -438,3 +435,10 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   재자격. qualifier physical write `3`, exact readback `3`, receipt `2`, final Flow `40`, unfinished
   journal `0`; old service·surface `1` 정상 복귀. append-only 기록을 Claude final GO 뒤 commit
   `8647f86`으로 랜딩하고 두 번째 Pro 앱 precondition 대기로 이동.
+- 22:43 KST — 두 번째 Pro도 새 schema에서 `40 -> 39 -> 40` physical write `3`, exact readback `3`,
+  receipt `2`로 재자격. TimerON과 현재 `sine`·Flow `45` schedule ownership을 복원하고 run
+  `24b808a`로 랜딩.
+- 23:09 KST — 두 새 candidate를 immutable set으로 fresh merge하고 exact 두 member만 write-enabled로
+  만든 단일 D1l generation 배포 완료. persistent control `1`, direct control `2`, HA range
+  `30..100`, discovery `86/86` exact, authenticated fresh `6/6`, startup write·group surface `0`,
+  journal·receipt tree byte 동일을 확인. run record commit `c6fe660`, 승인 경위 정정 `fe8a99a`.
