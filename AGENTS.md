@@ -2865,8 +2865,9 @@ terminal·OFF-attempt 분류를 고정하고, same/planned recovery read failure
 유지·이미 저장된 transaction `RECOVERY_REQUIRED`, OFF recovery read failure는 action `UNCERTAIN`·
 transaction `RECOVERY_REQUIRED`·send 0임을 구분하며 production schema에 없는 제3의 power 값을 만들지
 않음, (6) power OFF·TimerON·non-constant·non-independent·Flow `>45`·config/app range 밖, strict target·epoch·
-firmware mismatch 각각 첫 send와 journal과 receipt 0, (7) phase 사이 Timer·mode·linkage·Flow drift는 새
-forward 없이 OFF recovery, (8) receipt canonical bytes·distinct request·binding function `power`·artifact
+firmware mismatch 각각 첫 send와 journal과 receipt 0, (7) phase 사이 Timer·mode·linkage·Flow drift와
+record 생성 뒤 resolve·connect·envelope·writer close fault는 새 forward 없이 transaction
+`RECOVERY_REQUIRED`와 OFF recovery로 끝남, (8) receipt canonical bytes·distinct request·binding function `power`·artifact
 no-clobber와 terminal finalization의 network/write 0 멱등성, (9) manual-flow producer·CLI source와 기존
 assert byte 불변, frozen/import closure 불변, (10) 새 producer가 `LocalControlLease`에 같은
 `physical_identity_key` 하나를 넘기며 새 lock namespace를 만들지 않음, (11) power producer가
