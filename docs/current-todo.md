@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-13 00:04 KST
+마지막 갱신: 2026-09-13 00:26 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -53,8 +53,10 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   기존 discovery·두 Pro control byte 불변, Bar diagnostic `13`·command `0`, startup write `0`;
   근거: [`Bar active-template deployment`](runs/2026-09-12-local-bar-active-template-deployment.md),
   run commit `df6b055`
-- [ ] Bar family precondition source와 `power` qualification source·offline 회귀를 준비하고 검토·landing;
-  현장 감시가 필요한 live write는 별도 경계로 유지
+- [x] Pro 동작을 그대로 보존하는 Bar family precondition source·offline 회귀를 검토·landing;
+  commit `d687739`, 전체 `2531` tests·Ruff PASS, 첫 Bar live write는 미실행
+- [ ] `power` qualification source·offline 회귀를 준비하고 검토·landing;
+  현장 감시가 필요한 모든 live write는 별도 경계로 유지
 
 ## 완성까지 전체 로드맵
 
@@ -155,6 +157,9 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
     - schedule decode는 유효 slot `14`, invalid `0`; 이번 agent qualification write는 schedule을
       수정하지 않고 `39`·`40`만 사용
     - 실행 전 schedule image를 보존하지 않아 전체 schedule의 pre/post byte-exact 불변은 주장하지 않음
+  - [x] Pro의 4개 send-free state probe와 3-write 계약을 바이트 동일하게 보존하고, Bar의 product
+    descriptor·writer scalar mapping과 strict production status decoder로 TimerON을 판정하는 family
+    profile source·offline 회귀 landing `d687739`; Bar live qualification은 미실행
 - [ ] 각 멤버 `power` qualification producer/operation의 안전한 OFF·ON 순서와 rollback 권한 확정
 - [ ] 필요한 source는 기존 journal·lease·identity·single-write를 재사용해 offline 검토·landing
 - [ ] 새 `power` qualification write가 기존 deployment-wide global lock과
@@ -243,8 +248,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   `30..100`, startup write `0`
 - [x] Bar template membership `2` 배포 완료; 기존 direct control `2`·discovery `86` byte 불변,
   Bar diagnostic `13`·command `0`, fresh `6/6`, startup write `0`
-- [x] M3의 다음 작업은 Pro 동작을 보존하는 Bar family precondition과 power qualification source의
-  offline 검토·landing이며, 첫 Bar physical write 직전에 다시 멈춤
+- [x] Pro 동작을 보존하는 Bar family precondition source·offline 검토·landing `d687739` 완료
+- [ ] M3의 다음 작업은 power qualification source의 offline 검토·landing이며, 첫 Bar physical write
+  직전에 다시 멈춤
 
 ## M0~M1 작업 이력 (완료)
 
@@ -320,7 +326,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] Bar positive template bytes를 append-only static record로 재결속하고 별도 durable root·두-template
   manifest로 배포; 기존 Pro control·전체 discovery byte 불변, journal·receipt tree 불변, commit
   `df6b055`
-- [ ] Pro 경로는 동작 불변으로 유지하고 Bar precondition만 family별로 추가하는 최소 범위를 결속
+- [x] Pro 경로는 동작 불변으로 유지하고 Bar precondition만 family별로 추가하는 최소 범위를 결속;
+  source commit `d687739`, Bar physical write `0`
 - [ ] `power`의 OFF 실패는 safer-OFF 유지, planned ON 실패는 rollback OFF이며 자동 재기동하지 않는
   물리 결과와 현장 복원 절차를 정책에 명시
 
@@ -334,9 +341,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 사용자 조작 필요 여부
 
-- 현재: **사용자 조작 없음.** Bar template binding 배포는 완료됐고 family/power source와 offline
-  회귀를 준비합니다. Bar `manual_flow` 또는 3대 `power` 첫 physical write 직전에만 현장 감시·전원
-  차단 수단을 다시 확인하고, 앱 precondition이 필요하면 그 지점에서 요청합니다.
+- 현재: **사용자 조작 없음.** Bar template binding 배포와 family source landing은 완료됐고 power
+  source와 offline 회귀를 준비합니다. Bar `manual_flow` 또는 3대 `power` 첫 physical write 직전에만
+  현장 감시·전원 차단 수단을 다시 확인하고, 앱 precondition이 필요하면 그 지점에서 요청합니다.
 - 상시 HA `number` 엔티티 추가 노출 자체와 Jebao 실기·필요 상태 변경의 에이전트 실행은 사용자 승인 완료.
   승인 없던 `75`는 D1l에서 app-declared `30..100`으로 정정·배포 완료
 - 현재 attended 실기 가이드: agent 목적값은 Flow `<=50`로 계획하고 갑작스러운 step·여러 펌프 동시
@@ -461,3 +468,6 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   generation에 배포. template membership `1 -> 2`, 기존 Pro receipt `4` current·control `2`, Bar
   diagnostic entity `13`·command `0`, discovery `86/86` pre/post byte 동일, fresh `6/6`, startup write·
   journal·receipt 변화 `0`을 확인하고 append-only run `df6b055`로 랜딩.
+- 00:26 KST — Pro의 기존 state probe·`40 -> 39 -> 40` 계약을 보존하면서 Bar의 product-scoped
+  scalar mapping과 strict production status decoder로 TimerON을 판정하는 D1n source를 commit
+  `d687739`로 랜딩. 영향 회귀 `90`, 전체 `2531` tests·Ruff PASS이며 Bar app 조작·physical write는 `0`.
