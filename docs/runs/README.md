@@ -107,6 +107,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-11 local-control external app drift](2026-09-11-local-control-external-app-drift.md) | app Flow 40→41→40 / agent write 0 / final 40 | external drift를 direct fresh read와 retained state에 반영하고 journal·qualification 불변 확인 |
 | [2026-09-11 second Pro manual-flow qualification](2026-09-11-local-manual-flow-qualification-second-pro.md) | write 3 / verified 3 / receipt 2 / candidate only | 두 번째 Pro `40 -> 39 -> 40` exact readback과 TimerON 뒤 active schedule `sine`·Flow 45 확인; surface 미개방 |
 | [2026-09-12 first Pro D1l manual-flow requalification](2026-09-12-local-manual-flow-requalification-first-pro.md) | precondition write 1 + qualification write 3 / receipt 2 / final 40% | app-declared Flow range에 결속된 새 schema writer로 첫 번째 Pro를 재자격하고 old generation·surface 1 유지 |
+| [2026-09-12 second Pro D1l manual-flow requalification](2026-09-12-local-manual-flow-requalification-second-pro.md) | qualification write 3 / receipt 2 / Timer schedule restored | 두 번째 Pro를 같은 새 schema로 재자격하고 현재 slot `sine`·Flow 45 복귀 확인; candidate only·surface 미개방 |
 
 ## 새 실행 기록 템플릿
 
