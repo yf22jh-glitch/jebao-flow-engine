@@ -2698,6 +2698,65 @@ qualified direct surface `2`, Bar diagnostic-only, group `0`, discovery expected
 product binding, compiled URL 또는 cache bytes가 달라지면 같은 positive binding을 다시 수행합니다.
 배포 run record가 commit되기 전에는 Bar family source를 수정하지 않습니다.
 
+### 2026-09-13 Local Wavemaker Bar manual-flow family profile D1n
+
+D1m의 Bar template deployment는
+[`docs/runs/2026-09-12-local-bar-active-template-deployment.md`](docs/runs/2026-09-12-local-bar-active-template-deployment.md)에
+기록하고 commit `df6b055`로 source 변경 전에 고정했습니다. repository maintainer의 “내가 직접
+조작해야 하는 것 외에는 모두 진행” 지시는 Bar `manual_flow` producer의 family source·offline 회귀·
+image build와 첫 물리 write 직전 preflight까지를 승인합니다. 앱 조작과 장비 write는 포함하지 않으며,
+그 경계에서는 현장 감시와 전원 차단 수단을 다시 확인합니다.
+
+이번 작업이 닫을 질문은 **기존 Local Wavemaker Pro의 세-frame qualification 동작과 안전 계약을
+바꾸지 않고, current app catalog·protocol schema·writer가 공통으로 선언한 Local Wavemaker Bar의
+scalar fields로 같은 `manual_flow` operation을 구성할 수 있는가**입니다. 이는 Bar firmware가 frame을
+수용한다는 결론을 fake로 만드는 작업이 아닙니다. source slice의 PASS는 offline 구성 가능성만 닫고,
+firmware acceptance와 exact restore는 이후 한 번의 attended live run에서만 판정합니다.
+
+family profile은 product 이름이나 README의 pairing 설명으로 추측하지 않고 current product-scoped
+catalog descriptor와 기존 `ConnectedDeviceWriter.prepare_scalar()` mapping에 결속합니다. Pro profile은
+기존 probe 순서와 값인 `schedule_enable=false`에서 `SwitchON`·`TimerON`,
+`linkage_role=independent`, `manual_mode=constant`, `manual_flow=<declared minimum>`을 그대로 유지합니다.
+Bar는 `schedule_enable` write shape가 `SwitchON`을 포함하지 않으므로 `power=true` probe로 `SwitchON`을
+별도 읽고, 이어 `schedule_enable=false`의 `TimerON`, `linkage_role=independent`,
+`manual_mode=constant`, `manual_flow=<declared minimum>`을 읽습니다. Bar에도 `Linkage` register가 있고
+current fresh read가 `independent`를 돌려줬으므로 이를 생략하지 않습니다. Pro linkage choices
+`independent/master/sync_slave/async_slave`와 Bar choices `independent/master/slave`는 서로 복사하지
+않고 product descriptor의 실제 어휘를 유지합니다.
+
+두 family 모두 live admission은 power ON, TimerOFF, `Mode=constant`, `Linkage=independent`, current
+Flow와 하향 착지값이 config·app declared range 안, current Flow `<=45`, downward step `1..5`라는 기존
+계약을 그대로 사용합니다. `45`는 제품 capability나 영구 입력 상한이 아니라 attended first-write
+상한이고, 일반 direct HA/MQTT의 `30..100` capability와 섞지 않습니다. 2026-09-12 fresh read의 Bar는
+power ON·TimerOFF·`Mode=classic`·`Linkage=independent`·Flow `91`이므로 현재 상태로는 반드시 send와
+journal 생성 전에 거부되어야 합니다. `91`에서 실기 baseline으로의 큰 하향 변경은 agent가 임의로
+수행하지 않고, source landing 뒤 원래 `classic/91`과 복원 결정을 공개한 상태에서 사용자가 앱으로
+직접 수행합니다.
+
+source 범위는 기존 `qualification_producer.py`의 family profile 추가, 그 전용 unit test,
+`local_control_qualification_cli.py`의 사실 문구와 `docs/local-control.md`의 supported-family 설명으로
+한정합니다. journal·lease·coordinator·device writer·catalog·qualification verifier·receipt model,
+normal persistent control path, group, frozen six와 그 직접 테스트는 수정하지 않습니다. 이 module은
+protocol-schema digest 입력이 아니므로 기존 두 Pro receipt와 running generation을 무효화하거나
+재배포하지 않습니다. source·test·build 중 device·broker·HA·running service 접촉과 durable hardware
+artifact mutation은 0입니다.
+
+offline 회귀는 최소한 다음을 고정합니다. (1) 기존 Pro success가 같은 4 probe와
+`40 -> 39 -> 40`, writer/session 3개, journal action 3개, receipt 2장을 유지, (2) Bar success가 별도
+power probe를 포함한 5 probe로 current `SwitchON`을 읽고 같은 exact 3-write·2-receipt 계약을 사용,
+(3) Bar `classic`·Flow `91`·TimerON·power OFF·non-independent 각각 send 0, journal 0, receipt 0,
+(4) 지원하지 않는 family나 manual-flow encoder 부재는 writer·network 전에 거부, (5) Bar의 app-declared
+mode/linkage 어휘와 writer scalar field가 바뀌면 기존 product-scoped 구성 검증이 fail-closed,
+(6) strict resolution·epoch·single-write·journal-first·ACK/readback·recovery·artifact no-clobber 관련 기존
+assert를 삭제하거나 완화하지 않음입니다. 테스트용 Bar status는 production `LOCAL_WAVEMAKER` schema
+bytes를 사용하며 firmware 동작을 새 fake knob로 만들지 않습니다.
+
+§3의 wrong-device·duplicate·journal·FAIL→PASS 범주는 기존 exact identity, lease, durable record와
+receipt verifier를 그대로 사용합니다. out-of-envelope는 family 추가 뒤에도 같은 first-write admission을
+적용해 닫습니다. source landing 뒤에도 Bar command surface는 `0`이고 running two-Pro surface는 `2`로
+유지합니다. 다음 live 계획은 사용자가 앱에서 승인한 저출력 constant baseline을 만든 뒤 Bar 한 대만
+same-value → 1%p 하향 → exact planned restore로 실행하며, 그 전까지 장비 write는 시작하지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
