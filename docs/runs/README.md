@@ -110,6 +110,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-12 second Pro D1l manual-flow requalification](2026-09-12-local-manual-flow-requalification-second-pro.md) | qualification write 3 / receipt 2 / Timer schedule restored | 두 번째 Pro를 같은 새 schema로 재자격하고 현재 slot `sine`·Flow 45 복귀 확인; candidate only·surface 미개방 |
 | [2026-09-12 two-Pro qualified-control deployment](2026-09-12-two-pro-qualified-control-deployment.md) | persistent control 2 / HA range 30..100 / fresh 6 / device write 0 | 새 schema receipt 네 장을 단일 generation에 배포해 두 Pro만 열고 discovery exact·journal 불변 확인 |
 | [2026-09-12 Bar active-template static binding](2026-09-12-local-bar-active-template-static-binding.md) | app-loader static trace / candidate 2→1 / device write 0 | current Bar product URL에서 도달되는 exact template digest·size를 cache recency 없이 재결속 |
+| [2026-09-12 Bar active-template deployment](2026-09-12-local-bar-active-template-deployment.md) | template membership 1→2 / fresh 6 / device write 0 | Bar template을 새 generation에 결속하고 기존 discovery·Pro control byte 불변과 Bar diagnostic-only 유지 확인 |
 
 ## 새 실행 기록 템플릿
 
