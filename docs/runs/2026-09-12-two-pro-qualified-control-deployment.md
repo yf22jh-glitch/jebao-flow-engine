@@ -133,3 +133,12 @@
   않고 보존한 exact prior image id와 old bundle을 사용합니다. 다음 M3 단계는 Bar template binding을
   write 없이 별도 generation으로 결속한 뒤 Bar `manual_flow`, 마지막으로 three-device `power`
   qualification 순서입니다.
+
+## 정정 (2026-09-12T14:18:30Z)
+
+초판에는 HA write surface 확대의 사용자 공개·수용 경위가 빠졌습니다. 배포 전에 persistent HA
+`manual_flow` number가 `1 -> 2`로 늘어난다는 점을 공개했고 사용자는 추가 상시 노출과 진행을
+승인했습니다. 이어서 기존 number를 포함한 사람이 입력 가능한 범위는 승인 근거 없던 `30..75`가
+아니라 app-declared `30..100`이어야 한다고 사용자가 명시적으로 정정했으며, D1l source 수정과 두 Pro
+재자격 뒤 작업 재개를 지시했습니다. 이 경위는 보존된 장비 artifact가 아니라 대화에서 재구성한
+**(c) reconstructed operator observation**입니다.
