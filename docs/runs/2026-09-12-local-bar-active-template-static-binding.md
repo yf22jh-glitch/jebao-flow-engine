@@ -53,3 +53,12 @@
 - 다음에 이 지점을 다시 만나지 않으려면 필요한 것: write-free 조사도 positive content를 특정한
   즉시 app/build·product·URL digest, selected digest·byte size와 unreachable 후보를 append-only
   기록에 남기고, mutable todo의 체크박스만 증거로 사용하지 않습니다.
+
+## 정정 — 2026-09-12T14:37:21.836702000Z
+
+- 위 UTC span은 전체 decompile·조사 시간이 아니라 동일 입력으로 선택 결과를 다시 계산한 **최종
+  fresh rerun 구간**입니다. 앞선 decompile과 running container의 read-only config·manifest 대조
+  시간은 그 174ms span에 포함되지 않으며, 이 값으로 전체 조사 비용이나 병목을 주장하지 않습니다.
+- 이번 실행은 장비를 읽지 않은 product-scope 정적 조사이므로 `SHA-256 identity binding` 필드에는
+  앞선 실기들의 `qualification-target:` 물리 개체 anchor가 아니라 raw product key의 SHA-256을
+  실었습니다. 두 종류를 같은 identity 사슬로 비교하지 않습니다.
