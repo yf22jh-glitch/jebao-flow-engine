@@ -2799,12 +2799,34 @@ power recovery 계약을 깨는 실제 §3 물리 위험입니다. power produce
 `same_on`·`planned_on`의 `baseline_readback=OFF`는 시작 상태 주장이 아니라 **보수적 recovery 수렴
 목표**입니다. 두 의미를 run record에서도 구분합니다.
 
+기존 manual-flow producer의 `_create_record()`는 모든 action의 `restore_on_recovery`를 `true`로
+하드코딩하므로 power producer가 그 builder를 상속해 사용하지 않습니다. power 전용 builder가 위
+세 `PreparedDeviceWrite` 각각의 recovery policy를 그대로 journal에 저장하고, 첫 send 전에 store에서
+record를 다시 읽어 `true/false/true`와 각 rollback payload digest가 위 mapping과 exact 일치함을
+검증합니다. 메모리 객체만 검사해 durable journal의 policy 손실을 놓치지 않습니다.
+
+`same_on`은 fresh baseline과 같은 값이라 writer의 `no_change=true`가 정상입니다. 그러나 이 phase는
+transport-reachability evidence를 위한 planned physical frame이므로 coordinator의
+`_execute_prepared()`를 거치지 않습니다. 그 경로는 `no_change` action을 `NO_CHANGE`로 저장하고 send를
+생략하기 때문입니다. 새 producer는 기존 producer의 journal-first `_execute_action()`을 직접 사용해
+same ON도 정확히 한 번 보내며, terminal journal에는 `NO_CHANGE` action이 0개여야 합니다. 준비 때
+same ON의 `no_change=true`와 OFF의 `no_change=false`를 확인하는 것은 기존 baseline 일관성 검사의
+power 대응이고 새 firmware gate가 아닙니다.
+
 recovery는 세 action을 역순으로 처리하되 사용자 앱 조작 없이 TimerOFF·independent 상태가 유지되는
 동안 이미 OFF면 frame 0, ON이면 actual prepared OFF frame 최대 1회로 수렴하고 ON frame은 보내지
 않습니다. planned ON의 send와 readback이 성공한 뒤 transaction terminal save 전에 실패한 경우도
 final state를 OFF로 되돌립니다. 이는 보수적 선택의 의도된 결과이며,
-“복원 성공을 관측했으니 ON을 다시 유지한다”로 승격하지 않습니다. readback이 OFF와 ON 어느 쪽에도
-exact match하지 않거나 읽기 자체가 실패하면 frame을 보내지 않고 `RECOVERY_REQUIRED`로 남깁니다.
+“복원 성공을 관측했으니 ON을 다시 유지한다”로 승격하지 않습니다. production power readback은
+`SwitchON` boolean 하나이므로 유효한 상태에 제3의 값을 만들지 않습니다. `same_on`·`planned_on`
+recovery는 exact OFF면 무전송 terminal, exact ON이면 prepared OFF를 한 번 시도합니다. 이 두 action의
+recovery connect/read 자체가 실패하면 coordinator가 action을 새로 저장하기 전 예외가 나므로 직전
+action phase는 그대로이고, forward failure 직후 producer가 이미 transaction을
+`RECOVERY_REQUIRED`로 저장한 상태를 유지합니다. `power_off` recovery는 exact OFF를
+`safe_state_retained`, exact ON을 `baseline_already_present`로 각각 무전송 terminalize하며, read/decode
+실패는 기존 safe-state 분기가 action `UNCERTAIN`·transaction `RECOVERY_REQUIRED`를 저장하고 frame을
+보내지 않습니다. production schema로 도달 불가능한 제3의 power 값을 fake로 만들어 no-send 분기를
+증명하지 않습니다.
 어느 실패든 자동 재기동하지 않으므로 on-site approver가 앱 또는 물리 수단으로 ON을 복구해야 합니다.
 정상 실행만 세 exact write 뒤 journal을 `VERIFIED`로 terminalize하고 OFF와 planned ON action의 receipt
 두 장을 발급하며 최종 power ON을 요구합니다.
@@ -2826,22 +2848,30 @@ machinery만 재사용하고 manual-flow execute·intent·finalization을 호출
 만들지 않고 기존 `jebao-flow-local-qualify recover`가 같은 generic journal record를 처리합니다. journal,
 lease, coordinator, device writer, catalog, receipt verifier/model, persistent path, group, frozen six와 직접
 테스트는 수정하지 않습니다. 새 module은 protocol-schema digest 입력이 아니므로 current receipt와 running
-generation을 무효화하지 않습니다.
+generation을 무효화하지 않습니다. 특히 `device_writer.py`는 순수 helper 추출이나 refactor 명목으로도
+수정하지 않습니다. 그 파일은 protocol-schema digest 입력이라 한 byte 변경도 현재 세 장비의 기존
+qualification을 stale하게 만들기 때문입니다.
 
 offline 회귀는 최소한 다음을 고정합니다. (1) 성공은 하나의 preinstalled 3-action journal, writer/session
-3개, physical write `ON/OFF/ON` 정확히 3회, revision `10`, OFF·planned-ON receipt 2장, terminal ON,
-(2) 첫 send 전에 위 두 payload equality·세 baseline-readback·`true/false/true` recovery policy와 모든
-blob이 durable, (3) OFF action의 actual ON baseline은 유지되고 same/planned ON만 actual prepared OFF로
-remap, (4) same ON·OFF·planned ON 각 send/ACK/readback/cancel fault와 planned ON 검증 뒤 terminal-save
-fault에서 receipt 0, forward retry 0, recovery ON write 0·stable-state OFF write 최대 1, (5) recovery fresh state가
-이미 OFF 또는 아직 ON이면 각각 exact terminal 분류하고 다른 값·read failure면 no-send nonterminal,
-(6) power OFF·TimerON·non-constant·non-independent·Flow `>45`·config/app range 밖, strict target·epoch·
+3개, physical write `ON/OFF/ON` 정확히 3회, terminal journal의 `NO_CHANGE` 0개, revision `10`,
+OFF·planned-ON receipt 2장, terminal ON, (2) 첫 send 전에 journal store에서 reload한 record 기준으로 위
+두 payload equality·세 baseline-readback·`true/false/true` recovery policy·각 rollback digest와 모든
+blob이 durable하고 power 전용 builder가 inherited hardcode를 사용하지 않음, (3) OFF action의 actual ON
+baseline은 유지되고 same/planned ON만 actual prepared OFF로 remap하며 same ON의 `no_change=true`와
+OFF의 `no_change=false`를 준비 시 확인, (4) same ON·OFF·planned ON 각 send/ACK/readback/cancel fault와
+planned ON 검증 뒤 terminal-save fault에서 receipt 0, forward retry 0, recovery ON write 0·stable-state
+OFF write 최대 1, (5) 유효한 boolean recovery state가 이미 OFF 또는 아직 ON일 때 위 action별 exact
+terminal·OFF-attempt 분류를 고정하고, same/planned recovery read failure는 새 save 0·직전 action phase
+유지·이미 저장된 transaction `RECOVERY_REQUIRED`, OFF recovery read failure는 action `UNCERTAIN`·
+transaction `RECOVERY_REQUIRED`·send 0임을 구분하며 production schema에 없는 제3의 power 값을 만들지
+않음, (6) power OFF·TimerON·non-constant·non-independent·Flow `>45`·config/app range 밖, strict target·epoch·
 firmware mismatch 각각 첫 send와 journal과 receipt 0, (7) phase 사이 Timer·mode·linkage·Flow drift는 새
 forward 없이 OFF recovery, (8) receipt canonical bytes·distinct request·binding function `power`·artifact
 no-clobber와 terminal finalization의 network/write 0 멱등성, (9) manual-flow producer·CLI source와 기존
 assert byte 불변, frozen/import closure 불변, (10) 새 producer가 `LocalControlLease`에 같은
-`physical_identity_key` 하나를 넘기며 새 lock namespace를 만들지 않음입니다. test status는 production
-Pro·Bar schema bytes를 사용하고 firmware 결과를 새 fake knob로 만들지 않습니다.
+`physical_identity_key` 하나를 넘기며 새 lock namespace를 만들지 않음, (11) power producer가
+coordinator `_execute_prepared()`를 호출하지 않고 producer `_execute_action()`만 사용함입니다. test
+status는 production Pro·Bar schema bytes를 사용하고 firmware 결과를 새 fake knob로 만들지 않습니다.
 
 §3의 wrong-device는 strict manifest binding과 같은 physical lock key, out-of-envelope·다른 장비 전파는
 저출력 independent admission, duplicate는 action별 새 writer와 no-retry, journal loss는 첫 send 전 세
