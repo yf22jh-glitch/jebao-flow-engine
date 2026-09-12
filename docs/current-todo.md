@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-13 01:36 KST
+마지막 갱신: 2026-09-13 06:41 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -54,13 +54,22 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   근거: [`Bar active-template deployment`](runs/2026-09-12-local-bar-active-template-deployment.md),
   run commit `df6b055`
 - [x] Pro 동작을 그대로 보존하는 Bar family precondition source·offline 회귀를 검토·landing;
-  commit `d687739`, 전체 `2531` tests·Ruff PASS, 첫 Bar live write는 미실행
+  commit `d687739`, 전체 `2531` tests·Ruff PASS, source landing 시점의 Bar live write `0`
 - [x] 실패 시 OFF로만 수렴하는 `power` qualification source·CLI·offline fault 회귀를 검토·landing;
   source `c242635`, 후속 결속 `c02b8f5`·`045f086`, 전체 `2578` tests·Ruff PASS
 - [x] exact x86_64 one-shot image와 observer-mode no-clobber input을 준비하고, current Bar·journal·
   qualification·legacy authority를 read-only preflight
-- [ ] 첫 Bar `manual_flow` live write 직전 경계: 현장 감시·즉시 전원 차단 수단을 확인하고 사용자가
-  앱에서 `classic`·Flow `91`을 `constant`·Flow `45` 이하로 바꾸는 방법과 사후 복원값을 결정
+- [x] Bar `manual_flow`를 `45 -> 44 -> 45`로 qualification하고 사용자 앱으로
+  `classic`·Flow `91`을 복원; physical write `3`, terminal revision `10`, receipt `2`, recovery `0`;
+  근거: [`Bar manual-flow qualification`](runs/2026-09-13-local-bar-manual-flow-qualification.md),
+  run commit `1fdb947`
+- [x] Bar candidate를 current set에 exact merge하고 단일 generation에 배포; binding `2`·receipt `6`·
+  qualified pair `3`, direct control `3`, discovery `86/86` exact, startup write `0`, fresh `6/6`;
+  근거: [`Bar qualified-control deployment`](runs/2026-09-13-local-bar-qualified-control-deployment.md),
+  run commit `2c2afe1`
+- [ ] 첫 번째 Pro `power` live write 직전 경계: 현재 `ON`·TimerOFF·`constant`·`independent`·Flow `40`이라
+  앱 조작은 필요 없지만, ON→OFF→ON physical write `3` 전에 현장 감시·즉시 전원 차단/앱 복원 수단과
+  어떤 nonterminal failure에서도 최종 OFF로 남을 수 있음을 사용자에게 다시 확인
 
 ## 완성까지 전체 로드맵
 
@@ -142,7 +151,7 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
     entity `13`·command `0`, discovery `86/86` byte exact, fresh `6/6`
   - run [`Bar active-template deployment`](runs/2026-09-12-local-bar-active-template-deployment.md),
     commit `df6b055`
-- [ ] 각 멤버 `manual_flow` qualification 계획과 exact scalar restore 가능성을 확정
+- [x] 각 멤버 `manual_flow` qualification 계획과 exact scalar restore 가능성을 확정
   - [x] 두 번째 Pro를 current manifest·fresh resolution에서 정확히 하나로 선택하고 6/6 authenticated
     fresh, firmware 동일, unfinished `0`, legacy idle을 확인
   - [x] 두 번째 Pro 앱 precondition: power ON·`constant`·`independent` 유지, TimerOFF·Flow `40`
@@ -163,7 +172,13 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
     - 실행 전 schedule image를 보존하지 않아 전체 schedule의 pre/post byte-exact 불변은 주장하지 않음
   - [x] Pro의 4개 send-free state probe와 3-write 계약을 바이트 동일하게 보존하고, Bar의 product
     descriptor·writer scalar mapping과 strict production status decoder로 TimerON을 판정하는 family
-    profile source·offline 회귀 landing `d687739`; Bar live qualification은 미실행
+    profile source·offline 회귀 landing `d687739`; source landing 시점에는 Bar live write `0`
+  - [x] Bar를 `constant`·Flow `45`로 precondition한 뒤 `45 -> 44 -> 45`, physical write `3`, terminal
+    revision `10`, receipt `2`, recovery `0`으로 qualification하고 사용자 앱으로 `classic`·Flow `91` 복원;
+    run `1fdb947`
+  - [x] Bar candidate를 current two-Pro set에 fresh merge하고 같은 identity의 write allow만 추가한 단일
+    generation을 배포; binding `2`·receipt `6`·qualified pair `3`, ignored `0`, direct control `3`,
+    discovery `86/86` exact, startup device write `0`; run `2c2afe1`
 - [x] 각 멤버 `power` qualification producer/operation의 안전한 OFF·ON 순서와 rollback 권한 확정
   - durable action mapping은 ON/OFF/ON forward와 OFF/ON/OFF recovery target을 첫 send 전 절대 검증
   - 어느 nonterminal failure에서도 recovery ON frame `0`, OFF frame 최대 `1`, terminal 전 실패는
@@ -249,20 +264,23 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] reviewed persistent control service 1개 실행 중, 최종 generation restart 0
 - [x] 장비 6/6 관측 상태 유지
 - [x] HA 업데이트·재부팅 0
-- [x] 두 Pro `manual_flow` qualification 완료 (각 `40 -> 39 -> 40`, receipt 합계 4장)
+- [x] 세 수류모터 `manual_flow` qualification 완료: 두 Pro는 각 `40 -> 39 -> 40`, Bar는
+  `45 -> 44 -> 45`; current authority binding `2`·receipt `6`·qualified pair `3`
 - [x] MQTT 실기 `40 -> 39 -> 40` 완료, 각 command exact readback·terminal journal 확인
-- [x] 장비 6/6 fresh·qualified control 2·HA Flow range `30..100`·group armed 0
+- [x] 장비 6/6 fresh·qualified control 3·HA Flow range `30..100`·group armed 0
 - [x] M2 recovery·restart/reconnect·bounded soak·external drift 전 항목 완료
-- [x] D1l source와 두-Pro merge·deployment 완료; direct `manual_flow` control `2`, HA Flow range
-  `30..100`, startup write `0`
-- [x] Bar template membership `2` 배포 완료; 기존 direct control `2`·discovery `86` byte 불변,
-  Bar diagnostic `13`·command `0`, fresh `6/6`, startup write `0`
+- [x] D1l source와 세 장비 재자격·merge·deployment 완료; direct `manual_flow` control `3`, HA Flow
+  range `30..100`, startup write `0`
+- [x] Bar template membership `2`와 current qualification binding `2`·receipt `6`·qualified pair `3` 배포;
+  discovery `86/86` byte exact, Bar number `1`, fresh `6/6`, startup write `0`
 - [x] Pro 동작을 보존하는 Bar family precondition source·offline 검토·landing `d687739` 완료
 - [x] safer-OFF power qualification source·CLI·fault 회귀 landing과 exact one-shot image 준비 완료
-- [x] live 직전 read-only preflight: current service `1`·restart `0`, 장비 `6/6`, unfinished `0`,
-  legacy idle, receipt `4`, direct control `2`, Bar command `0`, group command `0`, retained command `0`
-- [ ] M3의 다음 작업은 첫 Bar `manual_flow` qualification이며, 현재 Bar
-  `ON`·TimerOFF·`classic`·`independent`·Flow `91`이라 사용자 앱 precondition 직전에서 멈춤
+- [x] current post-deploy audit: service `1`, 장비 `6/6`, unfinished `0`, legacy idle, receipt `6`,
+  direct control `3`, group command `0`, retained command `0`, journal·receipt tree byte 불변
+- [x] read-only `power` preflight: 첫 Pro는 `ON`·TimerOFF·`constant`·`independent`·Flow `40`으로 admission
+  준비 완료; 두 번째 Pro는 TimerON, Bar는 `classic`·Flow `91`이라 각각 이후 사용자 앱 precondition 필요
+- [ ] M3의 다음 작업은 첫 번째 Pro `power` qualification이며, 앱 조작 없이 첫 physical write 전 현장
+  감시·즉시 전원 차단/앱 복원과 safer-OFF 실패 결과를 사용자에게 확인하는 경계에서 멈춤
 
 ## M0~M1 작업 이력 (완료)
 
@@ -353,11 +371,13 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 사용자 조작 필요 여부
 
-- 현재: **사용자 앱 조작 필요.** first-write 전까지 가능한 source·image·offline input·read-only
-  preflight는 완료했습니다. Bar는 현재 power ON·TimerOFF·`classic`·`independent`·Flow `91`이고,
-  `manual_flow`와 `power` admission에는 `constant`·Flow `45` 이하가 필요합니다. `91 -> 45`는 46p
-  하강이므로 한 번에 바꾸라고 가정하지 않고, 현장 수조 상태에 맞춘 단계적 하향 여부와 실기 뒤
-  `classic`·Flow `91` 복원 결정을 사용자에게 확인한 뒤에만 첫 physical write를 시작합니다.
+- 현재: **첫 번째 Pro에는 앱 조작이 필요하지 않습니다.** read-only preflight에서 power ON·TimerOFF·
+  `constant`·`independent`·Flow `40`을 확인했습니다. 다만 `power` qualification은 ON→OFF→ON physical
+  write `3`이고 planned ON readback 뒤를 포함한 어떤 nonterminal failure에서도 펌프가 OFF로 남을 수
+  있으므로, 현장 감시와 즉시 전원 차단/앱 복원 가능 여부를 다시 확인한 뒤에만 시작합니다.
+- 이후 두 번째 Pro는 TimerON→OFF, Bar는 `classic`·Flow `91`→`constant`·Flow `45` 이하의 사용자 앱
+  precondition이 별도로 필요합니다. Bar의 `91 -> 45`는 46p 하강이므로 한 번에 바꾸라고 가정하지 않고
+  현장 수조 상태에 맞춘 단계적 하향 여부와 사후 `classic`·Flow `91` 복원 결정을 다시 확인합니다.
 - 상시 HA `number` 엔티티 추가 노출 자체와 Jebao 실기·필요 상태 변경의 에이전트 실행은 사용자 승인 완료.
   승인 없던 `75`는 D1l에서 app-declared `30..100`으로 정정·배포 완료
 - 현재 attended 실기 가이드: agent 목적값은 Flow `<=50`로 계획하고 갑작스러운 step·여러 펌프 동시
@@ -495,3 +515,13 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   group command·retained command `0`을 확인. 새 owner-only observer-mode input과 no-clobber candidate
   경로·opaque operation id를 준비했으며 candidate와 journal operation은 아직 없음. current Bar는
   `ON`·TimerOFF·`classic`·`independent`·Flow `91`; 첫 Bar physical write 전 사용자 앱 조작 경계에서 정지.
+- 05:52 KST — 사용자 앱 precondition 뒤 Bar를 `45 -> 44 -> 45`로 qualification. physical write `3`,
+  terminal revision `10`, receipt `2`, recovery `0`, Bar command surface `0`을 확인하고 사용자가 앱에서
+  `classic`·Flow `91`로 복원. append-only run record를 commit `1fdb947`로 랜딩.
+- 06:40 KST — Bar candidate를 current two-Pro qualification에 exact merge하고 Bar 한 대만
+  write-enabled로 바꾼 단일 generation 배포 완료. binding `2`·receipt `6`·qualified pair `3`, direct
+  control `3`, discovery `86/86` byte exact, fresh `6/6`, startup write `0`, journal·receipt tree 불변을
+  확인하고 append-only run record를 commit `2c2afe1`로 랜딩.
+- 06:41 KST — read-only `power` preflight에서 첫 Pro는 `ON`·TimerOFF·`constant`·`independent`·Flow `40`으로
+  앱 조작 없이 admission 가능한 상태임을 확인. 두 번째 Pro는 TimerON, Bar는 `classic`·Flow `91`이라
+  이후 별도 앱 precondition이 필요함을 분리하고, 첫 Pro physical write 직전 현장 승인 경계에서 정지.
