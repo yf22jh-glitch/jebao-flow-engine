@@ -2641,6 +2641,63 @@ declared range와 같음, (2) `slave_per_slot_flow_extension` range가 같은 Pr
 import closure 불변, (9) 기존 `30..75` 결과 단정을 app-declared 관계로 교체하고 `100`은 허용·`101`은
 거부함입니다. 기존 assert를 삭제하거나 입력 `100`을 거부하는 새 fake로 관계 검사를 대신하지 않습니다.
 
+### 2026-09-12 Local Wavemaker Bar active-template positive binding D1m
+
+repository maintainer의 “내가 직접 조작해야 하는 것 외에는 모두 진행” 지시는 현재 설치된 앱의
+Bar active template을 재결속하고, 장비 write 없이 current manifest와 새 Compose generation에
+추가해 배포하는 operation을 승인합니다. 이 범위는 Bar 앱 화면 조작이나 `manual_flow`·`power`
+장비 write를 포함하지 않습니다. 이번 작업이 닫을 질문은 **현재 앱 build와 current manifest의
+정확히 한 Bar product binding에 대해, 두 cache 후보 중 loader가 실제 선택하는 template bytes를
+추측 없이 다시 특정하고, 기존 두 Pro qualification·control surface와 장비 상태를 바꾸지 않은 채
+그 content binding을 배포할 수 있는가**입니다.
+
+read-only static trace는 installed Jebao Aqua app `3.4.18` / build `341800000`, 16,665,122-byte
+Hermes bundle SHA-256
+`97b8eb17a915b8071dcef16c177f1e5bc3ab31e154510c69e6d3f9af2a533c71`에 결속합니다. current
+manifest에는 Bar product binding이 정확히 하나 있고, 그 product key의 원문 대신 SHA-256
+`197ae39afb4414b1c55c1c5873ece68813b7a7ac6b2e336ea8ba2011faa32b38`만 기록합니다. compiled
+product config에서 이 key와 일치하는 device config object의 template download URL도 하나이며,
+원문 대신 SHA-256
+`078b2e1bccdac4c0189c1fa40c19c6a191743ef7281ca7ae1045dfa226f51880`로 결속합니다. loader는 이
+URL의 MD5를 cache locator로 사용하며 newest-directory·mtime·파일 크기로 후보를 고르지 않습니다.
+그 exact locator 아래에는 `index.js` 하나, `index.html` 0개가 있고, 선택되는 `index.js`는 162,553
+bytes, SHA-256
+`e609fa34a6fc6fe1d22d27379a2c6c0ccd077cfba20d4bd3b500e0721782e329`입니다. 같은 component의
+다른 110,295-byte candidate SHA-256
+`d6b35da90a9ee5db09f91a7819bfb5cf89c439d061e789a69af2b40706ebb6ab`는 현재 URL locator에서
+도달되지 않으므로 제외합니다. raw product key·URL·cache locator와 private 경로는 출력·문서·커밋에
+싣지 않습니다.
+
+write-free 조사라도 positive evidence를 특정한 즉시 app/build·product·URL 결속, 선택한 content의
+digest와 byte size, 배제 후보의 도달 불가 사유를 append-only `docs/runs/`에 남깁니다. mutable todo의
+체크박스만으로 완료 처리하지 않습니다. 이 규칙은 조사 때 device write가 없다는 사실과 조사 결과를
+내구성 있게 보존해야 한다는 의무를 분리합니다. 임시 decompile·raw app/cache 산출물은 저장소에
+넣지 않고, 보존되지 않은 static trace는 증거 등급 (c)를 넘지 않습니다.
+
+선택한 bytes는 current Pro template과 다른 새 durable private template root에 `index.js` 하나로만
+설치합니다. file SHA-256·byte size를 다시 검증하고 file mode `0444`, directory mode `0755`, link
+count `1`, file·directory·private parent fsync를 완료한 뒤에만 install input으로 사용합니다. 기존
+Pro root나 running generation은 수정하지 않습니다. fresh manifest의 `template_sha256`는 기존 Pro
+digest와 위 Bar digest의 정확한 두 원소여야 하고, six `physical_identity_key`와 stable role binding은
+byte 동일해야 합니다. template membership 판정이므로 기존 Pro receipt 네 장은 계속 current여야
+하며, offline projection은 qualified `manual_flow` surface 정확히 `2`, ignored qualification `0`,
+Bar command surface `0`, group command surface `0`이어야 합니다.
+
+배포는 새 immutable source와 Compose generation으로만 하고 current file을 in-place 수정하지 않습니다.
+Docker가 실제로 읽을 host bind source가 stop-first 전에 존재하는지 확인하고, rollback은 old build
+context를 재빌드하지 않고 보존한 exact prior image와 prior bundle을 사용합니다. 기존 persistent
+service를 완전히 정지한 뒤 새 instance 하나만 시작합니다. journal·receipt tree와 unfinished `0`은
+전후 byte 동일하고, startup device write `0`, retained command `0`, fresh authenticated state `6/6`,
+qualified direct surface `2`, Bar diagnostic-only, group `0`, discovery expected/present/exact가 모두
+일치해야 PASS입니다. local-control frame의 write-0 추론은 모든 그 경로의 frame보다 journal-first
+저장이 선행한다는 현재 coordinator 계약에만 한정합니다.
+
+이 slice는 source·frozen six·qualification verifier·receipt를 수정하지 않고 장비 command도 보내지
+않습니다. Bar active template을 결속했다고 firmware write acceptance, Bar `manual_flow` qualification,
+다른 app build의 active bytes나 remote URL bytes의 영속성을 주장하지 않습니다. app build, current
+product binding, compiled URL 또는 cache bytes가 달라지면 같은 positive binding을 다시 수행합니다.
+배포 run record가 commit되기 전에는 Bar family source를 수정하지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
