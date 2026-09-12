@@ -2724,6 +2724,10 @@ current fresh read가 `independent`를 돌려줬으므로 이를 생략하지 �
 `independent/master/sync_slave/async_slave`와 Bar choices `independent/master/slave`는 서로 복사하지
 않고 product descriptor의 실제 어휘를 유지합니다.
 
+여기서 profile의 4개·5개 probe는 current status field mapping을 유도하는 send `0`의
+`prepare_scalar()` 호출입니다. physical frame은 두 family 모두 same-value·하향·planned restore의
+정확히 3회뿐이며, Bar profile이 probe 하나를 더 쓴다는 사실을 다섯 frame 승인으로 해석하지 않습니다.
+
 두 family 모두 live admission은 power ON, TimerOFF, `Mode=constant`, `Linkage=independent`, current
 Flow와 하향 착지값이 config·app declared range 안, current Flow `<=45`, downward step `1..5`라는 기존
 계약을 그대로 사용합니다. `45`는 제품 capability나 영구 입력 상한이 아니라 attended first-write
