@@ -374,6 +374,21 @@ async def test_success_preinstalls_safer_off_mapping_and_sends_exactly_three_fra
         binding,
         _receipt_root_for_test=tmp_path / "receipts",
     ) == frozenset({target.physical_identity_key})
+    inverted = record.model_copy(
+        update={
+            "actions": tuple(
+                action.model_copy(
+                    update={
+                        "expected_readback_sha256": action.baseline_readback_sha256,
+                        "baseline_readback_sha256": action.expected_readback_sha256,
+                    }
+                )
+                for action in record.actions
+            )
+        }
+    )
+    with pytest.raises(QualificationProductionError, match="safer-OFF payload mapping changed"):
+        producer._require_preinstalled_recovery_mapping(inverted)
 
 
 @pytest.mark.parametrize(

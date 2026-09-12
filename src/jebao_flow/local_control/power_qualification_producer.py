@@ -8,6 +8,7 @@ artifact machinery without invoking its manual-flow execution or finalization pa
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 from typing import Literal, Self
 
@@ -47,6 +48,29 @@ from jebao_flow.local_control.resolver import ResolvedEndpoint
 
 _FUNCTION = "power"
 _ACTION_IDS = ("same_on", "power_off", "planned_on")
+
+
+def _boolean_scalar_readback(payload: bytes) -> tuple[str, bool]:
+    try:
+        decoded = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise QualificationProductionError(
+            "power qualification scalar readback evidence changed"
+        ) from exc
+    if (
+        type(decoded) is not dict
+        or len(decoded) != 1
+        or _canonical_json(decoded) != payload
+    ):
+        raise QualificationProductionError(
+            "power qualification scalar readback evidence changed"
+        )
+    field, value = next(iter(decoded.items()))
+    if not field or type(value) is not bool:
+        raise QualificationProductionError(
+            "power qualification scalar readback evidence changed"
+        )
+    return field, value
 
 
 class PowerQualificationIntent(BaseModel):
@@ -521,8 +545,23 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
                 self._journal.load_blob(digest)
 
         same_on, power_off, planned_on = record.actions
+        expected_readbacks = tuple(
+            _boolean_scalar_readback(
+                self._journal.load_blob(action.expected_readback_sha256)
+            )
+            for action in record.actions
+        )
+        baseline_readbacks = tuple(
+            _boolean_scalar_readback(
+                self._journal.load_blob(action.baseline_readback_sha256)
+            )
+            for action in record.actions
+        )
         if (
-            same_on.expected_readback_sha256 != power_off.baseline_readback_sha256
+            len({field for field, _value in expected_readbacks + baseline_readbacks}) != 1
+            or tuple(value for _field, value in expected_readbacks) != (True, False, True)
+            or tuple(value for _field, value in baseline_readbacks) != (False, True, False)
+            or same_on.expected_readback_sha256 != power_off.baseline_readback_sha256
             or same_on.expected_readback_sha256 != planned_on.expected_readback_sha256
             or same_on.baseline_readback_sha256 != power_off.expected_readback_sha256
             or same_on.baseline_readback_sha256 != planned_on.baseline_readback_sha256
