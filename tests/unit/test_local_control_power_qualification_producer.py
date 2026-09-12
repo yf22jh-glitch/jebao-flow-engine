@@ -498,6 +498,39 @@ async def test_missing_firmware_stops_before_writer_and_journal(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_post_create_mapping_fault_marks_reloaded_journal_recovery_required(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = _binding()
+    epoch = _epoch(target=target)
+    endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
+    sent: list[bytes] = []
+    producer, journal, _lease = _producer(
+        tmp_path,
+        epoch_provider=lambda: epoch,
+        resolver=_Resolver(endpoint),
+        writer_factory=_WriterFactory([_Session([_pro_status()], sent)]),
+    )
+
+    def _reject_mapping(_record: LocalControlJournalRecord) -> None:
+        raise QualificationProductionError("injected installed mapping fault")
+
+    monkeypatch.setattr(producer, "_require_preinstalled_recovery_mapping", _reject_mapping)
+
+    with pytest.raises(QualificationProductionError, match="installed mapping fault"):
+        await producer.execute("power_qualification_mapping_fault")
+
+    record = journal.load("power_qualification_mapping_fault")
+    assert record is not None
+    assert record.phase is TransactionPhase.RECOVERY_REQUIRED
+    assert record.revision == 1
+    assert all(action.phase is ActionPhase.PREPARED for action in record.actions)
+    assert sent == []
+    assert not tuple((tmp_path / "receipts").iterdir())
+
+
+@pytest.mark.asyncio
 async def test_firmware_change_after_same_on_requires_recovery_without_second_send(
     tmp_path: Path,
 ) -> None:

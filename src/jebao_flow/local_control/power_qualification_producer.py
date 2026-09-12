@@ -44,7 +44,6 @@ from jebao_flow.local_control.qualification_producer import (
     _require_operation_id,
 )
 from jebao_flow.local_control.resolver import ResolvedEndpoint
-from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 
 _FUNCTION = "power"
 _ACTION_IDS = ("same_on", "power_off", "planned_on")
@@ -378,28 +377,32 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
             actions=actions,
         )
         self._journal.create(record)
-        reloaded = self._journal.load(record.request_id)
-        if reloaded != record:
-            raise QualificationProductionError(
-                "power qualification journal did not reload exactly"
-            )
-        if (
-            reloaded.phase is not TransactionPhase.PREPARED
-            or reloaded.revision != 0
-            or any(
-                action.phase is not ActionPhase.PREPARED
-                or action.target != intent.target
-                or action.function != _FUNCTION
-                or action.verification_kind != "scalar_fields"
-                or action.acknowledgement_sha256 is not None
-                for action in reloaded.actions
-            )
-        ):
-            raise QualificationProductionError(
-                "power qualification journal was not safely preinstalled"
-            )
-        self._require_preinstalled_recovery_mapping(reloaded)
-        return reloaded
+        try:
+            reloaded = self._journal.load(record.request_id)
+            if reloaded != record:
+                raise QualificationProductionError(
+                    "power qualification journal did not reload exactly"
+                )
+            if (
+                reloaded.phase is not TransactionPhase.PREPARED
+                or reloaded.revision != 0
+                or any(
+                    action.phase is not ActionPhase.PREPARED
+                    or action.target != intent.target
+                    or action.function != _FUNCTION
+                    or action.verification_kind != "scalar_fields"
+                    or action.acknowledgement_sha256 is not None
+                    for action in reloaded.actions
+                )
+            ):
+                raise QualificationProductionError(
+                    "power qualification journal was not safely preinstalled"
+                )
+            self._require_preinstalled_recovery_mapping(reloaded)
+            return reloaded
+        except BaseException:
+            self._require_recovery(record.request_id)
+            raise
 
     def _finalize_power(
         self,
@@ -517,24 +520,15 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
             ):
                 self._journal.load_blob(digest)
 
-        on = _canonical_json({"SwitchON": True})
-        off = _canonical_json({"SwitchON": False})
-        expected_digests = tuple(
-            hashlib.sha256(value).hexdigest() for value in (on, off, on)
-        )
-        baseline_digests = tuple(
-            hashlib.sha256(value).hexdigest() for value in (off, on, off)
-        )
-        if tuple(action.expected_readback_sha256 for action in record.actions) != expected_digests:
-            raise QualificationProductionError("power qualification readback evidence changed")
-        if tuple(action.baseline_readback_sha256 for action in record.actions) != baseline_digests:
-            raise QualificationProductionError("power qualification recovery targets changed")
-        if tuple(action.restore_on_recovery for action in record.actions) != (True, False, True):
-            raise QualificationProductionError("power qualification recovery policy changed")
-
         same_on, power_off, planned_on = record.actions
         if (
-            same_on.forward_payload_sha256 != power_off.rollback_payload_sha256
+            same_on.expected_readback_sha256 != power_off.baseline_readback_sha256
+            or same_on.expected_readback_sha256 != planned_on.expected_readback_sha256
+            or same_on.baseline_readback_sha256 != power_off.expected_readback_sha256
+            or same_on.baseline_readback_sha256 != planned_on.baseline_readback_sha256
+            or same_on.expected_readback_sha256 == same_on.baseline_readback_sha256
+            or tuple(action.restore_on_recovery for action in record.actions) != (True, False, True)
+            or same_on.forward_payload_sha256 != power_off.rollback_payload_sha256
             or same_on.forward_payload_sha256 != planned_on.forward_payload_sha256
             or same_on.rollback_payload_sha256 != power_off.forward_payload_sha256
             or same_on.rollback_payload_sha256 != planned_on.rollback_payload_sha256
@@ -555,16 +549,12 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
         expected_enabled: bool,
     ) -> None:
         state = _manual_flow_state(writer, epoch.target, status)
-        minimum, maximum = declared_app_integer_range(epoch.target.product_key, "manual_flow")
         if (
             state.enabled is not expected_enabled
             or state.timer_enabled is not intent.baseline_timer_enabled
             or state.mode != intent.baseline_mode
             or state.linkage != intent.baseline_linkage
             or state.flow != intent.baseline_flow
-            or state.flow > _SAFE_FIRST_WRITE_MAXIMUM
-            or not epoch.min_power <= state.flow <= epoch.max_power
-            or not minimum <= state.flow <= maximum
         ):
             raise QualificationProductionError("power qualification phase state changed")
 
