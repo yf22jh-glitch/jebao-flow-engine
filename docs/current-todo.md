@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-13 00:26 KST
+마지막 갱신: 2026-09-13 01:36 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -55,8 +55,12 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   run commit `df6b055`
 - [x] Pro 동작을 그대로 보존하는 Bar family precondition source·offline 회귀를 검토·landing;
   commit `d687739`, 전체 `2531` tests·Ruff PASS, 첫 Bar live write는 미실행
-- [ ] `power` qualification source·offline 회귀를 준비하고 검토·landing;
-  현장 감시가 필요한 모든 live write는 별도 경계로 유지
+- [x] 실패 시 OFF로만 수렴하는 `power` qualification source·CLI·offline fault 회귀를 검토·landing;
+  source `c242635`, 후속 결속 `c02b8f5`·`045f086`, 전체 `2578` tests·Ruff PASS
+- [x] exact x86_64 one-shot image와 observer-mode no-clobber input을 준비하고, current Bar·journal·
+  qualification·legacy authority를 read-only preflight
+- [ ] 첫 Bar `manual_flow` live write 직전 경계: 현장 감시·즉시 전원 차단 수단을 확인하고 사용자가
+  앱에서 `classic`·Flow `91`을 `constant`·Flow `45` 이하로 바꾸는 방법과 사후 복원값을 결정
 
 ## 완성까지 전체 로드맵
 
@@ -160,9 +164,14 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   - [x] Pro의 4개 send-free state probe와 3-write 계약을 바이트 동일하게 보존하고, Bar의 product
     descriptor·writer scalar mapping과 strict production status decoder로 TimerON을 판정하는 family
     profile source·offline 회귀 landing `d687739`; Bar live qualification은 미실행
-- [ ] 각 멤버 `power` qualification producer/operation의 안전한 OFF·ON 순서와 rollback 권한 확정
-- [ ] 필요한 source는 기존 journal·lease·identity·single-write를 재사용해 offline 검토·landing
-- [ ] 새 `power` qualification write가 기존 deployment-wide global lock과
+- [x] 각 멤버 `power` qualification producer/operation의 안전한 OFF·ON 순서와 rollback 권한 확정
+  - durable action mapping은 ON/OFF/ON forward와 OFF/ON/OFF recovery target을 첫 send 전 절대 검증
+  - 어느 nonterminal failure에서도 recovery ON frame `0`, OFF frame 최대 `1`, terminal 전 실패는
+    planned ON readback 뒤라도 safer-OFF로 수렴
+- [x] 필요한 source는 기존 journal·lease·identity·single-write를 재사용해 offline 검토·landing
+  - source `c242635`, post-create recovery 결속 `c02b8f5`, boolean 방향 결속 `045f086`
+  - 전체 `2578` tests·Ruff PASS, 기존 manual-flow producer·recovery CLI·schema-bound writer 불변
+- [x] 새 `power` qualification write가 기존 deployment-wide global lock과
   `physical_identity_key`별 device lock을 그대로 사용하고 새 lock namespace를 만들지 않으며, 기존
   manual-flow 경로와 같은 장비 key로 상호배제됨을 회귀로 고정
 - [ ] 3대 모두 `manual_flow`·`power` receipt pair 확보; 다른 장비·기능은 계속 diagnostic
@@ -249,8 +258,11 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] Bar template membership `2` 배포 완료; 기존 direct control `2`·discovery `86` byte 불변,
   Bar diagnostic `13`·command `0`, fresh `6/6`, startup write `0`
 - [x] Pro 동작을 보존하는 Bar family precondition source·offline 검토·landing `d687739` 완료
-- [ ] M3의 다음 작업은 power qualification source의 offline 검토·landing이며, 첫 Bar physical write
-  직전에 다시 멈춤
+- [x] safer-OFF power qualification source·CLI·fault 회귀 landing과 exact one-shot image 준비 완료
+- [x] live 직전 read-only preflight: current service `1`·restart `0`, 장비 `6/6`, unfinished `0`,
+  legacy idle, receipt `4`, direct control `2`, Bar command `0`, group command `0`, retained command `0`
+- [ ] M3의 다음 작업은 첫 Bar `manual_flow` qualification이며, 현재 Bar
+  `ON`·TimerOFF·`classic`·`independent`·Flow `91`이라 사용자 앱 precondition 직전에서 멈춤
 
 ## M0~M1 작업 이력 (완료)
 
@@ -328,8 +340,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   `df6b055`
 - [x] Pro 경로는 동작 불변으로 유지하고 Bar precondition만 family별로 추가하는 최소 범위를 결속;
   source commit `d687739`, Bar physical write `0`
-- [ ] `power`의 OFF 실패는 safer-OFF 유지, planned ON 실패는 rollback OFF이며 자동 재기동하지 않는
-  물리 결과와 현장 복원 절차를 정책에 명시
+- [x] `power`의 OFF 실패는 safer-OFF 유지, planned ON 실패는 rollback OFF이며 자동 재기동하지 않는
+  물리 결과와 현장 복원 절차를 정책·source·reload journal 회귀에 결속
 
 ## 실패 시 행동
 
@@ -341,9 +353,11 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 사용자 조작 필요 여부
 
-- 현재: **사용자 조작 없음.** Bar template binding 배포와 family source landing은 완료됐고 power
-  source와 offline 회귀를 준비합니다. Bar `manual_flow` 또는 3대 `power` 첫 physical write 직전에만
-  현장 감시·전원 차단 수단을 다시 확인하고, 앱 precondition이 필요하면 그 지점에서 요청합니다.
+- 현재: **사용자 앱 조작 필요.** first-write 전까지 가능한 source·image·offline input·read-only
+  preflight는 완료했습니다. Bar는 현재 power ON·TimerOFF·`classic`·`independent`·Flow `91`이고,
+  `manual_flow`와 `power` admission에는 `constant`·Flow `45` 이하가 필요합니다. `91 -> 45`는 46p
+  하강이므로 한 번에 바꾸라고 가정하지 않고, 현장 수조 상태에 맞춘 단계적 하향 여부와 실기 뒤
+  `classic`·Flow `91` 복원 결정을 사용자에게 확인한 뒤에만 첫 physical write를 시작합니다.
 - 상시 HA `number` 엔티티 추가 노출 자체와 Jebao 실기·필요 상태 변경의 에이전트 실행은 사용자 승인 완료.
   승인 없던 `75`는 D1l에서 app-declared `30..100`으로 정정·배포 완료
 - 현재 attended 실기 가이드: agent 목적값은 Flow `<=50`로 계획하고 갑작스러운 step·여러 펌프 동시
@@ -471,3 +485,13 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - 00:26 KST — Pro의 기존 state probe·`40 -> 39 -> 40` 계약을 보존하면서 Bar의 product-scoped
   scalar mapping과 strict production status decoder로 TimerON을 판정하는 D1n source를 commit
   `d687739`로 랜딩. 영향 회귀 `90`, 전체 `2531` tests·Ruff PASS이며 Bar app 조작·physical write는 `0`.
+- 01:13 KST — nonterminal power qualification 실패가 unattended ON을 만들지 않고 OFF로만 수렴하는
+  D1o source·CLI·fault 회귀를 commit `c242635`로 랜딩. journal-create 뒤 validation fault도
+  `RECOVERY_REQUIRED`로 남기는 `c02b8f5`, product field 문자열을 하드코딩하지 않으면서 canonical
+  one-field bool을 열어 ON/OFF 방향을 절대 결속하는 `045f086`까지 반영. 전체 `2578` tests·Ruff PASS.
+- 01:36 KST — remote x86_64 one-shot image의 installed Python tree `137` files를 reviewed source와
+  exact 결속하고, current deployment를 바꾸지 않은 read-only preflight에서 service `1`·restart `0`,
+  fresh `6/6`, unfinished `0`, legacy idle, qualification receipt `4`, direct control `2`, Bar command·
+  group command·retained command `0`을 확인. 새 owner-only observer-mode input과 no-clobber candidate
+  경로·opaque operation id를 준비했으며 candidate와 journal operation은 아직 없음. current Bar는
+  `ON`·TimerOFF·`classic`·`independent`·Flow `91`; 첫 Bar physical write 전 사용자 앱 조작 경계에서 정지.
