@@ -309,11 +309,19 @@ this implementation and its tests did not start the service.
 ### Manual-flow qualification producer
 
 `jebao-flow-local-qualify` is a separate, explicit first-write tool for one current Local
-Wavemaker Pro `manual_flow` binding. It does not enable the regular control surface. A `run`
-requires `--write-enabled`, an opaque operation id, one privately selected current target, a
-1..5 percentage-point downward step, the reviewed active-template SHA-256, and a no-clobber
-qualification output path. The flag is only an invocation opt-in; it does not replace a separately
-approved live operation or any current envelope check.
+Wavemaker Pro or Local Wavemaker Bar `manual_flow` binding. It does not enable the regular control
+surface. A `run` requires `--write-enabled`, an opaque operation id, one privately selected current
+target, a 1..5 percentage-point downward step, the reviewed active-template SHA-256, and a
+no-clobber qualification output path. The flag is only an invocation opt-in; it does not replace a
+separately approved live operation or any current envelope check.
+
+The state inspection is product-scoped and sends no frame. The existing Pro profile derives
+SwitchON and TimerON together from its coupled timer shape. The Bar timer command shape depends on
+app state and deliberately has no deterministic encoder, so qualification does not invent one: it
+reads TimerON through the strict production status decoder and derives SwitchON from the existing
+power mapping. Both profiles then require the product's own `constant` and `independent` choices.
+The preparation probes and decoded-field read are inspection only; both live qualification
+sequences still contain exactly three physical frames.
 
 The producer creates one local-control journal record with three actions before the first frame:
 same-value, the exact downward step, and the exact planned restore. Every action uses a new strict

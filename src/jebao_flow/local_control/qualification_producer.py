@@ -27,6 +27,7 @@ from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.device_writer import (
     ConnectedDeviceWriter,
     PreparedDeviceWrite,
+    get_product_schema,
     verify_prepared_readback,
 )
 from jebao_flow.local_control.install import (
@@ -65,7 +66,6 @@ from jebao_flow.operator_capture.paths import durable_private_path
 _MAX_PRIVATE_INPUT_BYTES = 1024 * 1024
 _MAX_ARTIFACT_BYTES = 1024 * 1024
 _SAFE_FIRST_WRITE_MAXIMUM = 45
-_EXPECTED_FAMILY = "local_wavemaker_pro"
 _FUNCTION = "manual_flow"
 _ACTION_IDS = ("same_value", "lower_power", "planned_restore")
 
@@ -148,6 +148,41 @@ class ManualFlowState:
     mode: str
     linkage: str
     flow: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ManualFlowFamilyProfile:
+    family: str
+    state_probes: tuple[tuple[str, object, tuple[str, ...]], ...]
+    decoded_status_fields: tuple[str, ...]
+    required_mode: str
+    required_linkage: str
+
+
+_MANUAL_FLOW_FAMILY_PROFILES = {
+    "local_wavemaker_pro": _ManualFlowFamilyProfile(
+        family="local_wavemaker_pro",
+        state_probes=(
+            ("schedule_enable", False, ("SwitchON", "TimerON")),
+            ("linkage_role", "independent", ("Linkage",)),
+            ("manual_mode", "constant", ("Mode",)),
+        ),
+        decoded_status_fields=(),
+        required_mode="constant",
+        required_linkage="independent",
+    ),
+    "local_wavemaker": _ManualFlowFamilyProfile(
+        family="local_wavemaker",
+        state_probes=(
+            ("power", True, ("SwitchON",)),
+            ("linkage_role", "independent", ("Linkage",)),
+            ("manual_mode", "constant", ("Mode",)),
+        ),
+        decoded_status_fields=("TimerON",),
+        required_mode="constant",
+        required_linkage="independent",
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,12 +296,7 @@ class CurrentQualificationEpochSource:
         device = configured[0]
         if not device.enabled or device.product_key != target.product_key:
             raise QualificationProductionError("qualification target is not enabled and current")
-        try:
-            descriptor = build_local_control_catalog().find(target.product_key, _FUNCTION)
-        except KeyError as error:
-            raise QualificationProductionError("qualification target has no manual flow") from error
-        if descriptor.family != _EXPECTED_FAMILY or not descriptor.encoding_available:
-            raise QualificationProductionError("qualification target is not Local Wavemaker Pro")
+        _manual_flow_family_profile(target.product_key)
 
         return QualificationEpoch(
             target=target,
@@ -847,6 +877,7 @@ class ManualFlowQualificationProducer:
         epoch: QualificationEpoch,
         state: ManualFlowState,
     ) -> None:
+        profile = _manual_flow_family_profile(epoch.target.product_key)
         encoder_minimum, encoder_maximum = declared_app_integer_range(
             epoch.target.product_key,
             _FUNCTION,
@@ -854,8 +885,8 @@ class ManualFlowQualificationProducer:
         if (
             state.enabled is not True
             or state.timer_enabled is not False
-            or state.mode != "constant"
-            or state.linkage != "independent"
+            or state.mode != profile.required_mode
+            or state.linkage != profile.required_linkage
             or state.flow > _SAFE_FIRST_WRITE_MAXIMUM
             or not epoch.min_power <= state.flow <= epoch.max_power
             or not encoder_minimum <= state.flow <= encoder_maximum
@@ -965,14 +996,24 @@ def _manual_flow_state(
     status: bytes,
 ) -> ManualFlowState:
     values: dict[str, object] = {}
+    profile = _manual_flow_family_profile(target.product_key)
+    if profile.decoded_status_fields:
+        # Keep schema access behind the existing writer edge and read-only: Bar
+        # admission decodes TimerON without exposing another protocol encoder.
+        try:
+            decoded = get_product_schema(target.product_key).decode_status(status)
+        except (KeyError, ValueError) as error:
+            raise QualificationProductionError("current scalar state is invalid") from error
+        for name in profile.decoded_status_fields:
+            try:
+                values[name] = decoded[name]
+            except KeyError as error:
+                raise QualificationProductionError("current scalar state is incomplete") from error
     encoder_minimum, _encoder_maximum = declared_app_integer_range(
         target.product_key,
         _FUNCTION,
     )
-    probes = (
-        ("schedule_enable", False, ("SwitchON", "TimerON")),
-        ("linkage_role", "independent", ("Linkage",)),
-        ("manual_mode", "constant", ("Mode",)),
+    probes = profile.state_probes + (
         ("manual_flow", encoder_minimum, ("Flow",)),
     )
     for index, (function, value, fields) in enumerate(probes):
@@ -1010,6 +1051,43 @@ def _manual_flow_state(
     ):
         raise QualificationProductionError("current scalar state types are invalid")
     return ManualFlowState(enabled, timer, mode, linkage, flow)
+
+
+def _manual_flow_family_profile(product_key: str) -> _ManualFlowFamilyProfile:
+    catalog = build_local_control_catalog()
+    try:
+        manual_flow = catalog.find(product_key, _FUNCTION)
+        profile = _MANUAL_FLOW_FAMILY_PROFILES[manual_flow.family]
+    except KeyError as error:
+        raise QualificationProductionError(
+            "qualification target family is unsupported"
+        ) from error
+    if not manual_flow.encoding_available or manual_flow.fields != ("Flow",):
+        raise QualificationProductionError("qualification manual-flow encoder is unavailable")
+
+    probes = profile.state_probes + ((_FUNCTION, None, ("Flow",)),)
+    for function, value, required_fields in probes:
+        try:
+            descriptor = catalog.find(product_key, function)
+        except KeyError as error:
+            raise QualificationProductionError(
+                "qualification family state is incomplete"
+            ) from error
+        if (
+            descriptor.family != profile.family
+            or not descriptor.encoding_available
+            or not set(required_fields).issubset(descriptor.fields)
+        ):
+            raise QualificationProductionError("qualification family state is incomplete")
+        if isinstance(value, str) and value not in descriptor.choices:
+            raise QualificationProductionError("qualification family value is unavailable")
+    try:
+        schema = get_product_schema(product_key)
+    except KeyError as error:
+        raise QualificationProductionError("qualification family schema is unavailable") from error
+    if any(name not in schema.attributes_by_name for name in profile.decoded_status_fields):
+        raise QualificationProductionError("qualification family state is incomplete")
+    return profile
 
 
 def _phase_intent(

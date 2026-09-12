@@ -1,4 +1,4 @@
-"""Explicit operator CLI for one local-control manual-flow qualification operation."""
+"""Explicit operator CLI for one supported local-wavemaker manual-flow qualification."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser(
         "run",
-        help="run or offline-finalize one exact three-frame manual-flow qualification",
+        help="run or offline-finalize one supported three-frame manual-flow qualification",
     )
     _add_current_inputs(run)
     run.add_argument("--operation-id", required=True)

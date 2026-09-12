@@ -236,6 +236,52 @@ def test_qualification_producer_uses_only_the_current_write_edge() -> None:
     assert "LocalControlJournalStore" in source
 
 
+def test_qualification_producer_schema_access_is_read_only_through_writer_edge() -> None:
+    producer = PACKAGE / "qualification_producer.py"
+    tree = ast.parse(producer.read_text(encoding="utf-8"), filename=str(producer))
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    writer_imports = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "jebao_flow.local_control.device_writer"
+        for alias in node.names
+    }
+    schema_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "get_product_schema"
+    ]
+    schema_names: set[str] = set()
+    direct_members: set[str] = set()
+    for call in schema_calls:
+        parent = parents[call]
+        if isinstance(parent, ast.Attribute):
+            direct_members.add(parent.attr)
+        elif isinstance(parent, ast.Assign):
+            schema_names.update(
+                target.id for target in parent.targets if isinstance(target, ast.Name)
+            )
+
+    named_members = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in schema_names
+    }
+
+    assert "get_product_schema" in writer_imports
+    assert len(schema_calls) == 2
+    assert direct_members | named_members == {"attributes_by_name", "decode_status"}
+
+
 def test_production_group_transport_calls_the_service_not_the_supervisor() -> None:
     connector_sources = (
         (PACKAGE / "mqtt.py").read_text(encoding="utf-8"),

@@ -27,20 +27,25 @@ from jebao_flow.local_control.qualification_producer import (
     QualificationArtifactStore,
     QualificationEpoch,
     QualificationProductionError,
+    _manual_flow_state,
 )
 from jebao_flow.local_control.resolver import (
     CurrentEndpointResolutionError,
     ResolvedEndpoint,
 )
-from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
+from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
 
-def _binding(marker: str = "a") -> LocalDeviceBinding:
+def _binding(
+    marker: str = "a",
+    *,
+    product_key: str = LOCAL_WAVEMAKER_PRO.product_key,
+) -> LocalDeviceBinding:
     return LocalDeviceBinding(
         logical_member="qualification_target",
-        product_key=LOCAL_WAVEMAKER_PRO.product_key,
+        product_key=product_key,
         physical_identity_key=marker * 64,
         logical_role="standalone",
         role_attested_by="operator",
@@ -80,6 +85,26 @@ def _status(
     raw = bytearray(LOCAL_WAVEMAKER_PRO.raw_status_size)
     raw[0] = int(enabled) | (int(timer_enabled) << 1) | (linkage_code << 2)
     raw[1] = mode_code
+    raw[2] = flow
+    return bytes(raw)
+
+
+def _bar_status(
+    *,
+    flow: int = 40,
+    enabled: bool = True,
+    timer_enabled: bool = False,
+    linkage_code: int = 0,
+    mode_code: int = 3,
+) -> bytes:
+    raw = bytearray(LOCAL_WAVEMAKER.raw_status_size)
+    state_bits = (
+        int(enabled)
+        | (int(timer_enabled) << 3)
+        | (mode_code << 5)
+        | (linkage_code << 7)
+    )
+    raw[:2] = state_bits.to_bytes(2, "big")
     raw[2] = flow
     return bytes(raw)
 
@@ -292,6 +317,140 @@ async def test_success_uses_one_three_action_journal_and_two_receipts(tmp_path: 
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in (tmp_path / "receipts").iterdir())
     assert (tmp_path / "output").stat().st_mode & 0o777 == 0o700
     assert (tmp_path / "output" / "qualifications.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_family_profiles_preserve_pro_probes_and_use_the_bar_timer_decoder(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+    original = ConnectedDeviceWriter.prepare_scalar
+
+    def _record(self, intent, current_status):
+        calls.append((intent.function, intent.value))
+        return original(self, intent, current_status)
+
+    monkeypatch.setattr(ConnectedDeviceWriter, "prepare_scalar", _record)
+
+    pro_target = _binding()
+    pro_writer = ConnectedDeviceWriter(
+        ResolvedEndpoint(pro_target, "current-address", wifi_firmware_version="wifi-current"),
+        session_factory=lambda _address: _Session([], []),
+    )
+    pro_state = _manual_flow_state(pro_writer, pro_target, _status())
+    assert (
+        pro_state.enabled,
+        pro_state.timer_enabled,
+        pro_state.mode,
+        pro_state.linkage,
+        pro_state.flow,
+    ) == (True, False, "constant", "independent", 40)
+    assert calls == [
+        ("schedule_enable", False),
+        ("linkage_role", "independent"),
+        ("manual_mode", "constant"),
+        ("manual_flow", 30),
+    ]
+
+    calls.clear()
+    bar_target = _binding(product_key=LOCAL_WAVEMAKER.product_key)
+    bar_writer = ConnectedDeviceWriter(
+        ResolvedEndpoint(bar_target, "current-address", wifi_firmware_version="wifi-current"),
+        session_factory=lambda _address: _Session([], []),
+    )
+    bar_state = _manual_flow_state(bar_writer, bar_target, _bar_status())
+    assert (
+        bar_state.enabled,
+        bar_state.timer_enabled,
+        bar_state.mode,
+        bar_state.linkage,
+        bar_state.flow,
+    ) == (True, False, "constant", "independent", 40)
+    assert calls == [
+        ("power", True),
+        ("linkage_role", "independent"),
+        ("manual_mode", "constant"),
+        ("manual_flow", 30),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bar_success_uses_the_existing_three_action_contract(tmp_path: Path) -> None:
+    target = _binding(product_key=LOCAL_WAVEMAKER.product_key)
+    epoch = _epoch(target=target, maximum=100)
+    endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
+    baseline = _bar_status(flow=40)
+    lower = _bar_status(flow=39)
+    sent: list[bytes] = []
+    producer, journal, lease = _producer(
+        tmp_path,
+        epoch_provider=lambda: epoch,
+        resolver=_Resolver(endpoint),
+        writer_factory=_WriterFactory(
+            [
+                _Session([baseline, baseline], sent),
+                _Session([baseline, lower], sent),
+                _Session([lower, baseline], sent),
+            ]
+        ),
+    )
+
+    result = await producer.execute("qualification_bar", downward_step=1)
+
+    assert result.phase is TransactionPhase.VERIFIED
+    assert result.physical_write_count == 3
+    assert result.receipt_count == 2
+    assert len(sent) == 3
+    assert sent[0] == sent[2]
+    assert sent[1] != sent[0]
+    assert lease.acquired == [(target.physical_identity_key,)]
+    record = journal.load("qualification_bar")
+    assert record is not None
+    assert record.phase is TransactionPhase.VERIFIED
+    assert tuple(action.action_id for action in record.actions) == (
+        "same_value",
+        "lower_power",
+        "planned_restore",
+    )
+    assert all(action.phase is ActionPhase.VERIFIED for action in record.actions)
+    binding = _qualification_binding(tmp_path)
+    assert binding.product_key == LOCAL_WAVEMAKER.product_key
+    assert binding.function == "manual_flow"
+    assert qualified_physical_identity_keys(
+        binding,
+        _receipt_root_for_test=tmp_path / "receipts",
+    ) == frozenset({target.physical_identity_key})
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        _bar_status(enabled=False),
+        _bar_status(timer_enabled=True),
+        _bar_status(linkage_code=1),
+        _bar_status(mode_code=0),
+        _bar_status(flow=91),
+    ),
+)
+@pytest.mark.asyncio
+async def test_bar_envelope_rejections_send_nothing(
+    tmp_path: Path,
+    status: bytes,
+) -> None:
+    target = _binding(product_key=LOCAL_WAVEMAKER.product_key)
+    epoch = _epoch(target=target, maximum=100)
+    endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
+    sent: list[bytes] = []
+    producer, journal, _lease = _producer(
+        tmp_path,
+        epoch_provider=lambda: epoch,
+        resolver=_Resolver(endpoint),
+        writer_factory=_WriterFactory([_Session([status], sent)]),
+    )
+
+    with pytest.raises(QualificationProductionError, match="first-write envelope"):
+        await producer.execute("qualification_bar_bad", downward_step=1)
+
+    assert sent == []
+    assert journal.load("qualification_bar_bad") is None
+    assert not tuple((tmp_path / "receipts").iterdir())
 
 
 @pytest.mark.asyncio
@@ -662,6 +821,61 @@ async def test_step_active_crash_requires_exact_recovery_without_receipts(tmp_pa
     assert recovered.physical_write_count == 1
     assert len(recovery_sent) == 1
     assert recovery_sent[0] == sent[0]
+    assert not tuple((tmp_path / "receipts").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_bar_step_crash_uses_the_same_exact_recovery_contract(tmp_path: Path) -> None:
+    target = _binding(product_key=LOCAL_WAVEMAKER.product_key)
+    epoch = _epoch(target=target, maximum=100)
+    endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
+    baseline = _bar_status(flow=40)
+    lower = _bar_status(flow=39)
+    sent: list[bytes] = []
+    resolver = _Resolver(endpoint, fail_at=3)
+    writer_factory = _WriterFactory(
+        [_Session([baseline, baseline], sent), _Session([baseline, lower], sent)]
+    )
+    producer, journal, lease = _producer(
+        tmp_path,
+        epoch_provider=lambda: epoch,
+        resolver=resolver,
+        writer_factory=writer_factory,
+    )
+
+    with pytest.raises(CurrentEndpointResolutionError):
+        await producer.execute("qualification_bar_crash", downward_step=1)
+
+    pending = journal.load("qualification_bar_crash")
+    assert pending is not None
+    assert pending.phase is TransactionPhase.RECOVERY_REQUIRED
+    assert tuple(action.phase for action in pending.actions) == (
+        ActionPhase.VERIFIED,
+        ActionPhase.VERIFIED,
+        ActionPhase.PREPARED,
+    )
+    assert len(sent) == 2
+    assert not tuple((tmp_path / "receipts").iterdir())
+
+    recovery_sent: list[bytes] = []
+    coordinator = LocalControlCoordinator(
+        catalog=build_local_control_catalog(),
+        resolver=_Resolver(endpoint),  # type: ignore[arg-type]
+        journal=journal,
+        lease=lease,  # type: ignore[arg-type]
+        writer_factory=_WriterFactory(
+            [
+                _Session([lower, baseline], recovery_sent),
+                _Session([baseline], recovery_sent),
+            ]
+        ),
+    )
+
+    recovered = await coordinator.recover("qualification_bar_crash")
+
+    assert recovered.phase is TransactionPhase.ROLLED_BACK
+    assert recovered.physical_write_count == 1
+    assert recovery_sent == [sent[0]]
     assert not tuple((tmp_path / "receipts").iterdir())
 
 

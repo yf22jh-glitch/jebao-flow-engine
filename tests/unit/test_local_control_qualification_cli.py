@@ -14,11 +14,16 @@ from jebao_flow.local_control.qualification_producer import (
     QualificationProductionError,
     _install_or_verify_private_file,
 )
+from jebao_flow.protocol.profiles import DC_PUMP_PRO, LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
 
-def _config(*, mode: str = "observer") -> AppConfig:
+def _config(
+    *,
+    mode: str = "observer",
+    product_key: str = LOCAL_WAVEMAKER_PRO.product_key,
+) -> AppConfig:
     return AppConfig.model_validate(
         {
             "instance": {"id": "test", "name": "Test"},
@@ -29,7 +34,7 @@ def _config(*, mode: str = "observer") -> AppConfig:
                     "id": "private_member",
                     "name": "Private Member",
                     "type": "wavemaker",
-                    "product_key": "50dbc92221fd4d33ae69a1fedd43b555",
+                    "product_key": product_key,
                     "discovery": "auto",
                     "identity": {
                         "device_id": "private-test-device",
@@ -79,6 +84,23 @@ def test_current_epoch_rederives_exact_config_manifest_and_content() -> None:
     assert len(epoch.config_sha256) == 64
     assert len(epoch.manifest_sha256) == 64
     assert "private_member" not in repr(source)
+
+
+def test_current_epoch_accepts_the_product_scoped_bar_profile() -> None:
+    source = _source(_config(product_key=LOCAL_WAVEMAKER.product_key))
+
+    epoch = source()
+
+    assert epoch.target.product_key == LOCAL_WAVEMAKER.product_key
+    assert epoch.min_power == 30
+    assert epoch.max_power == 75
+
+
+def test_current_epoch_rejects_an_unsupported_manual_flow_family() -> None:
+    source = _source(_config(product_key=DC_PUMP_PRO.product_key))
+
+    with pytest.raises(QualificationProductionError, match="family is unsupported"):
+        source()
 
 
 def test_current_epoch_rejects_control_mode_and_unbound_template() -> None:
