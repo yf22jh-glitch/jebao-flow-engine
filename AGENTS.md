@@ -2763,6 +2763,93 @@ receipt verifier를 그대로 사용합니다. out-of-envelope는 family 추가 
 유지합니다. 다음 live 계획은 사용자가 앱에서 승인한 저출력 constant baseline을 만든 뒤 Bar 한 대만
 same-value → 1%p 하향 → exact planned restore로 실행하며, 그 전까지 장비 write는 시작하지 않습니다.
 
+### 2026-09-13 local-control power qualification producer D1o
+
+D1n의 Bar family source는 commit `d687739`로 landing했고 기존 Pro 동작을 포함한 전체 offline suite가
+통과했습니다. repository maintainer의 “직접 조작해야 하는 것 외에는 모두 진행” 지시는 세 수류모터의
+`power` qualification 정책·source·offline 회귀·image build와 첫 live write 직전 preflight까지를
+승인합니다. 앱 조작과 장비 write는 포함하지 않으며, 실제 operation마다 on-site 감시와 즉시 전원 차단
+수단을 다시 확인합니다.
+
+이번 작업이 닫을 질문은 **기존 exact identity·global/device lease·journal-first·single-send·ACK와 fresh
+readback 계약을 완화하지 않고, ON인 한 수류모터를 same-value ON → OFF → planned ON으로 검증하면서
+어느 중간 실패에서도 agent recovery가 무인 ON을 보내지 않는 receipt pair를 만들 수 있는가**입니다.
+이는 firmware 결과를 fake로 정하는 작업이 아니라 existing coordinator recovery의 static trace와 durable
+fault injection으로 write·복구 순서의 코드 내부 계약을 닫는 작업입니다.
+
+단순히 기존 writer가 만든 same-value ON action을 첫 action으로 두면 안 됩니다. 그 action의 일반
+rollback과 baseline readback은 ON이므로, 뒤의 OFF가 `safe_state_retained`로 끝나도 coordinator가 reverse
+순회의 마지막 same-value action에서 ON frame을 다시 보낼 수 있습니다. 이는 실패 시 safer-OFF를 유지한다는
+power recovery 계약을 깨는 실제 §3 물리 위험입니다. power producer는 첫 send 전에 actual
+`ConnectedDeviceWriter.prepare_scalar(power=False)`가 만든 **실제 OFF payload**를 얻고, 합성 bytes를
+만들지 않은 채 다음 세 action을 하나의 operation record에 모두 durably 설치합니다.
+
+1. `same_on`: forward·expected readback은 ON, rollback payload·baseline readback은 OFF,
+   `restore_on_recovery=true`
+2. `power_off`: writer가 만든 원형을 그대로 보존해 forward·expected readback은 OFF, rollback payload·
+   baseline readback은 실제 시작 상태 ON, `restore_on_recovery=false`
+3. `planned_on`: forward·expected readback은 ON, rollback payload·baseline readback은 OFF,
+   `restore_on_recovery=true`
+
+따라서 `same_on.forward == power_off.rollback == planned_on.forward`이고
+`same_on.rollback == power_off.forward == planned_on.rollback`이어야 합니다. OFF action의
+`baseline_readback=ON`은 OFF frame이 아직 적용되지 않아 장비가 ON인 경우를
+`baseline_already_present`로 무전송 분류하는 데 필요하므로 OFF로 바꾸지 않습니다. 세 action의
+`baseline_status`는 operation 시작 때 실제로 읽은 동일한 full ON status blob을 보존합니다. 반면
+`same_on`·`planned_on`의 `baseline_readback=OFF`는 시작 상태 주장이 아니라 **보수적 recovery 수렴
+목표**입니다. 두 의미를 run record에서도 구분합니다.
+
+recovery는 세 action을 역순으로 처리하되 사용자 앱 조작 없이 TimerOFF·independent 상태가 유지되는
+동안 이미 OFF면 frame 0, ON이면 actual prepared OFF frame 최대 1회로 수렴하고 ON frame은 보내지
+않습니다. planned ON의 send와 readback이 성공한 뒤 transaction terminal save 전에 실패한 경우도
+final state를 OFF로 되돌립니다. 이는 보수적 선택의 의도된 결과이며,
+“복원 성공을 관측했으니 ON을 다시 유지한다”로 승격하지 않습니다. readback이 OFF와 ON 어느 쪽에도
+exact match하지 않거나 읽기 자체가 실패하면 frame을 보내지 않고 `RECOVERY_REQUIRED`로 남깁니다.
+어느 실패든 자동 재기동하지 않으므로 on-site approver가 앱 또는 물리 수단으로 ON을 복구해야 합니다.
+정상 실행만 세 exact write 뒤 journal을 `VERIFIED`로 terminalize하고 OFF와 planned ON action의 receipt
+두 장을 발급하며 최종 power ON을 요구합니다.
+
+live admission은 D1n에서 검증한 product-scoped current state를 재사용해 power ON·TimerOFF·
+`Mode=constant`·`Linkage=independent`, current Flow `<=45`, config와 app-declared Flow range 안을 모두
+요구합니다. 이는 제품 capability를 `45`로 줄이는 것이 아니라 OFF 뒤 ON 복원이 만드는 순간 유량 step과
+linkage 전파를 한 장비·저출력 attended operation으로 묶는 안전 조건입니다. 각 phase의 fresh state는
+power만 계획대로 ON/OFF/ON이고 Timer·mode·linkage·Flow는 시작값과 같아야 합니다. drift는 forward를
+이어가지 않고 recovery-required로 끝냅니다. OFF 체류 시간을 추측한 코드 타이머나 새 retry gate는
+추가하지 않습니다.
+
+source 범위는 새 `src/jebao_flow/local_control/power_qualification_producer.py`, 별도 explicit
+`src/jebao_flow/local_control_power_qualification_cli.py`, 두 전용 unit test, 가산적 import-boundary test,
+`docs/local-control.md`, console entry를 위한 `pyproject.toml`로 한정합니다. 기존 검증된
+`qualification_producer.py`와 `local_control_qualification_cli.py`의 manual-flow·recover 동작과 bytes는
+수정하지 않습니다. 새 producer는 기존 producer의 function-independent lease·resolution·journal transition
+machinery만 재사용하고 manual-flow execute·intent·finalization을 호출하지 않습니다. recovery는 새 경로를
+만들지 않고 기존 `jebao-flow-local-qualify recover`가 같은 generic journal record를 처리합니다. journal,
+lease, coordinator, device writer, catalog, receipt verifier/model, persistent path, group, frozen six와 직접
+테스트는 수정하지 않습니다. 새 module은 protocol-schema digest 입력이 아니므로 current receipt와 running
+generation을 무효화하지 않습니다.
+
+offline 회귀는 최소한 다음을 고정합니다. (1) 성공은 하나의 preinstalled 3-action journal, writer/session
+3개, physical write `ON/OFF/ON` 정확히 3회, revision `10`, OFF·planned-ON receipt 2장, terminal ON,
+(2) 첫 send 전에 위 두 payload equality·세 baseline-readback·`true/false/true` recovery policy와 모든
+blob이 durable, (3) OFF action의 actual ON baseline은 유지되고 same/planned ON만 actual prepared OFF로
+remap, (4) same ON·OFF·planned ON 각 send/ACK/readback/cancel fault와 planned ON 검증 뒤 terminal-save
+fault에서 receipt 0, forward retry 0, recovery ON write 0·stable-state OFF write 최대 1, (5) recovery fresh state가
+이미 OFF 또는 아직 ON이면 각각 exact terminal 분류하고 다른 값·read failure면 no-send nonterminal,
+(6) power OFF·TimerON·non-constant·non-independent·Flow `>45`·config/app range 밖, strict target·epoch·
+firmware mismatch 각각 첫 send와 journal과 receipt 0, (7) phase 사이 Timer·mode·linkage·Flow drift는 새
+forward 없이 OFF recovery, (8) receipt canonical bytes·distinct request·binding function `power`·artifact
+no-clobber와 terminal finalization의 network/write 0 멱등성, (9) manual-flow producer·CLI source와 기존
+assert byte 불변, frozen/import closure 불변, (10) 새 producer가 `LocalControlLease`에 같은
+`physical_identity_key` 하나를 넘기며 새 lock namespace를 만들지 않음입니다. test status는 production
+Pro·Bar schema bytes를 사용하고 firmware 결과를 새 fake knob로 만들지 않습니다.
+
+§3의 wrong-device는 strict manifest binding과 같은 physical lock key, out-of-envelope·다른 장비 전파는
+저출력 independent admission, duplicate는 action별 새 writer와 no-retry, journal loss는 첫 send 전 세
+recovery mapping 설치, real FAIL의 PASS 오판은 ACK·fresh exact full-state predicate와 terminal journal을
+모두 요구해 닫습니다. source landing 뒤에도 장비 write와 새 qualification surface는 0입니다. 이후 live는
+Bar `manual_flow`를 먼저 완료한 뒤 별도 승인된 한 장비·한 function power operation으로 순차 수행하며,
+세 장비를 동시에 OFF/ON하지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
