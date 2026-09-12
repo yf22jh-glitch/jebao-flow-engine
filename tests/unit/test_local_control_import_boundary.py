@@ -10,6 +10,9 @@ ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "jebao_flow" / "local_control"
 CLI = ROOT / "src" / "jebao_flow" / "local_control_cli.py"
 QUALIFICATION_CLI = ROOT / "src" / "jebao_flow" / "local_control_qualification_cli.py"
+POWER_QUALIFICATION_CLI = (
+    ROOT / "src" / "jebao_flow" / "local_control_power_qualification_cli.py"
+)
 RECOVERY_DRILL_CLI = ROOT / "src" / "jebao_flow" / "local_control_recovery_drill_cli.py"
 QUALIFICATION_SET_CLI = ROOT / "src" / "jebao_flow" / "local_control_qualification_set_cli.py"
 
@@ -44,6 +47,7 @@ def test_frozen_harness_is_absent_from_every_local_control_source() -> None:
         *PACKAGE.glob("*.py"),
         CLI,
         QUALIFICATION_CLI,
+        POWER_QUALIFICATION_CLI,
         RECOVERY_DRILL_CLI,
         QUALIFICATION_SET_CLI,
     ):
@@ -57,6 +61,7 @@ def test_write_protocol_imports_exist_only_at_the_device_writer_edge() -> None:
             *PACKAGE.glob("*.py"),
             CLI,
             QUALIFICATION_CLI,
+            POWER_QUALIFICATION_CLI,
             RECOVERY_DRILL_CLI,
             QUALIFICATION_SET_CLI,
         )
@@ -154,6 +159,8 @@ def test_write_runtime_and_cli_import_closure_still_excludes_the_frozen_harness(
         "jebao_flow.local_control_cli",
         "jebao_flow.local_control.qualification_producer",
         "jebao_flow.local_control_qualification_cli",
+        "jebao_flow.local_control.power_qualification_producer",
+        "jebao_flow.local_control_power_qualification_cli",
         "jebao_flow.local_control.recovery_drill",
         "jebao_flow.local_control_recovery_drill_cli",
     )
@@ -234,6 +241,20 @@ def test_qualification_producer_uses_only_the_current_write_edge() -> None:
     assert "observe_many" not in source
     assert "ConnectedDeviceWriter" in source
     assert "LocalControlJournalStore" in source
+
+
+def test_power_qualification_producer_reuses_only_the_current_write_edge() -> None:
+    producer = PACKAGE / "power_qualification_producer.py"
+    imports = _imports(producer)
+    source = producer.read_text(encoding="utf-8")
+
+    assert imports.isdisjoint(FROZEN_MODULES)
+    assert not any(name.startswith("jebao_flow.devices") for name in imports)
+    assert not any(name.startswith("jebao_flow.protocol") for name in imports)
+    assert "ConnectedDeviceWriter" in source
+    assert "_execute_prepared" not in source
+    assert "global_operation_lock_path" not in source
+    assert "physical_lock_directory" not in source
 
 
 def test_qualification_producer_schema_access_is_read_only_through_writer_edge() -> None:

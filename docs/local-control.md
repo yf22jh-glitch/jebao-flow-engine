@@ -359,6 +359,33 @@ gate, journal, coordinator, and writer remain unchanged. The later D1i lease cha
 the exact terminal parked tombstone described under recovery semantics; it does not alter this
 producer's write, recovery, or evidence contract.
 
+### Power qualification producer
+
+`jebao-flow-local-power-qualify` is a separate explicit tool for qualifying one current `power`
+binding. It creates one journal containing `same_on`, `power_off`, and `planned_on` before its first
+frame, then uses three fresh authenticated writer sessions to send exactly ON, OFF, ON. The
+same-value ON frame is transport-reachability evidence and deliberately is not skipped as a
+no-change action. Only OFF and planned ON create receipts; the existing manual-flow CLI remains the
+only recovery entry point and does not resume a qualification phase.
+
+The journal's recovery mapping is deliberately asymmetric and is reloaded from durable storage
+before the first send. The two ON actions use the actual writer-produced OFF payload and OFF scalar
+readback as their rollback target, while the OFF action retains its actual ON baseline and sets
+`restore_on_recovery=false`. Thus any nonterminal failure, including one after planned ON readback
+but before the transaction's terminal save, converges conservatively to OFF and never sends an ON
+frame during recovery. An already-OFF device needs no recovery frame; an ON device may receive at
+most one prepared OFF frame while TimerOFF and independent ownership remain stable. The operation's
+full baseline status still records the true initial ON state—the OFF scalar baseline on the two ON
+actions is a recovery target, not a claim about the initial device state.
+
+The live admission state is power ON, TimerOFF, `constant`, `independent`, and current Flow no
+greater than 45 and within both current config and app-declared bounds. This is an attended
+hydraulic-step condition, not a device capability or Home Assistant input limit. No dwell timer,
+automatic retry, alternate lock namespace, or alternate recovery command is added. A failed run
+may leave the pump OFF; the on-site approver must retain an app or physical means to restore it.
+The producer does not modify the protocol-schema-bound writer, the existing qualification
+producer, or either existing qualification/recovery behavior.
+
 ### Immutable qualification-set composition
 
 `jebao-flow-local-qualification-set` is an offline composer for receipts that a qualification
