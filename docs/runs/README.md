@@ -120,6 +120,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-13 power authority deployment](2026-09-13-local-power-authority-deployment.md) | binding 4 / receipt 12 / direct power 3 / group 1+3 / write 0 | 세 power candidate를 병합·배포해 예상 direct·group surface를 열고 실제 start 실패의 exact prior rollback과 다음 성공을 확인 |
 | [2026-09-13 Constant group commissioning](2026-09-13-local-group-constant-commissioning.md) | ON 1 / Flow write 3 / power NO_CHANGE 3 / revision 13 | 세 멤버 31→30·bounded dedup 확인, pending audit 오류를 분리하고 사용자 수용 상태·prior 서비스로 복귀 |
 | [2026-09-13 Sync group commissioning](2026-09-13-local-group-sync-commissioning.md) | ON 1 / targets 31→30→31 / Flow write 9 / power 0 | 두 전환·유한 hold 중복 억제·세 번째 terminal 뒤 정지 확인, 수용된 latent31과 prior 서비스 복귀 |
+| [2026-09-14 Anti Phase group commissioning](2026-09-14-local-group-antiphase-commissioning.md) | ON 1 / A→B→C→D→A / Flow write 8 / power 0 | 기존 phase0/180/90의 네 전환·유한 hold·다섯 번째 terminal 뒤 정지 및 선언 field·prior 서비스 복귀 확인 |
 
 ## 새 실행 기록 템플릿
 
