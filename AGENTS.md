@@ -2881,6 +2881,121 @@ recovery mapping 설치, real FAIL의 PASS 오판은 ACK·fresh exact full-state
 Bar `manual_flow`를 먼저 완료한 뒤 별도 승인된 한 장비·한 function power operation으로 순차 수행하며,
 세 장비를 동시에 OFF/ON하지 않습니다.
 
+### 2026-09-13 software-independent Constant minimum group commissioning D1p
+
+[`power authority deployment`](docs/runs/2026-09-13-local-power-authority-deployment.md)은 세 수류모터의
+`manual_flow`·`power` qualification을 하나의 current authority로 합쳐 direct control `6`, group switch
+`1`, member resume `3`을 startup device write 없이 열었습니다. repository maintainer와 on-site
+hardware approver는 현재 집에서 수조를 직접 감시하고 물리 전원 차단 수단을 쥔 상태로, 사람이 앱에서
+직접 해야 하는 조작을 제외한 M4 실기를 계속 진행하도록 승인했습니다. 이 승인은 아래 Constant minimum
+one-shot 한 건, 그 앞의 임시 `power=30` config-only 배포, 그 뒤의 exact prior `power=50` 복귀 배포와
+ordered recovery·exact restore에 한정하며 group OFF, Sync, Anti Phase, direct override, resume, 장애
+주입이나 다른 M4/M5 operation을 포함하지 않습니다. 두 배포는 각각 start·rollback 실패 가능성을 독립적으로
+가지므로 one-shot이라는 표현으로 그 위험을 생략하지 않습니다.
+
+이번 작업이 닫을 질문은 **current exact three-member binding과 dual-function qualification 아래에서,
+software-independent Constant minimum plan 하나가 모든 baseline을 첫 frame 전에 읽고 하나의 plan-wide
+journal을 만든 뒤 각 멤버의 `manual_flow`만 `31 -> 30`으로 정확히 한 번 바꾸고, same-value power ON은
+전송하지 않으며, 후속 fresh cycle에서 같은 physical plan을 중복 전송하지 않고 세 장비와 prior deployment를
+exact restore할 수 있는가**입니다. MQTT 문구나 group aggregate만으로 PASS를 만들지 않고 terminal journal,
+멤버별 exact scalar readback, fresh authenticated state와 전후 durable tree로 판정합니다.
+
+현재 private group default는 `pattern=constant`, `power=50`, `min_power=30`, `max_power=75`,
+`period_seconds=10`, `transition_seconds=0`이고 세 멤버의 gain은 모두 `1`입니다. `GroupRuntime` 모델의
+일반 기본 state는 `STOPPED`이지만 production `GroupManager.__init__`은 current `group.enabled=true`를 읽어
+runtime state를 명시적으로 `RUNNING`으로 초기화하고 pattern·power·range·period는 `None`으로 둡니다.
+따라서 첫 group ON은 현재 private default를 그대로 사용합니다. M4의 “최소 출력”을 추측으로 `50`에
+붙이지 않고, 장비 write 전에 private config의 group
+`default.power` 하나만 `50 -> 30`으로 바꾼 임시 immutable generation을 만듭니다. app-declared capability
+`30..100`, per-device trusted limit `30..100`, persistent group min/max `30..75`, failure policy와 나머지
+config·manifest·qualification·image bytes는 바꾸지 않습니다. 이는 capability나 HA input range를 줄이는
+새 gate가 아니라 이 attended operation의 exact target 선택입니다.
+
+config-only 준비는 owner-only no-clobber 새 input과 새 Compose generation으로 수행합니다. 같은 output
+경로에 다른 bytes를 덮지 않으며, 재시도에는 새 경로를 씁니다. prior exact config `power=50`, image,
+Compose와 private bundle generation 전체를 rollback·최종 restore용으로 보존합니다. offline projection에서
+binding `4`, receipt `12`, qualified pair `6`, ignored category별 `0`, discovery `90`, direct control `6`,
+group switch `1`, resume `3`, command topic `10`과 모든 discovery payload가 current와 byte 동일해야 합니다.
+배포는 persistent service stop-first 뒤 임시 generation 하나만 시작하고 journal·receipt tree byte 불변,
+unfinished `0`, retained command `0`, fresh `6/6`, group supervisor `1`, armed `false`, cycle failure `0`,
+startup local-control device write `0`을 확인한 뒤에만 앱 precondition으로 갑니다. startup write `0`은
+journal-first인 direct·group 경로에 한해 journal tree 불변으로 판정합니다.
+
+앱 조작 전에는 세 멤버 각각의 current decoded state를 같은 field 집합으로 보존한 뒤 persistent service를
+먼저 완전히 stop-first합니다. 현재 알려진 운전
+baseline은 첫 Pro `ON / TimerOFF / constant / independent / Flow 40`, 두 번째 Pro
+`ON / TimerON / constant / independent / latent manual Flow 40`과 active schedule, Bar
+`ON / TimerOFF / classic / independent / Flow 91 / Frequency 80 / PulseTide false`입니다. 실제 fresh
+read가 이 값과 다르면 기록되지 않은 drift로 중단하고 새 baseline을 추측하지 않습니다. 두 번째 Pro의
+TimerON 상태에서 manual Flow readback만 바꾸면 active schedule 출력은 그대로여도 PASS처럼 보일 수 있으므로
+TimerOFF는 실기 의미를 지키는 필수 precondition입니다.
+
+service가 정지한 상태에서 on-site approver가 앱으로 세 장비를 각각 `power ON`, `TimerOFF`, `Mode=constant`,
+`Linkage=independent`, `Flow=31`로 만듭니다. Bar의 `classic/91 -> constant/31`은 60%p 하향과 파형
+변경이고, 두 Pro의 `40 -> 31`도 9%p 하향입니다. agent가 이 앱 조작의 step이나 frame 수를 정하지
+않으며 approver가 수조 상태를 보며 나눠 적용할 수 있습니다. 이때 HA group/direct control을 건드리지
+않고, 앱 precondition 뒤 separate fresh authenticated read로 세 exact anchor가 모두 위 다섯 조건과
+Flow `31`을 만족하는지 확인합니다. 한 멤버라도 다르거나 identity가 exact one-to-one으로 풀리지 않으면
+device command·journal 생성 전에 중단합니다.
+
+첫 command 직전에는 current journal·receipt inventory와 unfinished `0`, legacy exact-restore idle,
+qualified pair `6`, global `/hardware-safety` lease·latch availability, 단일 group supervisor와 shared
+direct/group operation-lock identity를 다시 확인합니다. service를 다시 시작하면 armed `false`여야 하고,
+service의 fresh read로도 세 precondition이 그대로인지 재확인한 뒤 subscribe-only MQTT observer를
+result·group status·availability에 먼저 붙입니다. command는 retained가 아닌 group ON boolean 한 번뿐이고
+group OFF를 먼저 보내거나 recovery·retry 대신 사용하지 않습니다.
+
+`apply_group_switch(true)`는 production 초기화로 이미 `RUNNING`인 fresh runtime의 ON ownership을
+명시적으로 arm하고 default Constant `30` plan과 이후 observation-driven submission을 활성화합니다. 세
+멤버 모두 gain `1`, online, manual override `0`이어야 하므로 plan은
+각 멤버에 `manual_flow=30` 뒤 `power=true` 순서의 exact two-intent target 하나씩, 총 여섯 action을
+만들어야 합니다. 세 `manual_flow` action은 baseline `31`과 달라 각각 physical frame 한 번과 exact
+readback을 요구하고, 세 `power=true` action은 baseline ON과 같아 `NO_CHANGE`로 journal만 한 번 저장하며
+frame을 보내지 않습니다. 따라서 사전 예상은 dispatch member `3`, action `6`, Flow physical write
+정확히 `3`, power physical write `0`, 전체 write `3`, `NO_CHANGE` `3`, receipt mutation `0`, terminal
+`VERIFIED revision 13`입니다. revision은 changed action `3 x 3 save`, no-change action `3 x 1 save`,
+transaction terminal save `1`에서 유도합니다. 실제 action 순서·frame 수·revision이 다르면 사후 설명을
+만들지 않고 FAIL로 조사합니다.
+
+첫 frame 전에는 resolver가 세 complete stable binding을 exact one-to-one으로 다시 풀고 모든 function
+qualification을 검증하며, deployment-wide global lease와 세 distinct physical lease를 한 번에 잡고, 세
+장비 baseline을 모두 fresh read한 뒤에만 one request journal을 durably 생성해야 합니다. result는 MQTT
+subscribe-only observation으로 받고 terminal record와 referenced blobs를 private store에서 재독합니다.
+성공 뒤에는 세 장비가 `ON / TimerOFF / constant / independent / Flow 30`인지 별도 fresh read로 확인하고,
+최소 세 번의 완전한 후속 fresh group cycle 동안 journal operation 수를 연속 관측해 같은 plan identity가
+deduplicate되고 operation·physical write가 늘지 않는지 확인합니다. initial terminal operation 뒤 새
+operation이나 physical write가 하나라도 늘면 즉시 persistent service를 stop-first하고 group OFF는 보내지
+않습니다. aggregate group output은 보조 관측일 뿐 멤버별 exact readback을 대신하지 않습니다.
+
+어느 command failure든 group ON을 새 request로 retry하거나 group OFF를 보내지 않습니다. 먼저 실제 세
+장비의 power·Flow를 fresh read하고 persistent service를 정지합니다. non-terminal journal이 있으면 오직
+`jebao-flow-local-qualify recover`의 existing generic recovery로 같은 request를 처리합니다;
+`jebao-flow-local recover`는 random install generation을 새로 만들 수 있어 금지합니다. reverse recovery는
+실제로 시도된 `manual_flow=30` changed action만 각 action의 보존 baseline `31`로 되돌리고 power action은
+frame을 보내지 않아야 합니다. recovery frame 수는 `VERIFIED`와 `UNCERTAIN`을 합친 attempted changed
+action 수 이하, 최대 `3`이고 terminal
+`ROLLED_BACK` 뒤에도 actual state를 fresh read하기 전에는 복구 완료를 주장하지 않습니다. verified
+transaction 뒤의 postcheck mismatch는 recovery로 승격하지 않고 on-site app restore로 처리합니다.
+
+성공·실패 어느 쪽이든 group runtime을 armed 상태로 남기지 않습니다. terminal·idle을 확인한 뒤 service를
+먼저 정지하고 on-site approver가 앱에서 각 장비를 위에 보존한 개별 baseline으로 되돌립니다. 특히 첫
+Pro는 `constant/40/TimerOFF`, 두 번째 Pro는 latent manual `40`을 복원한 뒤 `TimerON` 및 그 시점 active
+slot과 일치하는 `AutoMode`/`AutoFlow`로 schedule ownership,
+Bar는 `classic/91/Frequency 80/PulseTide false/TimerOFF`를 같은 field 집합으로 확인합니다. 그 뒤 임시
+`power=30` deployment를 폐기하지 않고 기록용 input으로 보존하되, 실행 전 보존한 exact prior
+`power=50` config·image·Compose·bundle generation으로 service를 복귀시킵니다. final service는 armed
+`false`, discovery·control byte exact, retained command `0`, fresh `6/6`, individual baselines exact,
+unfinished `0`이어야 합니다. journal에는 이번 terminal operation을 보존하고 qualification receipt tree는
+byte 불변이어야 합니다.
+
+이 slice는 frozen six·source·test·catalog·writer·coordinator·journal·qualification·HA schema를 수정하지
+않고 새 CLI·gate·retry·timer를 만들지 않습니다. private config-only 임시 generation, existing MQTT group
+command, existing generic recovery와 read-only audits만 사용합니다. 실제 실행 1회는 append-only
+`docs/runs/` record와 README index를 먼저 commit하고, 그 전에는 `src/`를 수정하거나 Sync·Anti Phase·
+group OFF·direct override·resume 실기로 넘어가지 않습니다. raw private identifiers·paths·broker secret은
+출력·문서·commit에 싣지 않고 public aggregate, domain-separated identity binding과 artifact digest만
+기록합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
