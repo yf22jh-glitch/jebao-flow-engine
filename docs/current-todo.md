@@ -72,6 +72,10 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   OFF 상태 비전원 필드 유지를 보존; 근거:
   [`first Pro power qualification`](runs/2026-09-13-local-power-qualification-first-pro.md), run
   commit `21370b6`
+- [x] 사용자 수행 HA Core process restart 뒤 discovery `86/86` byte exact·manual-flow control `3`·
+  availability `7/7 online`·removed Bar diagnostic 미재등장과 journal·receipt tree 불변을 확인해
+  restart 창의 local-control device write `0`을 판정; 근거:
+  [`Home Assistant Core restart`](runs/2026-09-13-home-assistant-core-restart.md), run commit `022690d`
 - [ ] 두 번째 Pro `power` 앱 precondition 직전 경계: write-free fresh read는
   `ON`·TimerON·`constant`·`independent`·Flow `40`과 exact target `1`을 확인했습니다. 사용자가 앱에서
   TimerOFF로 바꾸고, 실기 뒤 TimerON schedule ownership을 복원하기 전에는 physical write를 시작하지
@@ -275,7 +279,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 - [x] reviewed persistent control service 1개 실행 중, 최종 generation restart 0
 - [x] 장비 6/6 관측 상태 유지
-- [x] HA 업데이트·재부팅 0
+- [x] 사용자 수행 HA Core process restart 뒤 exact deployment surface 복귀·local-control device write `0`
+  확인; agent의 HA 업데이트·재기동·설정 변경은 `0`
 - [x] 세 수류모터 `manual_flow` qualification 완료: 두 Pro는 각 `40 -> 39 -> 40`, Bar는
   `45 -> 44 -> 45`; current authority binding `2`·receipt `6`·qualified pair `3`
 - [x] MQTT 실기 `40 -> 39 -> 40` 완료, 각 command exact readback·terminal journal 확인
@@ -291,8 +296,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   direct control `3`, group command `0`, retained command `0`, journal·receipt tree byte 불변
 - [x] read-only `power` preflight: 첫 Pro는 `ON`·TimerOFF·`constant`·`independent`·Flow `40`으로 admission
   준비 완료; 두 번째 Pro는 TimerON, Bar는 `classic`·Flow `91`이라 각각 이후 사용자 앱 precondition 필요
-- [ ] M3의 다음 작업은 첫 번째 Pro `power` qualification이며, 앱 조작 없이 첫 physical write 전 현장
-  감시·즉시 전원 차단/앱 복원과 safer-OFF 실패 결과를 사용자에게 확인하는 경계에서 멈춤
+- [ ] M3의 다음 작업은 두 번째 Pro `power` qualification이며, 사용자가 앱에서 TimerON→OFF로
+  ownership을 넘기고 fresh admission을 확인한 뒤에만 physical write를 시작; 실기 뒤 TimerON 복원 필요
 
 ## M0~M1 작업 이력 (완료)
 
@@ -383,11 +388,11 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 사용자 조작 필요 여부
 
-- 현재: **첫 번째 Pro에는 앱 조작이 필요하지 않습니다.** read-only preflight에서 power ON·TimerOFF·
-  `constant`·`independent`·Flow `40`을 확인했습니다. 다만 `power` qualification은 ON→OFF→ON physical
-  write `3`이고 planned ON readback 뒤를 포함한 어떤 nonterminal failure에서도 펌프가 OFF로 남을 수
-  있으므로, 현장 감시와 즉시 전원 차단/앱 복원 가능 여부를 다시 확인한 뒤에만 시작합니다.
-- 이후 두 번째 Pro는 TimerON→OFF, Bar는 `classic`·Flow `91`→`constant`·Flow `45` 이하의 사용자 앱
+- 현재: **두 번째 Pro는 TimerON→OFF 사용자 앱 precondition이 필요합니다.** 직전 read-only preflight는
+  power ON·TimerON·`constant`·`independent`·Flow `40`을 확인했습니다. `power` qualification은
+  ON→OFF→ON physical write `3`이고 어떤 nonterminal failure에서도 펌프가 OFF로 남을 수 있으므로,
+  현장 감시와 즉시 전원 차단/앱 복원 수단을 유지한 채 실행하고 실기 뒤 TimerON을 복원합니다.
+- 이후 Bar는 `classic`·Flow `91`→`constant`·Flow `45` 이하의 사용자 앱
   precondition이 별도로 필요합니다. Bar의 `91 -> 45`는 46p 하강이므로 한 번에 바꾸라고 가정하지 않고
   현장 수조 상태에 맞춘 단계적 하향 여부와 사후 `classic`·Flow `91` 복원 결정을 다시 확인합니다.
 - 상시 HA `number` 엔티티 추가 노출 자체와 Jebao 실기·필요 상태 변경의 에이전트 실행은 사용자 승인 완료.
@@ -395,9 +400,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - 현재 attended 실기 가이드: agent 목적값은 Flow `<=50`로 계획하고 갑작스러운 step·여러 펌프 동시
   변화를 피함. 이는 capability·영구 상한·사람의 HA 입력 제한이 아니며, direct HA/MQTT는 제품 범위
   `30..100`을 공개·수용
-- HA Core 재기동: 사용자가 추후 직접 수행 예정이며 agent는 업데이트·재기동·설정 변경을 실행하지 않음.
-  D1l 두-Pro 배포 postcheck는 완료됐으므로 재기동 가능하나, 직전에 알리면 retained command·journal
-  baseline을 잡고 재기동 후 unexpected Jebao write `0`을 read-only로 확인
+- HA Core process restart는 사용자가 직접 수행했고 exact discovery·registry·availability 복귀와
+  journal·receipt tree 불변을 read-only로 확인했습니다. agent의 HA 업데이트·재기동·설정 변경은 `0`입니다.
 
 ## 진행 로그
 
