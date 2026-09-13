@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-13 19:09 KST
+마지막 갱신: 2026-09-14 00:22 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -100,8 +100,11 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   Flow frame9·power frame0, 유한 hold 중복 억제와 세 번째 terminal 뒤 stop 확인;
   근거: [`Sync group commissioning`](runs/2026-09-13-local-group-sync-commissioning.md), `41487db`.
   prior Constant50 서비스 복귀와 두 번째 Pro latent31 유지 수용 완료. 물리적 완전 동시성은 미확정.
-- [ ] 다음은 M4 Anti Phase의 별도 계획·승인 경계. current baseline은 다시 읽으며 두 번째 Pro의
-  다음 manual baseline은 수용된 `31`이다. Sync 종료 이후 추가 physical operation은 미실행.
+- [x] M4 Anti Phase bounded epoch: 기존 phase0/180/90의 A→B→C→D→A, Flow8/power0,
+  유한 hold 세 쌍과 선언 decoded field·prior Constant50 복귀 확인;
+  근거: [`Anti Phase commissioning`](runs/2026-09-14-local-group-antiphase-commissioning.md), `d115250`.
+- [ ] 다음은 M4 direct override·resume의 별도 bounded 계획. 현재 두 번째 Pro manual baseline31·
+  TimerON을 유지하며, 실기 전 current state와 앱 선행 조작 필요성을 다시 확인한다.
 
 ## 완성까지 전체 로드맵
 
@@ -251,7 +254,9 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] Sync 저출력 bounded epoch: gain1·limit30..31에서 세 멤버 동일 목표의 두 전환과
   유한 hold duplicate suppression 확인; 물리적 완전 동시성·다른 gain/limit·무기한 동작은 미확정.
   [`run record`](runs/2026-09-13-local-group-sync-commissioning.md)
-- [ ] Anti Phase 저출력 bounded epoch: phase 분리와 전체 exact restore 확인
+- [x] Anti Phase 저출력 bounded epoch: 기존 phase0/180/90의 서로 다른 target 네 전환 및
+  선언 decoded field 집합 복원 확인. 물리적 정확한 위상차·raw 전체 exact restore는 미확정;
+  [`run record`](runs/2026-09-14-local-group-antiphase-commissioning.md), `d115250`.
 - [ ] `minimum_command_interval_ms`가 3대 cycle의 실제 device command 빈도를 제한하는지 확인
 - [ ] direct member override 후 다음 group cycle이 해당 멤버를 덮지 않는지 확인
 - [ ] Resume-to-group 후 해당 멤버만 group ownership으로 복귀하는지 확인
@@ -326,9 +331,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   discovery `86/86` byte exact, Bar number `1`, fresh `6/6`, startup write `0`
 - [x] Pro 동작을 보존하는 Bar family precondition source·offline 검토·landing `d687739` 완료
 - [x] safer-OFF power qualification source·CLI·fault 회귀 landing과 exact one-shot image 준비 완료
-- [x] current post-Sync restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
+- [x] current post-Anti-Phase restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
   direct control `6`, group switch `1`·resume `3`, retained command `0`, group armed `0`,
-  journal operations `17`·blobs `55`·files `72`, receipt root files `18`; group terminal 이후 복귀 전후
+  journal operations `22`·blobs `64`·files `86`, receipt root files `18`; group terminal 이후 복귀 전후
   tree byte 불변. group default `50` 복귀는 실제 장비 Flow `50` 변경을 뜻하지 않음.
 - [x] current accepted state: firstPro `ON/TimerOFF/constant/independent/40`, secondPro
   `ON/TimerON/constant/independent/latent31`, Bar `ON/TimerOFF/classic/independent/91`;
@@ -345,8 +350,10 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   초기 MQTT result는 timeout snapshot이며 terminal 판정의 대체물이 아님.
 - [x] M4 Sync 목표 `31→30→31`의 bounded 실기 및 prior Constant50 복귀 완료, final armed `false`;
   run [`Sync group commissioning`](runs/2026-09-13-local-group-sync-commissioning.md).
-- [ ] 다음은 M4 Anti Phase의 별도 bounded 계획. Anti Phase·group OFF·direct override·resume actuation은
-  여전히 미실행이며 M4 전체 완료로 선언하지 않음. 현재 승인된 Sync operation은 종결.
+- [x] M4 Anti Phase A→B→C→D→A bounded 실기 및 prior Constant50 복귀 완료, final armed `false`;
+  run [`Anti Phase commissioning`](runs/2026-09-14-local-group-antiphase-commissioning.md), `d115250`.
+- [ ] 다음은 M4 direct override·resume의 별도 bounded 계획. group OFF·direct override·resume actuation은
+  여전히 미실행이며 M4 전체 완료로 선언하지 않음. 승인된 Anti Phase operation은 종결.
 
 ## M0~M1 작업 이력 (완료)
 
