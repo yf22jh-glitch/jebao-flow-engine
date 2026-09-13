@@ -2996,6 +2996,108 @@ group OFF·direct override·resume 실기로 넘어가지 않습니다. raw priv
 출력·문서·commit에 싣지 않고 public aggregate, domain-separated identity binding과 artifact digest만
 기록합니다.
 
+### D1r — software-independent Sync 30/31 bounded epoch
+
+2026-09-13 D1q Constant 실기와 사용자 수용 상태 복귀를
+`docs/runs/2026-09-13-local-group-constant-commissioning.md`로 commit한 뒤 사용자는 다음 작업의
+진행을 지시했습니다. 다음은 native Linkage Sync가 아닌 software-independent Sync의 계획·준비와
+현장 precondition 뒤 bounded epoch 한 건입니다. 앞선 현장 감시·중단 수단 경계는 유지하고, 앱 조작은
+사용자가 수행합니다. 이 정책만으로 아직 맞추지 않은 장비 상태를 충족했다고 간주하지 않습니다.
+Anti Phase·group OFF·override·resume·장애 주입이나 native frozen 하네스는 이번 범위 밖입니다.
+
+닫을 질문은 **세 manual-owned 멤버에 같은 30/31 목표를 주는 Sync square-wave가 두 번의 방향 전환을
+실제로 적용하고, 같은 목표의 후속 fresh cycle에서는 중복 operation을 만들지 않으며, 세 번째 terminal
+plan 뒤 service 정지로 끝나는가**입니다. SyncPattern은 runtime.power/effective_power가 아니라
+effective_limits의 max/min을 반주기마다 고릅니다. 따라서 default.power만 30으로 바꾸는 것은 출력
+제한이 아니며 prior max75를 남기면 75가 선택됩니다. 임시 immutable config는 default.pattern=sync,
+default.power=30, default.min_power=30, default.max_power=31, default.period_seconds=120,
+transition_seconds=0, 세 member gain=1로 명시합니다. 나머지 authority·identity·source·schema·receipt와
+app capability 30..100은 바꾸지 않습니다. min/max30/31은 이 operation의 두 목표값 선택이지 영구
+capability 축소나 새 runtime gate가 아닙니다. 60초 반주기는 시험 파형이며 power-OFF 체류 timer가 아닙니다.
+
+GroupManager는 생성 시 monotonic epoch를 시작하고 이미 RUNNING인 group의 ON은 그 epoch를 reset하지
+않습니다. public MQTT lifecycle에는 epoch.started_at이나 내부 dispatch dedupe counter가 없으므로
+외부 observer가 그것을 읽었다고 주장하지 않습니다. 최초 ON의 command-result에만 있는 submitted
+identity는 보조 관측으로 보존하되 verdict로 쓰지 않고 후속 lifecycle에도 있다고 가정하지 않습니다.
+처음 선택되는 값은 30 또는31의 두 분기로 사전
+등록하고, 첫 terminal에서 실제 값을 확인한 뒤 다음 두 terminal 목표가 보수값으로 교대해야 한다고
+판정합니다. 두 Pro·Bar의 물리 적용은 직렬 장비 트랜잭션이므로 동일 plan timestamp·같은 목표와 실제
+수류의 완전 동시성은 구분합니다. 이 실기는 정밀한 물리 위상 동기나 정각 60초 적용 지연까지 입증하지
+않으며 그런 부분은 UNKNOWN으로 둡니다.
+
+준비는 D1q에서 복귀한 exact prior Constant50 image·Compose·input generation 전체와 current 상태를
+보존하는 것으로 시작합니다. 임시 Sync 배포와 prior Constant50 복귀 배포를 각각 수행하며 실패 자료는
+원 stderr·stage log·Compose 상태까지 보존합니다. source secret은 production처럼 owner-only 0700
+parent 안의 0444 파일이고 backup/runtime private file의 0600과 혼동하지 않습니다. 파일 owner·mode·
+link count와 fsync, exact bytes·host bind source 존재를 확인하고 preserved image만 사용하며 rebuild하지
+않습니다. 잘못된 output을 덮지 않고 새 artifact로 정정합니다. offline projection에서 기존 binding4·
+receipt12·qualified pair6·ignored0, discovery90 exact·tombstone53·command10·direct6·group1/resume3가
+byte 불변이어야 합니다. 임시 기동 뒤 readiness·fresh6·unarmed·journal/receipt 불변을 확인합니다.
+
+앱 조작 전에는 서비스부터 정지합니다. fresh baseline은 첫 Pro ON/TimerOFF/constant/independent/
+Flow40/Frequency34, 두 번째 Pro ON/TimerON/constant/independent/latentFlow30/Frequency32 및 그 시점
+active schedule, Bar ON/TimerOFF/classic/independent/Flow91/Frequency80/PulseTidefalse입니다.
+실제 관측이 다르면 새 baseline을 추측하지 않고 사용자와 정리합니다. 사용자가 세 장비를 ON·TimerOFF·
+constant·independent·Flow30으로 맞춥니다. Bar는 91→30의 61%p 하향과 파형 변경, 첫 Pro는40→30,
+두 번째 Pro는 manual30 유지와 schedule 소유권 해제입니다. 두 번째 Pro의 레지스터가 그대로여도
+TimerOFF는 그 시점 schedule 출력에서30으로 실제 운전을 바꿉니다. active slot을 조작 직전에 읽어
+변화 폭을 공개하며 앞선 sine45를 현재값으로 고정하지 않습니다. 앱 조작의 step·frame 수는 agent가
+정하지 않고 사용자가 수조를 보며 적용합니다. latent30이 있다는 이유로 TimerOFF 확인을 생략하지
+않습니다. 이 상태에서 separate authenticated fresh read, 서비스 재시작 후 readiness·unarmed·fresh
+field 재확인을 마친 뒤에만 ON을 한 번 발행합니다. 그동안 HA direct/group control이나 앱을 병행 조작하지
+않도록 안내합니다. first write의 global+physical lease·latch·exact resolver와 journal-first는 기존
+coordinator가 담당하며 감사 프로세스가 out-of-band LOCK_EX를 취득하지 않습니다.
+
+관측자는 current canonical inventory를 pre anchor로 고정하고 결과·group lifecycle·device state를
+subscribe-only로 먼저 받습니다. 이전 실행의 수치 14 operations/48 blobs/62 files 및 receipt18은
+예상 기준이며 실행 직전 exact bytes를 다시 확인합니다. group ON은 QoS0·retainfalse 한 번뿐입니다.
+초기 MQTT completion_pending을 실패나 성공 verdict로 사용하지 않습니다.
+
+사전 등록할 정상 분기는 다음 두 가지입니다. 각 record의 action 순서는 manual_flow/power ×3입니다.
+
+- 최초 목표30: 첫 record는 여섯 action 모두 NO_CHANGE, revision7, frame0. 이후31·30의 두
+  record는 각각 Flow VERIFIED3·power NO_CHANGE3, revision13, Flow frame3입니다.
+  합계 record3·Flow frame6·power frame0입니다.
+- 최초 목표31: 31·30·31의 세 record 모두 Flow VERIFIED3·power NO_CHANGE3, revision13,
+  각 Flow frame3입니다. 합계 record3·Flow frame9·power frame0입니다.
+
+모든 record는 세 exact anchor를 각각 두 action에 결속하며 expected Flow는 각 record 내 모두 같은
+30 또는31, baseline Flow는 첫 record의30 또는 직전 verified record 목표여야 합니다. power의 baseline과
+expected는 모두 ON이고 power frame은 없습니다. terminal action·revision·readback 또는 교대 순서가
+두 사전 분기와 다르면 사후 설명으로 통과시키지 않습니다. 같은 목표가 반복되는 hold의 lifecycle cycle과
+journal bytes를 함께 보존해 중복 억제를 확인합니다. 내부 dedupe counter 대신 어느 fresh cycle 사이에서
+새 operation이 없었는지 기록하며, 관측이 부족하면 그 항목은 미확정으로 남기고 실행을 연장하지 않습니다.
+새 blob 개수는 이전 content-addressed 내용과 비교해 종류별 신규/재사용을 설명하며 generic coordinator의
+intent digest에 보존 preimage가 있다고 가정하지 않습니다.
+
+D1q의 '새 operation 하나면 정지' guard는 이번에 재사용하지 않습니다. Sync는 정상 반주기 전환에도
+새 record와 Flow3 frame이 필요합니다. 새 record는 최대3개이고 세 번째 VERIFIED가 확인되면 즉시
+persistent service를 stop-first합니다. 4번째 record, 예상 밖 target·action·nonterminal failure,
+기존 record 또는 이미 terminal인 record 변경, lifecycle failure·감시 프로세스 오류가 생겨도 즉시
+stop-first합니다. publish 후180초는 전체 관측의 상한이며, 두 전환을 못 봤다고 시간을 연장하거나
+ON을 다시 보내지 않습니다. 이 감시 상한은 관측 기반 중단 규칙이지 네 번째 frame의 전송을 물리적으로
+불가능하게 만드는 새 gate라고 주장하지 않습니다. 정상 중단 목표는 ON 및 Flow30 또는31이고, 이를
+살아 있는 수조에 무조건 무해하다고 일반화하지 않습니다.
+
+service 종료는 새 OFF를 합성하지 않지만 이미 실행 중인 일반 plan이 마무리될 수 있습니다. 정지 완료
+후 actual state와 durable record를 재독하며 stopped 명령 성공만으로 장비 상태를 단정하지 않습니다.
+unfinished가 있으면 기존 config-only `jebao-flow-local-qualify recover`로 해당 operation만 처리하며
+`jebao-flow-local recover`·새 ON·group OFF·forward retry는 금지합니다. reverse recovery는 마지막
+nonterminal record에서 시도된 changed Flow action(VERIFIED/UNCERTAIN 포함, 최대3)을 그 record의
+실제 baseline30 또는31로 되돌립니다. 이전 VERIFIED record를 recovery 대상으로 삼거나 전체 epoch의
+앱 baseline을 자동 복구한다고 주장하지 않습니다. receipt mutation은0입니다.
+
+정지 후 사용자가 firstPro40/TimerOFF, secondPro latent30/TimerON, Bar classic91/TimerOFF로 돌리고
+Frequency34/32/80·Bar PulseTidefalse 및 secondPro의 그 시점 active-slot AutoMode/AutoFlow를 확인합니다.
+사용자가 다른 최종 상태를 수용하면 원래값 exact 복원과 분리 기록합니다. prior Constant50 image·Compose·
+bundle로 복귀한 뒤 unarmed·fresh6·discovery90 exact·retainedcommand0·unfinished0·최종 journal 보존과
+receipt 불변을 확인합니다. 앱 altered-regime 및 서비스 부재의 시각·관측 한계를 따로 남기고 짧은 command
+span으로 전체 물리 비용을 축소하지 않습니다.
+
+이 slice는 src/tests·frozen six·writer·coordinator·catalog·journal·qualification·HA schema를 수정하지
+않고 새 CLI·retry·gate를 만들지 않습니다. 결과는 새 append-only run과 README에 먼저 commit하며,
+그 전에 다른 M4/M5 실기나 source 변경으로 넘어가지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
