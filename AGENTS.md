@@ -3098,6 +3098,98 @@ span으로 전체 물리 비용을 축소하지 않습니다.
 않고 새 CLI·retry·gate를 만들지 않습니다. 결과는 새 append-only run과 README에 먼저 commit하며,
 그 전에 다른 M4/M5 실기나 source 변경으로 넘어가지 않습니다.
 
+### D1s — software-independent Anti Phase 30/31 bounded epoch
+
+사용자는 D1r Sync 기록 `41487db`와 prior Constant50 복귀 뒤 다음 Anti Phase 준비·진행을
+지시했습니다. 이번 범위는 native Linkage가 아닌 기존 software-independent AntiPhasePattern의
+단회 bounded commissioning입니다. 기존 현장 감시·중단 수단과 사용자 앱 조작 경계를 유지합니다.
+임시 immutable generation 배포, 앱 precondition, MQTT ON 한 번, 목표 벡터 네 번 전환 관측,
+service stop, 앱 복원과 exact prior Constant50 복귀가 범위이며 다른 physical operation은 하지 않습니다.
+
+닫을 질문은 **기존 member phase0/180/90의 서로 다른 목표가 네 번 전환해 처음 벡터로 돌아오고,
+같은 목표의 후속 cycle에서는 새 operation을 만들지 않는가**입니다. current config의 세 phase는
+secondPro0·firstPro180·Bar90이며 gain1·invertfalse·enabledtrue입니다. 이름이나 모델 기본값으로
+유추하지 않고 manifest의 exact physical anchor로 역해석한 값입니다. phase·gain·invert·role은
+바꾸지 않습니다. 임시 delta는 default.pattern=anti_phase, max_power=31, period_seconds=120의
+세 항목뿐입니다. min30·power50·transition0과 나머지 config는 그대로입니다. AntiPhasePattern은
+member.phase와 min/max를 사용하고 default.power·member.invert는 읽지 않습니다. power50 유지가
+목표50을 뜻하지 않으며 이번 목표는30/31입니다. app capability·device limits·qualification·HA
+surface를 좁히는 새 gate가 아니라 이 operation의 파형 선택입니다.
+
+멤버 순서를 (secondPro, firstPro, Bar)로 고정한 계산기 목표 벡터는 다음과 같습니다.
+
+| epoch 내 구간 | 벡터 | 다음 경계에서 바뀌는 멤버 수 |
+|---|---|---:|
+| A: 0..30초 | (31,30,30) | 1 |
+| B: 30..60초 | (31,30,31) | 2 |
+| C: 60..90초 | (30,31,31) | 1 |
+| D: 90..120초 | (30,31,30) | 2 |
+
+구간은 시작 포함·끝 제외이고 A→B→C→D→A의 순환입니다. 최초 위상은 네 분기로 사전 등록하고
+첫 terminal의 actual vector 이후에는 이 순서만 허용합니다. 서비스 시작 wall-clock을 manager의
+monotonic epoch로 동일시하지 않습니다. 설정상 두 Pro가 반대 목표이고 Bar가90도 지연되지만 실제
+장비 처리는 직렬이므로 정확한 물리 동시성·위상차·정각30초 적용이나 실측 수류량을 주장하지 않습니다.
+직전 실기의 약13초 처리 시간은 이번 처리 상한이 아닙니다. 경계와 처리 시점이 겹쳐 다음 record가
+곧이어 생길 수 있으므로 record 간30초 간격을 gate로 삼지 않으며, 전환 누락은 성공으로 꾸미지 않습니다.
+서로 다른 멤버 목표를 주는 실기이며 1%p 범위를 살아 있는 수조에 무조건 무해하다고 일반화하지 않습니다.
+
+준비 시 exact prior image·Compose·전체 input generation과 canonical journal/receipt inventory를
+보존합니다. 예상 pre는17 operations/55 blobs/72 files와 receipt18이나 직접 재확인하며, 전후 root·
+relative POSIX path·정렬·canonical ASCII JSON 방식은 D1r과 같습니다. source0444/parent0700·owner·
+link count1을 production 생성 경로로 유지하고 backup0600과 혼동하지 않습니다. 새 output은 no-clobber,
+Compose 교체는 production 함수를 사용하고 재빌드하지 않습니다. offline projection의 binding4·
+authority receipt12·pair6·ignored0, discovery90 exact·tombstone53·command10·direct6·group1/resume3
+불변을 확인합니다. 임시 배포 뒤 readiness·unarmed·fresh6·두 tree 불변을 확인합니다.
+
+앱 조작 전 service를 먼저 정지합니다. baseline은 첫Pro40/TimerOFF/constant/Frequency34,
+두 번째Pro latent31/TimerON/constant/Frequency32 및 그 시점 active schedule,
+Bar91/TimerOFF/classic/Frequency80/PulseTidefalse이며 모두 ON·independent입니다. fresh read가
+다르면 관측값을 먼저 보존하고 사용자와 정리합니다. 앱 precondition은 세 장비 ON·TimerOFF·constant·
+independent·Flow31입니다. 첫Pro40→31은9%p, Bar91→31은60%p 하향과 파형 변경입니다.
+두 번째Pro의 manual31이 같아도 TimerOFF는 그 시점 schedule 출력에서31로 실제 운전을 바꾸므로
+조작 직전 slot을 읽어 변화 폭을 알립니다. 사용자 수조 관찰에 따른 앱 조작 step과 frame 수는
+agent가 강제하지 않습니다. 앱 조작 후 separate authenticated read, 재기동 후 readiness·unarmed·
+fresh field 재확인을 통과한 뒤에만 ON을 보냅니다. 그동안 앱·HA 병행 조작을 하지 않도록 안내합니다.
+기존 coordinator의 exact resolver·lease·latch·journal-first를 사용하고 감사용 out-of-band lock은 없습니다.
+
+초기 baseline은 (31,31,31)입니다. A 또는D에서 시작하면 changed Flow2·NO_CHANGE4·revision11·
+Flow frame2, B 또는C에서 시작하면 changed Flow1·NO_CHANGE5·revision9·Flow frame1입니다.
+후속 네 전환에는 changed Flow1/2가 번갈아 발생해 합계6 frame입니다. 따라서 record5·총 Flow7 또는8·
+power frame0이며, 각 record는 action6(manual_flow/power ×3), revision=7+2×changed Flow 수입니다.
+첫 baseline은31, 이후 baseline은 직전 terminal의 멤버별 target이어야 하며 모든 power는 ON의
+NO_CHANGE입니다. 다섯 번째 target은 첫 target과 같아야 합니다. source expected readback과 실제
+journal target·action·revision·frame 산술이 다르면 사후 설명으로 PASS를 만들지 않습니다.
+
+ON은 QoS0·retainfalse 한 번입니다. 최초 result의 pending·submitted identity는 보조 관측이며 verdict가
+아닙니다. public lifecycle에 epoch나 내부 dedupe counter가 있다고 가정하지 않고 cycle와 record bytes로
+유한 hold를 관측합니다. 첫 frame 전 rev0을 별도로 확보하지 않았다면 확보했다고 쓰지 않습니다.
+generic coordinator의 intent preimage 보존은 가정하지 않고 새 blob은 참조별로 대조합니다.
+
+다섯 번째 VERIFIED 직후 즉시 stop-first합니다. 여섯 번째 record·총 Flow8 초과·power attempted·
+예상 밖 vector/순서/action·nonterminal failure·기존 또는 terminal record 변경·receipt 변경·lifecycle
+failure·observer 오류도 즉시 stop 사유입니다. publish 후180초의 내부·host 독립 감시 상한을 적용하며
+관측 부족이나 누락 전환을 보충하려고 연장·재ON·group OFF를 하지 않습니다. 이는 관측 기반 중단 규칙이며
+추가 frame을 물리적으로 불가능하게 만드는 새 gate가 아닙니다. 정상 stop 목표는 ON·각Flow30/31이고
+진행 중 plan이 종료 중 마무리될 수 있으므로 정지 뒤 실제 상태와 journal을 재독합니다.
+
+unfinished는 기존 config-only `jebao-flow-local-qualify recover`로 마지막 nonterminal operation만
+처리합니다. `jebao-flow-local recover`·forward retry·group OFF는 금지합니다. recovery 대상은 해당
+record에서 시도된 changed Flow(VERIFIED/UNCERTAIN 포함)이고 그 멤버의 실제 baseline30/31로 돌아갑니다.
+이전 VERIFIED record나 앱 baseline 전체 자동 복구를 뜻하지 않으며 fresh read 전에 복구 완료를 주장하지
+않습니다. 복구 frame 수는 실제 attempted changed action 수로 판정합니다.
+
+service가 정지한 상태에서 사용자가 first40/TimerOFF, second manual31 후 TimerON, Barclassic91로
+복원하고 Frequency34/32/80·BarPulseTidefalse·second의 그 시점 active-slot 일치를 확인합니다.
+초기 C/D 분기는 최종 second Flow30이므로 all31 precondition만으로 latent31 복원이 보장되지 않습니다.
+사용자가 다른 latent 최종값을 수용하면 exact 원복과 분리해 기록합니다. prior Constant50로 복귀 후
+unarmed·fresh6·discovery90 exact·retainedcommand0·unfinished0·최종 journal/receipt 불변을 확인합니다.
+정상 복귀가 group 목표50의 실제 재전송을 뜻하지 않습니다. 앱 준비·복원 대기와 service 부재도 기록하며
+짧은 command span으로 물리 비용을 축소하지 않습니다. 실패한 deploy는 원 stderr·stage log·Compose
+상태를 보존하고 exact prior image/input으로 복귀하며 이전 UNKNOWN의 원인을 소급 추정하지 않습니다.
+
+src/tests·frozen six·writer·coordinator·journal·qualification·HA schema는 무수정이고 새 CLI·gate·retry는
+추가하지 않습니다. 실기 뒤 append-only run과 README를 먼저 commit하며 다른 M4/M5로 넘어가지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
