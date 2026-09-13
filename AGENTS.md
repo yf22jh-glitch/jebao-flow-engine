@@ -3190,6 +3190,91 @@ unarmed·fresh6·discovery90 exact·retainedcommand0·unfinished0·최종 journa
 src/tests·frozen six·writer·coordinator·journal·qualification·HA schema는 무수정이고 새 CLI·gate·retry는
 추가하지 않습니다. 실기 뒤 append-only run과 README를 먼저 commit하며 다른 M4/M5로 넘어가지 않습니다.
 
+### D1t — Constant31 direct override와 member resume bounded epoch
+
+D1s 기록 `d115250`과 prior Constant50 복귀 뒤 사용자는 에이전트가 혼자 진행할 수 없는 지점까지
+계속 진행하라고 지시했습니다. 이번 질문은 **첫 Pro의 direct manual_flow override가 후속 그룹
+cycle에 덮이지 않고, 그 멤버의 resume 뒤에는 첫 Pro만 그룹 목표로 돌아오는가**입니다. 임시 배포,
+사용자 앱 precondition, group ON1·direct Flow32 1·member PRESS1, 유한 hold, stop과 앱 복원·
+prior 배포가 범위입니다. 앱 선행 조작과 현장 감시·중단 수단은 사용자가 담당하며 그 전에는 실행하지 않습니다.
+native Linkage·group OFF·다른 멤버의 direct 조작·추가 pattern 실기를 포함하지 않습니다.
+
+기존 Constant config의 default.power만50→31로 바꿉니다. min30/max75/period10/transition0 및
+member phase·gain·invert·role은 불변입니다. Constant는 default.power31을 사용하므로 초기 baseline31과
+일치할 때만 arm이 no-change입니다. prior50에서 ON을 눌러도 같은 결과라는 주장은 금지합니다.
+group clamp를 direct 입력 범위로 쓰지 않습니다. direct32는 app/device30..100 안이며 attended50 이하이고
+실기 변화는 첫 Pro31→32→31의1%p 왕복입니다. 이는 capability나 영구 상한을 낮추는 새 gate가 아닙니다.
+
+현재 private manifest의 physical anchor로 firstPro를 exact-one 역해석합니다. 다른 두 anchor도
+일대일 결속합니다. 임시 입력은 production prepare-compose의 source0444/parent0700/owner/link1로 만들고
+exact prior image·Compose·전체 bundle·canonical journal/receipt inventory를 보존합니다. offline
+projection은 discovery90 byte 불변·old/new/common-changed0, binding4/receipt12/pair6/ignored0,
+tombstone53/command10/direct6/group1/resume3을 확인합니다. 코드·tests·writer·journal·HA schema를
+수정하거나 새 CLI·production gate·retry를 만들지 않습니다. 감사는 production lock을 별도로 취득하지 않습니다.
+
+임시 배포 뒤 readiness·unarmed·fresh6·startup journal/receipt 불변을 확인한 다음 service를 먼저
+정지합니다. 앱 baseline은 first40/TimerOFF/constant/Frequency34, second latent31/TimerON/constant/
+Frequency32와 그 시점 active schedule, Barclassic91/TimerOFF/Frequency80/PulseTidefalse입니다.
+앱 준비는 모두 ON/TimerOFF/constant/independent/Flow31입니다. first40→31은9%p, Bar91→31은60%p와
+파형 변경이며 second도 현재 schedule 출력에서31로 바뀝니다. 조작 직전 slot을 읽어 실제 차이를 알리고
+과거 slot 값을 고정하지 않습니다. 앱 완료 후 separate fresh read, 서비스 재시작 후 readiness·unarmed·
+fresh field 재확인을 거쳐야 ON을 보냅니다. 앱·HA 병행 조작은 하지 않도록 안내합니다.
+
+사전 등록한 성공 경로의 durable 산술은 다음과 같습니다. 모든 power action은 ON의 NO_CHANGE입니다.
+
+| 단계 | journal 구성 | revision | physical Flow frame |
+|---|---|---:|---:|
+| group ON, all31 | 3멤버·action6 모두 NO_CHANGE | 7 | 0 |
+| 첫 Pro direct32 | 1멤버·manual_flow action1 VERIFIED | 4 | 1 |
+| override 후 reduced group | second·Bar action4 모두 NO_CHANGE, first 제외 | 5 | 0 |
+| 첫 Pro resume | 3멤버·action6, first32→31만 VERIFIED, 나머지 NO_CHANGE5 | 9 | 1 |
+
+합계 record4·Flow frame2·power0입니다. 초기 group terminal 뒤 최소3번의 완전한 fresh cycle 동안
+record/bytes 불변을 확인하고 direct32를 한 번 보냅니다. direct terminal과 reduced group terminal을
+모두 확인한 뒤 최소3번의 완전한 후속 fresh cycle에서 first32·나머지31과 override exact-one 유지 및
+새 operation0을 확인합니다. 그때만 firstPro resume topic에 PRESS를 한 번 보냅니다. resume terminal 뒤
+최소3번의 완전한 fresh cycle에서 all31·override0·record 불변을 확인하고 즉시 service stop합니다.
+fresh scalar 관측 시각은 해당 단계 terminal 뒤여야 하며 publish된 direct 값만 fresh 증거로 쓰지 않습니다.
+
+override는 전송 전에 claim되므로 direct 실패 시에도 flag가 남을 수 있습니다. 이를 아무 일 없었던 것으로
+쓰지 않습니다. 성공 경로를 실패 뒤 계속하려고 PRESS나 ON을 더 보내지 않고 즉시 service stop합니다.
+volatile ownership은 process 재생성 뒤 unarmed 상태에서 재확인하며 실제 장비 복원은 fresh read로 확인합니다.
+실패 경로의 corrective resume rev7/frame0을 이번 성공 시나리오의 대체물로 허용하지 않습니다.
+
+정적 freshness 근거는 claim의 manager generation/control_epoch 변경, runtime._plan_guard의
+owner_revision 및 manager.is_current 검사, group port→execute_batch→GenerationGuardedLocalControlPermit→
+send_once의 기존 pre-send 검사입니다. 이미 전송한 frame의 ACK/readback은 끝낼 수 있고 다음 stale frame은
+superseded로 끝납니다. 초기 steady hold 뒤에 direct를 보내는 이번 실기는 인위적인 경합 주입 검증이 아닙니다.
+reduced plan은 skip decision과 control_epoch가 달라 새 identity·record를 만들므로 이를 중복 write로
+오판하지 않습니다. stale plan은 frame을 보내기 전에 SUPERSEDED record를 남길 수 있습니다.
+이는 기존 guard가 정상 작동한 사건일 수 있고 device 실패나 중복 전송의 증거가 아닙니다. 이번 좁은
+시나리오는 그 extra record를 허용하며 계속하지 않고 stop하여 관측 미완료 UNKNOWN으로 남깁니다.
+정상 record4와 별개로 추가1을 허용하는 확장은 하지 않습니다. FORWARD_ATTEMPTING 뒤 pre-send에서
+superseded된 action을 physical frame으로 단정하지 않으며, 보수적인 attempted 상한 초과도 같은 방식으로
+정지 원인과 실제 송신 증거를 구분합니다. 무해한 중단 가능성을 없애려고 재실기·자동 retry를 만들지 않습니다.
+
+MQTT command는 각각 QoS0/retainfalse/1회이며 초기 결과·pending·ownership 문구는 보조 관측입니다.
+판정은 terminal journal·exact scalar readback·그 이후 fresh state·lifecycle ownership과 durable tree로 합니다.
+manual_override_members 원문은 private logical names이므로 private stream 안에서만 읽고 화면·중계·record에는
+count와 anchor로 변환합니다. resume availability는 armed 조건이지 해당 멤버 override의 증거가 아닙니다.
+resume은 전체 group plan을 재평가하지만 물리적으로 firstPro만 변경됐는지는 action별로 판정합니다.
+
+record5·총 attempted Flow2 초과·power attempted·허용하지 않은 멤버/target/순서/action/revision·
+nonterminal failure·기존/terminal record 변경·receipt 변경·lifecycle failure·observer 오류는 즉시 stop입니다.
+같은 단계의 hold에서는 지정한 추가 operation을 제외하고 증가0을 요구합니다. 최초 ON부터180초의
+내부·host 독립 관측 상한이며 완주 보장이나 물리 frame 차단 gate가 아닙니다. 부족하면 연장·재ON·
+재direct·재PRESS·group OFF 없이 FAIL/UNKNOWN으로 끝냅니다. stop 중 in-flight plan이 끝날 수 있어
+정지 뒤 실제 상태와 journal을 먼저 재독합니다.
+
+nonterminal recovery만 기존 config-only jebao-flow-local-qualify recover로 마지막 record의 실제
+attempted changed action을 그 record baseline으로 처리합니다. 이번 정상 계획의 record별 changed는 최대1이고
+기존 VERIFIED record나 앱 baseline 전체 자동 복구를 주장하지 않습니다. local recover는 manifest를 바꾸므로
+사용하지 않습니다. durable terminal만 보고 복구 완료로 쓰지 않으며 actual fresh state를 먼저 확인합니다.
+서비스 정지 상태에서 앱으로 first40/TimerOFF, second31 뒤TimerON, Barclassic91과 Frequency34/32/80·
+BarPulseTidefalse를 복원하고 second는 그 시점 active-slot 일치를 확인합니다. prior Constant50 복귀 뒤
+unarmed·fresh6·discovery90 exact·command0·unfinished0·journal/receipt 불변을 확인합니다. 준비·복원 대기와
+service 부재는 command span과 분리해 기록합니다. 다른 physical operation 전에 append-only run을 commit합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
