@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-13 15:23 KST
+마지막 갱신: 2026-09-13 19:09 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -85,9 +85,19 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   receipt `2`, recovery `0`, 최종 ON을 확인하고 동일한 일곱 decoded field에서 `classic`·Flow `91`·
   Frequency `80`·PulseTide `false` 원 운전 상태를 복원; 근거:
   [`Bar power qualification`](runs/2026-09-13-local-power-qualification-bar.md), run commit `5f43948`
-- [ ] current qualification과 세 power candidate를 deterministic no-clobber intermediate로 exact
+- [x] current qualification과 세 power candidate를 deterministic no-clobber intermediate로 exact
   merge하고, direct `power` 3개·group switch 1개·member resume 3개의 예상 discovery delta와 기존
-  `manual_flow` payload 불변을 offline projection으로 먼저 확정한 뒤 단일 generation 배포
+  `manual_flow` payload 불변을 offline projection으로 먼저 확정한 뒤 단일 generation 배포;
+  근거: [`power authority deployment`](runs/2026-09-13-local-power-authority-deployment.md)
+- [x] M4 Constant 최소 출력 group ON 한 번: 세 멤버 Flow `31 -> 30`, Flow frame `3`·power frame `0`,
+  `NO_CHANGE 3`·action `6`·terminal revision `13`, 최소 세 후속 cycle의 추가 operation `0` 확인;
+  근거: [`Constant group commissioning`](runs/2026-09-13-local-group-constant-commissioning.md),
+  run commit `2e84037`. 초기 MQTT pending을 잘못 판정한 wrapper 실패는 physical 결과와 분리 기록.
+- [x] 사용자 앱 복원 및 exact prior default `50` service 복귀: firstPro `40`·TimerOFF,
+  secondPro **latent `30` 유지 수용**·TimerON·그 시점 schedule 일치, Bar `classic/91`.
+  Frequency `34/32/80`·Bar PulseTide false 확인. service 비무장·fresh `6/6`·discovery `90` exact.
+- [ ] 다음은 M4 Sync 저출력 bounded epoch의 별도 계획·승인 경계. 다음 실기의 current baseline은
+  다시 읽고 두 번째 Pro의 비활성 manual 값을 `40`으로 가정하지 않는다. 새 physical operation 미실행.
 
 ## 완성까지 전체 로드맵
 
@@ -224,12 +234,16 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 
 ### M4 — software-independent 3대 그룹 실장비 commissioning
 
-- [ ] 세 장비를 app에서 `independent`·안전한 Timer 상태와 승인 출력으로 precondition
-- [ ] capability·영구 config 상한을 임의 축소하지 않고, attended commissioning의 목적값·step 크기·
-  동시 변경 대수를 수조 충격 방지 관점에서 검산; agent가 보내는 목적값은 `50` 이하로 계획
+- [x] Constant one-shot에서 세 장비를 app으로 `independent`·TimerOFF·constant·Flow `31`로 precondition;
+  후속 operation은 그때 current 상태를 다시 읽고 별도 조건을 확정
+- [x] Constant one-shot의 capability·영구 config 상한을 임의 축소하지 않고 목적값 `30`·step `1`·
+  동시 변경 대수 `3`을 검산; 후속 operation의 출력·동시성 판단까지 완료한 것은 아님
 - [ ] group write 경로가 같은 `/hardware-safety` 전역 lease·비상정지 latch에 참여하고 다른
   physical workflow와 실제로 상호배제되는지 확인
-- [ ] Constant 최소 출력 one-shot: plan-atomic journal·멤버별 exact readback·final state 확인
+  - Constant 정상 경로의 production acquire·shared-lock 결속은 확인; 다른 physical workflow와의
+    실제 경합 실기는 미수행. out-of-band auditor lock 실패를 그 실기의 대체 증거로 쓰지 않음.
+- [x] Constant 최소 출력 one-shot: plan-atomic journal·멤버별 exact readback·수용된 final state 확인;
+  [`run record`](runs/2026-09-13-local-group-constant-commissioning.md), `2e84037`
 - [ ] Sync 저출력 bounded epoch: gain·limit·동일 위상과 duplicate suppression 확인
 - [ ] Anti Phase 저출력 bounded epoch: phase 분리와 전체 exact restore 확인
 - [ ] `minimum_command_interval_ms`가 3대 cycle의 실제 device command 빈도를 제한하는지 확인
@@ -298,7 +312,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] 세 수류모터 `manual_flow` qualification 완료: 두 Pro는 각 `40 -> 39 -> 40`, Bar는
   `45 -> 44 -> 45`; current authority binding `2`·receipt `6`·qualified pair `3`
 - [x] MQTT 실기 `40 -> 39 -> 40` 완료, 각 command exact readback·terminal journal 확인
-- [x] 장비 6/6 fresh·qualified control 3·HA Flow range `30..100`·group armed 0
+- [x] 장비 6/6 fresh·qualified direct control 6(manual_flow 3 + power 3)·HA Flow range `30..100`·group armed 0
 - [x] M2 recovery·restart/reconnect·bounded soak·external drift 전 항목 완료
 - [x] D1l source와 세 장비 재자격·merge·deployment 완료; direct `manual_flow` control `3`, HA Flow
   range `30..100`, startup write `0`
@@ -306,11 +320,13 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   discovery `86/86` byte exact, Bar number `1`, fresh `6/6`, startup write `0`
 - [x] Pro 동작을 보존하는 Bar family precondition source·offline 검토·landing `d687739` 완료
 - [x] safer-OFF power qualification source·CLI·fault 회귀 landing과 exact one-shot image 준비 완료
-- [x] current post-deploy audit: service `1`, 장비 `6/6`, unfinished `0`, legacy idle, receipt `12`,
+- [x] current post-Constant restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
   direct control `6`, group switch `1`·resume `3`, retained command `0`, group armed `0`,
-  journal·receipt tree byte 불변
-- [x] read-only `power` preflight: 첫 Pro는 `ON`·TimerOFF·`constant`·`independent`·Flow `40`으로 admission
-  준비 완료; 두 번째 Pro는 TimerON, Bar는 `classic`·Flow `91`이라 각각 이후 사용자 앱 precondition 필요
+  journal operations `14`·blobs `48`·files `62`, receipt root files `18`; group terminal 이후 복귀 전후
+  tree byte 불변. group default `50` 복귀는 실제 장비 Flow `50` 변경을 뜻하지 않음.
+- [x] current accepted state: firstPro `ON/TimerOFF/constant/independent/40`, secondPro
+  `ON/TimerON/constant/independent/latent30`, Bar `ON/TimerOFF/classic/independent/91`;
+  secondPro는 그 시점 active slot과 AutoMode/AutoFlow 일치. 다음 TimerOFF에서는 manual `30`에 주의.
 - [x] 두 Pro의 `power` candidate 확보: 각각 ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
   두 번째 Pro는 실기 뒤 TimerON schedule ownership 복원
 - [x] Bar `power` candidate 확보: ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
@@ -318,9 +334,11 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] M3 authority merge·projection·write-free deployment 완료: binding `4`·receipt `12`·pair `6`,
   discovery `90/90`, direct `manual_flow 3`·`power 3`, group switch `1`·resume `3`, startup write `0`;
   run [`power authority deployment`](runs/2026-09-13-local-power-authority-deployment.md)
-- [ ] 다음 작업은 M4 Constant 최소 출력 one-shot입니다. group은 아직 비무장이고 실제 group switch·
-  resume actuation은 `0`입니다. 세 장비의 current 상태·승인 출력·exact restore와 plan-atomic journal을
-  first write 전에 결속합니다.
+- [x] M4 Constant group ON 실기 1회와 prior deployment 복귀 완료, final armed `false`;
+  run [`Constant group commissioning`](runs/2026-09-13-local-group-constant-commissioning.md), `2e84037`.
+  초기 MQTT result는 timeout snapshot이며 terminal 판정의 대체물이 아님.
+- [ ] 다음은 M4 Sync의 별도 bounded 계획. Sync·Anti Phase·group OFF·direct override·resume actuation은
+  여전히 미실행이며 M4 전체 완료로 선언하지 않음. 현재 승인된 Constant operation은 종결.
 
 ## M0~M1 작업 이력 (완료)
 
