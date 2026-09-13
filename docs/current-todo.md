@@ -214,7 +214,13 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
     실기 뒤 TimerON과 active schedule ownership 복원, run `aa59f5c`
   - [x] Bar `power`: 사용자 precondition 뒤 ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
     일곱 decoded field의 원 운전 상태 복원, run `5f43948`
-- [ ] group switch 1개와 member resume 3개만 새 command surface로 투영되는지 확인
+- [x] 세 power candidate를 current authority에 순서대로 merge하고 write-free 단일 generation 배포
+  - binding `4`·receipt `12`·qualified pair `6`, ignored category별 `0`
+  - direct `manual_flow 3`·`power 3`, group switch `1`·member resume `3`, command topic `10`
+  - discovery `90/90` byte exact, 기존 manual-flow payload 불변, startup device write `0`
+  - 첫 start 실패는 exact prior image·Compose·bundle로 rollback했고 원인은 `UNKNOWN`; 같은 final bytes의
+    두 번째 시도는 성공, run [`power authority deployment`](runs/2026-09-13-local-power-authority-deployment.md),
+    commit `a621b3b`
 
 ### M4 — software-independent 3대 그룹 실장비 commissioning
 
@@ -300,18 +306,21 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   discovery `86/86` byte exact, Bar number `1`, fresh `6/6`, startup write `0`
 - [x] Pro 동작을 보존하는 Bar family precondition source·offline 검토·landing `d687739` 완료
 - [x] safer-OFF power qualification source·CLI·fault 회귀 landing과 exact one-shot image 준비 완료
-- [x] current post-deploy audit: service `1`, 장비 `6/6`, unfinished `0`, legacy idle, receipt `6`,
-  direct control `3`, group command `0`, retained command `0`, journal·receipt tree byte 불변
+- [x] current post-deploy audit: service `1`, 장비 `6/6`, unfinished `0`, legacy idle, receipt `12`,
+  direct control `6`, group switch `1`·resume `3`, retained command `0`, group armed `0`,
+  journal·receipt tree byte 불변
 - [x] read-only `power` preflight: 첫 Pro는 `ON`·TimerOFF·`constant`·`independent`·Flow `40`으로 admission
   준비 완료; 두 번째 Pro는 TimerON, Bar는 `classic`·Flow `91`이라 각각 이후 사용자 앱 precondition 필요
 - [x] 두 Pro의 `power` candidate 확보: 각각 ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
   두 번째 Pro는 실기 뒤 TimerON schedule ownership 복원
 - [x] Bar `power` candidate 확보: ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
   실기 뒤 `classic`·Flow `91`·Frequency `80`·PulseTide `false` 복원
-- [ ] M3의 다음 작업은 current qualification과 세 power candidate의 offline exact merge·projection,
-  이어지는 write-free 단일 generation 배포입니다. 배포 전 TimerON인 두 번째 Pro에도 runtime power
-  command가 별도 Timer gate 없이 전달되고 schedule ownership 재개는 미검증이라는 사실과 새 direct·
-  group command surface를 사용자에게 공개합니다.
+- [x] M3 authority merge·projection·write-free deployment 완료: binding `4`·receipt `12`·pair `6`,
+  discovery `90/90`, direct `manual_flow 3`·`power 3`, group switch `1`·resume `3`, startup write `0`;
+  run [`power authority deployment`](runs/2026-09-13-local-power-authority-deployment.md)
+- [ ] 다음 작업은 M4 Constant 최소 출력 one-shot입니다. group은 아직 비무장이고 실제 group switch·
+  resume actuation은 `0`입니다. 세 장비의 current 상태·승인 출력·exact restore와 plan-atomic journal을
+  first write 전에 결속합니다.
 
 ## M0~M1 작업 이력 (완료)
 
