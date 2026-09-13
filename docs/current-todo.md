@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-13 09:05 KST
+마지막 갱신: 2026-09-13 13:57 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -76,10 +76,15 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   availability `7/7 online`·removed Bar diagnostic 미재등장과 journal·receipt tree 불변을 확인해
   restart 창의 local-control device write `0`을 판정; 근거:
   [`Home Assistant Core restart`](runs/2026-09-13-home-assistant-core-restart.md), run commit `022690d`
-- [ ] 두 번째 Pro `power` 앱 precondition 직전 경계: write-free fresh read는
-  `ON`·TimerON·`constant`·`independent`·Flow `40`과 exact target `1`을 확인했습니다. 사용자가 앱에서
-  TimerOFF로 바꾸고, 실기 뒤 TimerON schedule ownership을 복원하기 전에는 physical write를 시작하지
-  않습니다. 첫 Pro에서 보존 가능한 OFF 체류 상한은 qualification 전체 `18.9`초였습니다.
+- [x] 두 번째 Pro `power`: 사용자 앱에서 TimerOFF로 ownership을 넘긴 뒤 ON→OFF→ON physical write
+  `3`, terminal revision `10`, receipt `2`, recovery `0`, 최종 ON을 확인하고 TimerON schedule
+  ownership을 복원; 근거:
+  [`second Pro power qualification`](runs/2026-09-13-local-power-qualification-second-pro.md), run
+  commit `aa59f5c`
+- [ ] Bar `power` 앱 precondition 직전 경계: 마지막 확인 상태는 `ON`·TimerOFF·`classic`·
+  `independent`·Flow `91`입니다. physical write 전에 fresh read를 다시 수행하고, 사용자가 앱에서
+  `constant`·Flow `45` 이하로 바꾼 뒤에만 qualification을 시작합니다. 실기 뒤에는 사용자가
+  `classic`·Flow `91`을 복원합니다.
 
 ## 완성까지 전체 로드맵
 
@@ -202,8 +207,8 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [ ] 3대 모두 `manual_flow`·`power` receipt pair 확보; 다른 장비·기능은 계속 diagnostic
   - [x] 첫 번째 Pro `power`: ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON, candidate only;
     run `21370b6`
-  - [ ] 두 번째 Pro `power`: current TimerON을 사용자 앱에서 TimerOFF로 precondition하고 실기 뒤
-    TimerON 복원
+  - [x] 두 번째 Pro `power`: TimerOFF에서 ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
+    실기 뒤 TimerON과 active schedule ownership 복원, run `aa59f5c`
   - [ ] Bar `power`: current `classic`·Flow `91`을 사용자 판단으로 `constant`·Flow `45` 이하로
     precondition하고 실기 뒤 원 운전 상태 복원
 - [ ] group switch 1개와 member resume 3개만 새 command surface로 투영되는지 확인
@@ -296,8 +301,11 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   direct control `3`, group command `0`, retained command `0`, journal·receipt tree byte 불변
 - [x] read-only `power` preflight: 첫 Pro는 `ON`·TimerOFF·`constant`·`independent`·Flow `40`으로 admission
   준비 완료; 두 번째 Pro는 TimerON, Bar는 `classic`·Flow `91`이라 각각 이후 사용자 앱 precondition 필요
-- [ ] M3의 다음 작업은 두 번째 Pro `power` qualification이며, 사용자가 앱에서 TimerON→OFF로
-  ownership을 넘기고 fresh admission을 확인한 뒤에만 physical write를 시작; 실기 뒤 TimerON 복원 필요
+- [x] 두 Pro의 `power` candidate 확보: 각각 ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
+  두 번째 Pro는 실기 뒤 TimerON schedule ownership 복원
+- [ ] M3의 다음 작업은 Bar `power` qualification이며, fresh read로 current state를 다시 확인한 뒤
+  사용자가 앱에서 `constant`·Flow `45` 이하로 precondition해야 physical write를 시작; 실기 뒤
+  `classic`·Flow `91` 복원 필요
 
 ## M0~M1 작업 이력 (완료)
 
@@ -388,13 +396,12 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 사용자 조작 필요 여부
 
-- 현재: **두 번째 Pro는 TimerON→OFF 사용자 앱 precondition이 필요합니다.** 직전 read-only preflight는
-  power ON·TimerON·`constant`·`independent`·Flow `40`을 확인했습니다. `power` qualification은
-  ON→OFF→ON physical write `3`이고 어떤 nonterminal failure에서도 펌프가 OFF로 남을 수 있으므로,
-  현장 감시와 즉시 전원 차단/앱 복원 수단을 유지한 채 실행하고 실기 뒤 TimerON을 복원합니다.
-- 이후 Bar는 `classic`·Flow `91`→`constant`·Flow `45` 이하의 사용자 앱
-  precondition이 별도로 필요합니다. Bar의 `91 -> 45`는 46p 하강이므로 한 번에 바꾸라고 가정하지 않고
-  현장 수조 상태에 맞춘 단계적 하향 여부와 사후 `classic`·Flow `91` 복원 결정을 다시 확인합니다.
+- 현재: **Bar는 `classic`·Flow `91`→`constant`·Flow `45` 이하의 사용자 앱 precondition이
+  필요합니다.** 먼저 write-free fresh state를 다시 확인합니다. Bar의 `91 -> 45`는 46p 하강이므로
+  한 번에 바꾸라고 가정하지 않고 현장 수조 상태에 맞춘 단계적 하향 여부는 사용자가 결정합니다.
+  `power` qualification은 ON→OFF→ON physical write `3`이고 어떤 nonterminal failure에서도 펌프가
+  OFF로 남을 수 있으므로, 현장 감시와 즉시 전원 차단/앱 복원 수단을 유지한 채 실행하고 실기 뒤
+  `classic`·Flow `91`을 복원합니다.
 - 상시 HA `number` 엔티티 추가 노출 자체와 Jebao 실기·필요 상태 변경의 에이전트 실행은 사용자 승인 완료.
   승인 없던 `75`는 D1l에서 app-declared `30..100`으로 정정·배포 완료
 - 현재 attended 실기 가이드: agent 목적값은 Flow `<=50`로 계획하고 갑작스러운 step·여러 펌프 동시
@@ -541,3 +548,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - 06:41 KST — read-only `power` preflight에서 첫 Pro는 `ON`·TimerOFF·`constant`·`independent`·Flow `40`으로
   앱 조작 없이 admission 가능한 상태임을 확인. 두 번째 Pro는 TimerON, Bar는 `classic`·Flow `91`이라
   이후 별도 앱 precondition이 필요함을 분리하고, 첫 Pro physical write 직전 현장 승인 경계에서 정지.
+- 13:30~13:44 KST — 두 번째 Pro의 사용자 앱 precondition을 admission 전 fresh read로 검증한 뒤
+  TimerOFF에서 ON→OFF→ON `power` qualification을 수행. physical write `3`, terminal revision `10`,
+  receipt `2`, recovery `0`, final ON을 확인하고 사용자가 TimerON schedule ownership을 복원.
+- 13:55 KST — 두 번째 Pro `power` append-only run record를 Claude 독립 검토 finding `0` 뒤 commit
+  `aa59f5c`로 랜딩. 다음 대기 지점을 Bar의 write-free fresh preflight와 사용자 앱 precondition으로 이동.
