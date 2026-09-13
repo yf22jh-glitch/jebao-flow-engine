@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-13 06:41 KST
+마지막 갱신: 2026-09-13 09:05 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -67,9 +67,15 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   qualified pair `3`, direct control `3`, discovery `86/86` exact, startup write `0`, fresh `6/6`;
   근거: [`Bar qualified-control deployment`](runs/2026-09-13-local-bar-qualified-control-deployment.md),
   run commit `2c2afe1`
-- [ ] 첫 번째 Pro `power` live write 직전 경계: 현재 `ON`·TimerOFF·`constant`·`independent`·Flow `40`이라
-  앱 조작은 필요 없지만, ON→OFF→ON physical write `3` 전에 현장 감시·즉시 전원 차단/앱 복원 수단과
-  어떤 nonterminal failure에서도 최종 OFF로 남을 수 있음을 사용자에게 다시 확인
+- [x] 첫 번째 Pro `power`: 사용자 현장 감시·즉시 차단 수단 아래 ON→OFF→ON physical write `3`,
+  terminal revision `10`, receipt `2`, recovery `0`, 최종 ON·Flow `40`; first-send 전 safer-OFF mapping과
+  OFF 상태 비전원 필드 유지를 보존; 근거:
+  [`first Pro power qualification`](runs/2026-09-13-local-power-qualification-first-pro.md), run
+  commit `21370b6`
+- [ ] 두 번째 Pro `power` 앱 precondition 직전 경계: write-free fresh read는
+  `ON`·TimerON·`constant`·`independent`·Flow `40`과 exact target `1`을 확인했습니다. 사용자가 앱에서
+  TimerOFF로 바꾸고, 실기 뒤 TimerON schedule ownership을 복원하기 전에는 physical write를 시작하지
+  않습니다. 첫 Pro에서 보존 가능한 OFF 체류 상한은 qualification 전체 `18.9`초였습니다.
 
 ## 완성까지 전체 로드맵
 
@@ -190,6 +196,12 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   `physical_identity_key`별 device lock을 그대로 사용하고 새 lock namespace를 만들지 않으며, 기존
   manual-flow 경로와 같은 장비 key로 상호배제됨을 회귀로 고정
 - [ ] 3대 모두 `manual_flow`·`power` receipt pair 확보; 다른 장비·기능은 계속 diagnostic
+  - [x] 첫 번째 Pro `power`: ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON, candidate only;
+    run `21370b6`
+  - [ ] 두 번째 Pro `power`: current TimerON을 사용자 앱에서 TimerOFF로 precondition하고 실기 뒤
+    TimerON 복원
+  - [ ] Bar `power`: current `classic`·Flow `91`을 사용자 판단으로 `constant`·Flow `45` 이하로
+    precondition하고 실기 뒤 원 운전 상태 복원
 - [ ] group switch 1개와 member resume 3개만 새 command surface로 투영되는지 확인
 
 ### M4 — software-independent 3대 그룹 실장비 commissioning
