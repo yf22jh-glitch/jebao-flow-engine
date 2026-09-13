@@ -93,11 +93,15 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   `NO_CHANGE 3`·action `6`·terminal revision `13`, 최소 세 후속 cycle의 추가 operation `0` 확인;
   근거: [`Constant group commissioning`](runs/2026-09-13-local-group-constant-commissioning.md),
   run commit `2e84037`. 초기 MQTT pending을 잘못 판정한 wrapper 실패는 physical 결과와 분리 기록.
-- [x] 사용자 앱 복원 및 exact prior default `50` service 복귀: firstPro `40`·TimerOFF,
+- [x] Constant 실기 당시 사용자 앱 복원 및 exact prior default `50` service 복귀: firstPro `40`·TimerOFF,
   secondPro **latent `30` 유지 수용**·TimerON·그 시점 schedule 일치, Bar `classic/91`.
   Frequency `34/32/80`·Bar PulseTide false 확인. service 비무장·fresh `6/6`·discovery `90` exact.
-- [ ] 다음은 M4 Sync 저출력 bounded epoch의 별도 계획·승인 경계. 다음 실기의 current baseline은
-  다시 읽고 두 번째 Pro의 비활성 manual 값을 `40`으로 가정하지 않는다. 새 physical operation 미실행.
+- [x] M4 Sync bounded epoch: gain1·min30/max31에서 목표 `31→30→31`, revision13×3,
+  Flow frame9·power frame0, 유한 hold 중복 억제와 세 번째 terminal 뒤 stop 확인;
+  근거: [`Sync group commissioning`](runs/2026-09-13-local-group-sync-commissioning.md), `41487db`.
+  prior Constant50 서비스 복귀와 두 번째 Pro latent31 유지 수용 완료. 물리적 완전 동시성은 미확정.
+- [ ] 다음은 M4 Anti Phase의 별도 계획·승인 경계. current baseline은 다시 읽으며 두 번째 Pro의
+  다음 manual baseline은 수용된 `31`이다. Sync 종료 이후 추가 physical operation은 미실행.
 
 ## 완성까지 전체 로드맵
 
@@ -244,7 +248,9 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
     실제 경합 실기는 미수행. out-of-band auditor lock 실패를 그 실기의 대체 증거로 쓰지 않음.
 - [x] Constant 최소 출력 one-shot: plan-atomic journal·멤버별 exact readback·수용된 final state 확인;
   [`run record`](runs/2026-09-13-local-group-constant-commissioning.md), `2e84037`
-- [ ] Sync 저출력 bounded epoch: gain·limit·동일 위상과 duplicate suppression 확인
+- [x] Sync 저출력 bounded epoch: gain1·limit30..31에서 세 멤버 동일 목표의 두 전환과
+  유한 hold duplicate suppression 확인; 물리적 완전 동시성·다른 gain/limit·무기한 동작은 미확정.
+  [`run record`](runs/2026-09-13-local-group-sync-commissioning.md)
 - [ ] Anti Phase 저출력 bounded epoch: phase 분리와 전체 exact restore 확인
 - [ ] `minimum_command_interval_ms`가 3대 cycle의 실제 device command 빈도를 제한하는지 확인
 - [ ] direct member override 후 다음 group cycle이 해당 멤버를 덮지 않는지 확인
@@ -320,13 +326,13 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   discovery `86/86` byte exact, Bar number `1`, fresh `6/6`, startup write `0`
 - [x] Pro 동작을 보존하는 Bar family precondition source·offline 검토·landing `d687739` 완료
 - [x] safer-OFF power qualification source·CLI·fault 회귀 landing과 exact one-shot image 준비 완료
-- [x] current post-Constant restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
+- [x] current post-Sync restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
   direct control `6`, group switch `1`·resume `3`, retained command `0`, group armed `0`,
-  journal operations `14`·blobs `48`·files `62`, receipt root files `18`; group terminal 이후 복귀 전후
+  journal operations `17`·blobs `55`·files `72`, receipt root files `18`; group terminal 이후 복귀 전후
   tree byte 불변. group default `50` 복귀는 실제 장비 Flow `50` 변경을 뜻하지 않음.
 - [x] current accepted state: firstPro `ON/TimerOFF/constant/independent/40`, secondPro
-  `ON/TimerON/constant/independent/latent30`, Bar `ON/TimerOFF/classic/independent/91`;
-  secondPro는 그 시점 active slot과 AutoMode/AutoFlow 일치. 다음 TimerOFF에서는 manual `30`에 주의.
+  `ON/TimerON/constant/independent/latent31`, Bar `ON/TimerOFF/classic/independent/91`;
+  secondPro는 그 시점 active slot과 AutoMode/AutoFlow 일치. 다음 TimerOFF에서는 manual `31`에 주의.
 - [x] 두 Pro의 `power` candidate 확보: 각각 ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
   두 번째 Pro는 실기 뒤 TimerON schedule ownership 복원
 - [x] Bar `power` candidate 확보: ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
@@ -337,8 +343,10 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] M4 Constant group ON 실기 1회와 prior deployment 복귀 완료, final armed `false`;
   run [`Constant group commissioning`](runs/2026-09-13-local-group-constant-commissioning.md), `2e84037`.
   초기 MQTT result는 timeout snapshot이며 terminal 판정의 대체물이 아님.
-- [ ] 다음은 M4 Sync의 별도 bounded 계획. Sync·Anti Phase·group OFF·direct override·resume actuation은
-  여전히 미실행이며 M4 전체 완료로 선언하지 않음. 현재 승인된 Constant operation은 종결.
+- [x] M4 Sync 목표 `31→30→31`의 bounded 실기 및 prior Constant50 복귀 완료, final armed `false`;
+  run [`Sync group commissioning`](runs/2026-09-13-local-group-sync-commissioning.md).
+- [ ] 다음은 M4 Anti Phase의 별도 bounded 계획. Anti Phase·group OFF·direct override·resume actuation은
+  여전히 미실행이며 M4 전체 완료로 선언하지 않음. 현재 승인된 Sync operation은 종결.
 
 ## M0~M1 작업 이력 (완료)
 
