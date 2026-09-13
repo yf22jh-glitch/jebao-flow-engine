@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-13 13:57 KST
+마지막 갱신: 2026-09-13 15:23 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -81,10 +81,13 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   ownership을 복원; 근거:
   [`second Pro power qualification`](runs/2026-09-13-local-power-qualification-second-pro.md), run
   commit `aa59f5c`
-- [ ] Bar `power` 앱 precondition 직전 경계: 마지막 확인 상태는 `ON`·TimerOFF·`classic`·
-  `independent`·Flow `91`입니다. physical write 전에 fresh read를 다시 수행하고, 사용자가 앱에서
-  `constant`·Flow `45` 이하로 바꾼 뒤에만 qualification을 시작합니다. 실기 뒤에는 사용자가
-  `classic`·Flow `91`을 복원합니다.
+- [x] Bar `power`: 사용자 앱 precondition 뒤 ON→OFF→ON physical write `3`, terminal revision `10`,
+  receipt `2`, recovery `0`, 최종 ON을 확인하고 동일한 일곱 decoded field에서 `classic`·Flow `91`·
+  Frequency `80`·PulseTide `false` 원 운전 상태를 복원; 근거:
+  [`Bar power qualification`](runs/2026-09-13-local-power-qualification-bar.md), run commit `5f43948`
+- [ ] current qualification과 세 power candidate를 deterministic no-clobber intermediate로 exact
+  merge하고, direct `power` 3개·group switch 1개·member resume 3개의 예상 discovery delta와 기존
+  `manual_flow` payload 불변을 offline projection으로 먼저 확정한 뒤 단일 generation 배포
 
 ## 완성까지 전체 로드맵
 
@@ -204,13 +207,13 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] 새 `power` qualification write가 기존 deployment-wide global lock과
   `physical_identity_key`별 device lock을 그대로 사용하고 새 lock namespace를 만들지 않으며, 기존
   manual-flow 경로와 같은 장비 key로 상호배제됨을 회귀로 고정
-- [ ] 3대 모두 `manual_flow`·`power` receipt pair 확보; 다른 장비·기능은 계속 diagnostic
+- [x] 3대 모두 `manual_flow`·`power` receipt pair 확보; 다른 장비·기능은 계속 diagnostic
   - [x] 첫 번째 Pro `power`: ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON, candidate only;
     run `21370b6`
   - [x] 두 번째 Pro `power`: TimerOFF에서 ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
     실기 뒤 TimerON과 active schedule ownership 복원, run `aa59f5c`
-  - [ ] Bar `power`: current `classic`·Flow `91`을 사용자 판단으로 `constant`·Flow `45` 이하로
-    precondition하고 실기 뒤 원 운전 상태 복원
+  - [x] Bar `power`: 사용자 precondition 뒤 ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
+    일곱 decoded field의 원 운전 상태 복원, run `5f43948`
 - [ ] group switch 1개와 member resume 3개만 새 command surface로 투영되는지 확인
 
 ### M4 — software-independent 3대 그룹 실장비 commissioning
@@ -303,9 +306,12 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   준비 완료; 두 번째 Pro는 TimerON, Bar는 `classic`·Flow `91`이라 각각 이후 사용자 앱 precondition 필요
 - [x] 두 Pro의 `power` candidate 확보: 각각 ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
   두 번째 Pro는 실기 뒤 TimerON schedule ownership 복원
-- [ ] M3의 다음 작업은 Bar `power` qualification이며, fresh read로 current state를 다시 확인한 뒤
-  사용자가 앱에서 `constant`·Flow `45` 이하로 precondition해야 physical write를 시작; 실기 뒤
-  `classic`·Flow `91` 복원 필요
+- [x] Bar `power` candidate 확보: ON→OFF→ON write `3`, revision `10`, receipt `2`, final ON;
+  실기 뒤 `classic`·Flow `91`·Frequency `80`·PulseTide `false` 복원
+- [ ] M3의 다음 작업은 current qualification과 세 power candidate의 offline exact merge·projection,
+  이어지는 write-free 단일 generation 배포입니다. 배포 전 TimerON인 두 번째 Pro에도 runtime power
+  command가 별도 Timer gate 없이 전달되고 schedule ownership 재개는 미검증이라는 사실과 새 direct·
+  group command surface를 사용자에게 공개합니다.
 
 ## M0~M1 작업 이력 (완료)
 
