@@ -115,6 +115,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-13 Bar qualified-control deployment](2026-09-13-local-bar-qualified-control-deployment.md) | persistent control 2→3 / discovery 86 exact / fresh 6 / device write 0 | Bar receipt를 current set에 merge해 `30..100` number 하나를 열고 기존 Pro·journal·receipt 불변 확인 |
 | [2026-09-13 first Pro power qualification](2026-09-13-local-power-qualification-first-pro.md) | ON→OFF→ON write 3 / verified 3 / receipt 2 / candidate only | 첫 Pro에서 safer-OFF mapping의 first-send 전 durable 설치와 OFF 구간 비전원 필드 유지·최종 ON 복귀 확인 |
 | [2026-09-13 Home Assistant Core restart](2026-09-13-home-assistant-core-restart.md) | discovery 86 exact / control 3 / fresh 6 / device write 0 | 사용자 Core restart 뒤 discovery·availability·control 복귀와 removed Bar diagnostic 미재등장 확인 |
+| [2026-09-13 second Pro power qualification](2026-09-13-local-power-qualification-second-pro.md) | ON→OFF→ON write 3 / verified 3 / receipt 2 / candidate only | 두 번째 Pro에서 OFF 구간 비전원 필드 유지와 final ON·Timer schedule 복귀를 확인하고 독립 power candidate 보존 |
 
 ## 새 실행 기록 템플릿
 
