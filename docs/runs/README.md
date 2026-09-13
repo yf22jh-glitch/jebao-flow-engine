@@ -113,6 +113,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-12 Bar active-template deployment](2026-09-12-local-bar-active-template-deployment.md) | template membership 1→2 / fresh 6 / device write 0 | Bar template을 새 generation에 결속하고 기존 discovery·Pro control byte 불변과 Bar diagnostic-only 유지 확인 |
 | [2026-09-13 Bar manual-flow qualification](2026-09-13-local-bar-manual-flow-qualification.md) | write 3 / verified 3 / receipt 2 / candidate only | Bar에서 `45→44→45` exact readback과 planned restore를 확인하고 receipt pair를 surface 미개방 candidate로 보존 |
 | [2026-09-13 Bar qualified-control deployment](2026-09-13-local-bar-qualified-control-deployment.md) | persistent control 2→3 / discovery 86 exact / fresh 6 / device write 0 | Bar receipt를 current set에 merge해 `30..100` number 하나를 열고 기존 Pro·journal·receipt 불변 확인 |
+| [2026-09-13 first Pro power qualification](2026-09-13-local-power-qualification-first-pro.md) | ON→OFF→ON write 3 / verified 3 / receipt 2 / candidate only | 첫 Pro에서 safer-OFF mapping의 first-send 전 durable 설치와 OFF 구간 비전원 필드 유지·최종 ON 복귀 확인 |
 
 ## 새 실행 기록 템플릿
 
