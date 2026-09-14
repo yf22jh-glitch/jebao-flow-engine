@@ -3313,6 +3313,44 @@ source0444/parent0700의 production 생성·교체와 exact prior image/Compose/
 실행 후 append-only run을 먼저 commit하며 device별 OFF/ON 관측과 command span·service 부재를
 분리합니다. MQTT 발행 간격을 실제 세 펌프 OFF 체류 시간으로 동일시하지 않습니다.
 
+### D1v — 진단 image와 Bar-only OFF-state Flow 단회
+
+D1u FAIL·recovery·앱 복원 기록과 diagnostic source `269e92b`, HA 업데이트 read-only 기록
+`d9589ce`가 커밋된 뒤, 사용자는 targeted21/Ruff PASS와 full-suite 실패2건 미해결,
+Bar만 OFF→Flow30→ON을 시도하고 실패하면 OFF로 남아 현장 앱 복원이 필요할 수 있다는
+설명을 듣고 “ㅇㅇ 진행하자”로 진행을 승인했습니다. 두 Pro는 write 대상이 아닙니다.
+승인은 [D1v 계획](docs/local-bar-off-flow-diagnostic-plan.md)의 단회와 필요한 ordered recovery,
+사용자 앱 복원 및 exact prior service 복귀에 한정합니다. D1u 권한을 재사용하지 않습니다.
+
+새 diagnostic image는 source·schema 결속과 offline projection을 확인한 뒤 stop-first로 배포합니다.
+full-suite 실패 원인은 미해결이며 승인으로 PASS로 바뀌지 않습니다. prior image·Compose·whole
+input bundle을 보존하고 rollback 때 재빌드하지 않습니다. config와 HA 표면은 변경하지 않습니다.
+readiness·unarmed·fresh6·discovery90 exact·journal105/receipt18 불변을 확인한 뒤 서비스를 정지하고
+fresh baseline을 보존합니다. 그 뒤에만 사용자에게 Bar의 classic91→constant31 준비를 요청합니다.
+이 준비는60%p 하향과 파형 변경이며, Pro pair·group default Constant50은 그대로 유지합니다.
+앱 준비 회신과 현재 현장 감시·직접 ON 복원 가능 확인 전에는 첫 device command를 보내지 않습니다.
+
+group은 계속 비무장입니다. Bar ON/TimerOFF/constant/independent/Flow31에서 direct OFF1,
+fresh OFF31 확인 후 direct Flow30 1, fresh OFF30 확인 후 direct ON1만 보냅니다.
+성공 예상은 record3·rev4×3·Flow1/power2이고 ON 뒤 complete fresh cycle3에서 유지됨을 확인합니다.
+첫 publish intent부터 내부·독립 host180초 상한을 적용하며 연장·재전송·group ON/OFF는 없습니다.
+extra record·예상 밖 대상/값/action·Flow attempted1 초과·power attempted2 초과·Pro write·
+observer 실패는 즉시 stop합니다. superseded는 physical frame으로 단정하지 않고 UNKNOWN stop합니다.
+
+실패하면 후속 stage·corrective ON 없이 먼저 actual fresh state를 읽습니다. 마지막 nonterminal만
+기존 config-only recovery로 처리하며 OFF recovery는 ON을 보내지 않습니다. Flow recovery는
+baseline31로 되돌려도 Bar는 OFF일 수 있고 ON recovery는 다시 OFF를 보낼 수 있습니다.
+recovery 실패는 상태 UNKNOWN이므로 terminal만으로 복원을 주장하지 않습니다. recovery 뒤
+fresh 확인, 사용자 앱 복원, 재독 순서입니다. Bar classic91/TimerOFF/Frequency80/PulseTidefalse와
+Pro first40/TimerOFF/Frequency34, second latent31/TimerON/Frequency32·그 시점 slot을 대조합니다.
+diagnostic stderr를 보존·digest 검증하며 원인 미확정은 그대로 둡니다. direct 성공은 group D1u 원인
+해소나 group PASS가 아니며 source·test·gate·timeout·retry·frozen ASYNC 변경 없이 기록을 먼저 닫습니다.
+
+배포·readiness/postcheck 실패는 자료 보존과 candidate 정지 뒤 exact prior 복귀만 수행하고
+device command0으로 종료합니다. prior 복귀도 실패하면 정지·보고하며 같은 승인으로 candidate
+2차 배포를 재시도하지 않습니다. OFF 체류는 확인 절차 때문에 수십 초 규모일 수 있다는 추정과,
+180초는 물리 ON 복귀 보장이 아닌 관측 상한이라는 점을 앱 준비 안내 때 함께 공개합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,

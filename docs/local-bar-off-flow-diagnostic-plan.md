@@ -1,8 +1,8 @@
 # D1v — Bar-only OFF-state Flow diagnostic follow-up
 
-Status: offline preparation authorized by the user's request to propose and perform a useful
-retest after D1u. The concrete Bar-only physical sequence below is proposed, not yet approved
-or executed. D1u's one-shot authority is exhausted; its FAIL remains unchanged.
+Status: diagnostic deployment and one Bar-only operation are approved as described in
+"Authorization update after HA postcheck" below. Execution still requires app preparation
+and current onsite readiness. No D1v device command has been sent; D1u's FAIL remains unchanged.
 
 ## Question and alternatives
 
@@ -167,3 +167,24 @@ Both the installed source and diagnostic source produce protocol-schema SHA-256
 Writer/protocol/journal schema and frozen ASYNC files are unchanged. This preserves the named
 schema fingerprint; it is not a fresh audit of live receipt files or authorization to write.
 The tests prove code error-handling properties, not a Bar firmware hypothesis or a future PASS.
+
+## Authorization update after HA postcheck
+
+After the read-only HA postcheck record `d9589ce`, the user was told that targeted21/Ruff pass
+but two final full-suite failures remain unresolved, and that the proposed Bar-only
+OFF→Flow30→ON may leave Bar off and require onsite app restoration. The user replied
+“ㅇㅇ 진행하자”. This approves the diagnostic deployment and this single scoped operation,
+not a D1u retry or an all-green validation claim. App preparation and current onsite readiness must still be
+confirmed before a device command. Both Pro pumps and the unarmed group's Constant50 config
+remain unchanged. The exact prior service is preserved for return without rebuilding.
+
+A deployment or readiness/postcheck failure ends this deployment attempt: preserve failure
+output, stop the candidate, and restore the exact prior service without rebuilding. If that
+return fails, leave the service stopped and report the failure. No device command or second
+candidate deployment is authorized as a retry within this attempt.
+
+Bar may remain OFF for tens of seconds while command/read confirmations run. This is an
+operational estimate, not measured impeller dwell or a guarantee;180 seconds is only the
+observation stop limit, not an automatic physical restart. The two intermediate confirmations
+are independent authenticated reads, not waits for three MQTT cycles. Post-ON alone has the
+three-cycle hold. No claim of unconditional harmlessness follows from the other pumps running.
