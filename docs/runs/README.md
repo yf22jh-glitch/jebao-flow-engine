@@ -122,6 +122,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-13 Sync group commissioning](2026-09-13-local-group-sync-commissioning.md) | ON 1 / targets 31→30→31 / Flow write 9 / power 0 | 두 전환·유한 hold 중복 억제·세 번째 terminal 뒤 정지 확인, 수용된 latent31과 prior 서비스 복귀 |
 | [2026-09-14 Anti Phase group commissioning](2026-09-14-local-group-antiphase-commissioning.md) | ON 1 / A→B→C→D→A / Flow write 8 / power 0 | 기존 phase0/180/90의 네 전환·유한 hold·다섯 번째 terminal 뒤 정지 및 선언 field·prior 서비스 복귀 확인 |
 | [2026-09-14 direct override·resume commissioning](2026-09-14-local-group-override-resume-commissioning.md) | ON1·direct32 1·PRESS1 / record4 / Flow2 / power0 | first Pro의 세 cycle override 유지·resume 뒤 해당 멤버만31 복귀 및 선언 field·prior 서비스 복귀 확인 |
+| [2026-09-14 group power commissioning](2026-09-14-m4-group-power-commissioning.md) | OFF rev10 / ON FAIL rev14 / recovery rev25·write4 | Bar Flow send_once 예외로 혼합 상태; 마지막 record 복구·앱 원복·prior 복귀, 근본 원인은 UNKNOWN |
 
 ## 새 실행 기록 템플릿
 
