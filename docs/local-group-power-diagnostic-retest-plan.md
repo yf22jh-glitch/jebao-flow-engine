@@ -3,14 +3,24 @@
 상태: **재시험 요청에 따른 준비 계획**. 사용자 “야 이거 다시 해봐 절차상이든 뭐든 문제가
 있는건지 확인을 해야 할꺼 아니야???”를 D1u group 실패의 새 진단 재시험 요청으로 받았습니다.
 과거 D1u/D1v 단회 권한을 재사용하지 않습니다. 이 문서 작성은 배포나 장비 명령 실행이 아닙니다.
-아래 물리 결과를 공개하고 현재 현장 감시·즉시 직접 ON 복원 가능 여부를 확인한 뒤,
-해당 단회의 정책 결속과 독립 검토를 마쳐야 live 준비로 진행합니다.
+아래 물리 결과와 재시험의 관측 가치를 먼저 공개합니다. 승인 범위는 (A) maintainer의
+진단 image·Constant30 임시 배포1회와 exact prior 복귀, (B) on-site approver의 세 대
+OFF1/ON1·필요한 마지막 nonterminal recovery·앱 복원 단회로 각각 명시합니다.
+같은 사람이 두 범위를 함께 승인할 수 있지만, 한 범위나 테스트 수정 승인을 다른 범위에
+묵시적으로 재사용하지 않습니다. 상시 진단 배포 승인은 이 계획에 포함하지 않습니다.
+두 범위의 명시적 승인, 현재 현장 감시·즉시 직접 ON 복원 가능 확인, 단회 정책 결속과
+독립 검토를 마쳐야 live 준비로 진행합니다. 현재는 승인 질문 전 계획 단계입니다.
 
 ## 닫을 질문과 비교 설계
 
 동일한 세 binding, second Pro → first Pro → Bar 순서, all31 baseline과 Constant30 목표에서
 기존 group OFF/ON 경로가 완료되는가? 실패하면 어느 action·예외 catch 경계에서 멈추는가?
 순서·baseline·명령 수·readback을 감사하여 절차 이탈과 실행 중 실패를 구분합니다.
+
+기존 D1u 기록에서 실패 지점 이전 대상·action 순서·명령 회계의 이탈은 관측되지 않았습니다.
+이는 모든 절차 문제를 배제하는 증명은 아닙니다. 이번 재시험의 추가 가치는 동일 group 경로의
+새 완료 관측 또는 재실패 시 원래 빠졌던 예외 class·위치·경과를 확보하는 데 있습니다.
+이 점과 실패 재현·원인 규명 보장이 없다는 점을 사용자에게 승인 전에 직접 알립니다.
 
 근거는 [D1u FAIL](runs/2026-09-14-m4-group-power-commissioning.md),
 [D1v direct PASS](runs/2026-09-14-local-bar-off-flow-diagnostic.md),
@@ -38,14 +48,17 @@ bytes는 확인됐지만 transport·전송 순간 상태·세션 대기와 원 �
    min30/max75/period10/transition0, phases0/180/90, gains1, invertfalse, roles와 members는
    유지합니다. source0444/parent0700/owner/link1을 확인하고 projection90 byte exact,
    binding4·qualified pair6·ignored0을 검증합니다. prior Constant50에서 ON을 누르지 않습니다.
-4. 승인된 임시 진단 배포는 stop-first, no-build/no-pull로1회만 합니다. readiness·실제 image·
+4. 위 (A)의 명시적 배포 승인을 확인한 뒤 임시 진단 배포를 stop-first, no-build/no-pull로
+   1회만 합니다. readiness·실제 image·
    manifest 재생성 순서·unarmed·fresh6·discovery90·journal/receipt 불변을 확인합니다.
    실패하면 자료 보존→candidate 정지→exact prior 복귀 검증으로 command0 종료합니다.
    복귀도 실패하면 정지·보고하며 같은 승인 안에서 재배포를 반복하지 않습니다.
 5. 앱 준비 전에 서비스를 정지하고 독립 authenticated baseline을 보존합니다. 첫 Pro40→31은
    9%p, Bar classic91→constant31은60%p와 파형 변경입니다. second는 TimerOFF가 실제
    schedule 출력→manual31 전환이므로 조작 직전 active slot을 읽어 실제 변화 폭을 공개합니다.
-   Pro 안내에는 사용자 요청대로 실제 MAC을 붙이되 저장소·중계 기록에는 anchor만 씁니다.
+   Pro 안내에는 사용자 요청대로 실제 MAC을 사용자 직접 안내 채널에만 붙입니다.
+   Agent Bridge를 포함한 중계·저장소·run·README·readiness·commit에는 anchor만 씁니다.
+   private artifact에서 공개 기록으로 발췌할 때도 실제 MAC이 포함되지 않았는지 재확인합니다.
 6. 사용자가 모두 ON/TimerOFF/constant/independent/31로 준비한 회신 뒤 별도 fresh read,
    재기동·readiness·unarmed·override0·qualified/fresh field·tree 결속을 재확인합니다.
    Frequency는 first34/second32/Bar80, Bar PulseTidefalse를 유지합니다. 앱 완료를 현장
