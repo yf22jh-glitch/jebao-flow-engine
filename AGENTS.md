@@ -3275,6 +3275,44 @@ BarPulseTidefalse를 복원하고 second는 그 시점 active-slot 일치를 확
 unarmed·fresh6·discovery90 exact·command0·unfinished0·journal/receipt 불변을 확인합니다. 준비·복원 대기와
 service 부재는 command span과 분리해 기록합니다. 다른 physical operation 전에 append-only run을 commit합니다.
 
+### D1u — group canonical OFF와 OFF-state Flow-first ON 단회
+
+D1t 실기와 복원·기록 commit `0f51f99` 뒤 사용자는 다음 진행을 요청했습니다. 에이전트가
+세 수류모터 모두 OFF인 구간과 실패 시 OFF로 남아 사용자가 즉시 직접 켜야 한다는 결과를
+공개하고 현장 복원 준비를 확인한 질문에 사용자는 “ㅇㅇㅇㅇ 진행해줘”로 명시 승인했습니다.
+승인은 [D1u 계획](docs/local-group-power-commissioning-plan.md)의 임시 Constant30 배포,
+사용자 앱 all31/TimerOFF/constant/independent precondition, OFF1·ON1, 유한 관측과
+ordered recovery·앱 복원·exact prior Constant50 복귀 한 건에만 결속합니다. 다른 실기는 포함하지 않습니다.
+
+닫을 질문은 canonical OFF가 power만 보내고, 뒤 ON이 꺼진 장비의 Flow31→30을 먼저 적용한 뒤
+power ON을 별도 frame으로 보내는가입니다. source·tests·schema·qualification·새 gate는 변경하지
+않습니다. 세 exact physical binding과 기존 coordinator/lease/journal-first/single-send를 사용합니다.
+정상 예상은 OFF action3/rev10/power3, ON action6/rev19/Flow3+power3, record2/frame9이며
+receipt 변화0입니다. OFF-state Flow write는 이번이 첫 실기이고 성공을 미리 가정하지 않습니다.
+
+OFF 뒤 terminal과 independent authenticated read 한 번으로 OFF/Flow31 및 선언 field를 확인한
+경우에만 ON1로 갑니다. OFF 상태에서 세 cycle을 기다리지 않습니다. ON 뒤에는 세 complete fresh
+cycle에서 allON/Flow30·record 불변을 확인하고 stop합니다. 처음 OFF intent부터180초의 내부·host
+독립 상한은 관측 중단 규칙일 뿐 OFF 시간의 물리 보장이 아닙니다. extra record·예상 밖 action/
+target/순서·Flow attempted3 또는 power attempted6 초과·nonterminal failure·기존 record/receipt
+변경·observer/lifecycle 오류는 즉시 중단하며 재OFF·재ON·corrective direct ON은 하지 않습니다.
+supersession의 attempting은 실제 frame과 구분하며 완주하지 못하면 FAIL/UNKNOWN으로 기록합니다.
+
+정지는 자동 ON을 만들지 않고 이미 accepted mandatory OFF는 drain될 수 있습니다. nonterminal만
+기존 config-only qualification recover로 처리하고 일반 local recover나 이전 VERIFIED record는
+사용하지 않습니다. OFF recovery는 fresh OFF/원ON 분류만 하며 ON을 보내지 않습니다. ON recovery는
+actual attempted Flow baseline31 및 power baselineOFF로 역순 복구(최대6 frame)하므로 이미 켠
+멤버를 다시 끌 수 있습니다. terminal만으로 전원 복원을 주장하지 않고 현장 복원과 fresh read가 필요합니다.
+
+app·HA 병행 조작은 피하고 service stop 후에만 앱 precondition/restore를 요청합니다. 원 baseline은
+fresh로 재확인하고 first40/TimerOFF/Frequency34, second latent31/TimerON/Frequency32와 그 시점
+active slot, Barclassic91/TimerOFF/Frequency80/PulseTidefalse를 같은 field 집합으로 복원합니다.
+source0444/parent0700의 production 생성·교체와 exact prior image/Compose/bundle을 사용하고
+재빌드하지 않습니다. prior 복귀는 unarmed·fresh6·discovery90 exact·unfinished0·command0·두 tree
+결속으로 확인합니다. 공개에는 anchor·count·digest만 남기고 MAC/private names/paths는 넣지 않습니다.
+실행 후 append-only run을 먼저 commit하며 device별 OFF/ON 관측과 command span·service 부재를
+분리합니다. MQTT 발행 간격을 실제 세 펌프 OFF 체류 시간으로 동일시하지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
