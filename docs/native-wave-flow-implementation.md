@@ -124,3 +124,38 @@ schema 입력9개와 변경 집합 교집합은0이고, network-none 실행 재�
 이 구현 결과 커밋으로 `18233ae`의 구현 예외는 소진·재동결된다.
 두 역할 실기는 같은 절의 별도 실행 범위·현장 조건·이전 복원 의무를 확인하고 진행하며,
 이 문서의 테스트 결과만으로 시작하거나 원복 완료를 선언하지 않는다.
+
+## 실행 이미지 준비 결과
+
+구현 커밋 `6978d2dadf0400958241dc7ebd638d4be04b4763`의 bundle로 실행 이미지를 준비했다.
+이미지 SHA256은 `200564aeeaa084e181c887a431149f9d672d443d9931e376475d720c58a506f1`이다.
+기본 이미지는 기존 `a6ad7c71fb0ebd94ac6454bdb04441ba56e08f5ddfe0630d4dc4161b2ea06c4c`이며,
+그 로컬 태그의 실제 ID를 빌드 전·후 대조했다. 운영 서비스에 배포하지 않았다.
+
+첫 Dockerfile은 이미지 ID를 FROM에 직접 적어 BuildKit이 원격 이미지 이름으로 해석했고,
+메타데이터 조회에서 실패했다. layer 실행 전에 끝났으며 로그와 Dockerfile을 보존했다.
+`--network none`은 RUN 단계 제한이지 메타데이터 조회 전체의 네트워크 차단이 아니다.
+로컬 태그와 실제 ID 결속으로 표기만 정정한 두 번째 빌드는 exit0이었다.
+기본 이미지의 git·의존성을 재사용하고, fetch/checkout은 제공된 bundle만 사용했다.
+
+격리 이미지 검사 첫 호출은 operator script의 읽기 권한 때문에 양쪽 모두 시작 전에 실패했다.
+비밀값 없는 검사 script만0644로 정정했다. 운영 UID·보호 root·receipt 권한은 바꾸지 않았다.
+정정 검사 두 호출은 network-none/read-only이며 script만 마운트하고 운영 데이터는 마운트하지 않았다.
+각 이미지의 추적 source138개를 그 이미지 HEAD의 git bytes와 대조해 모두 일치했다.
+기본 대비 source 차이는 승인된 다섯 파일뿐이며 Python·설치 패키지 목록·schema 지문은 동일했다.
+새 이미지에서 가상 식별자를 사용한 순수 spec 생성으로 Sync·Anti-Sync marker와1035초 계약을 확인했다.
+이는 실제 신원·현장 조건 확인이나 device write가 아니다.
+
+보존 묶음은 `wave-flow-build.btTl4t53`이다.
+
+| 산출물 | SHA256 |
+|---|---|
+| source bundle | `51e1ff5358643928978ebafe75596718ca514e7d7e4095db2320c9cea92a8e46` |
+| 첫 빌드 실패 로그 | `ed3c648683896c1373f82f9df46d97ac2022ab8edcfe3e9bd137dc954d0f76c2` |
+| 정정 빌드 로그 | `2a4aa490dc14a177399657b3565da686cd4f98b77e903a585be180986901336c` |
+| 최종 Dockerfile | `f373a54354d3561eff1c8dd57c40cab19da36b045c34c856797891f97cf62c49` |
+| candidate 검사 | `35e8b23c4dc8647aed2a55becbcb0c40ad7385eeffef2509e37b7d9b5ee2e9d7` |
+| base 검사 | `6be72014fe2559f7489faec1ebe1fca5a3e5baf38ea39bd4397df3a425393287` |
+
+정정 검사 stderr는 양쪽0B다. 이미지 준비 뒤에도 원 exact 서비스는 정지 상태이고,
+이전 first TimerOFF는 새로 확인하지 않았다. 새 실기·앱 조작·운영 배포0을 유지한다.
