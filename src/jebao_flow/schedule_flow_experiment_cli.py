@@ -108,9 +108,10 @@ from jebao_flow.persistence import (
 _TOKEN_VERSION = 1
 _MAX_POWER = 45
 _FIXED_Q2_MAX_POWER = 47
-_BOUNDARY_MIN_LEAD_SECONDS = 540
-_BOUNDARY_MAX_LEAD_SECONDS = 600
-_RUN_MIN_LEAD_SECONDS = 510
+_FIXED_SYNC_MAX_POWER = 41
+_BOUNDARY_MIN_LEAD_SECONDS = 360
+_BOUNDARY_MAX_LEAD_SECONDS = 420
+_RUN_MIN_LEAD_SECONDS = 380
 _LEGACY_TERMINAL_OUTCOMES = frozenset(
     {
         "armed_preview_cancelled",
@@ -265,7 +266,7 @@ def _fixed_spec(
     sentinel_only: bool = False,
     allow_expired_qualification: bool = False,
 ) -> ScheduleFlowExperimentSpec:
-    """Return the only field-test plan currently audited for physical execution."""
+    """Construct the fixed Sync preparation plan; this is not live-write authorization."""
 
     spec = ScheduleFlowExperimentSpec(
         operation_id=operation_id,
@@ -273,16 +274,16 @@ def _fixed_spec(
         master_device_id=master_device_id,
         slave_device_id=slave_device_id,
         boundary_time=boundary_time,
-        master_before_flow=40,
-        slave_before_flow=35,
-        master_after_flow=35,
-        slave_after_flow=47,
-        sine_frequency=50,
+        master_before_flow=35,
+        slave_before_flow=32,
+        master_after_flow=30,
+        slave_after_flow=40,
+        sine_frequency=30,
         safe_frequency=20,
         # ScheduleLinkageController retains a 15-second rollback reserve.  A 915-second
         # authority therefore yields the maintainer-approved full 900-second read-only epoch.
         observation_window_seconds=915,
-        post_boundary_stability_seconds=300,
+        post_boundary_stability_seconds=30,
         verification_interval_seconds=2,
         minimum_lead_seconds=60,
         ambiguous_band_seconds=1,
@@ -310,21 +311,24 @@ def _fixed_spec(
 def _attended_power_cap(spec: ScheduleFlowExperimentSpec) -> int:
     """Open the attended 47% ceiling only for the approved fixed-Q2 signature."""
 
-    return _FIXED_Q2_MAX_POWER if spec.is_fixed_q2_plan else _MAX_POWER
+    return (
+        _FIXED_SYNC_MAX_POWER if spec.is_fixed_sync_plan else
+        _FIXED_Q2_MAX_POWER if spec.is_fixed_q2_plan else _MAX_POWER
+    )
 
 
 def _next_boundary(clocks: Sequence[datetime]) -> str:
-    """Choose a boundary 9-10 minutes after the freshest device clock."""
+    """Choose master T six-to-seven minutes ahead; slave transition is T+5 minutes."""
 
     if len(clocks) != 2 or any(clock.tzinfo is not None for clock in clocks):
         raise ScheduleFlowCliError("both device-local clocks must be available and timezone-naive")
     earliest, latest = min(clocks), max(clocks)
     if (latest - earliest).total_seconds() > 30:
         raise ScheduleFlowCliError("device-local clocks exceed the preserved-raw allowance")
-    boundary = latest.replace(second=0, microsecond=0) + timedelta(minutes=10)
+    boundary = latest.replace(second=0, microsecond=0) + timedelta(minutes=7)
     lead = (boundary - latest).total_seconds()
     if not _BOUNDARY_MIN_LEAD_SECONDS <= lead <= _BOUNDARY_MAX_LEAD_SECONDS:
-        raise ScheduleFlowCliError("cannot choose the fixed nine-to-ten-minute boundary")
+        raise ScheduleFlowCliError("cannot choose the fixed six-to-seven-minute boundary")
     if boundary.date() != latest.date() or (boundary.hour == 0 and boundary.minute == 0):
         raise ScheduleFlowCliError("schedule-flow preflight cannot cross midnight")
     return boundary.strftime("%H:%M")
@@ -712,12 +716,13 @@ async def _preflight(
     if spec.sentinel_only:
         print("Plan: sparse unused-slot wire qualification only; no field or role activation.")
     else:
-        print("Plan: pause Independent/Constant master 30% / slave 35%.")
+        print("Plan: pause Independent/Constant master 30% / slave 31%.")
         print(
-            "Boundary plan: master Sine 40% F50 -> Constant 35%; "
-            "slave Sine 35% F50 -> Constant 47%; roles master/async_slave."
+            "Boundary plan: master Sine 35% F30 -> Constant 30% at T; "
+            "slave Constant 32% -> Sine 40% F30 at T+5 minutes; roles master/sync_slave."
         )
-        print("Observation: full 900s epoch with at least 300s stable post-boundary evidence.")
+        print("Observation: full 900s epoch; W0 120s baseline and W2 30s stable evidence.")
+        print("Sync content observation does not establish Async behavior or physical flow.")
     print(f"Confirmation token: {token}")
     return 0
 
@@ -1134,6 +1139,7 @@ async def _run(
                     stage_event_observer=persist_stage_event,
                     schedule_snapshot_authorizer=_snapshot_authorizer(intent_store, intent),
                     fixed_q2_observation=spec.is_fixed_q2_plan,
+                    fixed_sync_observation=spec.is_fixed_sync_plan,
                 )
                 result = await _await_with_stop_signals(
                     controller.run_experiment(spec),

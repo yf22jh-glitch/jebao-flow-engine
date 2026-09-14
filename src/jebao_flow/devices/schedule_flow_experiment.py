@@ -49,6 +49,7 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageRunProgressEvent,
     ScheduleLinkageRunProgressKind,
     ScheduleLinkageSample,
+    ScheduleLinkageSlaveRoleSequence,
     ScheduleLinkageSpec,
 )
 from jebao_flow.devices.schedule_transaction import (
@@ -96,6 +97,9 @@ _STAGED_CURRENT_AUTO_MODES = frozenset({"constant", "pulse", "sine", "feed"})
 _SCHEDULE_FLOW_TEST_MAX_POWER = 45
 _FIXED_Q2_MAX_POWER = 47
 _FIXED_Q2_SIGNATURE = (40, 35, 35, 47, 50)
+_FIXED_SYNC_SIGNATURE = (35, 32, 30, 40, 30)
+_FIXED_SYNC_MAX_POWER = 41
+_FIXED_SYNC_SLAVE_MANUAL_POWER = 31
 _FIXED_Q2_MASTER_MANUAL_POWER = 30
 _FIXED_Q2_SLAVE_MANUAL_POWER = 35
 _FIXED_Q2_SAFE_FREQUENCY = 20
@@ -156,6 +160,17 @@ class ScheduleFlowExperimentSpec(BaseModel):
     def is_fixed_q2_plan(self) -> bool:
         return _is_fixed_q2_plan(self)
 
+    @property
+    def is_fixed_sync_plan(self) -> bool:
+        return _plan_signature(self) == _FIXED_SYNC_SIGNATURE
+
+    @property
+    def slave_boundary_time(self) -> str:
+        if not self.is_fixed_sync_plan:
+            return self.boundary_time
+        hour, minute = map(int, self.boundary_time.split(":"))
+        return (datetime(2000, 1, 1, hour, minute) + timedelta(minutes=5)).strftime("%H:%M")
+
     @model_validator(mode="after")
     def validate_experiment(self) -> Self:
         if self.master_device_id == self.slave_device_id:
@@ -191,7 +206,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
         if _is_fixed_q2_plan(self) and (
             self.safe_frequency != _FIXED_Q2_SAFE_FREQUENCY
             or self.observation_window_seconds != 915
-            or self.post_boundary_stability_seconds != 300
+            or self.post_boundary_stability_seconds != (30 if self.is_fixed_sync_plan else 300)
             or self.verification_interval_seconds != 2
             or self.minimum_lead_seconds != 60
             or self.ambiguous_band_seconds != 1
@@ -201,6 +216,11 @@ class ScheduleFlowExperimentSpec(BaseModel):
             or not self.full_epoch_after_roles
         ):
             raise ValueError("the fixed Q2 signature requires its exact attended controls")
+        if (
+            self.is_fixed_sync_plan
+            and boundary_seconds + 300 + required_after >= _FIELD_SCHEDULE_END_SECONDS
+        ):
+            raise ValueError("fixed Sync slave boundary must leave its full stable window")
         return self
 
     def outer_linkage_spec(self) -> LinkageTestSpec:
@@ -217,11 +237,15 @@ class ScheduleFlowExperimentSpec(BaseModel):
             if _is_fixed_q2_plan(self)
             else (self.master_before_flow, self.slave_before_flow)
         )
+        if self.is_fixed_sync_plan:
+            slave_power = _FIXED_SYNC_SLAVE_MANUAL_POWER
         return LinkageTestSpec(
             operation_id=self.operation_id,
             master_device_id=self.master_device_id,
             slave_device_id=self.slave_device_id,
-            slave_role=LinkageRole.ASYNC_SLAVE,
+            slave_role=(
+                LinkageRole.SYNC_SLAVE if self.is_fixed_sync_plan else LinkageRole.ASYNC_SLAVE
+            ),
             mode="constant",
             master_power=master_power,
             slave_power=slave_power,
@@ -250,7 +274,20 @@ class ScheduleFlowExperimentSpec(BaseModel):
         )
 
     def temporary_schedule_spec(self) -> TemporaryScheduleSpec:
-        if _is_fixed_q2_plan(self):
+        if self.is_fixed_sync_plan:
+            master_patch = _two_segment_patch(
+                self.master_device_id,
+                boundary_time=self.boundary_time,
+                before_mode="sine", before_flow=35, before_frequency=30,
+                after_mode="constant", after_flow=30, after_frequency=0,
+            )
+            slave_patch = _two_segment_patch(
+                self.slave_device_id,
+                boundary_time=self.slave_boundary_time,
+                before_mode="constant", before_flow=32, before_frequency=0,
+                after_mode="sine", after_flow=40, after_frequency=30,
+            )
+        elif _is_fixed_q2_plan(self):
             master_patch = _two_segment_patch(
                 self.master_device_id,
                 boundary_time=self.boundary_time,
@@ -312,16 +349,19 @@ class ScheduleFlowExperimentSpec(BaseModel):
         )
 
 
-def _is_fixed_q2_plan(spec: ScheduleFlowExperimentSpec) -> bool:
-    """Recognize the one token-compatible same-mode plan without adding persisted fields."""
-
+def _plan_signature(spec: ScheduleFlowExperimentSpec) -> tuple[int, int, int, int, int]:
     return (
         spec.master_before_flow,
         spec.slave_before_flow,
         spec.master_after_flow,
         spec.slave_after_flow,
         spec.sine_frequency,
-    ) == _FIXED_Q2_SIGNATURE
+    )
+
+
+def _is_fixed_q2_plan(spec: ScheduleFlowExperimentSpec) -> bool:
+    """Keep legacy Async and new Sync signatures distinct without rewriting persisted specs."""
+    return _plan_signature(spec) in {_FIXED_Q2_SIGNATURE, _FIXED_SYNC_SIGNATURE}
 
 
 class ScheduleFlowOutcome(StrEnum):
@@ -532,6 +572,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         schedule_snapshot_authorizer: SnapshotAuthorizer | None = None,
         role_preflight_settle_seconds: float = _ROLE_PREFLIGHT_SETTLE_SECONDS,
         fixed_q2_observation: bool = False,
+        fixed_sync_observation: bool = False,
     ) -> None:
         if role_preflight_settle_seconds < 0:
             raise ValueError("role preflight settle interval cannot be negative")
@@ -557,6 +598,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             refresh_sessions_before_critical_reads=True,
             owned_staged_auto_transition_observation=True,
             owned_fixed_q2_observation=fixed_q2_observation,
+            owned_fixed_sync_observation=fixed_sync_observation,
         )
         self._external_role_sample_observer = role_sample_observer
         self._external_diagnostic_event_observer = diagnostic_event_observer
@@ -564,6 +606,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         self._authorize_pause = pause_authorizer
         self._role_preflight_settle_seconds = role_preflight_settle_seconds
         self._fixed_q2_observation = fixed_q2_observation
+        self._fixed_sync_observation = fixed_sync_observation
         self._experiment_spec: ScheduleFlowExperimentSpec | None = None
         self._sentinel_result: TemporaryScheduleResult | None = None
         self._temporary_result: TemporaryScheduleResult | None = None
@@ -614,7 +657,10 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             self._deferred_diagnostic_events.clear()
             self._deferred_role_samples.clear()
             try:
-                if self._fixed_q2_observation is not spec.is_fixed_q2_plan:
+                if (
+                    self._fixed_q2_observation is not spec.is_fixed_q2_plan
+                    or self._fixed_sync_observation is not spec.is_fixed_sync_plan
+                ):
                     raise LinkageTransactionError(
                         "fixed Q2 monitor selection does not match the token-bound plan"
                     )
@@ -1419,7 +1465,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         expected_ids = (outer.spec.master_device_id, outer.spec.slave_device_id)
         if (
             not outer.spec.bootstrap_active_schedule
-            or outer.spec.slave_role is not LinkageRole.ASYNC_SLAVE
+            or outer.spec.slave_role not in {LinkageRole.ASYNC_SLAVE, LinkageRole.SYNC_SLAVE}
             or tuple(snapshot.device_id for snapshot in outer.snapshots) != expected_ids
         ):
             raise LinkageRollbackError("outer recovery record is not a schedule-flow owner")
@@ -1446,6 +1492,13 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 raise LinkageRollbackError("temporary schedule journal owner mismatch")
 
         if role is not None:
+            expected_role = (
+                LinkageRole.SYNC_SLAVE
+                if role.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.SYNC_ONLY
+                else LinkageRole.ASYNC_SLAVE
+            )
+            if outer.spec.slave_role is not expected_role:
+                raise LinkageRollbackError("nested role sequence disagrees with its outer owner")
             if (
                 schedule is None
                 or schedule.spec.kind is not TemporaryScheduleKind.FIELD_OBSERVATION
@@ -1719,6 +1772,8 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         clocks: list[datetime] = []
         leads: list[float] = []
         awaiting_current_a = False
+        # Both timer-arm checks use the earliest (master) boundary, conservatively also for
+        # the Sync slave whose own boundary is five minutes later. Do not subtract that offset.
         boundary_hour, boundary_minute = (
             int(value) for value in spec.boundary_time.split(":", maxsplit=1)
         )
@@ -1849,6 +1904,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         capabilities = self._get_device(device_id).capabilities
         limits = capabilities.power_limits
         plan_maximum = (
+            _FIXED_SYNC_MAX_POWER if spec.is_fixed_sync_plan else
             _FIXED_Q2_MAX_POWER if _is_fixed_q2_plan(spec) else _SCHEDULE_FLOW_TEST_MAX_POWER
         )
         guarded_maximum = min(limits.max_power, plan_maximum)
@@ -2246,6 +2302,33 @@ def classify_schedule_flow_sample(
     sample: ScheduleLinkageSample,
 ) -> ScheduleFlowOutcome:
     """Classify effective slave evidence without relying on the app's fixed Flow control."""
+
+    if sample.slave_linkage is not spec.outer_linkage_spec().slave_role:
+        return ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+    if spec.is_fixed_sync_plan:
+        def matches(value: ScheduleAutoEvidence | None, mode: str, flow: int, freq: int) -> bool:
+            return value is not None and (
+                value.mode == mode and value.flow == flow and value.feed_time is None
+                and value.frequency in ({0, 5} if mode == "constant" and freq == 0 else {freq})
+            )
+
+        if (
+            sample.phase != "after"
+            or sample.master_manual_power != 30 or sample.slave_manual_power != 31
+            or not matches(sample.master_before, "sine", 35, 30)
+            or not matches(sample.master, "constant", 30, 0)
+        ):
+            return ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+        before, after = sample.slave_before, sample.slave
+        if matches(before, "sine", 35, 30) and matches(after, "constant", 30, 0):
+            return ScheduleFlowOutcome.FULL_MASTER_FOLLOW
+        if matches(before, "constant", 32, 0) and matches(after, "sine", 40, 30):
+            return ScheduleFlowOutcome.OWN_SCHEDULE
+        if matches(before, "constant", 31, 20) and matches(after, "constant", 31, 20):
+            return ScheduleFlowOutcome.COMMON_MANUAL_FLOW
+        if matches(before, "constant", 32, 0) and matches(after, "constant", 32, 0):
+            return ScheduleFlowOutcome.A_SLOT_HOLD
+        return ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
 
     if _is_fixed_q2_plan(spec):
         if (

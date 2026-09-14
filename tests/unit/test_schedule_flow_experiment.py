@@ -101,6 +101,81 @@ def _fixed_q2_spec(**updates: object) -> ScheduleFlowExperimentSpec:
     return _spec(**values)
 
 
+def _fixed_sync_spec(**updates: object) -> ScheduleFlowExperimentSpec:
+    return _fixed_q2_spec(**({
+        "master_before_flow": 35, "slave_before_flow": 32,
+        "master_after_flow": 30, "slave_after_flow": 40,
+        "sine_frequency": 30, "post_boundary_stability_seconds": 30,
+    } | updates))
+
+
+def test_sync_fixed_plan_keeps_legacy_serialization_and_offsets_only_slave_boundary() -> None:
+    legacy = _fixed_q2_spec()
+    spec = _fixed_sync_spec()
+    assert legacy.is_fixed_sync_plan is False
+    assert legacy.outer_linkage_spec().slave_role is LinkageRole.ASYNC_SLAVE
+    assert legacy.slave_boundary_time == legacy.boundary_time
+    assert ScheduleFlowExperimentSpec.model_validate_json(legacy.model_dump_json()) == legacy
+    assert spec.is_fixed_sync_plan is True
+    assert spec.outer_linkage_spec().slave_role is LinkageRole.SYNC_SLAVE
+    assert spec.outer_linkage_spec().master_power == 30
+    assert spec.outer_linkage_spec().slave_power == 31
+    assert spec.slave_boundary_time == "12:39"
+    assert "is_fixed_sync_plan" not in spec.model_dump()
+    assert ScheduleFlowExperimentSpec.model_validate_json(spec.model_dump_json()) == spec
+    expected = (
+        (("sine", 35, 30, "00:00", "12:34"), ("constant", 30, 0, "12:34", "23:59")),
+        (("constant", 32, 0, "00:00", "12:39"), ("sine", 40, 30, "12:39", "23:59")),
+    )
+    for patch, entries in zip(spec.temporary_schedule_spec().device_patches, expected, strict=True):
+        assert len(patch.slots) == 48
+        assert sum(len(slot.wire_bytes) for slot in patch.slots) == 432
+        for slot, declared in zip(patch.slots[:2], entries, strict=True):
+            decoded = decode_local_wavemaker_pro_slot_wire(slot.wire_bytes, slot_index=slot.slot)
+            assert (decoded.mode, decoded.parameters["flow"], decoded.parameters["frequency"],
+                    decoded.start, decoded.end) == declared
+        assert all(slot.wire_bytes == LOCAL_WAVEMAKER_PRO_UNUSED_EE for slot in patch.slots[2:])
+
+
+@pytest.mark.parametrize("boundary", ("23:54", "23:55", "23:59"))
+def test_fixed_sync_rejects_wrapping_or_incomplete_slave_window(boundary: str) -> None:
+    with pytest.raises(ValidationError):
+        _fixed_sync_spec(boundary_time=boundary)
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "outcome"),
+    (
+        (("sine", 35, 30), ("constant", 30, 5), ScheduleFlowOutcome.FULL_MASTER_FOLLOW),
+        (("constant", 32, 0), ("sine", 40, 30), ScheduleFlowOutcome.OWN_SCHEDULE),
+        (("constant", 31, 20), ("constant", 31, 20), ScheduleFlowOutcome.COMMON_MANUAL_FLOW),
+        (("constant", 32, 5), ("constant", 32, 0), ScheduleFlowOutcome.A_SLOT_HOLD),
+        (("constant", 32, 0), ("sine", 40, 20), ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE),
+        (("sine", 35, 20), ("constant", 30, 0), ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE),
+    ),
+)
+def test_sync_classification_uses_whole_tuples_and_never_asserts_async_pass(
+    before, after, outcome,
+) -> None:
+    # These are classifier inputs, not fake claims about a firmware response.
+    def evidence(value):
+        return ScheduleAutoEvidence(mode=value[0], flow=value[1], frequency=value[2])
+
+    sample = ScheduleLinkageSample(
+        observed_at=datetime.now(UTC), phase="after",
+        master_before=evidence(("sine", 35, 30)), master=evidence(("constant", 30, 0)),
+        slave_before=evidence(before), slave=evidence(after),
+        master_manual_power=30, slave_manual_power=31,
+        master_linkage=LinkageRole.MASTER, slave_linkage=LinkageRole.SYNC_SLAVE,
+    )
+    assert classify_schedule_flow_sample(_fixed_sync_spec(), sample) is outcome
+    assert outcome is not ScheduleFlowOutcome.PER_SLOT_POWER_VERIFIED
+    wrong_role = sample.model_copy(update={"slave_linkage": LinkageRole.ASYNC_SLAVE})
+    assert classify_schedule_flow_sample(_fixed_sync_spec(), wrong_role) is (
+        ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+    )
+
+
 def _after_sample(
     *,
     master_flow: int = 35,

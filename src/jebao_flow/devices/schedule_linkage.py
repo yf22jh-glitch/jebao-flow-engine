@@ -96,6 +96,7 @@ _FIXED_Q2_BOUNDARY_EXCLUSION_SECONDS = 60.0
 _ROLE_FREQUENCY_FRESH_READ_ADMISSION_SECONDS = 30.0
 _SCHEDULE_LINKAGE_TEST_MAX_POWER = 45
 _FIXED_Q2_MAX_POWER = 47
+_FIXED_SYNC_MAX_POWER = 41
 _FIXED_Q2_MASTER_MANUAL_POWER = 30
 _FIXED_Q2_SLAVE_MANUAL_POWER = 35
 _FIXED_Q2_MASTER_BEFORE = ("sine", 40, 50)
@@ -158,6 +159,7 @@ class ScheduleLinkageSlaveRoleSequence(StrEnum):
 
     DIRECT = "direct"
     SYNC_THEN_ASYNC = "sync_then_async"
+    SYNC_ONLY = "sync_only"
 
 
 class ScheduleLinkageSlaveRoleProgress(StrEnum):
@@ -531,7 +533,7 @@ class ScheduleLinkageSample(BaseModel):
     slave_reported_mode: str | None = None
     slave_reported_frequency: int | None = Field(default=None, ge=0, le=100)
     master_linkage: Literal[LinkageRole.MASTER]
-    slave_linkage: Literal[LinkageRole.ASYNC_SLAVE]
+    slave_linkage: Literal[LinkageRole.ASYNC_SLAVE, LinkageRole.SYNC_SLAVE]
     master_reply_action: int | None = Field(default=None, ge=0, le=255)
     slave_reply_action: int | None = Field(default=None, ge=0, le=255)
     master_frame_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -752,7 +754,9 @@ class ScheduleLinkageRecord(BaseModel):
         detach_order = tuple(reversed(intents))
         if detached != detach_order[: len(detached)]:
             raise ValueError("detached progress must be a strict slave-to-master prefix")
-        if self.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.DIRECT:
+        if self.slave_role_sequence in {
+            ScheduleLinkageSlaveRoleSequence.DIRECT, ScheduleLinkageSlaveRoleSequence.SYNC_ONLY,
+        }:
             if slave_progress:
                 raise ValueError("direct slave role sequence cannot have staged progress")
         else:
@@ -1219,6 +1223,7 @@ class ScheduleActiveLinkageController:
         refresh_sessions_before_critical_reads: bool = False,
         owned_staged_auto_transition_observation: bool = False,
         owned_fixed_q2_observation: bool = False,
+        owned_fixed_sync_observation: bool = False,
     ) -> None:
         self._devices = dict(devices)
         self._store = store
@@ -1236,6 +1241,9 @@ class ScheduleActiveLinkageController:
             owned_staged_auto_transition_observation
         )
         self._owned_fixed_q2_observation = owned_fixed_q2_observation
+        self._owned_fixed_sync_observation = owned_fixed_sync_observation
+        if owned_fixed_sync_observation and not owned_fixed_q2_observation:
+            raise ValueError("fixed Sync observation requires the owned fixed monitor")
         if self._owned_fixed_q2_observation and not self._owned_staged_auto_transition_observation:
             raise ValueError("fixed Q2 observation requires the owned staged monitor")
         self._run_lock = asyncio.Lock()
@@ -1508,6 +1516,8 @@ class ScheduleActiveLinkageController:
                 updated_at=started_at,
                 expires_at=started_at + timedelta(seconds=spec.observation_window_seconds),
                 slave_role_sequence=(
+                    ScheduleLinkageSlaveRoleSequence.SYNC_ONLY
+                    if self._owned_fixed_sync_observation else
                     ScheduleLinkageSlaveRoleSequence.SYNC_THEN_ASYNC
                     if self._owned_fixed_q2_observation
                     else ScheduleLinkageSlaveRoleSequence.DIRECT
@@ -1545,13 +1555,13 @@ class ScheduleActiveLinkageController:
                 clock_anchor,
             )
             intent_already_persisted = False
-            if self._owned_fixed_q2_observation:
+            if self._owned_fixed_q2_observation and not self._owned_fixed_sync_observation:
                 record = await self._prepare_fixed_q2_slave_sequence(record)
                 intent_already_persisted = True
             record, clock_anchor = await self._link_device(
                 record,
                 spec.slave_device_id,
-                LinkageRole.ASYNC_SLAVE,
+                self._record_slave_role(record),
                 clock_anchor,
                 intent_already_persisted=intent_already_persisted,
             )
@@ -1618,6 +1628,21 @@ class ScheduleActiveLinkageController:
             self._run_drift_dimensions = ()
             self._run_pair_participant = None
 
+    @property
+    def _forward_slave_role(self) -> LinkageRole:
+        return (
+            LinkageRole.SYNC_SLAVE
+            if self._owned_fixed_sync_observation else LinkageRole.ASYNC_SLAVE
+        )
+
+    @staticmethod
+    def _record_slave_role(record: ScheduleLinkageRecord) -> LinkageRole:
+        return (
+            LinkageRole.SYNC_SLAVE
+            if record.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.SYNC_ONLY
+            else LinkageRole.ASYNC_SLAVE
+        )
+
     async def _capture_pair(
         self,
         spec: ScheduleLinkageSpec,
@@ -1633,7 +1658,7 @@ class ScheduleActiveLinkageController:
         )
         self._validate_capabilities(
             slave,
-            LinkageRole.ASYNC_SLAVE,
+            self._forward_slave_role,
             permit_disconnected=permit_disconnected_before_refresh,
         )
         if master.capabilities.product_key != slave.capabilities.product_key:
@@ -1662,7 +1687,7 @@ class ScheduleActiveLinkageController:
             # checks are safe before the retry, but only this completed paired boundary may
             # contribute connectivity evidence to a fresh capture.
             self._validate_capabilities(master, LinkageRole.MASTER)
-            self._validate_capabilities(slave, LinkageRole.ASYNC_SLAVE)
+            self._validate_capabilities(slave, self._forward_slave_role)
             try:
                 await self._heartbeat_pair(spec)
             except BaseException as error:
@@ -1949,7 +1974,10 @@ class ScheduleActiveLinkageController:
             master_expectation.before.mode == slave_expectation.before.mode
             and master_expectation.after_mode == slave_expectation.after_mode
         )
-        if master_expectation.boundary_at != slave_expectation.boundary_at or (
+        expected_offset = (
+            timedelta(minutes=5) if self._owned_fixed_sync_observation else timedelta(0)
+        )
+        if slave_expectation.boundary_at - master_expectation.boundary_at != expected_offset or (
             not self._owned_fixed_q2_observation and not same_mode_plan
         ):
             raise ScheduleLinkagePreflightError(
@@ -2087,6 +2115,12 @@ class ScheduleActiveLinkageController:
             ),
         }
         frequency_allowlist = {0, _FIXED_Q2_SAFE_FREQUENCY, 50}
+        if self._owned_fixed_sync_observation:
+            expected = {
+                spec.master_device_id: (30, ("sine", 35, 30), ("constant", 30, 0)),
+                spec.slave_device_id: (31, ("constant", 32, 0), ("sine", 40, 30)),
+            }
+            frequency_allowlist = {0, 5, 20, 30}
         for snapshot in snapshots:
             state = states[snapshot.device_id]
             schedule = state.schedule
@@ -2705,14 +2739,19 @@ class ScheduleActiveLinkageController:
                     else LinkageRole.INDEPENDENT
                 ),
                 record.spec.slave_device_id: (
-                    LinkageRole.ASYNC_SLAVE
+                    self._record_slave_role(record)
                     if record.spec.slave_device_id in intents
                     else LinkageRole.INDEPENDENT
                 ),
             }
             self._set_pair_verification_checkpoint()
             try:
-                self._assert_pair_sample(record, states, expected_roles, phase="before")
+                self._assert_pair_sample(
+                    record, states, expected_roles, phase="before",
+                    allow_sync_slave_control_transition=(
+                        self._owned_fixed_sync_observation and role is LinkageRole.SYNC_SLAVE
+                    ),
+                )
             except ScheduleLinkageApplyError as error:
                 if not self._frequency_only_pair_state_failure():
                     raise
@@ -3755,7 +3794,7 @@ class ScheduleActiveLinkageController:
         self,
         record: ScheduleLinkageRecord,
         states: Mapping[str, DeviceState],
-    ) -> Literal["before", "excluded", "after"] | None:
+    ) -> Literal["before", "excluded", "between", "after"] | None:
         """Classify the pair using each controller's device-local clock.
 
         The fixed Q2 observation may count a sample only when both devices are more than sixty
@@ -3765,6 +3804,16 @@ class ScheduleActiveLinkageController:
 
         if not self._owned_fixed_q2_observation:
             return None
+        if self._owned_fixed_sync_observation:
+            clocks = tuple(
+                self._state_clock_for(snapshot.device_id, states[snapshot.device_id])
+                for snapshot in record.snapshots
+            )
+            if clocks[0].replace(second=0, microsecond=0) != clocks[1].replace(
+                second=0, microsecond=0
+            ):
+                _LOGGER.warning("sync-observation excluded pair: device clock minutes differ")
+                return "excluded"
         positions = tuple(
             (
                 self._state_clock_for(
@@ -3785,6 +3834,13 @@ class ScheduleActiveLinkageController:
             for position in positions
         ):
             return "after"
+        if (
+            self._owned_fixed_sync_observation
+            and positions[0] > _FIXED_Q2_BOUNDARY_EXCLUSION_SECONDS
+            and positions[1] < -_FIXED_Q2_BOUNDARY_EXCLUSION_SECONDS
+        ):
+            # W1 remains raw/offline timing evidence, not an own-schedule success verdict.
+            return "between"
         return "excluded"
 
     async def _monitor_staged_auto_transition(
@@ -3802,7 +3858,7 @@ class ScheduleActiveLinkageController:
         spec = record.spec
         expected_roles = {
             spec.master_device_id: LinkageRole.MASTER,
-            spec.slave_device_id: LinkageRole.ASYNC_SLAVE,
+            spec.slave_device_id: self._record_slave_role(record),
         }
         auto_after_seen: set[str] = set()
         b_fields_seen: dict[
@@ -4016,6 +4072,8 @@ class ScheduleActiveLinkageController:
                     record,
                     states,
                 )
+                if self._owned_fixed_sync_observation:
+                    _LOGGER.warning("sync-observation qualified-window=%s", fixed_boundary_region)
             except ScheduleLinkageApplyError:
                 if not spec.complete_observation_epoch:
                     raise
@@ -4180,7 +4238,10 @@ class ScheduleActiveLinkageController:
                 if before_evidence == previous_before:
                     consecutive_before += 1
                 else:
-                    if pre_boundary_verified and previous_before is not None:
+                    if (
+                        previous_before is not None
+                        and (pre_boundary_verified or self._owned_fixed_sync_observation)
+                    ):
                         pre_boundary_conflicted = True
                     consecutive_before = 1
                     previous_before = before_evidence
@@ -4479,7 +4540,16 @@ class ScheduleActiveLinkageController:
         phase: Literal["before", "ambiguous", "after"],
         emit_sample: bool = True,
         allow_staged_control_transition: bool = False,
+        allow_sync_slave_control_transition: bool = False,
     ) -> _StablePairEvidence:
+        if (
+            record.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.SYNC_ONLY
+            and expected_roles.get(record.spec.slave_device_id)
+            not in {LinkageRole.INDEPENDENT, LinkageRole.SYNC_SLAVE}
+        ):
+            raise ScheduleLinkageApplyError(
+                "Sync-only record cannot authorize Async sample topology"
+            )
         effective: list[tuple[str, int, int, str, int]] = []
         observed: dict[str, ScheduleAutoEvidence] = {}
         for snapshot in record.snapshots:
@@ -4490,7 +4560,14 @@ class ScheduleActiveLinkageController:
                 else "slave"
             )
             self._set_pair_verification_checkpoint()
-            if allow_staged_control_transition:
+            sync_slave_transition = (
+                allow_sync_slave_control_transition
+                and self._owned_fixed_sync_observation
+                and record.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.SYNC_ONLY
+                and observed_role == "slave"
+                and expected_roles[snapshot.device_id] is LinkageRole.SYNC_SLAVE
+            )
+            if allow_staged_control_transition or sync_slave_transition:
                 self._assert_staged_control_snapshot(
                     snapshot,
                     state,
@@ -4515,7 +4592,7 @@ class ScheduleActiveLinkageController:
 
         full_linkage_topology = (
             expected_roles.get(record.spec.master_device_id) is LinkageRole.MASTER
-            and expected_roles.get(record.spec.slave_device_id) is LinkageRole.ASYNC_SLAVE
+            and expected_roles.get(record.spec.slave_device_id) is self._record_slave_role(record)
         )
         sample: ScheduleLinkageSample | None = None
         if phase != "ambiguous" and full_linkage_topology:
@@ -4547,7 +4624,7 @@ class ScheduleActiveLinkageController:
                 slave_reported_mode=slave_state.mode,
                 slave_reported_frequency=slave_state.frequency,
                 master_linkage=LinkageRole.MASTER,
-                slave_linkage=LinkageRole.ASYNC_SLAVE,
+                slave_linkage=self._record_slave_role(record),
                 master_reply_action=(
                     master_capture.capture.action if master_capture is not None else None
                 ),
@@ -4716,6 +4793,7 @@ class ScheduleActiveLinkageController:
     def _guarded_power_maximum(self, device_id: str) -> int:
         capabilities = self._get_device(device_id).capabilities
         approved_maximum = (
+            _FIXED_SYNC_MAX_POWER if self._owned_fixed_sync_observation else
             _FIXED_Q2_MAX_POWER
             if self._owned_fixed_q2_observation
             else _SCHEDULE_LINKAGE_TEST_MAX_POWER
@@ -5143,6 +5221,8 @@ class ScheduleActiveLinkageController:
             return {LinkageRole.INDEPENDENT, LinkageRole.MASTER}
         if record.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.DIRECT:
             return {LinkageRole.INDEPENDENT, LinkageRole.ASYNC_SLAVE}
+        if record.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.SYNC_ONLY:
+            return {LinkageRole.INDEPENDENT, LinkageRole.SYNC_SLAVE}
 
         progress = record.slave_role_progress
         if progress == _SYNC_THEN_ASYNC_PROGRESS[:1]:
@@ -5257,6 +5337,14 @@ class ScheduleActiveLinkageController:
             if expected_role is LinkageRole.INDEPENDENT:
                 raise ScheduleLinkageApplyError(
                     "fixed Q2 live control evidence is outside the linked monitor"
+                )
+            if self._owned_fixed_sync_observation and (
+                state.mode != snapshot.mode or state.frequency != snapshot.frequency
+            ):
+                _LOGGER.warning(
+                    "sync-observation inactive-control participant=%s "
+                    "expected_mode=%s observed_mode=%s expected_frequency=%s observed_frequency=%s",
+                    observed_role, snapshot.mode, state.mode, snapshot.frequency, state.frequency,
                 )
             self._assert_snapshot_control_sets(
                 snapshot,

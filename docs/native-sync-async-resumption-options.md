@@ -1,6 +1,7 @@
 # Native Sync/Async · 슬레이브 TimerON 파형별 Flow 재개 준비
 
-상태: **Sync-only 준비용 네 source·직접 tests의 한정 구현 승인 / 새 장비 write·앱 설정·배포 미승인**.
+상태: **Sync-only 구현·오프라인 검증 완료 / 새 장비 write·앱 설정·배포 미승인**.
+변경 계약과 중간 실패를 포함한 검증 결과는 [구현 기록](native-sync-only-implementation.md)에 있습니다.
 사용자는 software group 보조 시험보다 native Sync/Async에서 slave TimerON의 파형별 Flow
 확인을 우선하라고 요청했습니다. [D1w](runs/2026-09-14-m4-group-power-diagnostic-retest.md)는
 `774ad13`에 기록됐고 원래 서비스는 비무장으로 복귀했습니다. 현재 수용된 second Pro의
@@ -97,8 +98,9 @@ Sync-only 계획의 역할·샘플·복원 설계를 참조하되 stash나 과�
 - `hardware_test.py`: 해당 fixed Sync-only sample topology에 한정한 결과 처리
 
 사용자는 위 네 source와 직접 tests의 Sync 준비용 한정 해제 질문에 “ㅇㅇㅇ 진행하자”로
-승인했습니다. **AGENTS의 사유·범위·재개 조건을 별도 커밋한 뒤에만 구현하며, 실제 장비
-하네스 실행은 아직 승인되지 않았습니다.** 위 범위는 구현이 완료됐다는 뜻이 아닙니다.
+승인했습니다. **AGENTS의 사유·범위·재개 조건을 별도 커밋한 뒤에만 구현**하는 조건에 따라
+`d81552f`를 먼저 기록하고 구현·오프라인 검증을 마쳤습니다. **실제 장비 하네스 실행은
+아직 승인되지 않았습니다.** 결과와 독립 검토를 커밋하면 해당 구현 예외는 소진·재동결됩니다.
 일반 Async 검사·identity·Flow 범위·single-write·journal·rollback은
 보호하고, scope가 늘어나면 멈춰 별도 승인받습니다. 단순 enum 삭제나 timeout/retry 추가는 금지합니다.
 

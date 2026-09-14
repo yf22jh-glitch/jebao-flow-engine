@@ -635,7 +635,7 @@ class HardwareTestIntent(BaseModel):
                 sample = self.schedule_flow_sample
                 if (
                     sample.master_linkage is not LinkageRole.MASTER
-                    or sample.slave_linkage is not LinkageRole.ASYNC_SLAVE
+                    or sample.slave_linkage is not flow_spec.outer_linkage_spec().slave_role
                 ):
                     raise ValueError("schedule-flow sample has an invalid role topology")
             if self.schedule_flow_outcome is not None and self.schedule_flow_sample is None:
