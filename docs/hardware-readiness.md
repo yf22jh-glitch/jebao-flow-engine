@@ -258,6 +258,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |
 | 리턴·도징 actuator가 실기 검증됐는가 | NOT IN CURRENT TEST SCOPE |
 | 앱 없는 Wi-Fi provisioning과 control-mode reconnect restore가 준비됐는가 | NOT IMPLEMENTED |
+| software-independent Constant31에서 첫 Pro direct32 override 유지와 member resume이 확인됐는가 | **PASS — 이 세 binding의 TimerOFF·bounded 각3 fresh cycle 범위 (2026-09-14)**; record4·Flow2·power0, [실행 기록](runs/2026-09-14-local-group-override-resume-commissioning.md). 다른 조건·경합·M4 전체 완료는 미주장 |
 
 현재 **production grouping 전체 판정은 NO-GO**입니다. 2026-08-30 단회 write 실기는 아래의
 좁은 Flow 관측과 exact restore를 완료했지만, 사용자가 요구한 master Mode·timing + slave
