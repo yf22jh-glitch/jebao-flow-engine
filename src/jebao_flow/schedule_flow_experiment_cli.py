@@ -59,11 +59,15 @@ from jebao_flow.devices.schedule_transaction import (
     TemporaryScheduleRecord,
     TemporaryScheduleSpec,
 )
+from jebao_flow.exact_restore_receipts import ExactRestoreReceiptArchive
+from jebao_flow.exact_restore_store import ExactRestoreJournalStore
 from jebao_flow.hardware_guard import (
     DeploymentHardwareGuard,
+    HardwareOperationBusyError,
     HardwareOperationLockError,
 )
 from jebao_flow.hardware_safety import (
+    _validate_hardware_safety_root_descriptor,
     emergency_stop_latch_path,
     hardware_safety_root,
     native_linkage_intent_path,
@@ -125,6 +129,68 @@ _LEGACY_TERMINAL_OUTCOMES = frozenset(
 
 class ScheduleFlowCliError(HardwareTestError):
     """Sanitized, fail-closed refusal from the attended schedule-flow CLI."""
+
+
+class _ScheduleFlowHardwareGuard(DeploymentHardwareGuard):
+    """이 CLI에서만 검증된 terminal park를 진행 중 복원과 구분합니다.
+
+    전역 lease를 잡은 뒤 호출됩니다. 기존 reader/archive 검증을 재사용하며,
+    보류를 qualification 성공이나 exact-restore 재실행 권한으로 바꾸지 않습니다.
+    """
+
+    def _require_no_exact_restore_journal(self, root_descriptor: int = -1) -> None:
+        try:
+            if root_descriptor >= 0:
+                _validate_hardware_safety_root_descriptor(root_descriptor)
+            store = ExactRestoreJournalStore()
+            if store.path != self._exact_restore_journal_path:
+                raise ValueError("exact-restore journal path mismatch")
+            payload = store.load()
+            if payload is None:
+                return
+            archive = ExactRestoreReceiptArchive()
+            confirmed = archive.confirm_parked_tombstone(payload)
+            if (
+                confirmed.get("version") != 2
+                or confirmed.get("outcome") != "parked_unqualified"
+                or confirmed.get("disposition_sha256") != payload.get("disposition_sha256")
+                or store.load() != payload
+            ):
+                raise ValueError("parked exact-restore confirmation mismatch")
+            if root_descriptor >= 0:
+                _validate_hardware_safety_root_descriptor(root_descriptor)
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            raise HardwareOperationBusyError(
+                "exact-restore state is active or its parked archive is not verified"
+            ) from error
+        print(
+            json.dumps(
+                {
+                    "event": "schedule_flow_verified_park_admission",
+                    "event_version": 1,
+                    "message": "보류된 복원 기록 확인: 기록 보존, 자격 미취득 상태 유지",
+                    "disposition_sha256": confirmed["disposition_sha256"],
+                    "operation_sha256": payload["operation_sha256"],
+                    "journal_snapshot_sha256": payload["journal_snapshot_sha256"],
+                    "qualified": False,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _schedule_flow_hardware_guard(
+    intent: HardwareTestIntent | None,
+) -> DeploymentHardwareGuard:
+    # intent lease 안에서 선택합니다. 기존 Async의 진입/복구 의미는 바꾸지 않습니다.
+    if intent is not None and (
+        intent.schedule_flow_spec is None or not intent.schedule_flow_spec.is_fixed_sync_plan
+    ):
+        return DeploymentHardwareGuard()
+    return _ScheduleFlowHardwareGuard()
 
 
 class _PrivateRawCaptureSink:
@@ -1810,40 +1876,41 @@ async def dispatch(config: AppConfig, args: argparse.Namespace) -> int:
     schedule_store = JsonTemporaryScheduleJournalStore(temporary_schedule_journal_path())
     role_store = JsonScheduleLinkageJournalStore(schedule_linkage_journal_path())
     qualification_store = JsonQualificationStore(qualification_directory())
-    guard = DeploymentHardwareGuard()
-    with intent_store.lease(), guard.lease():
-        if args.command == "status":
-            return _status(config, intent_store, outer_store, schedule_store, role_store)
-        if args.command == "preflight":
-            return await _preflight(
-                config,
-                args,
-                intent_store,
-                outer_store,
-                qualification_store,
-            )
-        if args.command == "run":
-            return await _run(
-                config,
-                args,
-                intent_store,
-                outer_store,
-                schedule_store,
-                role_store,
-                qualification_store,
-                guard,
-            )
-        if args.command == "recover":
-            return await _recover(
-                config,
-                args.confirm,
-                intent_store,
-                outer_store,
-                schedule_store,
-                role_store,
-                qualification_store,
-                guard,
-            )
+    with intent_store.lease():
+        guard = _schedule_flow_hardware_guard(intent_store.load())
+        with guard.lease():
+            if args.command == "status":
+                return _status(config, intent_store, outer_store, schedule_store, role_store)
+            if args.command == "preflight":
+                return await _preflight(
+                    config,
+                    args,
+                    intent_store,
+                    outer_store,
+                    qualification_store,
+                )
+            if args.command == "run":
+                return await _run(
+                    config,
+                    args,
+                    intent_store,
+                    outer_store,
+                    schedule_store,
+                    role_store,
+                    qualification_store,
+                    guard,
+                )
+            if args.command == "recover":
+                return await _recover(
+                    config,
+                    args.confirm,
+                    intent_store,
+                    outer_store,
+                    schedule_store,
+                    role_store,
+                    qualification_store,
+                    guard,
+                )
     raise AssertionError(f"unhandled command: {args.command}")
 
 

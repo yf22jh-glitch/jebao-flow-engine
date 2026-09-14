@@ -1,5 +1,11 @@
 # Native Sync-only 단회 · 실행 계획
 
+후속 상태: 아래 승인 당시 준비에서 검색 설정 오류와 보존된 park 기록의 진입 차단을 발견했고
+[준비 기록](runs/2026-09-14-native-sync-preparation-admission.md)에 남겼습니다.
+원 서비스 복귀·사용자 퇴근 중지 뒤 별도 승인 범위로
+[진입 판정 구현](native-sync-parked-admission-implementation.md)을 검증합니다.
+이 구현 검증을 실제 Sync 실행이나 현재 현장 조건 확인으로 간주하지 않습니다.
+
 상태: **사용자가 Sync 단회·원복·만료 날짜 예외를 승인. 별도 정책 커밋·독립 검토와 실행 준비 전.**
 `6ecb276`의 구현 예외는 소진됐으며 새 실행 권한은 AGENTS의 별도 승인 절에 기록합니다.
 앱 준비와 fresh baseline 확인은 아직 수행하지 않았고 device command·배포는0입니다.
