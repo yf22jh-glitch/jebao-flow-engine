@@ -3528,6 +3528,71 @@ identity·출력 범위·single-write·fsync·원복 순서·현재 상태 재�
 앱 조작·배포는0이며, 새 image를 이용한 원래 단회 Sync 재개는 결과 공개·준비 재검증 뒤에만
 진행합니다. 원래의 시간 만료 한정 승인·원복 의무·Async 제외는 바꾸지 않습니다.
 
+### 2026-09-14 — 파형 주도권·슬레이브 Flow 세 구간 구현과 두 역할 실행
+
+사용자는 "니가 하려는게 파형을 누가 주도하는가, 슬레이브의 플로우 변경이 가능한가"라고
+목표를 바로잡고, 필요한 질문을 한 세션에 묶어 10분·15분에 변경하도록 요청했다.
+에이전트가 "이 시나리오 구현에 필요한 하네스·직접 테스트의 한정 동결 해제까지
+승인해 주실까요?"라고 물은 뒤 사용자는 "제발좀 한번에하라고 내가 승인했잔아 쫌 하자"로
+재승인하고 "어떻게 동작하는지 잘 모니터링 해야해"라고 지시했다.
+이 절은 해당 maintainer 구현 승인과 현장 두 역할 시험 요청을 구분해 결속하며,
+같은 승인을 다시 질문하는 대신 정확한 범위와 실행 전제 확인을 수행한다.
+
+직전 단회는 [field 준비 중단 기록](docs/runs/2026-09-14-native-sync-field-preparation-stop.md)에
+먼저 커밋했다. 원예외 UNKNOWN·앱 이전 first TimerOFF·원 서비스 복귀 미완료는 그대로 남으며,
+이 새 승인으로 이전 미완료를 성공 처리하지 않는다. 새 source 변경은 이 절의 별도 커밋 뒤에만 한다.
+
+구현·직접 테스트 해제 범위는 다음 열 파일과 관련 계획·결과 문서뿐이다.
+
+1. `src/jebao_flow/devices/schedule_flow_experiment.py`
+2. `src/jebao_flow/devices/schedule_linkage.py`
+3. `src/jebao_flow/devices/schedule_transaction.py`
+4. `src/jebao_flow/schedule_flow_experiment_cli.py`
+5. `src/jebao_flow/hardware_test.py`
+6. `tests/unit/test_schedule_flow_experiment.py`
+7. `tests/unit/test_schedule_linkage_transaction.py`
+8. `tests/unit/test_schedule_transaction.py`
+9. `tests/unit/test_schedule_flow_experiment_cli.py`
+10. `tests/unit/test_hardware_test.py`
+
+범위 사유는 기존 device당 한 경계·두 슬롯 가정을 슬레이브의 두 경계·세 슬롯으로 표현하고,
+계획 식별·역할 선택·관측 구간·결과 분류·진입을 동일 계약으로 결속하기 위함이다.
+temporary schedule의 두 슬롯 제한과 옛 opposing topology 허용 목록을 전역 삭제하지 않는다.
+새 exact 계획의 세 슬롯만 명시적으로 인지하고 legacy·그 밖의 거부 의미는 보존한다.
+`local_control/`, schema fingerprint 입력, 공용 guard, `devices/linkage.py`, 다른 CLI,
+기존 timeout/retry·전송 정책은 수정하지 않는다. 추가 파일이 실제 필요하면 범위를 보고하고 멈춘다.
+
+저장 계획은 master Sine35/F30→Constant32/F0(10분), slave Constant30/F0→Sine40/F30(10분)
+→Sine35/F30(15분)이다. 임시 상한41·safe manual master30/slave31을 유지한다.
+두 전환은 실행 전 fresh device clock으로 확정한 기준 시각에서 계산한다. 역할 진입·준비·원복
+예산과 경계 제외·안정 표본 구간이 실제로 들어가는지 오프라인으로 검산한 뒤 절대 시각을 고정한다.
+새 계획의 관측·표본 수 한도는 15분 경계 이후 유효 관측을 포함하도록 유한한 값으로 명시하고,
+기존 전체 outer 1200초 계약을 넘기지 않는다. legacy 관측 예산은 바꾸지 않는다.
+
+파형과 Flow는 독립적으로 분류하며 raw·ordinal·장비시각·취득 monotonic span을 보존한다.
+10분에 Constant40/Sine40/Constant32/Sine32/이전값/기타를 구분하고, 15분에는 master32 유지와
+slave 자기35·이전40·master32를 구분한다. protocol 보고값을 실제 임펠러 파형·위상·수류량으로
+승격하지 않으며, 동시 전환을 master 시계의 내부 인과 증명으로 쓰지 않는다.
+새 계획 구성·journal·복구·분류·legacy 호환성을 격리 테스트하며 펌웨어 가설 fake를 쓰지 않는다.
+원예외 class chain과 stage를 비밀값 없이 남기는 진단은 위 CLI 범위에서 함께 보강할 수 있다.
+
+구현 검증 후 한 현장 세션 안에서 Sync1회와 Anti-Sync1회, 합계 두 operation을 진행한다.
+각각 새 intent·원본 snapshot·기존 ordered rollback을 소유한다. Anti-Sync 진입은 기존 검증된
+역할 전환 경로를 사용하고 실제 logical 회계를 실행 전에 공개한다. 새 편의 write 경로를 만들지 않는다.
+첫 회의 원복 실패·위험·기술적 실행 실패는 두 번째 자동 실행을 중단한다. 기능 가설의 부정적
+관측 자체는 시험 실패와 구분하고, 원복이 확인된 경우에만 두 번째 역할로 넘어간다.
+지명 native receipt의 시간 유효성 한정 예외는 이 두 operation에 명시적으로 한정하며
+receipt 존재·operation·device·physical binding 검사와 파일 불변은 유지한다.
+같은 구성의 추가 반복·자동 retry·새 qualification write는 포함하지 않는다.
+
+새 실행 전 이전 앱 준비 상태와 복원 의무를 확인하고, 운영 서비스·원 시간표432B·controls·
+source/image·journal·receipt를 결속한다. 현장 감시·중단 수단·현재 fresh identity는 유지한다.
+앱이 필요한 마지막 원복은 사용자 소유이며, 그 전후 snapshot을 혼동하지 않는다.
+구현 결과 커밋으로 위 source/test 예외는 소진·재동결된다. 실기 두 회와 원복·독립 검토를
+각각 기록·커밋하면 실행 권한도 소진된다. 사용자 중지 지시는 어느 단계에서든 우선한다.
+
+세부 관측표는 [통합 시나리오](docs/native-follow-wave-own-flow-scenario.md)를 따른다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
