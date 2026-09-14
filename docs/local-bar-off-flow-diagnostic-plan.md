@@ -217,6 +217,10 @@ The service was stopped before app preparation at04:34:34.684504Z. Independent a
 reads at04:34:40.717555–04:34:42.305930Z confirmed Bar ON/classic91/TimerOFF/Frequency80/
 PulseTidefalse; first Pro ON/constant40/TimerOFF/Frequency34; second Pro ON/constant/latent31/
 TimerON/Frequency32 with current tidal55 matching exactly one active slot, valid14/invalid0.
+The earlier D1u sine50 and this tidal55 were observed at different times. Each matched its
+then-current slot; neither value is a fixed restoration target. Restoration must compare
+AutoMode/AutoFlow with the slot active at that later read. Equal valid/invalid slot counts
+alone do not establish unchanged schedule contents or explain every intervening change.
 All three retain independent linkage. No device command has been sent. App preparation and
 current onsite readiness remain outstanding; the service stays stopped until that boundary.
 
