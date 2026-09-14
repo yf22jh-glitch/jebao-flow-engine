@@ -3408,6 +3408,48 @@ Barclassic91/TimerOFF/F80/Pulsefalse 복원을 fresh로 확인하고 exact prior
 복귀합니다. 실행 image·generation·unarmed·fresh6·discovery90·unfinished0·새 journal과
 기존 receipt 결속을 확인합니다. 기록 커밋으로 이 단회 권한은 소진되며 자동 반복하지 않습니다.
 
+### 2026-09-14 — native Sync-only 준비의 한정 구현 해제
+
+사용자는 native Sync/Async에서 slave TimerON의 파형별 Flow 확인을 우선 요청했고,
+“관련 native 코드4개와 직접 테스트만 Sync 시험 준비 범위로 한정해 동결을 풀어도 될까요?
+안전·복원 조건 유지, 실제 장비 시험 승인은 별도”라는 질문에 “ㅇㅇㅇ 진행하자”로 승인했습니다.
+이 승인은 repository maintainer의 **구현·오프라인 검증 승인만**이며, on-site hardware
+approver의 새 실기 승인이나 배포·앱 설정 승인이 아닙니다.
+
+해제 사유는 [재개 준비](docs/native-sync-async-resumption-options.md)의 미확정 질문을
+측정할 Sync-only 두 구간 경로를 준비하는 것입니다. 9월2일 Sync 중간 검사에서 보고된
+inactive manual Mode/Frequency 차이를 정상 펌웨어 동작으로 단정하지 않습니다.
+9월3일 미사용 종료 계획은 설계 참고일 뿐, 그 승인·stash·미검증 변경을 재사용하지 않습니다.
+
+수정 가능한 source와 직접 테스트는 다음 여덟 파일뿐입니다.
+
+- `src/jebao_flow/devices/schedule_flow_experiment.py`
+- `src/jebao_flow/devices/schedule_linkage.py`
+- `src/jebao_flow/schedule_flow_experiment_cli.py`
+- `src/jebao_flow/hardware_test.py`
+- `tests/unit/test_schedule_flow_experiment.py`
+- `tests/unit/test_schedule_linkage_transaction.py`
+- `tests/unit/test_schedule_flow_experiment_cli.py`
+- `tests/unit/test_hardware_test.py`
+
+별도 정책 커밋 뒤에만 위 파일의 Sync-only fixed 계획·역할 sequence·sample topology·
+관측 결과·운영자 안내와 직접 검증을 수정합니다. identity·online/no-error·SwitchON·
+TimerON·정확한 schedule·active cap·manual Flow exact/bounded·single-write·durable
+journal/fsync·복구 권한은 유지합니다. inactive manual Mode/Frequency 차이는 해당
+Sync 경로의 기존 bounded staged-control 비교와 보존 진단으로 다루며, 일반 Async 검사나
+진단 enum 집합을 일괄 완화하지 않습니다. legacy record의 로드·복구 의미를 보존합니다.
+새 firmware 가설 gate·retry·timeout 변경, 다른 frozen source·테스트 수정은 금지합니다.
+
+검증은 코드의 순서·상태·복원 계약을 대상으로 하며 fake로 Sync/Async 펌웨어 답을 만들지
+않습니다. 역할별 예상 출력은 가설로만 남기고 Sync 결과를 Async PASS로 올리지 않습니다.
+구현·검증 결과와 독립 검토를 기록하고 변경을 커밋하면 이 해제는 자동 소진되어 재동결됩니다.
+범위 밖 수정이 필요하면 중단하고 별도 승인을 요청합니다.
+
+이 기간 device command·production 배포·앱 요청은 0으로 유지합니다. 실제 operation은
+새 image/source 결속, current baseline·복구 수단 검증, 명령 회계·구간별 관측·중단/복원
+절차 및 별도 실기 승인을 갖춘 뒤에만 가능하며 과거 D1u/D1v/D1w 권한을 재사용하지 않습니다.
+현재 TimerON의 수용된 inactive manual 값과 active slot 출력도 서로 구분합니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
