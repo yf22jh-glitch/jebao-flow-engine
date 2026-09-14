@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-14 14:14 KST
+마지막 갱신: 2026-09-14 14:31 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -137,9 +137,13 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [ ] 새 diagnostic image의 상시 배포 여부를 별도로 결정한다. 현재 운영은 새 failure event가
   없는 exact prior image다. targeted21/Ruff PASS와 full-suite 실패2건 미해결을 함께 공개해야 하며
   D1v 성공은 production 실패 시 진단 전달을 검증하지 않았다. 승인 없이 재배포하지 않는다.
-- [ ] 다음 기능 조사: group/direct의 baseline 선취득·세션 대기·frame 순서 차이를 write-free로
-  좁힌다. 현재 근거만으로 retry/timeout을 바꾸지 않는다. 추가 group/order 실기는 새로운 질문·
+- [x] [group/direct 보존 증거 비교](bar-group-direct-evidence-comparison.md): Bar forward/rollback·
+  expected/baseline readback·baseline status 다섯 blob의 bytes가 D1u/D1v에서 exact 일치.
+  두 Bar Flow의 자체 session 첫 control sequence1은 코드 추론으로 확인했다. record 생성 이후
+  시도 창은 다르지만 실제 session idle이나 원인은 미확정이며 device/broker 접촉 없이 분석했다.
+- [ ] 상시 진단 배포 여부를 먼저 결정한다. 후속 group/order 실기는 진단 image·새 질문·
   복원 수단·별도 현장 승인이 있어야 하며 이번 Bar-only 승인을 재사용하지 않는다.
+  현재 근거만으로 retry/timeout을 바꾸지 않는다.
 
 ## 완성까지 전체 로드맵
 
