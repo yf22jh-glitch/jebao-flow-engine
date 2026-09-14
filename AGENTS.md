@@ -3373,6 +3373,41 @@ native source, 다른 frozen 테스트·공용 fixture, 생산 시간 제한·�
 해당 함수도 재동결됩니다. 범위 밖 수정이 필요하면 중단하고 별도 승인을 요청합니다.
 전체 시험 검증 상태와 D1u 예외 원인은 서로 분리해 기록하고, 배포 보류는 유지합니다.
 
+### D1w — 동일 group 순서의 진단 재시험 단회 승인
+
+사용자는 D1u 재시험을 요청했고, (A) 진단 image 임시 배포1회와 exact prior 복귀,
+(B) 세 대 OFF→Flow30→ON 시험1회와 필요한 마지막 nonterminal recovery·앱 복원을
+각각 밝힌 질문에 “ㅇㅇ 진행하자”로 승인했습니다. 같은 질문에서 현재 수조 앞 감시와
+실패 시 일부 또는 전부 OFF인 장비를 직접 켤 수 있는지도 확인했습니다.
+기존 기록의 대상·순서·회계 이탈 미관측, 재실패 예외 확보의 가치, 재현·과거 원인 규명
+미보장, 전부/일부 OFF 잔류와 recovery의 재-OFF 가능성을 먼저 공개했습니다.
+
+승인은 [D1w 계획](docs/local-group-power-diagnostic-retest-plan.md)에만 결속합니다.
+상시 배포, D1u/D1v 권한 재사용, native ASYNC 해제, source/test·timeout/retry/gate 변경은
+포함하지 않습니다. candidate는 기존 diagnostic image, 임시 config delta는 Constant
+default.power50→30 하나이며 member 순서 second→first→Bar·phase/gain/role은 유지합니다.
+fresh baseline allON/TimerOFF/constant/independent/Flow31을 사용자 앱 준비 뒤 확인하기
+전에는 device command를 보내지 않습니다. 앱 준비 전에 서비스 정지와 복원 baseline 보존이 필요합니다.
+
+정상 OFF1은 action3/rev10/power3, 독립 fresh OFF31 확인 뒤 ON1은 action6/rev19/
+Flow3+power3이며, ON 후 complete fresh cycle3까지 record2/Flow3/power6을 유지합니다.
+처음 OFF intent부터 내부·host180초 관측 상한, 추가 record·attempt 상한 초과·잘못된
+대상/값/순서·nonterminal failure·관측 오류·tree 이탈은 stop입니다. superseded는 UNKNOWN
+stop이며 attempted를 실제 frame으로 단정하지 않습니다. stop은 물리 차단이나 자동 ON이 아닙니다.
+첫 publish 전 runtime logs follow와 최종 logs를 보존하고 예외 event를 request digest/index로
+journal과 대조합니다. event 부재나 단회 성공을 원인 규명으로 쓰지 않습니다.
+
+실패 시 stop·실제 state와 journal 보존을 먼저 하고, 마지막 nonterminal에만 기존 config-only
+recovery1회(최대6 frame)를 적용합니다. 그 뒤 fresh 확인과 사용자 앱 복원 순서이며 이전
+VERIFIED record는 복구하지 않습니다. 긴급 사용자 복원이 우선되면 시험을 폐기하고 기존
+baseline recovery를 자동 실행하지 않습니다. 재OFF·재ON·corrective direct ON·복구 retry는 금지합니다.
+배포/readiness 실패는 command0 종료와 exact prior 복귀 검증만 허용하며 복귀 실패 시 정지·보고합니다.
+
+사용자 앱의 first40/TimerOFF/F34, second latent31 뒤 TimerON/F32·그 시점 active slot,
+Barclassic91/TimerOFF/F80/Pulsefalse 복원을 fresh로 확인하고 exact prior Constant50에
+복귀합니다. 실행 image·generation·unarmed·fresh6·discovery90·unfinished0·새 journal과
+기존 receipt 결속을 확인합니다. 기록 커밋으로 이 단회 권한은 소진되며 자동 반복하지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
