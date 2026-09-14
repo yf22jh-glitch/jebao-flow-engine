@@ -108,7 +108,10 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   선언 decoded field·prior Constant50/unarmed 서비스 복귀 완료;
   근거: [`override·resume commissioning`](runs/2026-09-14-local-group-override-resume-commissioning.md), `0f51f99`.
 - [ ] 남은 M4 group OFF/ON·실제 명령 빈도·경합 및 M5 운영 경계는 별도 bounded 계획이 필요하다.
-  새 physical operation은 시작하지 않았으며, 현재 first40/TimerOFF·second31/TimerON·Barclassic91이다.
+  D1u는 [승인된 계획](local-group-power-commissioning-plan.md)에 따라 임시 Constant30 배포와
+  readiness·discovery90 exact·두 tree 불변 확인까지 완료. 앱 준비 전 서비스를 정지했고,
+  fresh baseline은 first40/TimerOFF·second31/TimerON·Barclassic91이다. OFF/ON 명령은 아직 0.
+  다음은 사용자 앱으로 all31/TimerOFF/constant를 구성한 뒤 별도 fresh 확인이다.
 
 ## 완성까지 전체 로드맵
 
@@ -327,7 +330,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 현재 상태
 
-- [x] reviewed persistent control service 1개 실행 중, 최종 generation restart 0
+- [ ] D1u 앱 준비를 위해 persistent control service 정지 중; 펌프 전원 정지를 뜻하지 않음.
 - [x] 장비 6/6 관측 상태 유지
 - [x] 사용자 수행 HA Core process restart 뒤 exact deployment surface 복귀·local-control device write `0`
   확인; agent의 HA 업데이트·재기동·설정 변경은 `0`
@@ -342,9 +345,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   discovery `86/86` byte exact, Bar number `1`, fresh `6/6`, startup write `0`
 - [x] Pro 동작을 보존하는 Bar family precondition source·offline 검토·landing `d687739` 완료
 - [x] safer-OFF power qualification source·CLI·fault 회귀 landing과 exact one-shot image 준비 완료
-- [x] current post-Anti-Phase restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
+- [x] D1t 종료 뒤 restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
   direct control `6`, group switch `1`·resume `3`, retained command `0`, group armed `0`,
-  journal operations `22`·blobs `64`·files `86`, receipt root files `18`; group terminal 이후 복귀 전후
+  journal operations `26`·blobs `72`·files `98`, receipt root files `18`; group terminal 이후 복귀 전후
   tree byte 불변. group default `50` 복귀는 실제 장비 Flow `50` 변경을 뜻하지 않음.
 - [x] current accepted state: firstPro `ON/TimerOFF/constant/independent/40`, secondPro
   `ON/TimerON/constant/independent/latent31`, Bar `ON/TimerOFF/classic/independent/91`;
@@ -363,8 +366,10 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   run [`Sync group commissioning`](runs/2026-09-13-local-group-sync-commissioning.md).
 - [x] M4 Anti Phase A→B→C→D→A bounded 실기 및 prior Constant50 복귀 완료, final armed `false`;
   run [`Anti Phase commissioning`](runs/2026-09-14-local-group-antiphase-commissioning.md), `d115250`.
-- [ ] 다음은 M4 direct override·resume의 별도 bounded 계획. group OFF·direct override·resume actuation은
-  여전히 미실행이며 M4 전체 완료로 선언하지 않음. 승인된 Anti Phase operation은 종결.
+- [x] M4 direct override·resume의 승인된 bounded operation은
+  [D1t 기록](runs/2026-09-14-local-group-override-resume-commissioning.md)으로 종결.
+- [ ] 다음은 D1u group OFF/ON. 임시 배포 이후 사용자 앱 준비 대기이며, group OFF/ON 실기는
+  아직 미실행이다. M4 전체 완료로 선언하지 않음.
 
 ## M0~M1 작업 이력 (완료)
 
