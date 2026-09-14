@@ -140,10 +140,11 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   direct OFF→OFF-state Flow30→ON, record3/rev4×3·Flow1/power2·후속 fresh3 cycle PASS.
   Pro write0·기존105 files 불변·신규OFF30 status blob1 확인. 앱 원복·exact prior 서비스 복귀 완료.
   D1u group FAIL·원인 UNKNOWN·batch 순서 조건은 그대로이며 단회 권한은 소진됐다.
-- [ ] 새 diagnostic image 상시 배포는 승인 뒤 실패 처리 요청에 따라 보류했다. 현재 운영은 새
+- [ ] 새 diagnostic image 상시 배포는 실패 확인·처리를 먼저 하라는 요청에 따라 보류했다. 현재 운영은 새
   failure event가 없는 exact prior image다. 두 test 수정 뒤 full2589 PASS이나 원 실패 원인은
-  미확정이고 D1v 성공은 production 실패 시 진단 전달을 검증하지 않았다. 배포 재개는
-  그 범위의 preflight·exact prior 보존·postcheck를 별도로 수행한다.
+  미확정이고 D1v 성공은 production 실패 시 진단 전달을 검증하지 않았다. 승인 없이 재배포하지 않는다.
+  배포 재개 전 해당 배포의 명시적 승인과 범위를 확인하고, preflight·exact prior 보존·postcheck를
+  별도로 수행한다. 테스트 수정 승인을 배포 승인으로 재사용하지 않는다.
 - [x] [group/direct 보존 증거 비교](bar-group-direct-evidence-comparison.md): Bar forward/rollback·
   expected/baseline readback·baseline status 다섯 blob의 bytes가 D1u/D1v에서 exact 일치.
   두 Bar Flow의 자체 session 첫 control sequence1은 코드 추론으로 확인했다. record 생성 이후
