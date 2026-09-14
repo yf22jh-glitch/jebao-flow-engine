@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-14 11:02 KST
+마지막 갱신: 2026-09-14 12:59 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -112,8 +112,22 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   사용자 앱 복원·별도 fresh read·exact prior Constant50/unarmed 복귀까지 완료;
   근거: [group power commissioning](runs/2026-09-14-m4-group-power-commissioning.md).
 - [ ] 세 대 group OFF/ON 성공은 미확인. Bar `send_once` 원 예외는 UNKNOWN으로 park하며
-  재시도하지 않는다. 기존 자료의 offline 검사 또는 새 승인 아래 원 예외·transport 관측을
-  보존하는 최소 조작이 대안이다. 실제 pacing·경합 및 M5 운영 경계도 미완료다.
+  D1u를 재시도하지 않는다. 후속 최소 조작은 별도 승인 대상으로 준비한다.
+  실제 pacing·경합 및 M5 운영 경계도 미완료다.
+- [x] D1u 보존 stream을 write-free 재분석: rev12→14 wall-clock 창은83.564ms이며,
+  monotonic 측정이나 예외 클래스의 절대 배제가 아니다. 원인은 여전히UNKNOWN.
+- [x] failure-only 예외 chain·내부 위치·monotonic 경과·request digest의 ERROR 진단을
+  journal save 뒤에 추가하고 독립 검토 후 source `269e92b`로 landing. writer·schema·journal·
+  retry·gate·frozen ASYNC 무수정. targeted21·Ruff PASS.
+- [ ] 최종 source의 full suite는 두 실행에서 각각2588 PASS/1 FAIL이고 실패 테스트가 서로
+  다르다. 초기2587 PASS와 HEAD2578 PASS로 이를 덮지 않는다. 원인·결과 안정성은 미해결이며,
+  이는 D1u Bar 원인과 별개다. 반복해서 green을 만들거나 기존 테스트를 완화하지 않는다.
+- [ ] HA Core 업데이트 상태 회신, 미해결 full-suite 결과를 고지한 배포 판단, 새 Bar-only
+  operation 승인 전에는 live/deploy를 재개하지 않는다. source는 아직 운영에 배포하지 않았다.
+- [ ] [Bar-only 후속 계획](local-bar-off-flow-diagnostic-plan.md): group 비무장·Pro pair 불변으로
+  Bar만 앱에서constant31 준비 후 direct OFF→Flow30→ON. 성공 예상record3/rev4×3,
+  Flow1+power2이며 실패 시 후속 명령 없이 종료·필요한 recovery 뒤 사용자 앱 복원.
+  현재는 **미승인 제안**이고 D1u group 실패 원인이나 group PASS로 승격하지 않는다.
 
 ## 완성까지 전체 로드맵
 
