@@ -18,6 +18,7 @@ from jebao_flow.local_control.device_writer import (
     verify_prepared_baseline,
     verify_prepared_readback,
 )
+from jebao_flow.local_control.failure_diagnostics import failure_clock_ns, report_action_failure
 from jebao_flow.local_control.install import current_protocol_schema_sha256
 from jebao_flow.local_control.journal import (
     ActionPhase,
@@ -506,6 +507,7 @@ class LocalControlCoordinator:
                         index,
                         phase=ActionPhase.ROLLBACK_ATTEMPTING,
                     )
+                    started_ns = failure_clock_ns()
                     try:
                         acknowledgement = await writer.send_once(
                             prepared.forward_payload,
@@ -515,12 +517,16 @@ class LocalControlCoordinator:
                         acknowledgement_sha256 = self._journal.install_blob(acknowledgement)
                         readback = await writer.readback(active_lease)
                     except BaseException as error:
+                        failed_ns = failure_clock_ns()
                         record = self._save_action(
                             record,
                             index,
                             phase=ActionPhase.ROLLBACK_UNCERTAIN,
                             diagnostic="rollback_outcome_uncertain",
                             transaction_phase=TransactionPhase.RECOVERY_REQUIRED,
+                        )
+                        report_action_failure(
+                            record, index, error, started_ns=started_ns, failed_ns=failed_ns
                         )
                         raise LocalControlExecutionError(
                             "rollback outcome is uncertain; forward write was not retried"
@@ -624,6 +630,7 @@ class LocalControlCoordinator:
                 phase=ActionPhase.FORWARD_ATTEMPTING,
                 transaction_phase=TransactionPhase.EXECUTING,
             )
+            started_ns = failure_clock_ns()
             try:
                 acknowledgement = await writer.send_once(prepared.forward_payload, lease)
                 writes += 1
@@ -631,12 +638,16 @@ class LocalControlCoordinator:
                 record = self._terminalize_superseded(record, index)
                 return self._result(record, physical_write_count=writes)
             except BaseException as error:
+                failed_ns = failure_clock_ns()
                 record = self._save_action(
                     record,
                     index,
                     phase=ActionPhase.UNCERTAIN,
                     diagnostic="forward_outcome_uncertain",
                     transaction_phase=TransactionPhase.RECOVERY_REQUIRED,
+                )
+                report_action_failure(
+                    record, index, error, started_ns=started_ns, failed_ns=failed_ns
                 )
                 raise LocalControlExecutionError(
                     "forward outcome is uncertain; the control frame will not be retried"
@@ -649,15 +660,20 @@ class LocalControlCoordinator:
                 phase=ActionPhase.FORWARD_ACKNOWLEDGED,
                 acknowledgement_sha256=acknowledgement_sha256,
             )
+            started_ns = failure_clock_ns()
             try:
                 readback = await writer.readback(lease)
             except BaseException as error:
+                failed_ns = failure_clock_ns()
                 record = self._save_action(
                     record,
                     index,
                     phase=ActionPhase.UNCERTAIN,
                     diagnostic="forward_readback_unavailable",
                     transaction_phase=TransactionPhase.RECOVERY_REQUIRED,
+                )
+                report_action_failure(
+                    record, index, error, started_ns=started_ns, failed_ns=failed_ns
                 )
                 raise LocalControlExecutionError("forward readback is unavailable") from error
             if not verify_prepared_readback(prepared, readback):

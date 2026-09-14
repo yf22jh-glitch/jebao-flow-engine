@@ -1,3 +1,8 @@
+import asyncio
+import hashlib
+import json
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,6 +30,7 @@ from jebao_flow.local_control.models import (
 from jebao_flow.local_control.resolver import ResolvedEndpoint
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan, FreshSlaveSchedule
 from jebao_flow.operator_capture.schedule_model import NativeLinkageMode, SlaveFlowOverride
+from jebao_flow.protocol.errors import ProtocolTimeoutError
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
 from jebao_flow.protocol.schedule_wire import LOCAL_WAVEMAKER_PRO_SCHEDULE_STATUS_OFFSET
 
@@ -260,6 +266,7 @@ async def test_schedule_reset_is_one_journaled_full_image_action(
 @pytest.mark.asyncio
 async def test_uncertain_forward_is_never_retried_and_can_restore_fresh_baseline(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     target = _binding("wavemaker_left", "a")
     endpoint = ResolvedEndpoint(
@@ -289,6 +296,20 @@ async def test_uncertain_forward_is_never_retried_and_can_restore_fresh_baseline
     assert uncertain.phase is TransactionPhase.RECOVERY_REQUIRED
     assert uncertain.actions[0].phase is ActionPhase.UNCERTAIN
     assert len(failed.sent) == 1
+    event = json.loads(caplog.records[-1].getMessage())
+    assert caplog.records[-1].exc_info is None
+    assert caplog.records[-1].levelname == "ERROR"
+    assert event["function"] == "manual_flow"
+    assert event["diagnostic"] == "forward_outcome_uncertain"
+    assert event["revision"] == uncertain.revision == 2
+    assert event["action_index"] == 0
+    assert event["request_sha256"] == hashlib.sha256(intent.request_id.encode("ascii")).hexdigest()
+    assert event["exception_chain"][0]["type"] == "builtins.TimeoutError"
+    assert any(
+        frame["function"] == "send_once"
+        for frame in event["exception_chain"][0]["frames"]
+    )
+    assert "ack lost" not in caplog.text
 
     restored = await coordinator.recover(intent.request_id)
 
@@ -296,6 +317,181 @@ async def test_uncertain_forward_is_never_retried_and_can_restore_fresh_baseline
     assert restored.physical_write_count == 1
     assert len(failed.sent) == 1
     assert len(recovery.sent) == 1
+
+
+@pytest.mark.parametrize(
+    "error_kind",
+    ["chained", "cancelled", "broken_logger", "cyclic", "long_chain", "broken_clock"],
+)
+@pytest.mark.asyncio
+async def test_failure_diagnostics_preserve_cause_and_journal_before_logging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_kind: str,
+) -> None:
+    # Code fault injection after D1u's missing exception evidence; no firmware model.
+    from jebao_flow.local_control import failure_diagnostics
+
+    ticks = iter((1_000_000_000, 1_083_564_000))
+
+    def clock() -> int:
+        if error_kind == "broken_clock":
+            raise RuntimeError("clock unavailable")
+        return next(ticks)
+
+    monkeypatch.setattr(failure_diagnostics.time, "monotonic_ns", clock)
+    private_value = "secret-passcode-and-endpoint"
+    original: BaseException
+    if error_kind == "cancelled":
+        original = asyncio.CancelledError(private_value)
+    else:
+        original = ProtocolTimeoutError(private_value)
+        original.__cause__ = TimeoutError(private_value)
+        if error_kind == "cyclic":
+            original.__cause__ = original
+        elif error_kind == "long_chain":
+            tail = original
+            for _ in range(12):
+                tail.__cause__ = TimeoutError(private_value)
+                tail = tail.__cause__
+    target = _binding("private_member", "a")
+    endpoint = ResolvedEndpoint(target, "private-endpoint", wifi_firmware_version="wifi-current")
+    session = _Session([_status(flow=40)], send_error=original)
+    coordinator, journal = _coordinator(
+        tmp_path,
+        qualifications=(_qualification("manual_flow"),),
+        resolver=_Resolver((endpoint,)),
+        sessions=_SessionFactory({"private-endpoint": [session]}),
+    )
+    intent = LocalControlIntent(
+        request_id="private_request", target=target, function="manual_flow", value=50
+    )
+    events: list[dict] = []
+
+    def log(format_string: str, encoded: str) -> None:
+        stored = journal.load(intent.request_id)
+        assert stored is not None
+        assert stored.revision == 2
+        assert stored.phase is TransactionPhase.RECOVERY_REQUIRED
+        assert stored.actions[0].phase is ActionPhase.UNCERTAIN
+        events.append(json.loads(encoded))
+        for secret in (private_value, "private_member", "private-endpoint", "private_request"):
+            assert secret not in encoded
+        if error_kind == "broken_logger":
+            raise RuntimeError("diagnostic sink unavailable")
+
+    monkeypatch.setattr(failure_diagnostics._LOGGER, "error", log)
+    with pytest.raises(LocalControlExecutionError) as raised:
+        await coordinator.execute(intent)
+    assert raised.value.__cause__ is original
+    assert len(session.sent) == 1
+    assert session.quarantined
+    assert len(events) == 1
+    assert events[0]["event_version"] == 1
+    assert events[0]["request_sha256"] == hashlib.sha256(b"private_request").hexdigest()
+    assert events[0]["boundary_elapsed_ns"] == (
+        None if error_kind == "broken_clock" else 83_564_000
+    )
+    encoded = json.dumps(events[0])
+    for secret in (private_value, "private_member", "private-endpoint", "private_request"):
+        assert secret not in encoded
+    chain = events[0]["exception_chain"]
+    if error_kind == "cancelled":
+        assert chain[0]["type"] == "asyncio.exceptions.CancelledError"
+    elif error_kind == "cyclic":
+        assert len(chain) == 1
+    else:
+        assert chain[0]["type"] == "jebao_flow.protocol.errors.ProtocolTimeoutError"
+        assert chain[1]["type"] == "builtins.TimeoutError"
+    assert events[0]["chain_truncated_or_cyclic"] is (error_kind in {"cyclic", "long_chain"})
+    if error_kind == "long_chain":
+        assert len(chain) == 8
+
+
+@pytest.mark.parametrize("failure_stage", ["readback", "recovery_send", "recovery_readback"])
+@pytest.mark.asyncio
+async def test_failure_diagnostics_do_not_mislabel_readback_as_send(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    failure_stage: str,
+) -> None:
+    target = _binding("wavemaker_left", "a")
+    endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
+    forward = _Session(
+        [_status(flow=40)],
+        send_error=None if failure_stage == "readback" else TimeoutError("private cause"),
+    )
+    recovery = _Session(
+        [_status(flow=50)],
+        send_error=OSError("private cause") if failure_stage == "recovery_send" else None,
+    )
+    coordinator, journal = _coordinator(
+        tmp_path,
+        qualifications=(_qualification("manual_flow"),),
+        resolver=_Resolver((endpoint,)),
+        sessions=_SessionFactory({"current-address": [forward, recovery]}),
+    )
+    intent = LocalControlIntent(
+        request_id="request_diagnostic", target=target, function="manual_flow", value=50
+    )
+    with pytest.raises(LocalControlExecutionError):
+        await coordinator.execute(intent)
+    if failure_stage != "readback":
+        with pytest.raises(LocalControlExecutionError):
+            await coordinator.recover(intent.request_id)
+    event = json.loads(caplog.records[-1].getMessage())
+    record = journal.load(intent.request_id)
+    assert record is not None
+    assert record.phase is TransactionPhase.RECOVERY_REQUIRED
+    assert event["revision"] == record.revision
+    assert isinstance(event["boundary_elapsed_ns"], int)
+    assert event["boundary_elapsed_ns"] >= 0
+    assert event["diagnostic"] == (
+        "forward_readback_unavailable"
+        if failure_stage == "readback"
+        else "rollback_outcome_uncertain"
+    )
+    assert event["exception_chain"][0]["type"] == (
+        "builtins.OSError" if failure_stage == "recovery_send" else "builtins.IndexError"
+    )
+    assert len(forward.sent) == 1
+    assert len(recovery.sent) == (0 if failure_stage == "readback" else 1)
+    assert "private cause" not in caplog.text
+
+
+@pytest.mark.parametrize("root_level", ["default", "ERROR"])
+def test_failure_event_reaches_stderr_without_logging_configuration(root_level: str) -> None:
+    # Separate interpreter: pytest's capture handler must not supply the delivery route.
+    script = """
+import logging
+import sys
+from types import SimpleNamespace
+from jebao_flow.local_control.failure_diagnostics import report_action_failure
+assert not logging.getLogger().handlers
+if sys.argv[1] != "default":
+    logging.getLogger().setLevel(sys.argv[1])
+action = SimpleNamespace(
+    function="manual_flow", diagnostic="forward_outcome_uncertain",
+    forward_payload_sha256="a" * 64, rollback_payload_sha256="b" * 64,
+)
+record = SimpleNamespace(request_id="private_request", revision=2, actions=(action,))
+report_action_failure(
+    record, 0, TimeoutError("secret-message"), started_ns=100, failed_ns=200,
+)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, root_level],
+        capture_output=True, text=True, check=True, timeout=10,
+    )
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1
+    event = json.loads(result.stderr)
+    assert event["event_version"] == 1
+    assert event["function"] == "manual_flow"
+    assert event["boundary_elapsed_ns"] == 100
+    assert event["exception_chain"][0]["type"] == "builtins.TimeoutError"
+    assert "secret-message" not in result.stderr
+    assert "private_request" not in result.stderr
 
 
 @pytest.mark.parametrize(
