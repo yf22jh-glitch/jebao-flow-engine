@@ -108,3 +108,42 @@ Ruff 성공 출력은 실행 간 byte-identical이므로 digest만으로 이번 
 사용자의 새 Sync1회 요청을 Anti·자동 반복으로 넓히지 않는다. 기술 실패 시 원복 후 중단한다.
 이전 first 앱 TimerOFF/manual constant40/F34·원 서비스 복귀 의무는 아직 열려 있고,
 이번 구현이나 테스트 PASS로 닫지 않는다.
+
+## 실행 이미지 준비와 현재 읽기 확인
+
+구현 커밋은 `e993628d16f01e0f2595920feea58045c7afe888`이며 승인 staged diff와 exact하다.
+기존 image `200564aeeaa084e181c887a431149f9d672d443d9931e376475d720c58a506f1`에
+해당 commit bundle만 적용해 새 image
+`ab6a33dbffe54432788d389164abebe295341d01d34625a228432253037f3de6`을 만들었다.
+첫 build exit0이다. `--network none`은 build RUN 단계 제한이며 metadata 조회 전부의
+네트워크 차단을 주장하지 않는다. 실제 이미지 대조 컨테이너는 network-none이었다.
+
+이미지 소스138개가 commit exact이고 기존 대비 승인 source4개만 달랐다.
+Python·설치 패키지·schema digest
+`fa3203f127f81eca46b2242a039c019802c71c65598a00d5228bdaaedbd7d0d6`는 동일했다.
+이미지 내부 생성 결과도 가상 시간표 SHA2개 및 차이5·14·23과 일치했다.
+schema 불변이 승인이나 qualification을 새로 부여하는 것은 아니다.
+
+검증 v1은 비밀값 없는 검사 script의0600 권한 때문에 읽기 전에 거부됐다.
+그 script와 새 operator script들만0644로 정정한 v2가 exit0이다. 실행 UID100/101,
+운영 config·보호 root·receipt 권한은 변경하지 않았다. 두 결과를 모두 보존했다.
+
+| 산출물 | SHA256 |
+|---|---|
+| build.log | `ac866ae6b09a5ff6329d47030d8f0fec4f5d31a30029116967084208f7d12764` |
+| verification.stderr (v1) | `03a7162426c61e463053b6136397d58249a2ae280c36e1d28a1a51f2a1c85916` |
+| verification-v2.json | `7b1eb78951d509e1009cf1af43f60382bbabef357c3f3be7ef2111603c43ae00` |
+| run_once.py | `28b12fa0567466efd9eefdbb172c9d5a02fc52ed4e557c78e0a27a727548b430` |
+| baseline-summary.json | `a7bc95ba7ec27313b7cb09021d890078b7e42f01c24d7e9fa72167cfeb325161` |
+
+그 뒤 별도 artifact `native-flow-only-baseline-v1`로 read-only2 pair를 보존했다.
+UTC span은 `2026-09-14T22:14:09.410217Z`–`22:14:43.288858Z`다. 두 기기 모두
+ON/TimerON/independent, 문제·invalid slot0이며 양쪽432B는 앱 이전 원본과 byte-exact다.
+second/master는 Auto Constant45/F5·비활성 manual30/F32, first/slave는
+Auto Constant55/F5·비활성 manual40/F34였다. 날짜는 양쪽09-15로 읽혔지만 향후 slave
+report 날짜 일치를 보장하지 않는다. 현재 값은 시간에 따라 바뀌며 복원 목표 슬롯을 고정하지 않는다.
+
+새 wrapper는 source·정책·사용자 현장 조건·설정 digest를 결속한 승인 artifact가 있어야 하고,
+O_EXCL/fsync 표식 뒤 기존 CLI preflight1/run1만 호출한다. 아직 실행하지 않았다.
+현재 현장 확인을 요청했으며 **이 단계까지 새 schedule/role/control write0**이다.
+원 exact 서비스는 stopped이고 first 최종 앱 TimerOFF 의무는 여전히 열린 상태다.
