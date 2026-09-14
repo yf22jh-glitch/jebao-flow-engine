@@ -1,6 +1,8 @@
 # Group OFF/ON bounded commissioning — D1u
 
-Status: **approved operation; not yet executed**. Prepared after D1t at `c47cbd3`.
+Status: **completed FAIL; one-shot authority exhausted**. Prepared after D1t at `c47cbd3`.
+See the [committed result](runs/2026-09-14-m4-group-power-commissioning.md).
+The historical approval and sequence below do not authorize another execution.
 After disclosure that all three wavemakers may remain OFF on failure and require immediate
 on-site restoration, the maintainer/on-site approver explicitly answered “ㅇㅇㅇㅇ 진행해줘”.
 This binds the temporary deployment, one OFF/ON sequence, recovery, app restoration and prior
