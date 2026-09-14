@@ -74,6 +74,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 
 | 파일 | 범위 | 요지 |
 |---|---|---|
+| [2026-09-14 native Sync field 준비 중단](2026-09-14-native-sync-field-preparation-stop.md) | sentinel 두 대상 write·원복 / field·role 진입 전 종료 | 앱 준비 후 시간표·controls 복원 확인, 원예외 UNKNOWN, 앱 이전 TimerOFF·서비스 복귀 미완료 |
 | [2026-08-26--28 네이티브 Linkage 실기 이력](2026-08-26--2026-08-28-native-linkage-history.md) | 13회 (legacy 집계) | 슬롯별 `AutoFlow` 질문은 여전히 UNKNOWN. 직접 시도는 5회 |
 | [2026-08-28 write-free collector pilot](2026-08-28-pilot-2bd1bf97.md) | 18 pair / 36 raw frame | collector transport·timing PASS. Q2는 판정하지 않음 |
 | [2026-08-30 write-free collector 30초 cadence](2026-08-30-collector-a2f44ded.md) | 18 pair / 36 raw frame | 30초 cadence acquisition PASS. Q2·independent-control epoch는 미실행 |
