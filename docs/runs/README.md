@@ -124,6 +124,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-14 direct override·resume commissioning](2026-09-14-local-group-override-resume-commissioning.md) | ON1·direct32 1·PRESS1 / record4 / Flow2 / power0 | first Pro의 세 cycle override 유지·resume 뒤 해당 멤버만31 복귀 및 선언 field·prior 서비스 복귀 확인 |
 | [2026-09-14 group power commissioning](2026-09-14-m4-group-power-commissioning.md) | OFF rev10 / ON FAIL rev14 / recovery rev25·write4 | Bar Flow send_once 예외로 혼합 상태; 마지막 record 복구·앱 원복·prior 복귀, 근본 원인은 UNKNOWN |
 | [2026-09-14 HA Core update read-only postcheck](2026-09-14-ha-core-update-readonly-postcheck.md) | discovery90 exact / fresh6 / command0 | 사용자 업데이트 완료 뒤 새 poll batch·비무장·전후 tree 불변 확인; 새 배포·실기 승인은 별개 |
+| [2026-09-14 Bar OFF-state Flow diagnostic](2026-09-14-local-bar-off-flow-diagnostic.md) | direct record3/rev4×3 / Flow1·power2 / post-ON3 cycle | Bar OFF31→OFF30→ON30 단회 PASS·앱 원복·exact prior 복귀; D1u group FAIL·원인 UNKNOWN 유지 |
 
 ## 새 실행 기록 템플릿
 
