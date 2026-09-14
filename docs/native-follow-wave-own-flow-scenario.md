@@ -65,7 +65,7 @@ Sine30 → Constant40 → Constant35가 된다. 이는 확인할 가설이며 PA
 
 ## 같은 현장 세션의 실행 순서
 
-1. 직전 실행의 기록·원복을 마친다. 원본 전체432-byte 시간표와 controls를 새 기준선으로 보존한다.
+1. 직전 실행의 기록·현재 상태·남은 복원 의무를 확인한다. 현재 두 대 TimerON을 준비 상태로 이어 쓰되, 아래 앱 이전 원본과 이번 하네스 baseline을 구분해 보존한다.
 2. Sync에서 위 세 구간을 한 번 관측하고 하네스가 소유한 기준선까지 복원한다.
 3. 복원을 독립 확인한 뒤 Anti-Sync에서 같은 구성의 세 구간을 한 번 관측한다.
 4. 원 시간표·controls·역할·서비스를 복원하고 앱 준비 이전 상태와 수용된 상태를 구분한다.
@@ -73,6 +73,37 @@ Sine30 → Constant40 → Constant35가 된다. 이는 확인할 가설이며 PA
 한 현장 세션이라는 것은 역할별 결과·저널·복구 권한을 하나로 혼합한다는 뜻이 아니다.
 첫 역할에서 원복 실패·구체적 위험·새로운 실행 차단이 생기면 다음 역할을 자동 실행하지 않는다.
 장비 기능에 대한 부정적 관측 자체는 실험 실패로 처리하지 않는다.
+
+### 실행 전 결속과 최종 원복 목표
+
+사용자가 다시 끝까지 진행하도록 지시한 뒤 14:36:10.689310–14:36:54.007851Z에
+fresh2 pair를 보존했다. 묶음 `wave-flow-current.lBPhmkKa`, series SHA256
+`31180b1d4cc2c02c2d0e926b177e1ee647215f96b46aab541ec37a2ce35dc573`이다.
+두 대 ON/TimerON/independent·오류0이며 원432B 시간표와 각각 byte-exact다.
+master의 현 Auto는 Sine45/F40, slave는 Sine65/F80이고 manual30/F32·40/F34는 비활성 저장값이다.
+현재 TimerON은 앱 준비 이후 상태이지 앱 이전 원본이 아니다.
+
+하네스는 각 operation 시작 때 snapshot한 두 대 TimerON·원 시간표·controls를 복원한다.
+마지막 사용자 앱 원복 목표는 **first Pro TimerOFF / manual constant40 / Frequency34**다.
+second는 TimerON·수용된 manual constant30/F32와 원 시간표를 유지하고 current slot은 그때 시각으로
+확인한다. 첫 Pro의 중간 OFF→ON 왕복은 추가하지 않는다.
+이전 실행의 마지막 앱 원복·서비스 복귀 의무와 이번 두 operation의 원복 의무는 별도로 기록한다.
+최종 앱 토글 한 번이 실제로 양쪽 의무를 닫더라도 각 기록에 관측을 따로 덧붙인다.
+
+### 두 역할의 logical 호출 회계
+
+[기존 단회 표](native-sync-live-plan-2026-09-14.md#정상-경로의-write-회계)의 safe2·sentinel
+forward2/restore2·field2·arm2·role2·보상 다섯 단계 각2를 그대로 사용한다.
+Sync는 전진10+보상12=22이고, Anti-Sync는 slave Sync 중간 진입1이 추가되어 전진11+보상12=23이다.
+Anti-Sync의 순서는 master → slave Sync 검증 → slave Anti-Sync이며 기존 경로만 사용한다.
+이는 정상 경로 정적 logical 회계다. skip과 실패 분기는 별도이며 physical frame 수·성공 수가 아니다.
+세 슬롯 구성도 전체432B image 한 번을 쓰므로 슬롯 수를 schedule write 횟수로 더하지 않는다.
+
+실행 source는 `6978d2dadf0400958241dc7ebd638d4be04b4763`, image는
+`200564aeeaa084e181c887a431149f9d672d443d9931e376475d720c58a506f1`로 고정한다.
+원 서비스와 prior image는 보존한다. 각 wrapper는 별도 approval·exclusive run-invoked 표식을
+남기고 preflight1회/run1회만 호출한다. 앞 intent는 덮이기 전에 별도 보존한다.
+둘째 역할을 시작하는 자동 루프는 없으며 첫 회 원복·기술적 결과를 실제로 확인한 뒤 시작한다.
 
 ## 구현 전에 고정할 범위
 
