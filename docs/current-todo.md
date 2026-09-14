@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-14 10:02 KST
+마지막 갱신: 2026-09-14 11:02 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -107,11 +107,13 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   확인하고 member PRESS 뒤 first만31로 복귀; record4·revision7/4/5/9·Flow2·power0.
   선언 decoded field·prior Constant50/unarmed 서비스 복귀 완료;
   근거: [`override·resume commissioning`](runs/2026-09-14-local-group-override-resume-commissioning.md), `0f51f99`.
-- [ ] 남은 M4 group OFF/ON·실제 명령 빈도·경합 및 M5 운영 경계는 별도 bounded 계획이 필요하다.
-  D1u는 [승인된 계획](local-group-power-commissioning-plan.md)에 따라 임시 Constant30 배포와
-  readiness·discovery90 exact·두 tree 불변 확인까지 완료. 앱 준비 전 서비스를 정지했고,
-  fresh baseline은 first40/TimerOFF·second31/TimerON·Barclassic91이다. OFF/ON 명령은 아직 0.
-  다음은 사용자 앱으로 all31/TimerOFF/constant를 구성한 뒤 별도 fresh 확인이다.
+- [x] D1u 승인된 group OFF/ON 시도는 **FAIL**로 종결. OFF rev10 뒤 ON의 Bar Flow가
+  `forward_outcome_uncertain`/rev14로 끝났고, 마지막 record만 recovery1회·write4로 rev25/ROLLED_BACK.
+  사용자 앱 복원·별도 fresh read·exact prior Constant50/unarmed 복귀까지 완료;
+  근거: [group power commissioning](runs/2026-09-14-m4-group-power-commissioning.md).
+- [ ] 세 대 group OFF/ON 성공은 미확인. Bar `send_once` 원 예외는 UNKNOWN으로 park하며
+  재시도하지 않는다. 기존 자료의 offline 검사 또는 새 승인 아래 원 예외·transport 관측을
+  보존하는 최소 조작이 대안이다. 실제 pacing·경합 및 M5 운영 경계도 미완료다.
 
 ## 완성까지 전체 로드맵
 
@@ -275,6 +277,9 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] 첫 Pro Resume-to-group 뒤 full plan 중 first32→31만 physical 변경하고 override0·
   세 후속 fresh cycle의 all31 확인; 위와 같은 bounded 조건에 한정.
 - [ ] group OFF/ON이 canonical OFF·Flow-first/Power-second 순서와 terminal journal을 지키는지 확인
+  - D1u에서 OFF power-only는 완료했으나 ON의 Bar Flow가 UNCERTAIN으로 끝나 전체 **FAIL**.
+    recovery·앱 복원은 완료했지만 성공 판정으로 승격하지 않는다. 원인 UNKNOWN park;
+    [실패·복구 근거](runs/2026-09-14-m4-group-power-commissioning.md).
 
 ### M5 — 장애·급여·운영 경계
 
@@ -330,7 +335,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 현재 상태
 
-- [ ] D1u 앱 준비를 위해 persistent control service 정지 중; 펌프 전원 정지를 뜻하지 않음.
+- [x] D1u 실패·복구·사용자 앱 복원 뒤 exact prior Constant50 persistent service 복귀, 비무장 상태.
 - [x] 장비 6/6 관측 상태 유지
 - [x] 사용자 수행 HA Core process restart 뒤 exact deployment surface 복귀·local-control device write `0`
   확인; agent의 HA 업데이트·재기동·설정 변경은 `0`
@@ -345,10 +350,11 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   discovery `86/86` byte exact, Bar number `1`, fresh `6/6`, startup write `0`
 - [x] Pro 동작을 보존하는 Bar family precondition source·offline 검토·landing `d687739` 완료
 - [x] safer-OFF power qualification source·CLI·fault 회귀 landing과 exact one-shot image 준비 완료
-- [x] D1t 종료 뒤 restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
+- [x] D1u 종료 뒤 restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
   direct control `6`, group switch `1`·resume `3`, retained command `0`, group armed `0`,
-  journal operations `26`·blobs `72`·files `98`, receipt root files `18`; group terminal 이후 복귀 전후
-  tree byte 불변. group default `50` 복귀는 실제 장비 Flow `50` 변경을 뜻하지 않음.
+  journal operations `28`·blobs `77`·files `105`, receipt root files `18`; recovery terminal 이후 복귀
+  전후 tree byte 불변. startup write0은 journal-first 경로에 한정하며, group default `50` 복귀는
+  실제 장비 Flow `50` 변경을 뜻하지 않음.
 - [x] current accepted state: firstPro `ON/TimerOFF/constant/independent/40`, secondPro
   `ON/TimerON/constant/independent/latent31`, Bar `ON/TimerOFF/classic/independent/91`;
   secondPro는 그 시점 active slot과 AutoMode/AutoFlow 일치. 다음 TimerOFF에서는 manual `31`에 주의.
@@ -368,8 +374,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   run [`Anti Phase commissioning`](runs/2026-09-14-local-group-antiphase-commissioning.md), `d115250`.
 - [x] M4 direct override·resume의 승인된 bounded operation은
   [D1t 기록](runs/2026-09-14-local-group-override-resume-commissioning.md)으로 종결.
-- [ ] 다음은 D1u group OFF/ON. 임시 배포 이후 사용자 앱 준비 대기이며, group OFF/ON 실기는
-  아직 미실행이다. M4 전체 완료로 선언하지 않음.
+- [x] D1u group OFF/ON은 [실패·복구 기록](runs/2026-09-14-m4-group-power-commissioning.md)으로 종결.
+  확인된 전송 회계11(Flow4/power7)과 Bar Flow uncertain attempt1을 구분하며 재실기하지 않는다.
+- [ ] M4 전체·production grouping은 여전히 NO-GO. 다음 물리 operation은 별도 범위·승인이 필요하다.
 
 ## M0~M1 작업 이력 (완료)
 
