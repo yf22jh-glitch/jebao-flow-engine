@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-14 12:59 KST
+마지막 갱신: 2026-09-14 13:12 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -122,8 +122,11 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [ ] 최종 source의 full suite는 두 실행에서 각각2588 PASS/1 FAIL이고 실패 테스트가 서로
   다르다. 초기2587 PASS와 HEAD2578 PASS로 이를 덮지 않는다. 원인·결과 안정성은 미해결이며,
   이는 D1u Bar 원인과 별개다. 반복해서 green을 만들거나 기존 테스트를 완화하지 않는다.
-- [ ] HA Core 업데이트 상태 회신, 미해결 full-suite 결과를 고지한 배포 판단, 새 Bar-only
-  operation 승인 전에는 live/deploy를 재개하지 않는다. source는 아직 운영에 배포하지 않았다.
+- [x] 사용자 HA Core 업데이트 완료 회신 뒤 read-only postcheck: discovery90 exact·fresh6·비무장,
+  command0·journal105/receipt18 전후 불변. HA 내부 registry/UI 전체 정상은 미주장.
+  근거: [HA update postcheck](runs/2026-09-14-ha-core-update-readonly-postcheck.md).
+- [ ] 미해결 full-suite 결과를 고지한 배포 판단과 새 Bar-only operation 승인 전에는
+  live/deploy를 재개하지 않는다. 진단 source는 아직 운영에 배포하지 않았다.
 - [ ] [Bar-only 후속 계획](local-bar-off-flow-diagnostic-plan.md): group 비무장·Pro pair 불변으로
   Bar만 앱에서constant31 준비 후 direct OFF→Flow30→ON. 성공 예상record3/rev4×3,
   Flow1+power2이며 실패 시 후속 명령 없이 종료·필요한 recovery 뒤 사용자 앱 복원.
