@@ -29,6 +29,7 @@ from jebao_flow.devices.schedule_flow_experiment import (
     ScheduleFlowStage,
     ScheduleFlowStageEvent,
     classify_schedule_flow_sample,
+    describe_wave_flow_windows,
 )
 from jebao_flow.devices.schedule_linkage import (
     ScheduleAutoEvidence,
@@ -43,6 +44,7 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageRunProgressKind,
     ScheduleLinkageSample,
     ScheduleLinkageStopReason,
+    WaveFlowWindowEvidence,
 )
 from jebao_flow.devices.schedule_transaction import (
     TemporaryScheduleErrorCode,
@@ -174,6 +176,142 @@ def test_sync_classification_uses_whole_tuples_and_never_asserts_async_pass(
     assert classify_schedule_flow_sample(_fixed_sync_spec(), wrong_role) is (
         ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
     )
+
+
+def _wave_flow_spec(role="sync_slave", **updates):
+    return _fixed_sync_spec(
+        **(
+            {
+                "wave_flow_role": role,
+                "slave_before_flow": 30,
+                "master_after_flow": 32,
+                "observation_window_seconds": 1035,
+            }
+            | updates
+        )
+    )
+
+
+@pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
+def test_wave_flow_exact_three_windows_preserve_legacy_and_outer_cap(role):
+    spec = _wave_flow_spec(role)
+    assert spec.is_wave_flow_plan
+    assert spec.outer_linkage_spec().slave_role.value == role
+    assert spec.outer_linkage_spec().duration_seconds == 1200
+    assert spec.role_observation_spec().observation_window_seconds - 15 == 1020
+    assert spec.outer_linkage_spec().slave_power == 31
+    assert spec.slave_boundary_time == spec.boundary_time
+    assert "wave_flow_role" not in _fixed_sync_spec().model_dump()
+    assert "wave_flow_role" not in _fixed_sync_spec().role_observation_spec().model_dump()
+    assert ScheduleFlowExperimentSpec.model_validate_json(spec.model_dump_json()) == spec
+    expected = (
+        (("sine", 35, "00:00", "12:34"), ("constant", 32, "12:34", "23:59")),
+        (
+            ("constant", 30, "00:00", "12:34"),
+            ("sine", 40, "12:34", "12:39"),
+            ("sine", 35, "12:39", "23:59"),
+        ),
+    )
+    for patch, declared in zip(
+        spec.temporary_schedule_spec().device_patches, expected, strict=True
+    ):
+        entries = tuple(
+            decode_local_wavemaker_pro_slot_wire(slot.wire_bytes, slot_index=slot.slot)
+            for slot in patch.slots[: len(declared)]
+        )
+        assert tuple((e.mode, e.parameters["flow"], e.start, e.end) for e in entries) == declared
+        assert all(
+            slot.wire_bytes == LOCAL_WAVEMAKER_PRO_UNUSED_EE
+            for slot in patch.slots[len(declared) :]
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    ({"master_after_flow": 33}, {"observation_window_seconds": 915}, {"boundary_time": "23:55"}),
+)
+def test_wave_flow_marker_cannot_authorize_nearby_unapproved_plan(change):
+    with pytest.raises(ValidationError):
+        _wave_flow_spec(**change)
+
+
+def _wave_window(index, slave_mode, slave_flow):
+    # 순수 분류 입력이다. 장비가 이 값을 보고한다는 fake 실기 주장이 아니다.
+    master = ScheduleAutoEvidence(
+        mode="sine" if index == 0 else "constant",
+        flow=35 if index == 0 else 32,
+        frequency=30 if index == 0 else 5,
+    )
+    return WaveFlowWindowEvidence(
+        window=index,
+        master=master,
+        slave=ScheduleAutoEvidence(
+            mode=slave_mode, flow=slave_flow, frequency=30 if slave_mode == "sine" else 5
+        ),
+        pair_count=10 if index == 0 else 3,
+        stable_seconds=120 if index == 0 else 30,
+        first_ordinal=1 + index * 20,
+        last_ordinal=10 + index * 20,
+        acquisition_started=100.0 + index * 300,
+        acquisition_completed=101.0 + index * 300,
+        master_device_time=datetime(2026, 9, 14, 12, (32, 36, 41)[index]),
+        slave_device_time=datetime(2026, 9, 14, 12, (32, 36, 41)[index]),
+        master_frame_sha256="a" * 64,
+        slave_frame_sha256="b" * 64,
+    )
+
+
+@pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
+@pytest.mark.parametrize(
+    "slave_modes,slave_flows,wave_match,flow_match",
+    (
+        (("sine", "constant", "constant"), (30, 40, 35), "master", "own_slot"),
+        (("constant", "sine", "sine"), (30, 40, 35), "own_slot", "own_slot"),
+        (("sine", "constant", "constant"), (35, 32, 32), "master", "master"),
+        (("constant", "sine", "sine"), (35, 32, 32), "own_slot", "master"),
+    ),
+)
+def test_wave_flow_classifier_separates_questions_without_firmware_claim(
+    role, slave_modes, slave_flows, wave_match, flow_match
+):
+    windows = tuple(
+        _wave_window(i, mode, flow)
+        for i, (mode, flow) in enumerate(zip(slave_modes, slave_flows, strict=True))
+    )
+    sample = ScheduleLinkageSample(
+        observed_at=datetime.now(UTC),
+        phase="after",
+        master=windows[-1].master,
+        slave=windows[-1].slave,
+        master_manual_power=30,
+        slave_manual_power=31,
+        master_linkage=LinkageRole.MASTER,
+        slave_linkage=LinkageRole(role),
+        wave_flow_windows=windows,
+    )
+    assert (
+        classify_schedule_flow_sample(_wave_flow_spec(role), sample)
+        is ScheduleFlowOutcome.WAVE_FLOW_OBSERVED
+    )
+    assert (
+        classify_schedule_flow_sample(_wave_flow_spec(role), sample)
+        is not ScheduleFlowOutcome.PER_SLOT_POWER_VERIFIED
+    )
+    assert all(
+        row["wave_match"] == wave_match and row["flow_match"] == flow_match
+        for row in describe_wave_flow_windows(sample)
+    )
+    incomplete = sample.model_copy(update={"wave_flow_windows": windows[:2]})
+    assert (
+        classify_schedule_flow_sample(_wave_flow_spec(role), incomplete)
+        is ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+    )
+    wrong = sample.model_copy(update={"slave_linkage": LinkageRole.MASTER})
+    assert (
+        classify_schedule_flow_sample(_wave_flow_spec(role), wrong)
+        is ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+    )
+    assert ScheduleLinkageSample.model_validate_json(sample.model_dump_json()) == sample
 
 
 def _after_sample(

@@ -1023,12 +1023,13 @@ class TemporaryScheduleController:
         snapshots: tuple[ScheduleImageSnapshot, ...],
     ) -> dict[str, bytes]:
         source = {snapshot.device_id: snapshot.image_bytes for snapshot in snapshots}
+        wave_flow_plan = _is_wave_flow_patch_pair(spec)
         expected: dict[str, bytes] = {}
         field_evidence: list[
             tuple[
                 tuple[tuple[str, str, str], ...],
-                tuple[int, int],
-                tuple[int, int],
+                tuple[int, ...],
+                tuple[int, ...],
             ]
         ] = []
         for patch in spec.device_patches:
@@ -1076,9 +1077,10 @@ class TemporaryScheduleController:
                     self._validate_field_schedule_image(
                         patch.device_id,
                         image,
+                        wave_flow_plan=wave_flow_plan,
                     )
                 )
-        if field_evidence:
+        if field_evidence and not wave_flow_plan:
             master_topology, master_flows, master_frequencies = field_evidence[0]
             slave_topology, slave_flows, slave_frequencies = field_evidence[1]
             fixed_q2_opposing_topology = _is_fixed_q2_opposing_topology(
@@ -1198,10 +1200,12 @@ class TemporaryScheduleController:
         self,
         device_id: str,
         image: bytes,
+        *,
+        wave_flow_plan: bool = False,
     ) -> tuple[
         tuple[tuple[str, str, str], ...],
-        tuple[int, int],
-        tuple[int, int],
+        tuple[int, ...],
+        tuple[int, ...],
     ]:
         entries = tuple(
             entry
@@ -1214,9 +1218,11 @@ class TemporaryScheduleController:
             )
             is not None
         )
-        if len(entries) != 2:
+        if len(entries) != 2 and not (wave_flow_plan and len(entries) == 3):
             raise TemporarySchedulePreflightError(TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE)
         ordered = tuple(sorted(entries, key=lambda entry: _wall_minutes(entry.start)))
+        # 새 slave의 두 번째·세 번째 슬롯은 모두 Sine이다. 이 세 슬롯 예외는
+        # _is_wave_flow_patch_pair의 전체 exact 계획 일치에만 의존한다.
         if ordered[0].mode == ordered[1].mode:
             raise TemporarySchedulePreflightError(TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE)
         cursor = 0
@@ -1246,7 +1252,7 @@ class TemporaryScheduleController:
         topology = tuple((entry.start, entry.end, entry.mode) for entry in ordered)
         flows = tuple(entry.parameters["flow"] for entry in ordered)
         frequencies = tuple(entry.parameters["frequency"] for entry in ordered)
-        return topology, (flows[0], flows[1]), (frequencies[0], frequencies[1])
+        return topology, flows, frequencies
 
     async def _rollback_uninterruptibly(self, record: TemporaryScheduleRecord) -> None:
         task = asyncio.create_task(self._rollback(record))
@@ -1647,6 +1653,53 @@ def _constant_time_equal(left: str, right: str) -> bool:
 def _wall_minutes(value: str) -> int:
     hour_text, minute_text = value.split(":", maxsplit=1)
     return int(hour_text) * 60 + int(minute_text)
+
+
+def _is_wave_flow_patch_pair(spec: TemporaryScheduleSpec) -> bool:
+    """새 승인 계획의 전체 슬롯 bytes만 인지하며 legacy topology 검사는 바꾸지 않습니다."""
+    if spec.kind is not TemporaryScheduleKind.FIELD_OBSERVATION:
+        return False
+    if len(spec.device_patches) != 2:
+        return False
+    all_entries = []
+    for patch in spec.device_patches:
+        if tuple(slot.slot for slot in patch.slots) != tuple(range(LOCAL_WAVEMAKER_PRO_SLOT_COUNT)):
+            return False
+        entries = tuple(
+            entry
+            for slot in patch.slots
+            if (
+                entry := decode_local_wavemaker_pro_slot_wire(slot.wire_bytes, slot_index=slot.slot)
+            )
+            is not None
+        )
+        all_entries.append(entries)
+    master, slave = all_entries
+    if len(master) != 2 or len(slave) != 3:
+        return False
+    expected = (
+        (("sine", 35, 30), ("constant", 32, 0)),
+        (("constant", 30, 0), ("sine", 40, 30), ("sine", 35, 30)),
+    )
+    for entries, wanted in zip(all_entries, expected, strict=True):
+        for index, (entry, values) in enumerate(zip(entries, wanted, strict=True)):
+            if (
+                entry.slot != index
+                or (entry.mode, entry.parameters["flow"], entry.parameters["frequency"]) != values
+            ):
+                return False
+            if entry.parameters["feed_time"] != 0 or entry.parameters["custom_frequency"] != 0:
+                return False
+        if entries[0].start != "00:00" or entries[-1].end != "23:59":
+            return False
+        if any(left.end != right.start for left, right in zip(entries, entries[1:], strict=False)):
+            return False
+        if any(_wall_minutes(entry.end) <= _wall_minutes(entry.start) for entry in entries):
+            return False
+    return (
+        master[0].end == slave[0].end
+        and _wall_minutes(slave[1].end) - _wall_minutes(slave[1].start) == 5
+    )
 
 
 def _is_fixed_q2_opposing_topology(

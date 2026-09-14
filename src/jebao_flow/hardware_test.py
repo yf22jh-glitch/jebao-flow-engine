@@ -633,6 +633,8 @@ class HardwareTestIntent(BaseModel):
                     raise ValueError("wire qualification must end with outer restoration")
             if self.schedule_flow_sample is not None:
                 sample = self.schedule_flow_sample
+                if sample.wave_flow_windows is not None and not flow_spec.is_wave_flow_plan:
+                    raise ValueError("three-window evidence requires the exact wave/Flow plan")
                 if (
                     sample.master_linkage is not LinkageRole.MASTER
                     or sample.slave_linkage is not flow_spec.outer_linkage_spec().slave_role

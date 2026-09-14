@@ -49,10 +49,13 @@ from jebao_flow.protocol.schedule_wire import (
     LOCAL_WAVEMAKER_PRO_SLOT_COUNT,
     LOCAL_WAVEMAKER_PRO_UNUSED_EE,
     LOCAL_WAVEMAKER_PRO_UNUSED_ZERO,
+    decode_local_wavemaker_pro_slot_wire,
+    encode_local_wavemaker_pro_schedule_entry,
     get_local_wavemaker_pro_slot_wire,
     patch_local_wavemaker_pro_schedule_slot,
 )
 from jebao_flow.safety.limits import PowerLimits
+from jebao_flow.schedule_flow_experiment_cli import _fixed_spec
 
 
 def _capabilities() -> DeviceCapabilities:
@@ -410,6 +413,50 @@ def _expected_images_for_spec(spec: TemporaryScheduleSpec) -> dict[str, bytes]:
         LinkageSafetyInterlock(initially_permitted=True),
     )
     return controller._expected_images(spec, snapshots)  # noqa: SLF001
+
+
+@pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
+def test_wave_flow_plan_passes_actual_lower_image_composition_without_writes(role):
+    spec = _fixed_spec(
+        operation_id="wave",
+        qualification_operation_id="qualified",
+        master_device_id="left",
+        slave_device_id="right",
+        boundary_time="12:10",
+        wave_flow_role=role,
+    ).temporary_schedule_spec()
+    expected = _expected_images_for_spec(spec)
+    assert set(expected) == {"left", "right"}
+    for patch in spec.device_patches:
+        assert expected[patch.device_id] == b"".join(slot.wire_bytes for slot in patch.slots)
+        assert len(expected[patch.device_id]) == 432
+
+
+@pytest.mark.parametrize("change", ("flow", "offset", "order"))
+def test_three_slot_exception_rejects_nearby_unapproved_image_pairs(change):
+    spec = _fixed_spec(
+        operation_id="wave",
+        qualification_operation_id="qualified",
+        master_device_id="left",
+        slave_device_id="right",
+        boundary_time="12:10",
+        wave_flow_role="sync_slave",
+    ).temporary_schedule_spec()
+    patches = list(spec.device_patches)
+    if change == "order":
+        patches.reverse()
+    else:
+        patch = patches[1]
+        slots = list(patch.slots)
+        entry = decode_local_wavemaker_pro_slot_wire(slots[2].wire_bytes, slot_index=2)
+        if change == "flow":
+            entry = entry.model_copy(update={"parameters": dict(entry.parameters) | {"flow": 36}})
+        else:
+            entry = entry.model_copy(update={"start": "12:16"})
+        slots[2] = ScheduleSlotPatch.from_wire(2, encode_local_wavemaker_pro_schedule_entry(entry))
+        patches[1] = patch.model_copy(update={"slots": tuple(slots)})
+    with pytest.raises(TemporarySchedulePreflightError):
+        _expected_images_for_spec(spec.model_copy(update={"device_patches": tuple(patches)}))
 
 
 @pytest.mark.asyncio

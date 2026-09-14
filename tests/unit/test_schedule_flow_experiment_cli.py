@@ -114,6 +114,84 @@ def _digests() -> tuple[HardwareTestScheduleImageDigest, ...]:
     )
 
 
+@pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
+def test_wave_flow_cli_binds_selected_role_and_new_boundary_without_changing_legacy(role):
+    args = cli.build_parser().parse_args(
+        [
+            "run",
+            "--operation-id",
+            "wave",
+            "--qualification-operation-id",
+            "qualified",
+            "--master",
+            "master",
+            "--slave",
+            "slave",
+            "--boundary-time",
+            "12:10",
+            "--confirm",
+            "placeholder",
+            "--wave-flow-role",
+            role,
+        ]
+    )
+    spec = cli._spec_from_run_args(args)
+    assert spec.is_wave_flow_plan and spec.wave_flow_role == role
+    assert cli._attended_power_cap(spec) == 41
+    saved = _intent().model_copy(
+        update={"schedule_flow_spec": spec, "spec": spec.outer_linkage_spec()}
+    )
+    assert type(cli._schedule_flow_hardware_guard(saved)) is cli._ScheduleFlowHardwareGuard
+    clocks = (datetime(2026, 9, 14, 12, 0, 20), datetime(2026, 9, 14, 12, 0, 30))
+    assert cli._next_boundary(clocks, wave_flow=True) == "12:10"
+    assert cli._next_boundary(clocks) == "12:07"
+    cli._require_boundary_still_fresh("12:10", clocks, wave_flow=True)
+    with pytest.raises(cli.ScheduleFlowCliError):
+        cli._require_boundary_still_fresh("12:10", clocks)
+    with pytest.raises(cli.ScheduleFlowCliError):
+        cli._require_boundary_still_fresh(
+            "12:10", tuple(clock + timedelta(minutes=2) for clock in clocks), wave_flow=True
+        )
+
+
+def test_failure_chain_keeps_nested_classes_and_does_not_print_messages(capsys, monkeypatch):
+    original = ConnectionResetError("private-identity")
+    wrapped = RuntimeError("private-payload")
+    wrapped.__cause__ = original
+    cli._report_failure_chain(
+        wrapped, operation_id="private_operation", stage="field_snapshot_started"
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.err)
+    assert captured.out == ""
+    assert [item["class"] for item in payload["exception_chain"]] == [
+        "RuntimeError",
+        "ConnectionResetError",
+    ]
+    assert "private-" not in captured.err and "private_operation" not in captured.err
+    assert payload["operation_sha256"] == hashlib.sha256(b"private_operation").hexdigest()
+    cli._report_failure_chain(
+        asyncio.CancelledError(), operation_id="private_operation", stage="run"
+    )
+    assert json.loads(capsys.readouterr().err)["exception_chain"][0]["class"] == "CancelledError"
+
+    def broken_print(*args, **kwargs):
+        raise OSError("logger unavailable")
+
+    monkeypatch.setattr("builtins.print", broken_print)
+    try:
+        raise wrapped
+    except RuntimeError:
+        cli._report_failure_chain(wrapped, operation_id="private_operation", stage="run")
+        assert wrapped.__cause__ is original
+
+
+def test_legacy_intent_rejects_three_window_evidence_without_the_new_plan():
+    sample = _after_sample().model_copy(update={"wave_flow_windows": ()})
+    with pytest.raises(ValidationError, match="exact wave/Flow plan"):
+        _intent(phase=HardwareTestIntentPhase.STARTED, sample=sample)
+
+
 def _spec(
     boundary: str = "12:34",
     *,

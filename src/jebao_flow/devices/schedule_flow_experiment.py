@@ -15,7 +15,14 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_serializer,
+    model_validator,
+)
 
 from jebao_flow.devices.base import JebaoDevice
 from jebao_flow.devices.linkage import (
@@ -98,6 +105,7 @@ _SCHEDULE_FLOW_TEST_MAX_POWER = 45
 _FIXED_Q2_MAX_POWER = 47
 _FIXED_Q2_SIGNATURE = (40, 35, 35, 47, 50)
 _FIXED_SYNC_SIGNATURE = (35, 32, 30, 40, 30)
+_WAVE_FLOW_SIGNATURE = (35, 30, 32, 40, 30)
 _FIXED_SYNC_MAX_POWER = 41
 _FIXED_SYNC_SLAVE_MANUAL_POWER = 31
 _FIXED_Q2_MASTER_MANUAL_POWER = 30
@@ -144,7 +152,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
     slave_after_flow: int = Field(default=40, ge=0, le=100)
     sine_frequency: int = Field(default=30, ge=0, le=100)
     safe_frequency: int = Field(default=20, ge=0, le=100)
-    observation_window_seconds: float = Field(default=600, gt=0, le=930)
+    observation_window_seconds: float = Field(default=600, gt=0, le=1080)
     post_boundary_stability_seconds: float = Field(default=300, ge=0, le=300)
     verification_interval_seconds: float = Field(default=2, gt=0, le=10)
     minimum_lead_seconds: float = Field(default=60, ge=10, le=180)
@@ -155,6 +163,18 @@ class ScheduleFlowExperimentSpec(BaseModel):
     sentinel_only: bool = False
     allow_expired_qualification: bool = False
     full_epoch_after_roles: bool = False
+    wave_flow_role: Literal["sync_slave", "async_slave"] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_shape(self, handler):
+        payload = handler(self)
+        if self.wave_flow_role is None:
+            payload.pop("wave_flow_role", None)
+        return payload
+
+    @property
+    def is_wave_flow_plan(self) -> bool:
+        return self.wave_flow_role is not None and _plan_signature(self) == _WAVE_FLOW_SIGNATURE
 
     @property
     def is_fixed_q2_plan(self) -> bool:
@@ -162,17 +182,35 @@ class ScheduleFlowExperimentSpec(BaseModel):
 
     @property
     def is_fixed_sync_plan(self) -> bool:
-        return _plan_signature(self) == _FIXED_SYNC_SIGNATURE
+        return (self.wave_flow_role is None and _plan_signature(self) == _FIXED_SYNC_SIGNATURE) or (
+            self.is_wave_flow_plan and self.wave_flow_role == "sync_slave"
+        )
 
     @property
     def slave_boundary_time(self) -> str:
-        if not self.is_fixed_sync_plan:
+        if self.is_wave_flow_plan or not self.is_fixed_sync_plan:
             return self.boundary_time
         hour, minute = map(int, self.boundary_time.split(":"))
         return (datetime(2000, 1, 1, hour, minute) + timedelta(minutes=5)).strftime("%H:%M")
 
     @model_validator(mode="after")
     def validate_experiment(self) -> Self:
+        if self.wave_flow_role is None and self.observation_window_seconds > 930:
+            raise ValueError("legacy observation window remains bounded by 930 seconds")
+        if self.wave_flow_role is not None and (
+            not self.is_wave_flow_plan
+            or self.observation_window_seconds != 1035
+            or self.post_boundary_stability_seconds != 30
+            or self.safe_frequency != 20
+            or self.verification_interval_seconds != 2
+            or self.minimum_lead_seconds != 60
+            or self.ambiguous_band_seconds != 1
+            or self.maximum_clock_skew_seconds != 30
+            or self.clock_advance_tolerance_seconds != 2
+            or not self.sentinel_qualification
+            or not self.full_epoch_after_roles
+        ):
+            raise ValueError("wave/Flow observation requires its exact three-window contract")
         if self.master_device_id == self.slave_device_id:
             raise ValueError("master and slave devices must differ")
         if self.sentinel_only and not self.sentinel_qualification:
@@ -203,23 +241,26 @@ class ScheduleFlowExperimentSpec(BaseModel):
             raise ValueError(
                 "stable schedule-flow evidence must complete before the 23:59 field end"
             )
-        if _is_fixed_q2_plan(self) and (
-            self.safe_frequency != _FIXED_Q2_SAFE_FREQUENCY
-            or self.observation_window_seconds != 915
-            or self.post_boundary_stability_seconds != (30 if self.is_fixed_sync_plan else 300)
-            or self.verification_interval_seconds != 2
-            or self.minimum_lead_seconds != 60
-            or self.ambiguous_band_seconds != 1
-            or self.maximum_clock_skew_seconds != 30
-            or self.clock_advance_tolerance_seconds != 2
-            or not self.sentinel_qualification
-            or not self.full_epoch_after_roles
+        if (
+            _is_fixed_q2_plan(self)
+            and not self.is_wave_flow_plan
+            and (
+                self.safe_frequency != _FIXED_Q2_SAFE_FREQUENCY
+                or self.observation_window_seconds != 915
+                or self.post_boundary_stability_seconds != (30 if self.is_fixed_sync_plan else 300)
+                or self.verification_interval_seconds != 2
+                or self.minimum_lead_seconds != 60
+                or self.ambiguous_band_seconds != 1
+                or self.maximum_clock_skew_seconds != 30
+                or self.clock_advance_tolerance_seconds != 2
+                or not self.sentinel_qualification
+                or not self.full_epoch_after_roles
+            )
         ):
             raise ValueError("the fixed Q2 signature requires its exact attended controls")
         if (
-            self.is_fixed_sync_plan
-            and boundary_seconds + 300 + required_after >= _FIELD_SCHEDULE_END_SECONDS
-        ):
+            self.is_fixed_sync_plan or self.is_wave_flow_plan
+        ) and boundary_seconds + 300 + required_after >= _FIELD_SCHEDULE_END_SECONDS:
             raise ValueError("fixed Sync slave boundary must leave its full stable window")
         return self
 
@@ -237,7 +278,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
             if _is_fixed_q2_plan(self)
             else (self.master_before_flow, self.slave_before_flow)
         )
-        if self.is_fixed_sync_plan:
+        if self.is_fixed_sync_plan or self.is_wave_flow_plan:
             slave_power = _FIXED_SYNC_SLAVE_MANUAL_POWER
         return LinkageTestSpec(
             operation_id=self.operation_id,
@@ -257,6 +298,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
 
     def role_observation_spec(self) -> ScheduleLinkageSpec:
         return ScheduleLinkageSpec(
+            wave_flow_role=self.wave_flow_role,
             operation_id=f"{self.operation_id}_roles",
             qualification_operation_id=self.qualification_operation_id,
             master_device_id=self.master_device_id,
@@ -274,7 +316,19 @@ class ScheduleFlowExperimentSpec(BaseModel):
         )
 
     def temporary_schedule_spec(self) -> TemporaryScheduleSpec:
-        if self.is_fixed_sync_plan:
+        if self.is_wave_flow_plan:
+            master_patch = _two_segment_patch(
+                self.master_device_id,
+                boundary_time=self.boundary_time,
+                before_mode="sine",
+                before_flow=35,
+                before_frequency=30,
+                after_mode="constant",
+                after_flow=32,
+                after_frequency=0,
+            )
+            slave_patch = _wave_flow_slave_patch(self.slave_device_id, self.boundary_time)
+        elif self.is_fixed_sync_plan:
             master_patch = _two_segment_patch(
                 self.master_device_id,
                 boundary_time=self.boundary_time,
@@ -361,10 +415,14 @@ def _plan_signature(spec: ScheduleFlowExperimentSpec) -> tuple[int, int, int, in
 
 def _is_fixed_q2_plan(spec: ScheduleFlowExperimentSpec) -> bool:
     """Keep legacy Async and new Sync signatures distinct without rewriting persisted specs."""
-    return _plan_signature(spec) in {_FIXED_Q2_SIGNATURE, _FIXED_SYNC_SIGNATURE}
+    return spec.is_wave_flow_plan or (
+        spec.wave_flow_role is None
+        and _plan_signature(spec) in {_FIXED_Q2_SIGNATURE, _FIXED_SYNC_SIGNATURE}
+    )
 
 
 class ScheduleFlowOutcome(StrEnum):
+    WAVE_FLOW_OBSERVED = "wave_flow_observed"
     """Classification of the slave's effective post-boundary Auto tuple."""
 
     PER_SLOT_POWER_VERIFIED = "per_slot_power_verified"
@@ -573,6 +631,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         role_preflight_settle_seconds: float = _ROLE_PREFLIGHT_SETTLE_SECONDS,
         fixed_q2_observation: bool = False,
         fixed_sync_observation: bool = False,
+        wave_flow_observation: bool = False,
     ) -> None:
         if role_preflight_settle_seconds < 0:
             raise ValueError("role preflight settle interval cannot be negative")
@@ -599,6 +658,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             owned_staged_auto_transition_observation=True,
             owned_fixed_q2_observation=fixed_q2_observation,
             owned_fixed_sync_observation=fixed_sync_observation,
+            owned_wave_flow_observation=wave_flow_observation,
         )
         self._external_role_sample_observer = role_sample_observer
         self._external_diagnostic_event_observer = diagnostic_event_observer
@@ -607,6 +667,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         self._role_preflight_settle_seconds = role_preflight_settle_seconds
         self._fixed_q2_observation = fixed_q2_observation
         self._fixed_sync_observation = fixed_sync_observation
+        self._wave_flow_observation = wave_flow_observation
         self._experiment_spec: ScheduleFlowExperimentSpec | None = None
         self._sentinel_result: TemporaryScheduleResult | None = None
         self._temporary_result: TemporaryScheduleResult | None = None
@@ -660,6 +721,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 if (
                     self._fixed_q2_observation is not spec.is_fixed_q2_plan
                     or self._fixed_sync_observation is not spec.is_fixed_sync_plan
+                    or self._wave_flow_observation is not spec.is_wave_flow_plan
                 ):
                     raise LinkageTransactionError(
                         "fixed Q2 monitor selection does not match the token-bound plan"
@@ -1904,8 +1966,11 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         capabilities = self._get_device(device_id).capabilities
         limits = capabilities.power_limits
         plan_maximum = (
-            _FIXED_SYNC_MAX_POWER if spec.is_fixed_sync_plan else
-            _FIXED_Q2_MAX_POWER if _is_fixed_q2_plan(spec) else _SCHEDULE_FLOW_TEST_MAX_POWER
+            _FIXED_SYNC_MAX_POWER
+            if spec.is_fixed_sync_plan or spec.is_wave_flow_plan
+            else _FIXED_Q2_MAX_POWER
+            if _is_fixed_q2_plan(spec)
+            else _SCHEDULE_FLOW_TEST_MAX_POWER
         )
         guarded_maximum = min(limits.max_power, plan_maximum)
         if (
@@ -1935,6 +2000,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 spec.outer_linkage_spec().slave_power,
                 spec.slave_before_flow,
                 spec.slave_after_flow,
+                *((35,) if spec.is_wave_flow_plan else ()),
             ),
         }
         for device_id, values in planned.items():
@@ -2245,6 +2311,43 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         return spec
 
 
+def _wave_flow_slave_patch(device_id: str, boundary_time: str) -> DeviceSchedulePatch:
+    hour, minute = map(int, boundary_time.split(":"))
+    second = (datetime(2000, 1, 1, hour, minute) + timedelta(minutes=5)).strftime("%H:%M")
+    segments = (
+        ("00:00", boundary_time, "constant", 30, 0),
+        (boundary_time, second, "sine", 40, 30),
+        (second, _FIELD_SCHEDULE_END, "sine", 35, 30),
+    )
+    wires = tuple(
+        encode_local_wavemaker_pro_schedule_entry(
+            ScheduleEntry(
+                slot=index,
+                start=start,
+                end=end,
+                mode=mode,
+                mode_code=1 if mode == "sine" else 2,
+                parameters={
+                    "flow": flow,
+                    "frequency": frequency,
+                    "feed_time": 0,
+                    "custom_frequency": 0,
+                },
+            )
+        )
+        for index, (start, end, mode, flow, frequency) in enumerate(segments)
+    )
+    return DeviceSchedulePatch(
+        device_id=device_id,
+        slots=tuple(
+            ScheduleSlotPatch.from_wire(
+                index, wires[index] if index < 3 else LOCAL_WAVEMAKER_PRO_UNUSED_EE
+            )
+            for index in range(LOCAL_WAVEMAKER_PRO_SLOT_COUNT)
+        ),
+    )
+
+
 def _two_segment_patch(
     device_id: str,
     *,
@@ -2297,6 +2400,37 @@ def _two_segment_patch(
     return DeviceSchedulePatch(device_id=device_id, slots=slots)
 
 
+def describe_wave_flow_windows(sample: ScheduleLinkageSample) -> tuple[dict[str, object], ...]:
+    """보고 파형과 Flow를 독립 표시한다. 관측 자격 판정은 별도다."""
+    rows = []
+    for item in sample.wave_flow_windows or ():
+        own_mode = "constant" if item.window == 0 else "sine"
+        own_flow = (30, 40, 35)[item.window]
+        previous_flow = (None, 30, 40)[item.window]
+        rows.append(
+            {
+                "window": item.window,
+                "master": item.master.model_dump(mode="json"),
+                "slave": item.slave.model_dump(mode="json"),
+                "wave_match": "master"
+                if item.slave.mode == item.master.mode
+                else "own_slot"
+                if item.slave.mode == own_mode
+                else "other",
+                "flow_match": "own_slot"
+                if item.slave.flow == own_flow
+                else "master"
+                if item.slave.flow == item.master.flow
+                else "previous_slot"
+                if item.slave.flow == previous_flow
+                else "manual"
+                if item.slave.flow == 31
+                else "other",
+            }
+        )
+    return tuple(rows)
+
+
 def classify_schedule_flow_sample(
     spec: ScheduleFlowExperimentSpec,
     sample: ScheduleLinkageSample,
@@ -2305,6 +2439,59 @@ def classify_schedule_flow_sample(
 
     if sample.slave_linkage is not spec.outer_linkage_spec().slave_role:
         return ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+    if spec.is_wave_flow_plan:
+        windows = sample.wave_flow_windows
+        if (
+            sample.phase != "after"
+            or windows is None
+            or tuple(item.window for item in windows) != (0, 1, 2)
+            or sample.master_manual_power != 30
+            or sample.slave_manual_power != 31
+            or sample.master != windows[-1].master
+            or sample.slave != windows[-1].slave
+        ):
+            return ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+        hour, minute = map(int, spec.boundary_time.split(":"))
+        boundary = windows[0].master_device_time.replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        previous = None
+        for item in windows:
+            offsets = tuple(
+                (clock - boundary).total_seconds()
+                for clock in (item.master_device_time, item.slave_device_time)
+            )
+            valid_window = (
+                all(offset < -60 for offset in offsets)
+                if item.window == 0
+                else all(60 < offset < 240 for offset in offsets)
+                if item.window == 1
+                else all(offset > 360 for offset in offsets)
+            )
+            expected_master = ("sine", 35) if item.window == 0 else ("constant", 32)
+            if (
+                not valid_window
+                or (item.master.mode, item.master.flow) != expected_master
+                or item.master.frequency not in ({30} if item.window == 0 else {0, 5})
+                or item.master.feed_time is not None
+                or item.slave.feed_time is not None
+                or item.slave.mode not in {"sine", "constant"}
+                or item.slave.frequency not in {0, 5, 20, 30}
+                or not 30 <= item.slave.flow <= 41
+                or item.master_device_time.replace(second=0, microsecond=0)
+                != item.slave_device_time.replace(second=0, microsecond=0)
+                or (
+                    previous is not None
+                    and (
+                        item.first_ordinal <= previous.last_ordinal
+                        or item.acquisition_started <= previous.acquisition_completed
+                    )
+                )
+            ):
+                return ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+            previous = item
+        # 세 창이 관측됐다는 결과일 뿐, 어느 기능 가설의 PASS도 뜻하지 않는다.
+        return ScheduleFlowOutcome.WAVE_FLOW_OBSERVED
     if spec.is_fixed_sync_plan:
         def matches(value: ScheduleAutoEvidence | None, mode: str, flow: int, freq: int) -> bool:
             return value is not None and (

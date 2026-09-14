@@ -27,6 +27,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    model_serializer,
     model_validator,
 )
 
@@ -465,7 +466,7 @@ class ScheduleLinkageSpec(BaseModel):
     )
     master_device_id: DeviceIdentifier
     slave_device_id: DeviceIdentifier
-    observation_window_seconds: float = Field(default=180, gt=0, le=930)
+    observation_window_seconds: float = Field(default=180, gt=0, le=1080)
     verification_interval_seconds: float = Field(default=1, gt=0, le=10)
     minimum_lead_seconds: float = Field(default=45, ge=10, le=180)
     ambiguous_band_seconds: float = Field(default=1, ge=0.1, le=5)
@@ -478,9 +479,26 @@ class ScheduleLinkageSpec(BaseModel):
     allow_expired_qualification: bool = False
     maximum_clock_skew_seconds: float = Field(default=2, ge=0.1, le=30)
     clock_advance_tolerance_seconds: float = Field(default=2, ge=0.1, le=10)
+    wave_flow_role: Literal["sync_slave", "async_slave"] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_shape(self, handler):
+        payload = handler(self)
+        if self.wave_flow_role is None:
+            payload.pop("wave_flow_role", None)
+        return payload
 
     @model_validator(mode="after")
     def validate_window(self) -> Self:
+        if self.wave_flow_role is None and self.observation_window_seconds > 930:
+            raise ValueError("legacy observation window remains bounded by 930 seconds")
+        if self.wave_flow_role is not None and (
+            self.observation_window_seconds != 1035
+            or not self.complete_observation_epoch
+            or not self.observe_slave_after_tuple_variance
+            or self.post_boundary_stability_seconds != 30
+        ):
+            raise ValueError("wave/Flow role observation requires the exact bounded epoch")
         if self.master_device_id == self.slave_device_id:
             raise ValueError("master and slave devices must be different")
         post_boundary_budget = (
@@ -509,6 +527,38 @@ class ScheduleAutoEvidence(BaseModel):
     def validate_feed_time(self) -> Self:
         if (self.mode == "feed") != (self.feed_time is not None):
             raise ValueError("AutoFeedTime is required only for feed evidence")
+        return self
+
+
+class WaveFlowWindowEvidence(BaseModel):
+    """세 구간의 안정 보고값. 펌웨어 답이나 물리 수류 판정은 아니다."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    window: Literal[0, 1, 2]
+    master: ScheduleAutoEvidence
+    slave: ScheduleAutoEvidence
+    pair_count: int = Field(ge=2)
+    stable_seconds: float = Field(ge=30)
+    first_ordinal: int = Field(ge=1)
+    last_ordinal: int = Field(ge=1)
+    acquisition_started: float = Field(ge=0)
+    acquisition_completed: float = Field(ge=0)
+    master_device_time: datetime
+    slave_device_time: datetime
+    master_frame_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    slave_frame_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_window(self) -> Self:
+        if self.window == 0 and (self.pair_count < 10 or self.stable_seconds < 120):
+            raise ValueError("W0 requires ten fresh pairs across 120 seconds")
+        if (
+            self.last_ordinal - self.first_ordinal < self.pair_count - 1
+            or self.acquisition_completed < self.acquisition_started
+        ):
+            raise ValueError("window evidence cannot run backwards")
+        if self.master_device_time.tzinfo is not None or self.slave_device_time.tzinfo is not None:
+            raise ValueError("device-local clocks must be naive")
         return self
 
 
@@ -542,6 +592,14 @@ class ScheduleLinkageSample(BaseModel):
     slave_frame_length: int | None = Field(default=None, gt=0)
     master_device_time: datetime | None = None
     slave_device_time: datetime | None = None
+    wave_flow_windows: tuple[WaveFlowWindowEvidence, ...] | None = Field(default=None, max_length=3)
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_shape(self, handler):
+        result = handler(self)
+        if self.wave_flow_windows is None:
+            result.pop("wave_flow_windows", None)
+        return result
 
     @model_validator(mode="after")
     def validate_timestamp(self) -> Self:
@@ -1224,6 +1282,7 @@ class ScheduleActiveLinkageController:
         owned_staged_auto_transition_observation: bool = False,
         owned_fixed_q2_observation: bool = False,
         owned_fixed_sync_observation: bool = False,
+        owned_wave_flow_observation: bool = False,
     ) -> None:
         self._devices = dict(devices)
         self._store = store
@@ -1242,6 +1301,9 @@ class ScheduleActiveLinkageController:
         )
         self._owned_fixed_q2_observation = owned_fixed_q2_observation
         self._owned_fixed_sync_observation = owned_fixed_sync_observation
+        self._owned_wave_flow_observation = owned_wave_flow_observation
+        if owned_wave_flow_observation and not owned_fixed_q2_observation:
+            raise ValueError("wave/Flow observation requires the owned fixed monitor")
         if owned_fixed_sync_observation and not owned_fixed_q2_observation:
             raise ValueError("fixed Sync observation requires the owned fixed monitor")
         if self._owned_fixed_q2_observation and not self._owned_staged_auto_transition_observation:
@@ -1975,7 +2037,9 @@ class ScheduleActiveLinkageController:
             and master_expectation.after_mode == slave_expectation.after_mode
         )
         expected_offset = (
-            timedelta(minutes=5) if self._owned_fixed_sync_observation else timedelta(0)
+            timedelta(minutes=5)
+            if self._owned_fixed_sync_observation and spec.wave_flow_role is None
+            else timedelta(0)
         )
         if slave_expectation.boundary_at - master_expectation.boundary_at != expected_offset or (
             not self._owned_fixed_q2_observation and not same_mode_plan
@@ -2097,7 +2161,7 @@ class ScheduleActiveLinkageController:
         """Bind the widened cap and same-mode monitor to the one approved schedule."""
 
         after_valid_until = {snapshot.expectation.after_valid_until for snapshot in snapshots}
-        if len(after_valid_until) != 1:
+        if len(after_valid_until) != 1 and spec.wave_flow_role is None:
             raise ScheduleLinkagePreflightError(
                 "fixed Q2 entries must share one validity window",
                 failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
@@ -2121,6 +2185,12 @@ class ScheduleActiveLinkageController:
                 spec.slave_device_id: (31, ("constant", 32, 0), ("sine", 40, 30)),
             }
             frequency_allowlist = {0, 5, 20, 30}
+        if spec.wave_flow_role is not None:
+            expected = {
+                spec.master_device_id: (30, ("sine", 35, 30), ("constant", 32, 0)),
+                spec.slave_device_id: (31, ("constant", 30, 0), ("sine", 40, 30)),
+            }
+            frequency_allowlist = {0, 5, 20, 30}
         for snapshot in snapshots:
             state = states[snapshot.device_id]
             schedule = state.schedule
@@ -2142,15 +2212,18 @@ class ScheduleActiveLinkageController:
                 )
             entries = _validated_entries(schedule)
             expectation = snapshot.expectation
+            three_slots = (
+                spec.wave_flow_role is not None and snapshot.device_id == spec.slave_device_id
+            )
             if (
-                len(entries) != 2
+                len(entries) != (3 if three_slots else 2)
                 or expectation.current_slot != entries[0].slot
                 or expectation.next_slot != entries[1].slot
                 or entries[0].slot != 0
                 or entries[1].slot != 1
                 or entries[0].start != "00:00"
                 or entries[0].end != entries[1].start
-                or entries[1].end != "23:59"
+                or entries[-1].end != "23:59"
                 or _wall_seconds(entries[1].end) <= _wall_seconds(entries[1].start)
                 or snapshot.power != manual_power
                 or snapshot.mode != "constant"
@@ -2160,9 +2233,21 @@ class ScheduleActiveLinkageController:
                     "fixed Q2 controls or two-entry schedule do not match the approved plan",
                     failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
                 )
+            if three_slots and (
+                entries[2].slot != 2
+                or entries[1].end != entries[2].start
+                or _wall_seconds(entries[2].start) - _wall_seconds(entries[1].start) != 300
+            ):
+                raise ScheduleLinkagePreflightError(
+                    "wave/Flow third slot must begin five minutes after the shared boundary",
+                    failure=ScheduleLinkageRunFailure.PREFLIGHT_STAGED_PLAN,
+                )
+            expected_tuples = (before_tuple, after_tuple)
+            if three_slots:
+                expected_tuples += (("sine", 35, 30),)
             for entry, expected_tuple in zip(
                 entries,
-                (before_tuple, after_tuple),
+                expected_tuples,
                 strict=True,
             ):
                 expected_mode, expected_flow, expected_frequency = expected_tuple
@@ -2926,6 +3011,7 @@ class ScheduleActiveLinkageController:
             expected_roles,
             phase="before",
             emit_sample=False,
+            allow_staged_control_transition=record.spec.wave_flow_role is not None,
         )
         self._assert_attended_active_flow_cap(record, states)
 
@@ -3855,6 +3941,8 @@ class ScheduleActiveLinkageController:
         end the epoch before its fixed deadline.
         """
 
+        if record.spec.wave_flow_role is not None:
+            return await self._monitor_wave_flow(record)
         spec = record.spec
         expected_roles = {
             spec.master_device_id: LinkageRole.MASTER,
@@ -4343,6 +4431,202 @@ class ScheduleActiveLinkageController:
             "staged Auto transition lacked two consecutive stable after samples"
         )
 
+    def _wave_flow_window(
+        self,
+        record: ScheduleLinkageRecord,
+        states: Mapping[str, DeviceState],
+    ) -> Literal[0, 1, 2] | None:
+        """두 장비 시각이 같은 분·같은 창일 때만 경계 밖 표본으로 센다."""
+        clocks = tuple(
+            self._state_clock_for(s.device_id, states[s.device_id]) for s in record.snapshots
+        )
+        if clocks[0].replace(second=0, microsecond=0) != clocks[1].replace(second=0, microsecond=0):
+            return None
+        boundary = record.snapshots[0].expectation.boundary_at
+        offsets = tuple((clock - boundary).total_seconds() for clock in clocks)
+        if all(value < -60 for value in offsets):
+            return 0
+        if all(60 < value < 240 for value in offsets):
+            return 1
+        if all(value > 360 for value in offsets):
+            return 2
+        return None
+
+    async def _monitor_wave_flow(
+        self,
+        record: ScheduleLinkageRecord,
+    ) -> tuple[ScheduleLinkageStopReason, bool]:
+        """승인된 세 창을 관측한다. 부정적 기능 관측도 그대로 보존한다."""
+        spec = record.spec
+        roles = {
+            spec.master_device_id: LinkageRole.MASTER,
+            spec.slave_device_id: self._record_slave_role(record),
+        }
+        qualified: dict[int, WaveFlowWindowEvidence] = {}
+        conflicted: set[int] = set()
+        previous = None
+        previous_window = None
+        previous_clocks = None
+        first_at = 0.0
+        first_ordinal = 0
+        count = 0
+        acquisition_failures = 0
+        last_states = None
+        # 1020초 / 최소 10초 pause + 끝점 여유. 횟수 상한은 새 계획에만 적용한다.
+        for _attempt in range(104):
+            if self._monotonic() > self._require_observation_deadline():
+                break
+            if self._stop_requested():
+                return ScheduleLinkageStopReason.MANUAL, False
+            if not self._active_observation_allowed():
+                raise ScheduleLinkageApplyError("wave/Flow observation authority was revoked")
+            try:
+                states, _started = await self._acquire_fixed_q2_monitor_pair(record)
+            except asyncio.CancelledError:
+                raise
+            except ScheduleLinkageApplyError:
+                if self._run_failure is ScheduleLinkageRunFailure.MONITOR_DEADLINE:
+                    break
+                raise
+            except Exception as error:
+                acquisition_failures += 1
+                _LOGGER.warning("wave-flow read failed class=%s", type(error).__name__)
+                previous, count = None, 0
+                if acquisition_failures >= _FIXED_Q2_MAX_CONSECUTIVE_ACQUISITION_FAILURES:
+                    return ScheduleLinkageStopReason.EPOCH_COMPLETED, False
+                await self._sleep(_FIXED_Q2_MONITOR_PAUSE_SECONDS)
+                continue
+            acquisition_failures = 0
+            sampled_at = self._monotonic()
+            if sampled_at > self._require_observation_deadline():
+                break
+            self._assert_attended_active_flow_cap(record, states)
+            try:
+                self._assert_pair_sample(
+                    record,
+                    states,
+                    roles,
+                    phase="ambiguous",
+                    emit_sample=False,
+                    allow_staged_control_transition=True,
+                )
+            except ScheduleLinkageApplyError:
+                # 보호 필드 이상을 경계 제외로 감추거나 나중의 정상 표본으로 지우지 않는다.
+                conflicted.add(-1)
+                previous, count = None, 0
+                _LOGGER.warning("wave-flow protected snapshot mismatch")
+                await self._sleep(_FIXED_Q2_MONITOR_PAUSE_SECONDS)
+                continue
+            window = self._wave_flow_window(record, states)
+            clocks = tuple(
+                self._state_clock_for(s.device_id, states[s.device_id]) for s in record.snapshots
+            )
+            if previous_clocks is not None and any(
+                now < old for now, old in zip(clocks, previous_clocks, strict=True)
+            ):
+                conflicted.update(qualified)
+                previous, count = None, 0
+            fresh_clocks = previous_clocks is None or all(
+                now > old for now, old in zip(clocks, previous_clocks, strict=True)
+            )
+            if not fresh_clocks or window is None:
+                if window is None:
+                    previous, count = None, 0
+                await self._sleep(_FIXED_Q2_MONITOR_PAUSE_SECONDS)
+                continue
+            previous_clocks = clocks
+            try:
+                evidence = self._assert_pair_sample(
+                    record,
+                    states,
+                    roles,
+                    phase="before" if window == 0 else "after",
+                    emit_sample=False,
+                    allow_staged_control_transition=True,
+                )
+            except ScheduleLinkageApplyError as error:
+                if window in qualified:
+                    conflicted.add(window)
+                _LOGGER.warning(
+                    "wave-flow invalid sample window=%s class=%s", window, type(error).__name__
+                )
+                previous, count = None, 0
+                await self._sleep(_FIXED_Q2_MONITOR_PAUSE_SECONDS)
+                continue
+            master = _observed_auto(spec.master_device_id, states[spec.master_device_id])
+            slave = _observed_auto(spec.slave_device_id, states[spec.slave_device_id])
+            _LOGGER.warning(
+                "wave-flow window=%d master=%s/%d/%d slave=%s/%d/%d",
+                window,
+                master.mode,
+                master.flow,
+                master.frequency,
+                slave.mode,
+                slave.flow,
+                slave.frequency,
+            )
+            ordinal = self._fixed_capture_pair_ordinal
+            if previous_window != window or previous != evidence:
+                if window in qualified:
+                    conflicted.add(window)
+                count, first_at, first_ordinal = 1, sampled_at, ordinal
+            else:
+                count += 1
+            previous, previous_window = evidence, window
+            stable = sampled_at - first_at
+            needed_count, needed_seconds = (10, 120) if window == 0 else (2, 30)
+            if count >= needed_count and stable >= needed_seconds:
+                master_capture = self._latest_fixed_captures[spec.master_device_id]
+                slave_capture = self._latest_fixed_captures[spec.slave_device_id]
+                qualified[window] = WaveFlowWindowEvidence(
+                    window=window,
+                    master=master,
+                    slave=slave,
+                    pair_count=count,
+                    stable_seconds=stable,
+                    first_ordinal=first_ordinal,
+                    last_ordinal=ordinal,
+                    acquisition_started=min(
+                        master_capture.monotonic_started_at, slave_capture.monotonic_started_at
+                    ),
+                    acquisition_completed=max(
+                        master_capture.monotonic_completed_at, slave_capture.monotonic_completed_at
+                    ),
+                    master_device_time=clocks[0],
+                    slave_device_time=clocks[1],
+                    master_frame_sha256=hashlib.sha256(
+                        master_capture.capture.wire_frame
+                    ).hexdigest(),
+                    slave_frame_sha256=hashlib.sha256(slave_capture.capture.wire_frame).hexdigest(),
+                )
+                if window == 0:
+                    self._fixed_stable_before = {
+                        spec.master_device_id: master,
+                        spec.slave_device_id: slave,
+                    }
+                self._assert_pair_sample(
+                    record,
+                    states,
+                    roles,
+                    phase="before" if window == 0 else "after",
+                    allow_staged_control_transition=True,
+                    wave_flow_windows=tuple(qualified[key] for key in sorted(qualified)),
+                )
+                last_states = states
+            await self._sleep(_FIXED_Q2_MONITOR_PAUSE_SECONDS)
+        complete = (
+            set(qualified) == {0, 1, 2}
+            and not conflicted
+            and not self._raw_capture_persistence_failed
+        )
+        _LOGGER.warning(
+            "wave-flow completed windows=%s conflicting=%s raw_failed=%s",
+            sorted(qualified),
+            sorted(conflicted),
+            self._raw_capture_persistence_failed,
+        )
+        return ScheduleLinkageStopReason.EPOCH_COMPLETED, complete and last_states is not None
+
     def _classify_staged_auto_sides(
         self,
         record: ScheduleLinkageRecord,
@@ -4541,6 +4825,7 @@ class ScheduleActiveLinkageController:
         emit_sample: bool = True,
         allow_staged_control_transition: bool = False,
         allow_sync_slave_control_transition: bool = False,
+        wave_flow_windows: tuple[WaveFlowWindowEvidence, ...] | None = None,
     ) -> _StablePairEvidence:
         if (
             record.slave_role_sequence is ScheduleLinkageSlaveRoleSequence.SYNC_ONLY
@@ -4603,6 +4888,7 @@ class ScheduleActiveLinkageController:
             if master_state.power is None or slave_state.power is None:
                 raise ScheduleLinkageApplyError("manual fallback Flow evidence is unavailable")
             sample = ScheduleLinkageSample(
+                wave_flow_windows=wave_flow_windows,
                 observed_at=datetime.now(UTC),
                 phase=phase,
                 master=observed[record.spec.master_device_id],
@@ -4642,14 +4928,10 @@ class ScheduleActiveLinkageController:
                     else None
                 ),
                 master_frame_length=(
-                    len(master_capture.capture.wire_frame)
-                    if master_capture is not None
-                    else None
+                    len(master_capture.capture.wire_frame) if master_capture is not None else None
                 ),
                 slave_frame_length=(
-                    len(slave_capture.capture.wire_frame)
-                    if slave_capture is not None
-                    else None
+                    len(slave_capture.capture.wire_frame) if slave_capture is not None else None
                 ),
                 master_device_time=(
                     master_state.schedule.device_local_time
@@ -4793,8 +5075,9 @@ class ScheduleActiveLinkageController:
     def _guarded_power_maximum(self, device_id: str) -> int:
         capabilities = self._get_device(device_id).capabilities
         approved_maximum = (
-            _FIXED_SYNC_MAX_POWER if self._owned_fixed_sync_observation else
-            _FIXED_Q2_MAX_POWER
+            _FIXED_SYNC_MAX_POWER
+            if self._owned_fixed_sync_observation or self._owned_wave_flow_observation
+            else _FIXED_Q2_MAX_POWER
             if self._owned_fixed_q2_observation
             else _SCHEDULE_LINKAGE_TEST_MAX_POWER
         )
@@ -5338,7 +5621,7 @@ class ScheduleActiveLinkageController:
                 raise ScheduleLinkageApplyError(
                     "fixed Q2 live control evidence is outside the linked monitor"
                 )
-            if self._owned_fixed_sync_observation and (
+            if (self._owned_fixed_sync_observation or self._owned_wave_flow_observation) and (
                 state.mode != snapshot.mode or state.frequency != snapshot.frequency
             ):
                 _LOGGER.warning(

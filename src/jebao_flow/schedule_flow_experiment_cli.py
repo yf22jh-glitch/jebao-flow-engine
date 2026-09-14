@@ -21,7 +21,7 @@ import sys
 from collections.abc import Awaitable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -43,6 +43,7 @@ from jebao_flow.devices.schedule_flow_experiment import (
     ScheduleFlowStage,
     ScheduleFlowStageEvent,
     classify_schedule_flow_sample,
+    describe_wave_flow_windows,
     schedule_flow_stage_rank,
 )
 from jebao_flow.devices.schedule_linkage import (
@@ -187,7 +188,11 @@ def _schedule_flow_hardware_guard(
 ) -> DeploymentHardwareGuard:
     # intent lease 안에서 선택합니다. 기존 Async의 진입/복구 의미는 바꾸지 않습니다.
     if intent is not None and (
-        intent.schedule_flow_spec is None or not intent.schedule_flow_spec.is_fixed_sync_plan
+        intent.schedule_flow_spec is None
+        or not (
+            intent.schedule_flow_spec.is_fixed_sync_plan
+            or intent.schedule_flow_spec.is_wave_flow_plan
+        )
     ):
         return DeploymentHardwareGuard()
     return _ScheduleFlowHardwareGuard()
@@ -331,24 +336,26 @@ def _fixed_spec(
     boundary_time: str,
     sentinel_only: bool = False,
     allow_expired_qualification: bool = False,
+    wave_flow_role: Literal["sync_slave", "async_slave"] | None = None,
 ) -> ScheduleFlowExperimentSpec:
     """Construct the fixed Sync preparation plan; this is not live-write authorization."""
 
     spec = ScheduleFlowExperimentSpec(
+        wave_flow_role=wave_flow_role,
         operation_id=operation_id,
         qualification_operation_id=qualification_operation_id,
         master_device_id=master_device_id,
         slave_device_id=slave_device_id,
         boundary_time=boundary_time,
         master_before_flow=35,
-        slave_before_flow=32,
-        master_after_flow=30,
+        slave_before_flow=30 if wave_flow_role is not None else 32,
+        master_after_flow=32 if wave_flow_role is not None else 30,
         slave_after_flow=40,
         sine_frequency=30,
         safe_frequency=20,
         # ScheduleLinkageController retains a 15-second rollback reserve.  A 915-second
         # authority therefore yields the maintainer-approved full 900-second read-only epoch.
-        observation_window_seconds=915,
+        observation_window_seconds=1035 if wave_flow_role is not None else 915,
         post_boundary_stability_seconds=30,
         verification_interval_seconds=2,
         minimum_lead_seconds=60,
@@ -378,12 +385,15 @@ def _attended_power_cap(spec: ScheduleFlowExperimentSpec) -> int:
     """Open the attended 47% ceiling only for the approved fixed-Q2 signature."""
 
     return (
-        _FIXED_SYNC_MAX_POWER if spec.is_fixed_sync_plan else
-        _FIXED_Q2_MAX_POWER if spec.is_fixed_q2_plan else _MAX_POWER
+        _FIXED_SYNC_MAX_POWER
+        if spec.is_fixed_sync_plan or spec.is_wave_flow_plan
+        else _FIXED_Q2_MAX_POWER
+        if spec.is_fixed_q2_plan
+        else _MAX_POWER
     )
 
 
-def _next_boundary(clocks: Sequence[datetime]) -> str:
+def _next_boundary(clocks: Sequence[datetime], *, wave_flow: bool = False) -> str:
     """Choose master T six-to-seven minutes ahead; slave transition is T+5 minutes."""
 
     if len(clocks) != 2 or any(clock.tzinfo is not None for clock in clocks):
@@ -391,9 +401,12 @@ def _next_boundary(clocks: Sequence[datetime]) -> str:
     earliest, latest = min(clocks), max(clocks)
     if (latest - earliest).total_seconds() > 30:
         raise ScheduleFlowCliError("device-local clocks exceed the preserved-raw allowance")
-    boundary = latest.replace(second=0, microsecond=0) + timedelta(minutes=7)
+    boundary = latest.replace(second=0, microsecond=0) + timedelta(minutes=10 if wave_flow else 7)
     lead = (boundary - latest).total_seconds()
-    if not _BOUNDARY_MIN_LEAD_SECONDS <= lead <= _BOUNDARY_MAX_LEAD_SECONDS:
+    minimum, maximum = (
+        (540, 600) if wave_flow else (_BOUNDARY_MIN_LEAD_SECONDS, _BOUNDARY_MAX_LEAD_SECONDS)
+    )
+    if not minimum <= lead <= maximum:
         raise ScheduleFlowCliError("cannot choose the fixed six-to-seven-minute boundary")
     if boundary.date() != latest.date() or (boundary.hour == 0 and boundary.minute == 0):
         raise ScheduleFlowCliError("schedule-flow preflight cannot cross midnight")
@@ -403,6 +416,8 @@ def _next_boundary(clocks: Sequence[datetime]) -> str:
 def _require_boundary_still_fresh(
     boundary_time: str,
     clocks: Sequence[datetime],
+    *,
+    wave_flow: bool = False,
 ) -> None:
     if len(clocks) != 2 or any(clock.tzinfo is not None for clock in clocks):
         raise ScheduleFlowCliError("both fresh device clocks are required before execution")
@@ -412,7 +427,10 @@ def _require_boundary_still_fresh(
     hour, minute = (int(part) for part in boundary_time.split(":"))
     boundary = latest.replace(hour=hour, minute=minute, second=0, microsecond=0)
     lead = (boundary - latest).total_seconds()
-    if not _RUN_MIN_LEAD_SECONDS <= lead <= _BOUNDARY_MAX_LEAD_SECONDS:
+    minimum, maximum = (
+        (520, 600) if wave_flow else (_RUN_MIN_LEAD_SECONDS, _BOUNDARY_MAX_LEAD_SECONDS)
+    )
+    if not minimum <= lead <= maximum:
         raise ScheduleFlowCliError(
             "confirmed boundary is no longer within the audited execution lead window"
         )
@@ -721,6 +739,7 @@ async def _preflight(
         devices = await _build_devices(config, selected, writable=False)
         async with _connected(devices):
             provisional = _fixed_spec(
+                wave_flow_role=getattr(args, "wave_flow_role", None),
                 operation_id=args.operation_id,
                 qualification_operation_id=args.qualification_operation_id,
                 master_device_id=args.master,
@@ -746,11 +765,16 @@ async def _preflight(
             provisional.allow_expired_qualification,
         )
         spec = _fixed_spec(
+            wave_flow_role=provisional.wave_flow_role,
             operation_id=args.operation_id,
             qualification_operation_id=args.qualification_operation_id,
             master_device_id=args.master,
             slave_device_id=args.slave,
-            boundary_time=_next_boundary(clocks),
+            boundary_time=(
+                _next_boundary(clocks, wave_flow=True)
+                if provisional.is_wave_flow_plan
+                else _next_boundary(clocks)
+            ),
             sentinel_only=getattr(args, "sentinel_only", False),
             allow_expired_qualification=provisional.allow_expired_qualification,
         )
@@ -781,6 +805,11 @@ async def _preflight(
     print(f"Boundary: {spec.boundary_time} (device-local time)")
     if spec.sentinel_only:
         print("Plan: sparse unused-slot wire qualification only; no field or role activation.")
+    elif spec.is_wave_flow_plan:
+        print(f"역할: {spec.wave_flow_role}; safe manual master30/slave31, 상한41.")
+        print("마스터: Sine35 → Constant32. 슬레이브 저장: Constant30 → Sine40 → Sine35.")
+        print("기준은 fresh 장비시각의 분 시작. 첫 경계 +10분, 둘째 +15분; 실제 첫 대기는 9~10분.")
+        print("관측 1020초: W0 10 pair/120초, W1·W2 각각 2 pair/30초. 파형·Flow 별도 분류.")
     else:
         print("Plan: pause Independent/Constant master 30% / slave 31%.")
         print(
@@ -795,6 +824,7 @@ async def _preflight(
 
 def _spec_from_run_args(args: argparse.Namespace) -> ScheduleFlowExperimentSpec:
     return _fixed_spec(
+        wave_flow_role=getattr(args, "wave_flow_role", None),
         operation_id=args.operation_id,
         qualification_operation_id=args.qualification_operation_id,
         master_device_id=args.master,
@@ -901,6 +931,64 @@ def _print_sample(sample: ScheduleLinkageSample | None) -> None:
         f"{sample.master_reported_mode}/freq{sample.master_reported_frequency}:"
         f"{sample.slave_reported_mode}/freq{sample.slave_reported_frequency}"
     )
+    for row in describe_wave_flow_windows(sample):
+        print("파형·Flow 구간 관측: " + json.dumps(row, ensure_ascii=False, sort_keys=True))
+
+
+def _report_failure_chain(error: BaseException, *, operation_id: str, stage: str) -> None:
+    """동기 진단. 메시지/args/locals/경로/extra/exc_info는 절대 방출하지 않는다."""
+    try:
+        chain = []
+        seen = set()
+        current: BaseException | None = error
+        while current is not None and id(current) not in seen and len(chain) < 8:
+            seen.add(id(current))
+            frames = []
+            frame = current.__traceback__
+            while frame is not None:
+                module = frame.tb_frame.f_globals.get("__name__", "")
+                if isinstance(module, str) and module.startswith("jebao_flow."):
+                    frames.append(
+                        {
+                            "module": module,
+                            "function": frame.tb_frame.f_code.co_name,
+                            "line": frame.tb_lineno,
+                        }
+                    )
+                frame = frame.tb_next
+            chain.append(
+                {
+                    "module": type(current).__module__,
+                    "class": type(current).__name__,
+                    "frames": frames[-32:],
+                    "frames_truncated": len(frames) > 32,
+                }
+            )
+            current = (
+                current.__cause__
+                if current.__cause__ is not None
+                else None
+                if current.__suppress_context__
+                else current.__context__
+            )
+        print(
+            json.dumps(
+                {
+                    "event": "schedule_flow_failure",
+                    "event_version": 1,
+                    "operation_sha256": hashlib.sha256(operation_id.encode("ascii")).hexdigest(),
+                    "stage": stage,
+                    "exception_chain": chain,
+                    "chain_truncated_or_cyclic": current is not None,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+    except BaseException:
+        # 이 관측자는 await 없는 동기 함수로 유지한다. 원예외·원복을 대체하지 않는다.
+        pass
 
 
 async def _await_with_stop_signals(
@@ -1004,7 +1092,10 @@ async def _run(
                 (spec.master_device_id, spec.slave_device_id),
             )
             _assert_digest_match(intent.schedule_image_digests, fresh_digests)
-            _require_boundary_still_fresh(spec.boundary_time, fresh_clocks)
+            if spec.is_wave_flow_plan:
+                _require_boundary_still_fresh(spec.boundary_time, fresh_clocks, wave_flow=True)
+            else:
+                _require_boundary_still_fresh(spec.boundary_time, fresh_clocks)
             intent = _persist_successor(
                 intent_store,
                 intent,
@@ -1068,13 +1159,12 @@ async def _run(
                     and previous.master_manual_power == sample.master_manual_power
                     and previous.slave_manual_power == sample.slave_manual_power
                     and previous.master_reported_mode == sample.master_reported_mode
-                    and previous.master_reported_frequency
-                    == sample.master_reported_frequency
+                    and previous.master_reported_frequency == sample.master_reported_frequency
                     and previous.slave_reported_mode == sample.slave_reported_mode
-                    and previous.slave_reported_frequency
-                    == sample.slave_reported_frequency
+                    and previous.slave_reported_frequency == sample.slave_reported_frequency
                     and previous.master_linkage is sample.master_linkage
                     and previous.slave_linkage is sample.slave_linkage
+                    and previous.wave_flow_windows == sample.wave_flow_windows
                 ):
                     return
                 successor = intent.model_copy(
@@ -1206,12 +1296,18 @@ async def _run(
                     schedule_snapshot_authorizer=_snapshot_authorizer(intent_store, intent),
                     fixed_q2_observation=spec.is_fixed_q2_plan,
                     fixed_sync_observation=spec.is_fixed_sync_plan,
+                    **({"wave_flow_observation": True} if spec.is_wave_flow_plan else {}),
                 )
                 result = await _await_with_stop_signals(
                     controller.run_experiment(spec),
                     task_name="schedule-flow-experiment",
                 )
-            except BaseException:
+            except BaseException as error:
+                _report_failure_chain(
+                    error,
+                    operation_id=spec.operation_id,
+                    stage=pending_stage_events[-1].stage.value if pending_stage_events else "run",
+                )
                 raw_sink.close_best_effort()
                 pending_outer = outer_store.load()
                 pending = pending_outer is not None or any(
@@ -1237,9 +1333,7 @@ async def _run(
                             "updated_at": max(datetime.now(UTC), current.updated_at),
                         }
                     )
-                last_sample = (
-                    controller.last_role_sample if controller is not None else None
-                )
+                last_sample = controller.last_role_sample if controller is not None else None
                 if last_sample is not None:
                     current = current.model_copy(
                         update={
@@ -1247,9 +1341,7 @@ async def _run(
                             "updated_at": max(datetime.now(UTC), current.updated_at),
                         }
                     )
-                role_failure = (
-                    controller.last_role_failure if controller is not None else None
-                )
+                role_failure = controller.last_role_failure if controller is not None else None
                 if role_failure is not None:
                     current = current.model_copy(
                         update={
@@ -1831,6 +1923,11 @@ async def _recover(
 
 
 def _add_identity_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--wave-flow-role",
+        choices=("sync_slave", "async_slave"),
+        help="승인된 세 구간 파형·Flow 시험 역할; 생략하면 기존 계획",
+    )
     parser.add_argument("--operation-id", required=True)
     parser.add_argument("--qualification-operation-id", required=True)
     parser.add_argument("--master", required=True, help="configured logical master name")

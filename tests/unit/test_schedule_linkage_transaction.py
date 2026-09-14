@@ -20,6 +20,7 @@ from jebao_flow.devices.schedule_linkage import (
     ScheduleLinkageExternalDisarmState,
     ScheduleLinkagePhase,
     ScheduleLinkagePreflightError,
+    ScheduleLinkageRawCapture,
     ScheduleLinkageRecord,
     ScheduleLinkageRollbackError,
     ScheduleLinkageRunFailure,
@@ -912,6 +913,194 @@ async def _fixed_sync_prepared():
     controller._observation_deadline = master.virtual_time.monotonic() + 900  # noqa: SLF001
     controller._staged_transition_not_before = master.virtual_time.monotonic() + 420  # noqa: SLF001
     return controller, record, states, master, slave, store, samples
+
+
+async def _wave_flow_prepared(role="sync_slave"):
+    controller, old, states, master, slave, store, samples = await _fixed_sync_prepared()
+    flow = ScheduleFlowExperimentSpec(
+        operation_id=old.operation_id,
+        qualification_operation_id=old.spec.qualification_operation_id,
+        master_device_id="master",
+        slave_device_id="slave",
+        boundary_time="18:20",
+        wave_flow_role=role,
+        master_before_flow=35,
+        slave_before_flow=30,
+        master_after_flow=32,
+        slave_after_flow=40,
+        sine_frequency=30,
+        safe_frequency=20,
+        observation_window_seconds=1035,
+        post_boundary_stability_seconds=30,
+        verification_interval_seconds=2,
+        minimum_lead_seconds=60,
+        ambiguous_band_seconds=1,
+        maximum_clock_skew_seconds=30,
+        clock_advance_tolerance_seconds=2,
+        sentinel_qualification=True,
+        full_epoch_after_roles=True,
+    )
+    controller._owned_fixed_sync_observation = role == "sync_slave"  # noqa: SLF001
+    controller._owned_wave_flow_observation = True  # noqa: SLF001
+    for patch in flow.temporary_schedule_spec().device_patches:
+        state = states[patch.device_id]
+        entries = tuple(
+            entry
+            for slot in patch.slots
+            if (
+                entry := decode_local_wavemaker_pro_slot_wire(slot.wire_bytes, slot_index=slot.slot)
+            )
+            is not None
+        )
+        auto = dict(state.observed_attributes)
+        if patch.device_id == "slave":
+            auto["AutoFlow"] = 30
+        states[patch.device_id] = state.model_copy(
+            update={
+                "observed_attributes": auto,
+                "schedule": state.schedule.model_copy(update={"entries": entries}),
+            }
+        )
+    spec = flow.role_observation_spec()
+    snapshots = controller._snapshots_from_states(spec, states)  # noqa: SLF001
+    record = old.model_copy(
+        update={
+            "operation_id": spec.operation_id,
+            "spec": spec,
+            "snapshots": snapshots,
+            "slave_role_sequence": ScheduleLinkageSlaveRoleSequence.SYNC_ONLY
+            if role == "sync_slave"
+            else ScheduleLinkageSlaveRoleSequence.SYNC_THEN_ASYNC,
+            "expires_at": old.created_at + timedelta(seconds=1035),
+        }
+    )
+    return controller, record, states, master, slave, store, samples
+
+
+@pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
+async def test_wave_flow_raw_plan_reaches_role_preflight_with_exact_three_slots(role):
+    controller, record, states, master, slave, _store, _samples = await _wave_flow_prepared(role)
+    assert len(record.snapshots) == 2
+    assert (
+        record.snapshots[0].expectation.boundary_at == record.snapshots[1].expectation.boundary_at
+    )
+    assert record.snapshots[1].expectation.after_valid_until - record.snapshots[
+        1
+    ].expectation.boundary_at == timedelta(minutes=5)
+    assert controller._guarded_power_maximum("slave") == 41  # noqa: SLF001
+    assert controller._record_slave_role(record).value == role  # noqa: SLF001
+    assert ScheduleLinkageRecord.model_validate_json(record.model_dump_json()) == record
+    assert master.commands == slave.commands == []
+    roles = {"master": LinkageRole.MASTER, "slave": LinkageRole(role)}
+    linked = {
+        key: value.model_copy(update={"linkage": roles[key]}) for key, value in states.items()
+    }
+    controller._assert_pair_sample(
+        record, linked, roles, phase="before", allow_staged_control_transition=True
+    )  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "seconds,window",
+    ((-61, 0), (-60, None), (60, None), (61, 1), (239, 1), (240, None), (360, None), (361, 2)),
+)
+async def test_wave_flow_window_excludes_both_boundaries_inclusively(seconds, window):
+    controller, record, states, *_ = await _wave_flow_prepared()
+    clock = record.snapshots[0].expectation.boundary_at + timedelta(seconds=seconds)
+    positioned = {
+        key: value.model_copy(
+            update={"schedule": value.schedule.model_copy(update={"device_local_time": clock})}
+        )
+        for key, value in states.items()
+    }
+    assert controller._wave_flow_window(record, positioned) == window  # noqa: SLF001
+    positioned["slave"] = positioned["slave"].model_copy(
+        update={
+            "schedule": positioned["slave"].schedule.model_copy(
+                update={"device_local_time": clock + timedelta(minutes=1)}
+            )
+        }
+    )
+    assert controller._wave_flow_window(record, positioned) is None  # noqa: SLF001
+
+
+@pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
+@pytest.mark.parametrize("fault", (None, "duplicate_clock", "unsafe_flow", "raw_loss"))
+async def test_wave_monitor_requires_three_fresh_stable_windows_and_keeps_safe_caps(
+    monkeypatch, role, fault
+):
+    # 합성 read 입력으로 표본 회계·유실/중복 판정만 검사한다. 펌웨어 동작 예측이 아니다.
+    controller, record, initial, master, _slave, _store, samples = await _wave_flow_prepared(role)
+    virtual = master.virtual_time
+    virtual.value = 0
+    controller._observation_deadline = 1020  # noqa: SLF001
+    controller._fixed_capture_pair_ordinal = 0  # noqa: SLF001
+    start = record.snapshots[0].expectation.boundary_at - timedelta(minutes=10)
+
+    async def acquire(_record):
+        now = virtual.monotonic()
+        ordinal = controller._fixed_capture_pair_ordinal + 1  # noqa: SLF001
+        controller._fixed_capture_pair_ordinal = ordinal  # noqa: SLF001
+        index = 0 if now < 600 else 1 if now < 900 else 2
+        clock = start + timedelta(seconds=0 if fault == "duplicate_clock" else now)
+        states = {}
+        captures = {}
+        for device_id, state in initial.items():
+            is_master = device_id == "master"
+            mode = "sine" if index == 0 else "constant"
+            flow = (35, 32, 32)[index] if is_master else (30, 40, 35)[index]
+            if fault == "unsafe_flow" and not is_master:
+                flow = 42
+            values = dict(state.observed_attributes) | {
+                "AutoMode": mode,
+                "AutoFlow": flow,
+                "AutoFreq": 30 if mode == "sine" else 5,
+            }
+            states[device_id] = state.model_copy(
+                update={
+                    "observed_attributes": values,
+                    "linkage": LinkageRole.MASTER if is_master else LinkageRole(role),
+                    "schedule": state.schedule.model_copy(update={"device_local_time": clock}),
+                }
+            )
+            captures[device_id] = ScheduleLinkageRawCapture(
+                pair_ordinal=ordinal,
+                participant="master" if is_master else "slave",
+                read_started_at=datetime.now(UTC),
+                read_completed_at=datetime.now(UTC),
+                monotonic_started_at=now,
+                monotonic_completed_at=now,
+                state=states[device_id],
+                capture=RawStateCapture(
+                    wire_frame=f"synthetic-{ordinal}-{device_id}".encode(),
+                    action=STATE_REPLY_ACTION,
+                    status_payload=b"synthetic",
+                ),
+            )
+        controller._latest_fixed_captures = captures  # noqa: SLF001
+        controller._raw_capture_persistence_failed = fault == "raw_loss"  # noqa: SLF001
+        return states, now
+
+    monkeypatch.setattr(controller, "_acquire_fixed_q2_monitor_pair", acquire)
+    if fault == "unsafe_flow":
+        with pytest.raises(ScheduleLinkageApplyError, match="cap"):
+            await controller._monitor_wave_flow(record)  # noqa: SLF001
+        assert samples == []
+        return
+    stop, complete = await controller._monitor_wave_flow(record)  # noqa: SLF001
+    assert stop is ScheduleLinkageStopReason.EPOCH_COMPLETED
+    assert complete is (fault is None)
+    assert controller._fixed_capture_pair_ordinal <= 104  # noqa: SLF001
+    if fault != "duplicate_clock":
+        last = samples[-1]
+        assert last.slave_linkage.value == role
+        assert tuple(w.window for w in last.wave_flow_windows) == (0, 1, 2)
+        assert tuple(w.slave.flow for w in last.wave_flow_windows) == (30, 40, 35)
+        assert all(
+            w.stable_seconds >= (120 if w.window == 0 else 30) for w in last.wave_flow_windows
+        )
+    else:
+        assert samples == []
 
 
 async def test_fixed_sync_sends_only_master_then_sync_with_durable_intent_and_detaches(
