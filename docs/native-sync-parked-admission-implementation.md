@@ -136,3 +136,37 @@ first TimerOFF 시간표를 누락하거나 second inactive manual30을 옛31로
 후속 준비는 새 source/image 결속, 원 서비스 exact 복귀 경로, 진단 보존과 현재 조건 재확인입니다.
 실제 Sync 시험은 앱 준비와 기존 단회 승인 조건이 성립한 뒤에만 진행하고 원복 전에 완료로
 보고하지 않습니다. Sync/Async 파형별 Flow의 실제 적용 여부는 아직 미확정입니다.
+
+## 커밋 이후 실행 이미지 준비
+
+위 검토된 수정은 `6ebd802a8b18195813ed719cf6c213b6cbf5c70a`에 커밋했습니다.
+한정 구현 예외는 소진됐고 source/tests는 다시 동결됐습니다.
+그 뒤 source 변경 없이 기존 시험 image를 기반으로 해당 commit bundle을 checkout했습니다.
+빌드는 network-none·pull 비활성화로 수행했으며 운영 volume은 마운트하지 않았습니다.
+
+- base image: `f233978b17938c30334c3b3a3e1f3880099e45e92369acd38758a4d9f8578c9e`
+- 새 image: `a6ad7c71fb0ebd94ac6454bdb04441ba56e08f5ddfe0630d4dc4161b2ea06c4c`
+- 첫 빌드는 root 소유로 COPY된 mode0600 bundle을 image의 일반 사용자가 읽지 못해 실패했습니다.
+  source나 실행 사용자를 바꾸지 않고 COPY 소유자를 기존 image 사용자로 명시해 정정했습니다.
+  두 번째 빌드는 exit0이며 두 출력 모두 보존했습니다. 장비 실행 실패가 아닙니다.
+- network-none 검사에서 image의 git HEAD가 위 commit과 일치하고 checkout은 clean이었습니다.
+  추적 source138파일 전부가 현재 source와 byte-exact였습니다. base와 비교한 source 차이는
+  `schedule_flow_experiment_cli.py` 한 파일뿐입니다.
+- base와 새 image의 설치된 package 이름·버전 목록이 동일했습니다. protocol schema digest도
+  실제 실행으로 양쪽 모두 `fa3203f127f81eca46b2242a039c019802c71c65598a00d5228bdaaedbd7d0d6`였습니다.
+  이를 현재 실제 장비 신원이나 receipt 자격 재검증으로 확대하지 않습니다.
+
+빌드 자료의 논리 묶음은 `native-sync-parked-image-20260914`이며 로컬 gitignored 영역에
+보존했습니다. 원 서비스 image와 기존 자료는 삭제하지 않았습니다.
+
+| 자료 | SHA-256 |
+|---|---|
+| build-v1.log | `92b63f3ff1f7bcc2f04d245702372f08c1c38a7e68dbba9cabf0881c89c6bf9b` |
+| build-v2.log | `b773fc4180791c0bb5ca7beda00ead255d4f87058684710d132d68b3ab9ba165` |
+| 정정한 Dockerfile | `9a357a1d02ac038b32e970788a062dfa0697fcafdc75250818a17cb8cc3d056d` |
+| source.bundle | `57ab106b1f14bb076f020963da39b707939eaa96596d80d57f8372ca2a0d06ea` |
+| source-comparison.json | `90d393257216d408e4f4be0fced58a6843216f64f465e44079c15af19267f1a9` |
+| image-verification.json | `9525ccc344da361cc98ab66ee488d9a164181200ef313eb7293d677b17a6c279` |
+
+새 image 준비는 완료했지만 운영 배포·장비 명령은 하지 않았습니다. 퇴근 뒤 현재 현장 감시
+가능 여부는 아직 확인하지 않았으므로 실제 Sync 실행은 시작하지 않습니다.
