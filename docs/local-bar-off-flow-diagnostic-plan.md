@@ -1,8 +1,10 @@
 # D1v — Bar-only OFF-state Flow diagnostic follow-up
 
-Status: diagnostic deployment and one Bar-only operation are approved as described in
-"Authorization update after HA postcheck" below. Execution still requires app preparation
-and current onsite readiness. No D1v device command has been sent; D1u's FAIL remains unchanged.
+Status: the approved D1v operation is complete. The Bar-only direct sequence passed, app
+restoration and exact prior image return were verified, and the run is committed as `fa22037`:
+[D1v record](runs/2026-09-14-local-bar-off-flow-diagnostic.md). D1u's FAIL remains unchanged.
+The preparation/proposal sections below preserve the pre-execution design, not current authority.
+The single-attempt authority is exhausted. No additional physical operation is approved here.
 
 ## Question and alternatives
 
@@ -229,3 +231,18 @@ binding, prior backups, deployment and read outputs. The deployment host stdout 
 SHA-256 `f7cd37ef840237edba51483ed4e390bc590de1666e1e8dcbc481dc7bdd36f3f2`, with exit0 and
 empty stderr. This progress note does not replace the append-only run record due at the end of
 the approved operation. The full-suite failures and D1u cause remain unresolved.
+
+## Completed operation and remaining decisions
+
+The onsite-approval inference was withdrawn before execution; explicit current onsite confirmation
+and the user's resumption after the sequence explanation preceded the first publish. Three direct
+records ended VERIFIED/rev4, with Flow1/power2 and three post-ON fresh cycles. Reconciliation found
+only three new records and one OFF30 baseline-status blob; all105 pre-existing files were unchanged.
+User app restoration and the exact prior image return completed with fresh6/unarmed/discovery90
+and journal109/receipt18 unchanged. See the committed run for timestamps and artifact bindings.
+
+Current production uses the prior image, which does not contain the new failure event. Persistent
+diagnostic deployment is a separate maintainer decision with the unresolved full-suite failures
+disclosed; no further deployment follows automatically from this successful physical run.
+The group/direct session and batch-order differences remain untested. Further write-free analysis
+may refine a new question, but another physical operation requires a separately scoped approval.

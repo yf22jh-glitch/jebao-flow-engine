@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-14 13:34 KST
+마지막 갱신: 2026-09-14 14:14 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -128,13 +128,18 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] 미해결 full-suite 결과·Bar-only 실패 시 OFF 잔류를 고지한 뒤 사용자 단회 승인;
   정책 `ad95635`. 진단 image를 첫 시도에 배포하고 readiness·비무장·fresh6·discovery90 exact·
   journal105/receipt18 불변 확인. 앱 준비 전 서비스 정지와 독립 baseline 재독 완료.
-- [ ] Bar 앱 준비 회신과 현재 현장 감시·즉시 ON 복원 가능 확인 전 첫 device command 금지.
-  준비는 Bar만 classic91→constant31/TimerOFF이며 두 Pro는 변경하지 않는다.
-- [ ] [Bar-only 후속 계획](local-bar-off-flow-diagnostic-plan.md): group 비무장·Pro pair 불변으로
-  Bar만 앱에서constant31 준비 후 direct OFF→Flow30→ON. 성공 예상record3/rev4×3,
-  Flow1+power2이며 실패 시 후속 명령 없이 종료·필요한 recovery 뒤 사용자 앱 복원.
-  현재는 **승인된 단회·앱 준비 대기**이며 device command0이다. D1u group 실패 원인이나
-  group PASS로 승격하지 않는다. 전체 단회가 종료되면 배포와 실행을 함께 append-only 기록한다.
+- [x] Bar 앱 준비와 별도 현재 현장 감시·직접 ON 복원 가능 확인 후 단회 실행. 앱 완료를 현장
+  확인까지 포함한 것으로 오인한 approval v1은 실행 전에 철회·보존하고 명시 v2를 사용했다.
+- [x] [Bar-only D1v 기록](runs/2026-09-14-local-bar-off-flow-diagnostic.md) `fa22037`:
+  direct OFF→OFF-state Flow30→ON, record3/rev4×3·Flow1/power2·후속 fresh3 cycle PASS.
+  Pro write0·기존105 files 불변·신규OFF30 status blob1 확인. 앱 원복·exact prior 서비스 복귀 완료.
+  D1u group FAIL·원인 UNKNOWN·batch 순서 조건은 그대로이며 단회 권한은 소진됐다.
+- [ ] 새 diagnostic image의 상시 배포 여부를 별도로 결정한다. 현재 운영은 새 failure event가
+  없는 exact prior image다. targeted21/Ruff PASS와 full-suite 실패2건 미해결을 함께 공개해야 하며
+  D1v 성공은 production 실패 시 진단 전달을 검증하지 않았다. 승인 없이 재배포하지 않는다.
+- [ ] 다음 기능 조사: group/direct의 baseline 선취득·세션 대기·frame 순서 차이를 write-free로
+  좁힌다. 현재 근거만으로 retry/timeout을 바꾸지 않는다. 추가 group/order 실기는 새로운 질문·
+  복원 수단·별도 현장 승인이 있어야 하며 이번 Bar-only 승인을 재사용하지 않는다.
 
 ## 완성까지 전체 로드맵
 
@@ -356,7 +361,7 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
 ## 현재 상태
 
-- [x] D1u 실패·복구·사용자 앱 복원 뒤 exact prior Constant50 persistent service 복귀, 비무장 상태.
+- [x] D1v direct 단회·사용자 앱 복원 뒤 exact prior Constant50 persistent service 복귀, 비무장 상태.
 - [x] 장비 6/6 관측 상태 유지
 - [x] 사용자 수행 HA Core process restart 뒤 exact deployment surface 복귀·local-control device write `0`
   확인; agent의 HA 업데이트·재기동·설정 변경은 `0`
@@ -371,9 +376,9 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
   discovery `86/86` byte exact, Bar number `1`, fresh `6/6`, startup write `0`
 - [x] Pro 동작을 보존하는 Bar family precondition source·offline 검토·landing `d687739` 완료
 - [x] safer-OFF power qualification source·CLI·fault 회귀 landing과 exact one-shot image 준비 완료
-- [x] D1u 종료 뒤 restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
+- [x] D1v 종료 뒤 restore audit: service `1`, 장비 `6/6`, unfinished `0`, authority receipt `12`,
   direct control `6`, group switch `1`·resume `3`, retained command `0`, group armed `0`,
-  journal operations `28`·blobs `77`·files `105`, receipt root files `18`; recovery terminal 이후 복귀
+  journal operations `31`·blobs `78`·files `109`, receipt root files `18`; D1v terminal 이후 복귀
   전후 tree byte 불변. startup write0은 journal-first 경로에 한정하며, group default `50` 복귀는
   실제 장비 Flow `50` 변경을 뜻하지 않음.
 - [x] current accepted state: firstPro `ON/TimerOFF/constant/independent/40`, secondPro
@@ -398,6 +403,8 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 - [x] D1u group OFF/ON은 [실패·복구 기록](runs/2026-09-14-m4-group-power-commissioning.md)으로 종결.
   확인된 전송 회계11(Flow4/power7)과 Bar Flow uncertain attempt1을 구분하며 재실기하지 않는다.
 - [ ] M4 전체·production grouping은 여전히 NO-GO. 다음 물리 operation은 별도 범위·승인이 필요하다.
+- [x] D1v Bar direct OFF-state Flow 단회 PASS·앱 복원·exact prior 복귀 완료, 근거 `fa22037`.
+  기존 group FAIL과 진단의 production 실패 발동 미검증은 별개로 유지한다.
 
 ## M0~M1 작업 이력 (완료)
 
