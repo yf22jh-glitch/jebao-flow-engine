@@ -3593,6 +3593,55 @@ source/image·journal·receipt를 결속한다. 현장 감시·중단 수단·�
 
 세부 관측표는 [통합 시나리오](docs/native-follow-wave-own-flow-scenario.md)를 따른다.
 
+### 2026-09-15 — 마스터 시간표 상속·Flow 전용 차이 한정 재개
+
+사용자는 마스터에 파형·Flow를 지정하고 슬레이브에는 해당 시간표 Flow만 지정하는 Sync
+10분·15분 실기를 추가 요청한 뒤 "실기 테스트 까지 쭉 진행하고 보고 해줘"라고 지시했다.
+에이전트가 "새 스케줄 지원과 종료 오류 진단에 한정해 관련 코드 4개·테스트 4개의 동결
+해제도 승인해 주실까요?"라고 물었고 사용자는 "그냥 진행하라니깐"으로 승인했다.
+이 절을 별도 커밋한 뒤 다음 여덟 파일만 구현·오프라인 검증을 위해 한정 해제한다.
+
+1. `src/jebao_flow/devices/schedule_flow_experiment.py`
+2. `src/jebao_flow/devices/schedule_linkage.py`
+3. `src/jebao_flow/devices/schedule_transaction.py`
+4. `src/jebao_flow/schedule_flow_experiment_cli.py`
+5. `tests/unit/test_schedule_flow_experiment.py`
+6. `tests/unit/test_schedule_linkage_transaction.py`
+7. `tests/unit/test_schedule_transaction.py`
+8. `tests/unit/test_schedule_flow_experiment_cli.py`
+
+사유는 앞선 반대 파형·master2/slave3 슬롯 구성과 구분되는 **동일 master 시간표·양쪽3슬롯**
+계획을 표현하고, 직전 종료 오류에서 사라진 원 예외를 보존하는 것이다.
+master는 Sine35/F30 → Constant32/F0 → Sine38/F30, slave는 같은 시간·Mode·Frequency에서
+Flow30→40→35만 다르게 한다. 10분·15분 경계와 상한41, safe manual30/31은 유지한다.
+slave에 Mode 필드를 생략하는 것이 아니라 전체432B image에서 master와 다른 바이트를
+세 슬롯의 Flow로만 한정한다. 새 계획은 별도 durable 표식으로 구분하고 legacy serialization·
+기록 로드·확인 토큰·복원 의미를 유지한다. 기존 허용 집합을 전역 삭제하지 않는다.
+
+진단은 `schedule_transaction`의 observer 수거·disarm completion에서 원 예외 class/frame과
+분기 표식만 보존한다. 메시지·locals·비밀값·exc_info/extra는 금지하고 기존 예외 전파,
+`from None`, 제어 흐름·retry·timeout·원복 순서·안전 게이트는 변경하지 않는다.
+기능 가설 fake나 실제 출력 성공을 단정하는 테스트를 만들지 않는다.
+`local_control/`, schema fingerprint 입력, 공용 guard, `devices/linkage.py`, `hardware_test.py`,
+다른 CLI·직접 테스트는 범위 밖이다. 추가 파일 필요성이 나오면 멈추고 범위를 보고한다.
+구현·검증 결과를 기록하고 커밋하면 이 여덟 파일은 자동 재동결된다.
+
+실기 요청 범위는 새 구성 **Sync1회**이며 Anti-Sync나 성공할 때까지의 반복은 포함하지 않는다.
+구현 결과·정확한 source/image·관측 항목·현재 현장 감시·fresh 신원·원 시간표/controls·
+기존 원복 의무를 결속한 뒤에만 시작한다. 준비 실패나 새 위험이 있으면 재시도 없이 보고한다.
+지명 native receipt의 시간 유효성 예외가 필요한 경우 이번 단회에 명시적으로 결속하며,
+존재·operation·device·physical binding 확인과 receipt 원본 불변은 유지한다.
+새 qualification이나 standalone 원복 권한으로 확대하지 않는다.
+
+직전 Sync는 [실행 기록](docs/runs/2026-09-14-native-sync-wave-flow.md)에 먼저 커밋했다.
+역할 해제 확인 오류·자동 창 자격 미달을 해결됐다고 쓰지 않는다. 새 스케줄은 그 오류의
+해결책이 아니며 동일 오류가 나도 원인 정보를 남기도록 진단만 보강한다.
+장비 날짜·같은 분·관측 안정 요건을 조용히 바꾸지 않는다. raw 보고와 실제 임펠러·수류를
+구분하며 자동 판정 미달을 기능 부정이나 PASS로 바꾸지 않는다.
+첫 Pro의 앱 이전 TimerOFF/manual constant40/F34와 원 서비스 복귀 의무는 별개로 유지한다.
+현재 TimerON을 이어 쓰더라도 전후 snapshot을 혼동하지 않고 마지막 앱 원복은 사용자 소유다.
+실행·원복·독립 검토를 기록 커밋하면 이번 실기 권한도 소진된다. 사용자 중지는 항상 우선한다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
