@@ -114,6 +114,48 @@ def _digests() -> tuple[HardwareTestScheduleImageDigest, ...]:
     )
 
 
+def test_master_template_cli_flag_survives_saved_spec_and_changes_confirmation():
+    args = cli.build_parser().parse_args([
+        "run", "--operation-id", "template", "--qualification-operation-id", "qualified",
+        "--master", "master", "--slave", "slave", "--boundary-time", "12:10",
+        "--confirm", "placeholder", "--wave-flow-role", "sync_slave",
+        "--master-template-flow-only",
+    ])
+    spec = cli._spec_from_run_args(args)
+    assert spec.master_template_flow_only is True
+    assert spec.role_observation_spec().master_template_flow_only is True
+    old = spec.model_copy(update={"master_template_flow_only": False})
+    assert spec.model_dump_json() != old.model_dump_json()
+    saved = _intent().model_copy(
+        update={"schedule_flow_spec": spec, "spec": spec.outer_linkage_spec()}
+    )
+    legacy = saved.model_copy(update={"schedule_flow_spec": old})
+    assert hardware_test_intent_confirmation_token(saved) != (
+        hardware_test_intent_confirmation_token(legacy)
+    )
+    assert type(cli._schedule_flow_hardware_guard(saved)) is cli._ScheduleFlowHardwareGuard
+    assert type(spec).model_validate_json(spec.model_dump_json()) == spec
+
+
+@pytest.mark.parametrize("maximum,allowed", ((37, False), (38, True)))
+def test_master_template_support_check_includes_third_master_flow(maximum, allowed):
+    spec = cli._fixed_spec(
+        operation_id="template", qualification_operation_id="qualified",
+        master_device_id="master", slave_device_id="slave", boundary_time="12:10",
+        wave_flow_role="sync_slave", master_template_flow_only=True,
+    )
+    devices = {
+        key: SimpleNamespace(capabilities=SimpleNamespace(
+            power_limits=SimpleNamespace(min_power=30, max_power=limit), power_step=1
+        )) for key, limit in (("master", maximum), ("slave", 40))
+    }
+    if allowed:
+        assert cli._require_plan_supported(devices, spec) is None
+    else:
+        with pytest.raises(cli.ScheduleFlowCliError, match="limits"):
+            cli._require_plan_supported(devices, spec)
+
+
 @pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
 def test_wave_flow_cli_binds_selected_role_and_new_boundary_without_changing_legacy(role):
     args = cli.build_parser().parse_args(

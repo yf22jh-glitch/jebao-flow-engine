@@ -164,12 +164,15 @@ class ScheduleFlowExperimentSpec(BaseModel):
     allow_expired_qualification: bool = False
     full_epoch_after_roles: bool = False
     wave_flow_role: Literal["sync_slave", "async_slave"] | None = None
+    master_template_flow_only: bool = False
 
     @model_serializer(mode="wrap")
     def serialize_legacy_shape(self, handler):
         payload = handler(self)
         if self.wave_flow_role is None:
             payload.pop("wave_flow_role", None)
+        if not self.master_template_flow_only:
+            payload.pop("master_template_flow_only", None)
         return payload
 
     @property
@@ -195,6 +198,10 @@ class ScheduleFlowExperimentSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_experiment(self) -> Self:
+        if self.master_template_flow_only and (
+            not self.is_wave_flow_plan or self.wave_flow_role != "sync_slave"
+        ):
+            raise ValueError("master-template Flow-only plan requires the exact Sync contract")
         if self.wave_flow_role is None and self.observation_window_seconds > 930:
             raise ValueError("legacy observation window remains bounded by 930 seconds")
         if self.wave_flow_role is not None and (
@@ -299,6 +306,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
     def role_observation_spec(self) -> ScheduleLinkageSpec:
         return ScheduleLinkageSpec(
             wave_flow_role=self.wave_flow_role,
+            master_template_flow_only=self.master_template_flow_only,
             operation_id=f"{self.operation_id}_roles",
             qualification_operation_id=self.qualification_operation_id,
             master_device_id=self.master_device_id,
@@ -316,7 +324,14 @@ class ScheduleFlowExperimentSpec(BaseModel):
         )
 
     def temporary_schedule_spec(self) -> TemporaryScheduleSpec:
-        if self.is_wave_flow_plan:
+        if self.master_template_flow_only:
+            master_patch = _master_template_flow_patch(
+                self.master_device_id, self.boundary_time, flows=(35, 32, 38)
+            )
+            slave_patch = _master_template_flow_patch(
+                self.slave_device_id, self.boundary_time, flows=(30, 40, 35)
+            )
+        elif self.is_wave_flow_plan:
             master_patch = _two_segment_patch(
                 self.master_device_id,
                 boundary_time=self.boundary_time,
@@ -1995,6 +2010,7 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 spec.outer_linkage_spec().master_power,
                 spec.master_before_flow,
                 spec.master_after_flow,
+                *((38,) if spec.master_template_flow_only else ()),
             ),
             spec.slave_device_id: (
                 spec.outer_linkage_spec().slave_power,
@@ -2311,6 +2327,36 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
         return spec
 
 
+def _master_template_flow_patch(
+    device_id: str, boundary_time: str, *, flows: tuple[int, int, int]
+) -> DeviceSchedulePatch:
+    """동일한 master 시간·파형·주파수에서 슬롯 Flow만 다른 전체 image를 구성한다."""
+    hour, minute = map(int, boundary_time.split(":"))
+    second = (datetime(2000, 1, 1, hour, minute) + timedelta(minutes=5)).strftime("%H:%M")
+    segments = (
+        ("00:00", boundary_time, "sine", flows[0], 30),
+        (boundary_time, second, "constant", flows[1], 0),
+        (second, _FIELD_SCHEDULE_END, "sine", flows[2], 30),
+    )
+    wires = tuple(
+        encode_local_wavemaker_pro_schedule_entry(
+            ScheduleEntry(
+                slot=index, start=start, end=end, mode=mode,
+                mode_code=1 if mode == "sine" else 2,
+                parameters={"flow": flow, "frequency": frequency, "feed_time": 0,
+                            "custom_frequency": 0},
+            )
+        )
+        for index, (start, end, mode, flow, frequency) in enumerate(segments)
+    )
+    return DeviceSchedulePatch(
+        device_id=device_id,
+        slots=tuple(ScheduleSlotPatch.from_wire(
+            index, wires[index] if index < 3 else LOCAL_WAVEMAKER_PRO_UNUSED_EE
+        ) for index in range(LOCAL_WAVEMAKER_PRO_SLOT_COUNT)),
+    )
+
+
 def _wave_flow_slave_patch(device_id: str, boundary_time: str) -> DeviceSchedulePatch:
     hour, minute = map(int, boundary_time.split(":"))
     second = (datetime(2000, 1, 1, hour, minute) + timedelta(minutes=5)).strftime("%H:%M")
@@ -2400,11 +2446,16 @@ def _two_segment_patch(
     return DeviceSchedulePatch(device_id=device_id, slots=slots)
 
 
-def describe_wave_flow_windows(sample: ScheduleLinkageSample) -> tuple[dict[str, object], ...]:
+def describe_wave_flow_windows(
+    sample: ScheduleLinkageSample, *, master_template_flow_only: bool = False
+) -> tuple[dict[str, object], ...]:
     """보고 파형과 Flow를 독립 표시한다. 관측 자격 판정은 별도다."""
     rows = []
     for item in sample.wave_flow_windows or ():
-        own_mode = "constant" if item.window == 0 else "sine"
+        own_mode = (
+            ("sine", "constant", "sine")[item.window]
+            if master_template_flow_only else "constant" if item.window == 0 else "sine"
+        )
         own_flow = (30, 40, 35)[item.window]
         previous_flow = (None, 30, 40)[item.window]
         rows.append(
@@ -2412,7 +2463,9 @@ def describe_wave_flow_windows(sample: ScheduleLinkageSample) -> tuple[dict[str,
                 "window": item.window,
                 "master": item.master.model_dump(mode="json"),
                 "slave": item.slave.model_dump(mode="json"),
-                "wave_match": "master"
+                "wave_match": "shared_plan_ownership_unresolved"
+                if master_template_flow_only and item.slave.mode == own_mode
+                else "master"
                 if item.slave.mode == item.master.mode
                 else "own_slot"
                 if item.slave.mode == own_mode
@@ -2469,10 +2522,12 @@ def classify_schedule_flow_sample(
                 else all(offset > 360 for offset in offsets)
             )
             expected_master = ("sine", 35) if item.window == 0 else ("constant", 32)
+            if spec.master_template_flow_only:
+                expected_master = (("sine", 35), ("constant", 32), ("sine", 38))[item.window]
             if (
                 not valid_window
                 or (item.master.mode, item.master.flow) != expected_master
-                or item.master.frequency not in ({30} if item.window == 0 else {0, 5})
+                or item.master.frequency not in ({30} if expected_master[0] == "sine" else {0, 5})
                 or item.master.feed_time is not None
                 or item.slave.feed_time is not None
                 or item.slave.mode not in {"sine", "constant"}

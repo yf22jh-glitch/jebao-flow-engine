@@ -192,6 +192,55 @@ def _wave_flow_spec(role="sync_slave", **updates):
     )
 
 
+def test_master_template_marker_roundtrip_preserves_legacy_and_flow_only_images():
+    for legacy in (_fixed_q2_spec(), _fixed_sync_spec(), _wave_flow_spec()):
+        assert "master_template_flow_only" not in legacy.model_dump()
+        assert "master_template_flow_only" not in legacy.role_observation_spec().model_dump()
+    spec = _wave_flow_spec(master_template_flow_only=True)
+    assert ScheduleFlowExperimentSpec.model_validate_json(spec.model_dump_json()) == spec
+    assert spec.role_observation_spec().master_template_flow_only is True
+    assert spec.outer_linkage_spec().slave_role is LinkageRole.SYNC_SLAVE
+    assert spec.outer_linkage_spec().duration_seconds == 1200
+    images = tuple(b"".join(s.wire_bytes for s in p.slots)
+                   for p in spec.temporary_schedule_spec().device_patches)
+    assert tuple(i for i, (a, b) in enumerate(zip(*images, strict=True)) if a != b) == (5, 14, 23)
+    assert tuple(images[0][i] for i in (5, 14, 23)) == (35, 32, 38)
+    assert tuple(images[1][i] for i in (5, 14, 23)) == (30, 40, 35)
+
+
+@pytest.mark.parametrize("role", (None, "async_slave"))
+def test_master_template_marker_cannot_select_legacy_or_anti(role):
+    with pytest.raises(ValidationError):
+        _wave_flow_spec(role=role, master_template_flow_only=True)
+
+
+@pytest.mark.parametrize("flows,expected", (((30, 40, 35), "own_slot"), ((35, 32, 38), "master")))
+def test_master_template_classifier_labels_reported_flow_not_wave_ownership(flows, expected):
+    # 분류기 계약 입력이며 실제 펌웨어의 출력을 모사하거나 보증하지 않습니다.
+    modes = ("sine", "constant", "sine")
+    windows = tuple(_wave_window(i, modes[i], flows[i]) for i in range(3))
+    windows = windows[:2] + (windows[2].model_copy(update={
+        "master": ScheduleAutoEvidence(mode="sine", flow=38, frequency=30)
+    }),)
+    sample = ScheduleLinkageSample(
+        observed_at=datetime.now(UTC), phase="after", master=windows[-1].master,
+        slave=windows[-1].slave, master_manual_power=30, slave_manual_power=31,
+        master_linkage=LinkageRole.MASTER, slave_linkage=LinkageRole.SYNC_SLAVE,
+        wave_flow_windows=windows,
+    )
+    spec = _wave_flow_spec(master_template_flow_only=True)
+    assert classify_schedule_flow_sample(spec, sample) is ScheduleFlowOutcome.WAVE_FLOW_OBSERVED
+    rows = describe_wave_flow_windows(sample, master_template_flow_only=True)
+    assert all(row["wave_match"] == "shared_plan_ownership_unresolved" for row in rows)
+    assert all(row["flow_match"] == expected for row in rows)
+    assert classify_schedule_flow_sample(_wave_flow_spec(), sample) is (
+        ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+    )
+    assert classify_schedule_flow_sample(spec, sample.model_copy(
+        update={"wave_flow_windows": windows[:2]}
+    )) is ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+
+
 @pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
 def test_wave_flow_exact_three_windows_preserve_legacy_and_outer_cap(role):
     spec = _wave_flow_spec(role)

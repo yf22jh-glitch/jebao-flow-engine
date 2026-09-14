@@ -337,11 +337,13 @@ def _fixed_spec(
     sentinel_only: bool = False,
     allow_expired_qualification: bool = False,
     wave_flow_role: Literal["sync_slave", "async_slave"] | None = None,
+    master_template_flow_only: bool = False,
 ) -> ScheduleFlowExperimentSpec:
     """Construct the fixed Sync preparation plan; this is not live-write authorization."""
 
     spec = ScheduleFlowExperimentSpec(
         wave_flow_role=wave_flow_role,
+        master_template_flow_only=master_template_flow_only,
         operation_id=operation_id,
         qualification_operation_id=qualification_operation_id,
         master_device_id=master_device_id,
@@ -452,6 +454,11 @@ def _require_plan_supported(
             else (spec.slave_before_flow, spec.slave_after_flow)
         ),
     }
+    if spec.master_template_flow_only and not spec.sentinel_only:
+        requested = {
+            spec.master_device_id: (35, 32, 38),
+            spec.slave_device_id: (30, 40, 35),
+        }
     for device_id, flows in requested.items():
         capabilities = devices[device_id].capabilities
         limits = capabilities.power_limits
@@ -740,6 +747,7 @@ async def _preflight(
         async with _connected(devices):
             provisional = _fixed_spec(
                 wave_flow_role=getattr(args, "wave_flow_role", None),
+                master_template_flow_only=getattr(args, "master_template_flow_only", False),
                 operation_id=args.operation_id,
                 qualification_operation_id=args.qualification_operation_id,
                 master_device_id=args.master,
@@ -766,6 +774,7 @@ async def _preflight(
         )
         spec = _fixed_spec(
             wave_flow_role=provisional.wave_flow_role,
+            master_template_flow_only=provisional.master_template_flow_only,
             operation_id=args.operation_id,
             qualification_operation_id=args.qualification_operation_id,
             master_device_id=args.master,
@@ -807,7 +816,12 @@ async def _preflight(
         print("Plan: sparse unused-slot wire qualification only; no field or role activation.")
     elif spec.is_wave_flow_plan:
         print(f"역할: {spec.wave_flow_role}; safe manual master30/slave31, 상한41.")
-        print("마스터: Sine35 → Constant32. 슬레이브 저장: Constant30 → Sine40 → Sine35.")
+        if spec.master_template_flow_only:
+            print("공통 시간표: Sine/F30 → Constant/F0 → Sine/F30.")
+            print("master Flow35/32/38, slave30/40/35. 전체432B에서 Flow3바이트만 다릅니다.")
+            print("동일 파형·시각이므로 파형 소유권은 비판별입니다.")
+        else:
+            print("마스터: Sine35 → Constant32. 슬레이브 저장: Constant30 → Sine40 → Sine35.")
         print("기준은 fresh 장비시각의 분 시작. 첫 경계 +10분, 둘째 +15분; 실제 첫 대기는 9~10분.")
         print("관측 1020초: W0 10 pair/120초, W1·W2 각각 2 pair/30초. 파형·Flow 별도 분류.")
     else:
@@ -825,6 +839,7 @@ async def _preflight(
 def _spec_from_run_args(args: argparse.Namespace) -> ScheduleFlowExperimentSpec:
     return _fixed_spec(
         wave_flow_role=getattr(args, "wave_flow_role", None),
+        master_template_flow_only=getattr(args, "master_template_flow_only", False),
         operation_id=args.operation_id,
         qualification_operation_id=args.qualification_operation_id,
         master_device_id=args.master,
@@ -918,7 +933,9 @@ def _outer_token_factory(intent: HardwareTestIntent):
     return token
 
 
-def _print_sample(sample: ScheduleLinkageSample | None) -> None:
+def _print_sample(
+    sample: ScheduleLinkageSample | None, *, master_template_flow_only: bool = False
+) -> None:
     if sample is None:
         print("Effective sample: none")
         return
@@ -931,7 +948,9 @@ def _print_sample(sample: ScheduleLinkageSample | None) -> None:
         f"{sample.master_reported_mode}/freq{sample.master_reported_frequency}:"
         f"{sample.slave_reported_mode}/freq{sample.slave_reported_frequency}"
     )
-    for row in describe_wave_flow_windows(sample):
+    for row in describe_wave_flow_windows(
+        sample, master_template_flow_only=master_template_flow_only
+    ):
         print("파형·Flow 구간 관측: " + json.dumps(row, ensure_ascii=False, sort_keys=True))
 
 
@@ -1427,7 +1446,9 @@ async def _run(
             intent_store.save(current)
 
     print(f"Schedule-flow result: {result_outcome}")
-    _print_sample(result.last_after_sample)
+    _print_sample(
+        result.last_after_sample, master_template_flow_only=spec.master_template_flow_only
+    )
     if result_outcome != "wire_qualified":
         print(f"Stable observation: {result.stable_observation_seconds:g}s")
     print("Exact schedules and original control states were restored.")
@@ -1676,7 +1697,13 @@ def _status(
         print(f"Role run failure: {role_failure_text}")
         print(f"Role failure phase: {role_failure_phase}")
         print(f"Role failure reason: {role_failure_text}")
-        _print_sample(intent.schedule_flow_sample)
+        _print_sample(
+            intent.schedule_flow_sample,
+            master_template_flow_only=(
+                intent.schedule_flow_spec.master_template_flow_only
+                if intent.schedule_flow_spec is not None else False
+            ),
+        )
         if intent.phase is not HardwareTestIntentPhase.TERMINAL or any(
             value is not None for value in (outer, temporary, role)
         ):
@@ -1923,6 +1950,10 @@ async def _recover(
 
 
 def _add_identity_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--master-template-flow-only", action="store_true",
+        help="Sync 전용: master 시간표를 공유하고 slave 슬롯 Flow만 다르게 지정",
+    )
     parser.add_argument(
         "--wave-flow-role",
         choices=("sync_slave", "async_slave"),

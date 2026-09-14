@@ -977,6 +977,52 @@ async def _wave_flow_prepared(role="sync_slave"):
     return controller, record, states, master, slave, store, samples
 
 
+async def test_master_template_three_slots_reach_actual_role_preflight_without_writes():
+    controller, old, states, master, slave, _store, _samples = await _wave_flow_prepared()
+    flow = ScheduleFlowExperimentSpec(
+        operation_id="template", qualification_operation_id=old.spec.qualification_operation_id,
+        master_device_id="master", slave_device_id="slave", boundary_time="18:20",
+        wave_flow_role="sync_slave", master_template_flow_only=True,
+        master_before_flow=35, slave_before_flow=30, master_after_flow=32, slave_after_flow=40,
+        sine_frequency=30, safe_frequency=20, observation_window_seconds=1035,
+        post_boundary_stability_seconds=30, verification_interval_seconds=2,
+        minimum_lead_seconds=60, ambiguous_band_seconds=1, maximum_clock_skew_seconds=30,
+        clock_advance_tolerance_seconds=2, sentinel_qualification=True, full_epoch_after_roles=True,
+    )
+    for patch in flow.temporary_schedule_spec().device_patches:
+        state = states[patch.device_id]
+        entries = tuple(decode_local_wavemaker_pro_slot_wire(s.wire_bytes, slot_index=s.slot)
+                        for s in patch.slots[:3])
+        auto = dict(state.observed_attributes)
+        if patch.device_id == "slave":
+            auto.update(AutoMode="sine", AutoFlow=30, AutoFreq=30)
+        states[patch.device_id] = state.model_copy(update={
+            "observed_attributes": auto,
+            "schedule": state.schedule.model_copy(update={"entries": entries}),
+        })
+    spec = flow.role_observation_spec()
+    snapshots = controller._snapshots_from_states(spec, states)
+    assert len(snapshots) == 2
+    assert snapshots[0].expectation.boundary_at == snapshots[1].expectation.boundary_at
+    assert snapshots[0].expectation.after_valid_until == snapshots[1].expectation.after_valid_until
+    assert snapshots[0].expectation.after_valid_until - snapshots[0].expectation.boundary_at == (
+        timedelta(minutes=5)
+    )
+    assert type(spec).model_validate_json(spec.model_dump_json()) == spec
+    assert spec.master_template_flow_only is True
+    assert master.commands == slave.commands == []
+    record = old.model_copy(update={
+        "operation_id": spec.operation_id, "spec": spec, "snapshots": snapshots,
+    })
+    loaded = ScheduleLinkageRecord.model_validate_json(record.model_dump_json())
+    assert loaded == record
+    default_controller = _controller(master, slave, _store)
+    assert default_controller._record_slave_role(loaded) is LinkageRole.SYNC_SLAVE
+    assert default_controller._allowed_recovery_roles(loaded, "slave") == {
+        LinkageRole.INDEPENDENT
+    }
+
+
 @pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
 async def test_wave_flow_raw_plan_reaches_role_preflight_with_exact_three_slots(role):
     controller, record, states, master, slave, _store, _samples = await _wave_flow_prepared(role)

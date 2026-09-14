@@ -480,16 +480,21 @@ class ScheduleLinkageSpec(BaseModel):
     maximum_clock_skew_seconds: float = Field(default=2, ge=0.1, le=30)
     clock_advance_tolerance_seconds: float = Field(default=2, ge=0.1, le=10)
     wave_flow_role: Literal["sync_slave", "async_slave"] | None = None
+    master_template_flow_only: bool = False
 
     @model_serializer(mode="wrap")
     def serialize_legacy_shape(self, handler):
         payload = handler(self)
         if self.wave_flow_role is None:
             payload.pop("wave_flow_role", None)
+        if not self.master_template_flow_only:
+            payload.pop("master_template_flow_only", None)
         return payload
 
     @model_validator(mode="after")
     def validate_window(self) -> Self:
+        if self.master_template_flow_only and self.wave_flow_role != "sync_slave":
+            raise ValueError("master-template Flow-only observation is Sync-only")
         if self.wave_flow_role is None and self.observation_window_seconds > 930:
             raise ValueError("legacy observation window remains bounded by 930 seconds")
         if self.wave_flow_role is not None and (
@@ -2191,6 +2196,11 @@ class ScheduleActiveLinkageController:
                 spec.slave_device_id: (31, ("constant", 30, 0), ("sine", 40, 30)),
             }
             frequency_allowlist = {0, 5, 20, 30}
+        if spec.master_template_flow_only:
+            expected = {
+                spec.master_device_id: (30, ("sine", 35, 30), ("constant", 32, 0)),
+                spec.slave_device_id: (31, ("sine", 30, 30), ("constant", 40, 0)),
+            }
         for snapshot in snapshots:
             state = states[snapshot.device_id]
             schedule = state.schedule
@@ -2213,7 +2223,8 @@ class ScheduleActiveLinkageController:
             entries = _validated_entries(schedule)
             expectation = snapshot.expectation
             three_slots = (
-                spec.wave_flow_role is not None and snapshot.device_id == spec.slave_device_id
+                spec.master_template_flow_only
+                or (spec.wave_flow_role is not None and snapshot.device_id == spec.slave_device_id)
             )
             if (
                 len(entries) != (3 if three_slots else 2)
@@ -2244,7 +2255,9 @@ class ScheduleActiveLinkageController:
                 )
             expected_tuples = (before_tuple, after_tuple)
             if three_slots:
-                expected_tuples += (("sine", 35, 30),)
+                expected_tuples += ((
+                    "sine", 38 if snapshot.device_id == spec.master_device_id else 35, 30
+                ),)
             for entry, expected_tuple in zip(
                 entries,
                 expected_tuples,

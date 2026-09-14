@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
@@ -44,6 +45,55 @@ DeviceIdentifier = Annotated[
     str,
     StringConstraints(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.-]+$"),
 ]
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _report_observation_failure(
+    error: BaseException | None, *, operation_id: str | None, site: str
+) -> None:
+    """실패 분기와 class/frame만 보존하며 진단 실패로 원복을 대체하지 않습니다."""
+    try:
+        chain = []
+        seen: set[int] = set()
+        current = error
+        while current is not None and id(current) not in seen and len(chain) < 8:
+            seen.add(id(current))
+            frames = []
+            frame = current.__traceback__
+            while frame is not None:
+                module = frame.tb_frame.f_globals.get("__name__", "")
+                if isinstance(module, str) and module.startswith("jebao_flow."):
+                    frames.append(
+                        {"module": module, "function": frame.tb_frame.f_code.co_name,
+                         "line": frame.tb_lineno}
+                    )
+                frame = frame.tb_next
+            chain.append(
+                {"module": type(current).__module__, "class": type(current).__name__,
+                 "frames": frames[-32:], "frames_truncated": len(frames) > 32}
+            )
+            current = (
+                current.__cause__ if current.__cause__ is not None
+                else None if current.__suppress_context__ else current.__context__
+            )
+        _LOGGER.error(
+            "%s",
+            json.dumps(
+                {"event": "temporary_schedule_observation_failure", "event_version": 1,
+                 "operation_sha256": (
+                     hashlib.sha256(operation_id.encode("ascii")).hexdigest()
+                     if operation_id is not None else None
+                 ), "site": site, "exception_chain": chain,
+                 "chain_truncated_or_cyclic": current is not None},
+                sort_keys=True,
+            ),
+        )
+    except BaseException:
+        # await 없는 부수 진단이며 원래 예외와 보상 순서를 그대로 유지합니다.
+        pass
+
+
 OperationIdentifier = Annotated[
     str,
     StringConstraints(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
@@ -969,15 +1019,21 @@ class TemporaryScheduleController:
         if observation.done():
             try:
                 completion = await observation
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as error:
+                _report_observation_failure(
+                    error, operation_id=operation_id, site="already_done_cancelled"
+                )
                 raise TemporaryScheduleRollbackUnsafeError(
                     TemporaryScheduleErrorCode.CONTROL_DISARM_UNVERIFIED
                 ) from None
-            except Exception:
+            except Exception as error:
+                _report_observation_failure(
+                    error, operation_id=operation_id, site="already_done_failed"
+                )
                 raise TemporaryScheduleRollbackUnsafeError(
                     TemporaryScheduleErrorCode.CONTROL_DISARM_UNVERIFIED
                 ) from None
-            self._require_disarm_completion(completion)
+            self._require_disarm_completion(completion, operation_id=operation_id)
             return
         observation.cancel()
         done, _ = await asyncio.wait({observation}, timeout=timeout_seconds)
@@ -991,19 +1047,30 @@ class TemporaryScheduleController:
             )
         try:
             completion = await observation
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            _report_observation_failure(
+                error, operation_id=operation_id, site="cancelled_then_cancelled"
+            )
             raise TemporaryScheduleRollbackUnsafeError(
                 TemporaryScheduleErrorCode.CONTROL_DISARM_UNVERIFIED
             ) from None
-        except Exception:
+        except Exception as error:
+            _report_observation_failure(
+                error, operation_id=operation_id, site="cancelled_then_failed"
+            )
             raise TemporaryScheduleRollbackUnsafeError(
                 TemporaryScheduleErrorCode.CONTROL_DISARM_UNVERIFIED
             ) from None
-        self._require_disarm_completion(completion)
+        self._require_disarm_completion(completion, operation_id=operation_id)
 
     @staticmethod
-    def _require_disarm_completion(completion: ObservationCompletion) -> None:
+    def _require_disarm_completion(
+        completion: ObservationCompletion, *, operation_id: str | None = None
+    ) -> None:
         if completion is not ObservationCompletion.DISARM_VERIFIED:
+            _report_observation_failure(
+                None, operation_id=operation_id, site="completion_not_disarm_verified"
+            )
             raise TemporaryScheduleRollbackUnsafeError(
                 TemporaryScheduleErrorCode.CONTROL_DISARM_UNVERIFIED
             )
@@ -1675,12 +1742,22 @@ def _is_wave_flow_patch_pair(spec: TemporaryScheduleSpec) -> bool:
         )
         all_entries.append(entries)
     master, slave = all_entries
-    if len(master) != 2 or len(slave) != 3:
+    if (len(master), len(slave)) == (2, 3):
+        expected = (
+            (("sine", 35, 30), ("constant", 32, 0)),
+            (("constant", 30, 0), ("sine", 40, 30), ("sine", 35, 30)),
+        )
+    elif (len(master), len(slave)) == (3, 3):
+        expected = (
+            (("sine", 35, 30), ("constant", 32, 0), ("sine", 38, 30)),
+            (("sine", 30, 30), ("constant", 40, 0), ("sine", 35, 30)),
+        )
+        # 새 경우는 전체 image에서 세 Flow 바이트만 다를 때만 허용합니다.
+        images = tuple(b"".join(slot.wire_bytes for slot in p.slots) for p in spec.device_patches)
+        if tuple(i for i, (a, b) in enumerate(zip(*images, strict=True)) if a != b) != (5, 14, 23):
+            return False
+    else:
         return False
-    expected = (
-        (("sine", 35, 30), ("constant", 32, 0)),
-        (("constant", 30, 0), ("sine", 40, 30), ("sine", 35, 30)),
-    )
     for entries, wanted in zip(all_entries, expected, strict=True):
         for index, (entry, values) in enumerate(zip(entries, wanted, strict=True)):
             if (

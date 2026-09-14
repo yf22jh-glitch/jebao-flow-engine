@@ -432,6 +432,126 @@ def test_wave_flow_plan_passes_actual_lower_image_composition_without_writes(rol
         assert len(expected[patch.device_id]) == 432
 
 
+def test_master_template_images_reach_lower_composition_and_only_flow_bytes_differ():
+    spec = _fixed_spec(
+        operation_id="template", qualification_operation_id="qualified",
+        master_device_id="left", slave_device_id="right", boundary_time="12:10",
+        wave_flow_role="sync_slave", master_template_flow_only=True,
+    ).temporary_schedule_spec()
+    images = _expected_images_for_spec(spec)
+    assert tuple(i for i, (a, b) in enumerate(zip(images["left"], images["right"], strict=True))
+                 if a != b) == (5, 14, 23)
+    assert len(images["left"]) == len(images["right"]) == 432
+    for patch in spec.device_patches:
+        assert images[patch.device_id] == b"".join(slot.wire_bytes for slot in patch.slots)
+
+
+@pytest.mark.parametrize("change", ("master_flow", "slave_mode", "shared_time", "order"))
+def test_master_template_lower_composition_rejects_nonexact_plan(change):
+    spec = _fixed_spec(
+        operation_id="template", qualification_operation_id="qualified",
+        master_device_id="left", slave_device_id="right", boundary_time="12:10",
+        wave_flow_role="sync_slave", master_template_flow_only=True,
+    ).temporary_schedule_spec()
+    patches = list(spec.device_patches)
+    if change == "order":
+        patches.reverse()
+    else:
+        device = 0 if change == "master_flow" else 1
+        slots = list(patches[device].slots)
+        wire = bytearray(slots[2].wire_bytes)
+        wire[{"master_flow": 5, "slave_mode": 4, "shared_time": 1}[change]] += 1
+        slots[2] = ScheduleSlotPatch.from_wire(2, bytes(wire))
+        patches[device] = patches[device].model_copy(update={"slots": tuple(slots)})
+    with pytest.raises(TemporarySchedulePreflightError):
+        _expected_images_for_spec(spec.model_copy(update={"device_patches": tuple(patches)}))
+
+
+@pytest.mark.parametrize("site", (
+    "already_done_cancelled", "already_done_failed", "cancelled_then_cancelled",
+    "cancelled_then_failed", "completion_not_disarm_verified",
+))
+async def test_observer_failure_diagnostics_preserve_five_branches_without_secret(site, caplog):
+    import hashlib
+
+    entered = asyncio.Event()
+
+    async def observe():
+        entered.set()
+        if site == "completion_not_disarm_verified":
+            return None
+        if site == "already_done_failed":
+            raise ValueError("secret-observer-message")
+        if site == "already_done_cancelled":
+            raise asyncio.CancelledError("secret-cancel-message")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if site == "cancelled_then_failed":
+                raise ValueError("secret-observer-message") from None
+            raise
+
+    task = asyncio.create_task(observe())
+    await entered.wait()
+    controller = object.__new__(TemporaryScheduleController)
+    with pytest.raises(TemporaryScheduleRollbackUnsafeError) as caught:
+        await controller._cancel_observation(
+            task, timeout_seconds=1, operation_id="private-operation"
+        )
+    assert caught.value.code is TemporaryScheduleErrorCode.CONTROL_DISARM_UNVERIFIED
+    assert task.done()
+    if site != "completion_not_disarm_verified":
+        assert caught.value.__suppress_context__ is True
+    records = [r for r in caplog.records if "temporary_schedule_observation_failure" in r.message]
+    assert len(records) == 1
+    event = json.loads(records[0].message)
+    assert event["site"] == site
+    assert event["operation_sha256"] == hashlib.sha256(b"private-operation").hexdigest()
+    assert event["event_version"] == 1
+    assert records[0].exc_info is None
+    assert "secret-" not in records[0].message and "private-operation" not in records[0].message
+    if site == "completion_not_disarm_verified":
+        assert event["exception_chain"] == []
+    else:
+        assert event["exception_chain"][0]["class"] == (
+            "ValueError" if site.endswith("failed") else "CancelledError"
+        )
+        assert event["exception_chain"][0]["frames"][0]["function"] == "_cancel_observation"
+
+
+def test_observation_diagnostics_bound_chain_and_preserve_suppression(caplog):
+    from jebao_flow.devices.schedule_transaction import _report_observation_failure
+
+    errors = [ValueError("secret-message") for _ in range(10)]
+    for left, right in zip(errors, errors[1:], strict=False):
+        left.__cause__ = right
+    _report_observation_failure(errors[0], operation_id="private", site="test")
+    event = json.loads(caplog.records[-1].message)
+    assert len(event["exception_chain"]) == 8
+    assert event["chain_truncated_or_cyclic"] is True
+    errors[0].__cause__ = errors[0]
+    _report_observation_failure(errors[0], operation_id="private", site="test")
+    assert len(json.loads(caplog.records[-1].message)["exception_chain"]) == 1
+    errors[0].__cause__ = None
+    errors[0].__context__ = errors[1]
+    errors[0].__suppress_context__ = True
+    _report_observation_failure(errors[0], operation_id="private", site="test")
+    assert len(json.loads(caplog.records[-1].message)["exception_chain"]) == 1
+    assert "secret-message" not in caplog.text
+
+
+def test_observation_logger_failure_does_not_replace_original_disarm_error(monkeypatch):
+    from jebao_flow.devices import schedule_transaction as transaction
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("logging unavailable")
+
+    monkeypatch.setattr(transaction._LOGGER, "error", fail)
+    with pytest.raises(TemporaryScheduleRollbackUnsafeError) as caught:
+        TemporaryScheduleController._require_disarm_completion(None, operation_id="private")
+    assert caught.value.code is TemporaryScheduleErrorCode.CONTROL_DISARM_UNVERIFIED
+
+
 @pytest.mark.parametrize("change", ("flow", "offset", "order"))
 def test_three_slot_exception_rejects_nearby_unapproved_image_pairs(change):
     spec = _fixed_spec(
