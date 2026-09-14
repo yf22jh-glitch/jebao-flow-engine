@@ -188,3 +188,40 @@ operational estimate, not measured impeller dwell or a guarantee;180 seconds is 
 observation stop limit, not an automatic physical restart. The two intermediate confirmations
 are independent authenticated reads, not waits for three MQTT cycles. Post-ON alone has the
 three-cycle hold. No claim of unconditional harmlessness follows from the other pumps running.
+
+## Deployment progress, before the first device command
+
+Policy `ad95635` was committed before deployment. An image built from the clean `4c31f3f`
+archive contains the reviewed diagnostic source `269e92b`:138 installed Python source files
+match that archive exactly. Compared with the prior image, only coordinator and the new
+failure-diagnostics module differ; Python and installed distribution versions are identical.
+Network-none checks reproduced the unchanged protocol schema and90-entry discovery projection.
+
+The prior and candidate both use Compose input generation `2b4d91a3a662ac2aa85bacf91a03f72b`.
+Generation alone does not distinguish them. Prior image is
+`785cf449e528ef86562af8f776bf5703c028f34d8e21b99f237c6435236988d9`; candidate image is
+`847c51edb112abb9717c7a577666d5d46842dc78e3a470e40e8386b96ba82d0c`.
+All Compose calls enumerate their files with explicit arguments; return omits the added image
+overlay and checks the running prior image identity. Both prior Compose files and all four input
+files are preserved. Rendered Compose differs only in the two service image identities;
+source input bytes remain unchanged with0444 files,0700 parents and matching ownership.
+
+The first deployment succeeded. Prior stop was requested at2026-09-14T04:34:14.005149Z;
+candidate StartedAt is04:34:16.699757580Z. Runtime manifest
+`a7bf3ebde319579ac77694ee923884a7` was rederived at04:34:17.877622Z, after startup.
+At04:34:34.116737Z, the postcheck observed six complete fresh device batches, discovery90
+byte-exact, group qualified and unarmed, failure0, command0, unfinished0 and unchanged
+journal105/receipt18. This was a single-cycle postcheck, not the future three-cycle test hold.
+
+The service was stopped before app preparation at04:34:34.684504Z. Independent authenticated
+reads at04:34:40.717555–04:34:42.305930Z confirmed Bar ON/classic91/TimerOFF/Frequency80/
+PulseTidefalse; first Pro ON/constant40/TimerOFF/Frequency34; second Pro ON/constant/latent31/
+TimerON/Frequency32 with current tidal55 matching exactly one active slot, valid14/invalid0.
+All three retain independent linkage. No device command has been sent. App preparation and
+current onsite readiness remain outstanding; the service stays stopped until that boundary.
+
+Private artifact `bar-off-flow-diagnostic-a9c77231316e506777a70d38ef939347` preserves build,
+binding, prior backups, deployment and read outputs. The deployment host stdout is9251 bytes,
+SHA-256 `f7cd37ef840237edba51483ed4e390bc590de1666e1e8dcbc481dc7bdd36f3f2`, with exit0 and
+empty stderr. This progress note does not replace the append-only run record due at the end of
+the approved operation. The full-suite failures and D1u cause remain unresolved.
