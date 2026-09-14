@@ -1020,6 +1020,28 @@ create no qualification receipt. A zero-write `baseline_already_present` recover
 not answer this drill's question. The persistent control service remains stopped until exact Flow 40
 is independently confirmed, then the reviewed service is restored and checked again.
 
+## Command pacing in the current local-control path
+
+Static trace at `c47cbd3` establishes that `DeviceControlConfig.minimum_command_interval_ms`
+does **not** impose a minimum send interval on `jebao-flow-local` direct or group writes.
+`local_control_cli._coordinator()` constructs the production coordinator without passing that
+setting. Its default `ConnectedDeviceWriter` uses `protocol.control_session.GizwitsSession`;
+`send_once()` checks the existing permit and per-session duplicate-payload guard, then calls
+`send_raw_control()`. The latter exchanges one sequence-bound control request without a
+configured inter-command dwell.
+
+The setting is consumed by the separate `devices.factory` / `LanJebaoDevice` path, where
+`_respect_command_interval()` uses a last-command timestamp and a sleep. That legacy path is
+not the current local-control writer and must not be started alongside it to obtain pacing.
+Shared operation locks, sequential ACK/readback, fresh-cycle cadence, and unchanged-plan
+deduplication are not an implementation of the named millisecond setting. Neither transaction
+timestamps nor a successful bounded run establish a universal minimum physical send interval.
+
+This is a source-level answer about configuration consumption, not a new hardware experiment,
+a claim of excessive physical command rate, or a reason to invent a firmware timing gate.
+Actual per-device send timing and any separately justified pacing change remain open. No
+source, configuration, or write-path guard was changed to obtain this result.
+
 ## Still requiring evidence
 
 The code is ready for isolated and simulator review, but hardware controls remain hidden until

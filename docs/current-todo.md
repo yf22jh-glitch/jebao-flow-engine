@@ -261,7 +261,11 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] Anti Phase 저출력 bounded epoch: 기존 phase0/180/90의 서로 다른 target 네 전환 및
   선언 decoded field 집합 복원 확인. 물리적 정확한 위상차·raw 전체 exact restore는 미확정;
   [`run record`](runs/2026-09-14-local-group-antiphase-commissioning.md), `d115250`.
-- [ ] `minimum_command_interval_ms`가 3대 cycle의 실제 device command 빈도를 제한하는지 확인
+- [x] `minimum_command_interval_ms`의 current local-control 적용 여부를 정적으로 판정: **적용 안 됨**.
+  CLI→coordinator→ConnectedDeviceWriter→GizwitsSession 경로는 이 값을 전달·소비하지 않으며,
+  별도 legacy LanJebaoDevice만 사용한다. [근거와 한계](local-control.md#command-pacing-in-the-current-local-control-path).
+- [ ] 실제 장비별 frame 간격과 필요한 pacing 여부는 별도 증거로 판정한다. 직렬 처리·poll 주기를
+  위 설정의 최소 간격 보장으로 쓰지 않으며, 이번 정적 판정으로 새 gate나 source 변경을 만들지 않는다.
 - [x] 첫 Pro의 direct31→32 override 뒤 세 후속 fresh cycle에서 first32·나머지31 유지 확인;
   TimerOFF·Constant31 조건에 한정하며 다른 멤버·값·경합은 미검증.
   [`run record`](runs/2026-09-14-local-group-override-resume-commissioning.md), `0f51f99`.
