@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-14 14:31 KST
+마지막 갱신: 2026-09-14 15:02 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -39,6 +39,12 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - Claude는 독립 정적 검토 역할을 유지한다.
 
 ## 현재 대기 지점
+
+- [x] 상시 진단 배포보다 full-suite 실패 두 건 처리를 우선했다. 각각 강제 지연으로 같은
+  단언 실패를 재현하고 단계 기반 테스트로 수정했다. 단일 테스트 예외312a047 준수,
+  기존 단언34개 보존·7개 추가·src delta0. 관련153·최종full2589·Ruff PASS.
+  원래 실패의 실제 환경 원인은 미확정이며 배포는 아직 하지 않았다.
+  근거: [실패 후속 조사](full-suite-failure-followup.md).
 
 - [x] 두 Pro를 D1l 새 schema에서 각각 `40 -> 39 -> 40`으로 재자격하고 receipt `4`장 확보;
   근거: [`first Pro requalification`](runs/2026-09-12-local-manual-flow-requalification-first-pro.md),
@@ -119,9 +125,9 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] failure-only 예외 chain·내부 위치·monotonic 경과·request digest의 ERROR 진단을
   journal save 뒤에 추가하고 독립 검토 후 source `269e92b`로 landing. writer·schema·journal·
   retry·gate·frozen ASYNC 무수정. targeted21·Ruff PASS.
-- [ ] 최종 source의 full suite는 두 실행에서 각각2588 PASS/1 FAIL이고 실패 테스트가 서로
-  다르다. 초기2587 PASS와 HEAD2578 PASS로 이를 덮지 않는다. 원인·결과 안정성은 미해결이며,
-  이는 D1u Bar 원인과 별개다. 반복해서 green을 만들거나 기존 테스트를 완화하지 않는다.
+- [x] 당시 refined full suite 두 실행의 각각2588 PASS/1 FAIL을 보존하고 두 테스트의 시간
+  경합을 처리했다. 수정 후 단회 full2589 PASS이며 초기2587/HEAD2578로 원 실패를 덮지 않았다.
+  원래 실패의 인과·일반적 실행 안정성은 별도 미확정 한계로 남고 D1u 원인과도 구분한다.
 - [x] 사용자 HA Core 업데이트 완료 회신 뒤 read-only postcheck: discovery90 exact·fresh6·비무장,
   command0·journal105/receipt18 전후 불변. HA 내부 registry/UI 전체 정상은 미주장.
   근거: [HA update postcheck](runs/2026-09-14-ha-core-update-readonly-postcheck.md).
@@ -134,14 +140,15 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   direct OFF→OFF-state Flow30→ON, record3/rev4×3·Flow1/power2·후속 fresh3 cycle PASS.
   Pro write0·기존105 files 불변·신규OFF30 status blob1 확인. 앱 원복·exact prior 서비스 복귀 완료.
   D1u group FAIL·원인 UNKNOWN·batch 순서 조건은 그대로이며 단회 권한은 소진됐다.
-- [ ] 새 diagnostic image의 상시 배포 여부를 별도로 결정한다. 현재 운영은 새 failure event가
-  없는 exact prior image다. targeted21/Ruff PASS와 full-suite 실패2건 미해결을 함께 공개해야 하며
-  D1v 성공은 production 실패 시 진단 전달을 검증하지 않았다. 승인 없이 재배포하지 않는다.
+- [ ] 새 diagnostic image 상시 배포는 승인 뒤 실패 처리 요청에 따라 보류했다. 현재 운영은 새
+  failure event가 없는 exact prior image다. 두 test 수정 뒤 full2589 PASS이나 원 실패 원인은
+  미확정이고 D1v 성공은 production 실패 시 진단 전달을 검증하지 않았다. 배포 재개는
+  그 범위의 preflight·exact prior 보존·postcheck를 별도로 수행한다.
 - [x] [group/direct 보존 증거 비교](bar-group-direct-evidence-comparison.md): Bar forward/rollback·
   expected/baseline readback·baseline status 다섯 blob의 bytes가 D1u/D1v에서 exact 일치.
   두 Bar Flow의 자체 session 첫 control sequence1은 코드 추론으로 확인했다. record 생성 이후
   시도 창은 다르지만 실제 session idle이나 원인은 미확정이며 device/broker 접촉 없이 분석했다.
-- [ ] 상시 진단 배포 여부를 먼저 결정한다. 후속 group/order 실기는 진단 image·새 질문·
+- [ ] 상시 진단 배포 후속 절차를 먼저 완료한다. 후속 group/order 실기는 진단 image·새 질문·
   복원 수단·별도 현장 승인이 있어야 하며 이번 Bar-only 승인을 재사용하지 않는다.
   현재 근거만으로 retry/timeout을 바꾸지 않는다.
 

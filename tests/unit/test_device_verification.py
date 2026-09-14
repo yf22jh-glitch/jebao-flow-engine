@@ -364,14 +364,35 @@ async def _wait_for_phase(
     raise AssertionError(f"journal did not reach {phase.value}")
 
 
-async def test_success_journals_before_each_write_and_exactly_restores(tmp_path: Path) -> None:
+async def test_success_journals_before_each_write_and_exactly_restores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
     device = await _ready_device(events=events)
     store = _RecordingStore(tmp_path / "verify.json", events)
     controller = FirstPhysicalWriteVerifier(device, store, global_guard=_GlobalGuard())
 
-    result = await controller.run(_spec())
+    original_monitor = controller._monitor  # noqa: SLF001
+    monitor_entries: list[DeviceVerificationPhase] = []
 
+    async def expire_after_lower_power_active(
+        record: DeviceVerificationRecord,
+    ) -> DeviceVerificationStopReason:
+        persisted = store.load()
+        assert persisted is not None
+        assert persisted.phase is DeviceVerificationPhase.LOWER_POWER_ACTIVE
+        monitor_entries.append(record.phase)
+        # Exercise the real timeout/restore path after the writes being tested.
+        # Journal fsync speed must not decide whether this success case reaches them.
+        controller._monotonic_deadline = asyncio.get_running_loop().time()  # noqa: SLF001
+        return await original_monitor(record)
+
+    monkeypatch.setattr(controller, "_monitor", expire_after_lower_power_active)
+    # Use the schema's 10s maximum for setup; the phase hook ends the run, not this wait.
+    result = await controller.run(_spec(duration=10))
+
+    assert monitor_entries == [DeviceVerificationPhase.LOWER_POWER_ACTIVE]
     assert result.stop_reason is DeviceVerificationStopReason.TIMEOUT
     assert result.lower_power_applied is True
     assert [target.power for target in device.write_targets] == [40, 35, 40]

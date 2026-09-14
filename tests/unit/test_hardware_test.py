@@ -1036,7 +1036,8 @@ def test_live_slave_failure_survives_masking_rollback_failure(
     _install_fakes(monkeypatch, config, devices)
     args = _args("preflight")
     args[args.index("sync_slave")] = "async_slave"
-    args[args.index("0.02")] = "0.08"
+    # This tests failure preservation, not completion of durable setup within 80ms.
+    args[args.index("0.02")] = "10"
     args.extend(
         (
             "--slave-power-after",
@@ -1050,6 +1051,36 @@ def test_live_slave_failure_survives_masking_rollback_failure(
 
     slave = devices["pro_right"]
     original_slave_write = slave.write_power
+    original_monitor = TemporaryLinkageController._monitor_until_stop  # noqa: SLF001
+    monitor_entries: list[LinkageTransactionPhase] = []
+    discarded_powers: list[int] = []
+
+    async def monitor_with_change_due(
+        self: TemporaryLinkageController,
+        record: LinkageTransactionRecord,
+    ) -> tuple[LinkageStopReason, bool]:
+        assert record.phase is LinkageTransactionPhase.ACTIVE
+        monitor_entries.append(record.phase)
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        first_read = True
+        change_after = record.spec.power_change_after_seconds
+        assert change_after is not None
+
+        def advance_monitor_clock() -> float:
+            nonlocal first_read
+            now = real_time()
+            if first_read:
+                # Coupled to the current monitor_started assignment in original_monitor.
+                first_read = False
+                return now
+            # First read establishes monitor_started; subsequent reads make the
+            # scheduled change due. Keep advancing normally, including timeouts.
+            return now + change_after
+
+        with monkeypatch.context() as clock_patch:
+            clock_patch.setattr(loop, "time", advance_monitor_clock)
+            return await original_monitor(self, record)
 
     async def discard_live_slave_power(
         power: int,
@@ -1058,6 +1089,7 @@ def test_live_slave_failure_survives_masking_rollback_failure(
         previous_power = slave._state.power  # noqa: SLF001
         outcome = await original_slave_write(power, **kwargs)  # type: ignore[arg-type]
         if power == 38:
+            discarded_powers.append(power)
             slave._state = slave._state.model_copy(  # noqa: SLF001
                 update={"power": previous_power}
             )
@@ -1093,6 +1125,11 @@ def test_live_slave_failure_survives_masking_rollback_failure(
     monkeypatch.setattr(slave, "write_power", discard_live_slave_power)
     monkeypatch.setattr(
         TemporaryLinkageController,
+        "_monitor_until_stop",
+        monitor_with_change_due,
+    )
+    monkeypatch.setattr(
+        TemporaryLinkageController,
         "_rollback_uninterruptibly",
         fail_rollback,
     )
@@ -1100,6 +1137,8 @@ def test_live_slave_failure_survives_masking_rollback_failure(
     run_args[0] = "run-native-linkage"
 
     assert hardware_test.main([*run_args, "--confirm", token]) == 2
+    assert monitor_entries == [LinkageTransactionPhase.ACTIVE]
+    assert discarded_powers == [38]
 
     error_output = capsys.readouterr().err
     assert "LinkageRollbackError" in error_output

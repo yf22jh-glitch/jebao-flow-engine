@@ -246,3 +246,14 @@ diagnostic deployment is a separate maintainer decision with the unresolved full
 disclosed; no further deployment follows automatically from this successful physical run.
 The group/direct session and batch-order differences remain untested. Further write-free analysis
 may refine a new question, but another physical operation requires a separately scoped approval.
+
+## Full-suite failure follow-up
+
+After the maintainer requested failure handling before persistent deployment, both affected tests
+were investigated with isolated latency probes. A single-function frozen-test exception was
+recorded in312a047 before changing the hardware test. Both tests now control the intended phase
+transition while retaining every prior assertion; production source and safety gates are unchanged.
+The two modules passed153 tests, and one final full execution passed2589 tests in106.82s.
+See [the follow-up](full-suite-failure-followup.md) for preserved failures, probes, limitations and
+the final artifact bindings. This updates the current validation result, not the original failed
+run outcomes or their still-unknown environment cause. No deployment followed from this test work.
