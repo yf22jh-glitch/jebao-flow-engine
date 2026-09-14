@@ -3496,6 +3496,38 @@ Sync 관측·원복과 지명된 native 자격 기록의 시간 유효성 예외
 세부 절차는 [단회 계획](docs/native-sync-live-plan-2026-09-14.md)을 따릅니다.
 이 절은 관련 source의 새 수정이나 기존 보호 검사의 완화를 허용하지 않습니다.
 
+### 2026-09-14 — Sync 진입의 보존된 park 기록 판정 한정 수정
+
+사용자는 검색 설정 정정 뒤 “ㅇㅇㅇ 시작하자”로 준비 재개를 지시했습니다. 이어 native 진입이
+기존 park 기록의 존재 때문에 막혔다는 보고와 “그 기록을 삭제하지 않고 처리하도록, 진입 검사
+수정·검증을 별도로 진행해도 될까요?”라는 질문에 “ㅇㅇㅇㅇ”라고 승인했습니다.
+이 절은 그 repository maintainer 승인과 범위를 결속합니다. 실기 준비의 관측은
+[준비 기록](docs/runs/2026-09-14-native-sync-preparation-admission.md)에 먼저 보존합니다.
+
+이 절을 별도 커밋한 뒤 다음 범위만 수정·오프라인 검증합니다.
+
+- `src/jebao_flow/schedule_flow_experiment_cli.py`: 이 CLI만 사용하는 진입 guard를 좁게 구성.
+- `tests/unit/test_schedule_flow_experiment_cli.py` 및 신규 `tests/unit/test_schedule_flow_parked_admission.py`:
+  기존 거부·원복 단언 보존과 admission 회귀 검증.
+- 관련 결과·계획 문서. 그 밖의 source/test는 수정하지 않습니다.
+
+공용 `hardware_guard.py`와 다른 CLI의 기존 차단 의미는 그대로 둡니다. 이 CLI의 guard만
+기존 exact-restore journal reader와 archive의 `confirm_parked_tombstone`을 사용해 canonical
+보류 기록·immutable finalization/disposition/snapshot 결속을 검증합니다. 파일 부재 또는 이
+검증에 성공한 terminal park만 진행 중 복원과 구분합니다. 단순 phase 문자열·면제 플래그·
+임의 callback으로 통과시키지 않습니다. 검증은 기존 전역 operation lock을 보유한 상태에서
+수행하고, 모든 실패는 차단하며 journal·archive·영구 replay barrier를 삭제/변경하지 않습니다.
+이는 liveness 판정이며 qualification 성공이나 같은 exact-restore operation의 재실행 권한이
+아닙니다. 기존 reader의 owner/mode/inode/canonical 검사와 archive 검증을 재구현/완화하지 않습니다.
+identity·출력 범위·single-write·fsync·원복 순서·현재 상태 재독·긴급중단 보호는 그대로입니다.
+기존 Async·다른 native 하네스·local-control·schema 입력·timeout/retry 변경은 범위 밖입니다.
+
+격리 검증은 real journal/archive fixture로 정상 보류·누락/변조·nonterminal·파일 안전성·
+전역 lock·영구 replay 거부와 원본 불변을 확인하고, firmware 가설 fake를 만들지 않습니다.
+수정·검증 결과 커밋으로 이 구현 예외는 자동 소진·재동결됩니다. 구현 중 device write·
+앱 조작·배포는0이며, 새 image를 이용한 원래 단회 Sync 재개는 결과 공개·준비 재검증 뒤에만
+진행합니다. 원래의 시간 만료 한정 승인·원복 의무·Async 제외는 바꾸지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
