@@ -3450,6 +3450,52 @@ Sync 경로의 기존 bounded staged-control 비교와 보존 진단으로 다�
 절차 및 별도 실기 승인을 갖춘 뒤에만 가능하며 과거 D1u/D1v/D1w 권한을 재사용하지 않습니다.
 현재 TimerON의 수용된 inactive manual 값과 active slot 출력도 서로 구분합니다.
 
+### 2026-09-14 — 두 Pro Sync 관측·원복 단회 실행 해제
+
+사용자는 두 Pro를 master·sync_slave로 묶고 서로 다른 슬롯 출력·전환 시각을 900초 관측한 뒤
+원복하며 Bar와 Async를 제외한다는 설명에 “ㅇㅇ 계속 진행해줘”라고 지시했습니다.
+이어 “장비 신원·기록 일치·출력 제한·복원 검사는 그대로 유지하고, 이번 시험 한 번만
+만료 날짜 검사를 예외 처리하는 것까지 승인하실까요?”라는 질문에
+“ㅇㅇㅇㅇ 그후 데이터 원복만 시켜주면되”라고 승인했습니다.
+
+이 결정은 repository maintainer의 아래 단회 실행 해제 및 on-site hardware approver의
+Sync 관측·원복과 지명된 native 자격 기록의 시간 유효성 예외 승인입니다.
+`6ecb276`의 구현 해제는 이미 소진됐으며 새 승인은 그 권한을 재사용하지 않습니다.
+구현은 변경하지 않고, 이 절을 별도 커밋한 뒤에만 잠긴 source/image의 실행을 준비합니다.
+
+- 대상은 새로 identity를 확인한 Pro 두 대뿐이며 master/slave 배치를 실행 기록에 고정합니다.
+  Bar·리턴·도징·Async write, 일반 배포, source/tests 수정은 승인 범위가 아닙니다.
+- 임시 writer와 같은 source/image의 attended recovery 및 원래 서비스 복귀를 한 operation으로
+  준비합니다. 설정·image·원복 수단을 먼저 보존하고 경쟁 writer를 배제합니다.
+- 임시 safe manual은 master Constant30/F20·slave Constant31/F20이고, master는
+  Sine35/F30→Constant30, slave는 Constant32→Sine40/F30, 경계는 T·T+5분입니다.
+  임시 출력 상한41·관측900초를 지키며 준비와 원복 시간은900초에 포함되지 않습니다.
+- 지정 native qualification 두 기록의 존재·operation·device_id·physical binding은 그대로
+  확인하고 시간 유효성만 본 단회에서 제외합니다. 파일이나 날짜는 고치지 않으며
+  local-control receipt로 대체하거나 새 qualification write를 자동 실행하지 않습니다.
+- 시작 TimerON 요건 때문에 필요한 앱 준비는 현재 실제 출력과 전환 후 예상 slot을 따로
+  공개하고 사용자 회신 뒤에만 진행합니다. second Pro의 수용된 inactive manual30은
+  정상화하지 않습니다. 앱 전 baseline과 하네스 소유 baseline을 분리합니다.
+- 하네스가 자기 시작 controls·원432-byte schedule을 durable하게 소유하고 ordered rollback을
+  수행합니다. 앱 이전 상태를 standalone 복원하는 권한은 만들지 않으며, 앱 준비로 바뀐
+  부분은 마지막 사용자 앱 복원까지 확인합니다. 원복 전 시험 완료로 보고하지 않습니다.
+- sentinel 검사·복원도 실제 write에 포함합니다. 정상 경로의 논리 호출과 물리 frame·ACK를
+  구분하며 실패 분기의 보상은 따로 계상합니다. 같은 전진 명령을 재전송하지 않습니다.
+- identity·범위/step·single-write·durable journal/fsync·복구 권한은 유지합니다.
+  실패 때 새 가설 gate·retry·timeout을 추가하거나 조건을 바꿔 재시험하지 않습니다.
+- 기존 raw sink·진단·W0/W1/W2 판정 기준으로 관측하고 sample이 부족하면 UNKNOWN으로
+  기록합니다. Sync의 OWN_SCHEDULE을 Async 성공이나 물리 유량 증명으로 올리지 않습니다.
+- 중단 시 기존 ordered recovery를 우선하고 복원 미확인이나 구체적 위험을 즉시 보고합니다.
+  서비스 stop·시간 상한은 물리 차단이나 자동 원복 보장이 아닙니다. 현장 개입 뒤 stale
+  baseline으로 자동 복구하지 않습니다. 안전상 필요하면 사람이 중단 수단을 사용합니다.
+- 앱 요청 전에 준비가 실패하면 device command0으로 종료하고 원 서비스 복귀를 확인합니다.
+  원복도 실패하면 정지·보고하며 같은 승인으로 추가 배포·재시험하지 않습니다.
+- 실기 결과와 원복·독립 검토를 append-only 기록으로 커밋하면 이 실행 해제는 자동 소진되고
+  하네스는 다시 동결됩니다. 이후 Sync 반복·Async·상시 배포에는 새 승인이 필요합니다.
+
+세부 절차는 [단회 계획](docs/native-sync-live-plan-2026-09-14.md)을 따릅니다.
+이 절은 관련 source의 새 수정이나 기존 보호 검사의 완화를 허용하지 않습니다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
