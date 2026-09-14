@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-14 00:22 KST
+마지막 갱신: 2026-09-14 10:02 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -103,8 +103,12 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - [x] M4 Anti Phase bounded epoch: 기존 phase0/180/90의 A→B→C→D→A, Flow8/power0,
   유한 hold 세 쌍과 선언 decoded field·prior Constant50 복귀 확인;
   근거: [`Anti Phase commissioning`](runs/2026-09-14-local-group-antiphase-commissioning.md), `d115250`.
-- [ ] 다음은 M4 direct override·resume의 별도 bounded 계획. 현재 두 번째 Pro manual baseline31·
-  TimerON을 유지하며, 실기 전 current state와 앱 선행 조작 필요성을 다시 확인한다.
+- [x] M4 direct override·resume bounded epoch: first Pro31→32의 override를 세 후속 fresh cycle에
+  확인하고 member PRESS 뒤 first만31로 복귀; record4·revision7/4/5/9·Flow2·power0.
+  선언 decoded field·prior Constant50/unarmed 서비스 복귀 완료;
+  근거: [`override·resume commissioning`](runs/2026-09-14-local-group-override-resume-commissioning.md), `0f51f99`.
+- [ ] 남은 M4 group OFF/ON·실제 명령 빈도·경합 및 M5 운영 경계는 별도 bounded 계획이 필요하다.
+  새 physical operation은 시작하지 않았으며, 현재 first40/TimerOFF·second31/TimerON·Barclassic91이다.
 
 ## 완성까지 전체 로드맵
 
@@ -258,8 +262,11 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   선언 decoded field 집합 복원 확인. 물리적 정확한 위상차·raw 전체 exact restore는 미확정;
   [`run record`](runs/2026-09-14-local-group-antiphase-commissioning.md), `d115250`.
 - [ ] `minimum_command_interval_ms`가 3대 cycle의 실제 device command 빈도를 제한하는지 확인
-- [ ] direct member override 후 다음 group cycle이 해당 멤버를 덮지 않는지 확인
-- [ ] Resume-to-group 후 해당 멤버만 group ownership으로 복귀하는지 확인
+- [x] 첫 Pro의 direct31→32 override 뒤 세 후속 fresh cycle에서 first32·나머지31 유지 확인;
+  TimerOFF·Constant31 조건에 한정하며 다른 멤버·값·경합은 미검증.
+  [`run record`](runs/2026-09-14-local-group-override-resume-commissioning.md), `0f51f99`.
+- [x] 첫 Pro Resume-to-group 뒤 full plan 중 first32→31만 physical 변경하고 override0·
+  세 후속 fresh cycle의 all31 확인; 위와 같은 bounded 조건에 한정.
 - [ ] group OFF/ON이 canonical OFF·Flow-first/Power-second 순서와 terminal journal을 지키는지 확인
 
 ### M5 — 장애·급여·운영 경계
