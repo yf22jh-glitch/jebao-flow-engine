@@ -1,6 +1,6 @@
 # Jebao 현재 작업 To-do
 
-마지막 갱신: 2026-09-14 15:02 KST
+마지막 갱신: 2026-09-14 16:25 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이
 > 아닙니다. run record와 별도 커밋으로 관리합니다.
@@ -39,6 +39,17 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 - Claude는 독립 정적 검토 역할을 유지한다.
 
 ## 현재 대기 지점
+
+- [x] D1w group 재시험과 서비스 복귀 기록 `774ad13` 완료. OFF/ON record2·rev10/19·
+  Flow3/power6·post-ON3 cycle PASS. second Pro의 현재 TimerON 운전과 inactive manual30을 구분해
+  사용자 수용 상태로 종료했고 원manual31 exact 복원은 미주장. prior image/Constant50·
+  unarmed·fresh6·discovery90·journal115/receipt18 불변 확인. 단회 권한 소진.
+- [x] 미사용 Jebao image35개 건별 정리. prior/diagnostic/holder/legacy 참조4개 보존,
+  containers·volumes·journal·receipt 불변; 공용 cache와 다른 프로젝트 미삭제.
+- [ ] 사용자 우선순위에 따라 다음 준비는 native Sync/Async·slave TimerON 파형별 Flow로 이동.
+  [재개 경로·선행조건](native-sync-async-resumption-options.md)을 정리했으며 새 앱 조작이나
+  code write는 아직 미승인. 기존 independent 스케줄 읽기를 native 소유권 판정으로 쓰지 않는다.
+  frozen integrated 하네스의 scoped 구현 해제와 실제 operation 승인은 별개다.
 
 - [x] 상시 진단 배포보다 full-suite 실패 두 건 처리를 우선했다. 각각 강제 지연으로 같은
   단언 실패를 재현하고 단계 기반 테스트로 수정했다. 단일 테스트 예외312a047 준수,
@@ -117,9 +128,9 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   `forward_outcome_uncertain`/rev14로 끝났고, 마지막 record만 recovery1회·write4로 rev25/ROLLED_BACK.
   사용자 앱 복원·별도 fresh read·exact prior Constant50/unarmed 복귀까지 완료;
   근거: [group power commissioning](runs/2026-09-14-m4-group-power-commissioning.md).
-- [ ] 세 대 group OFF/ON 성공은 미확인. Bar `send_once` 원 예외는 UNKNOWN으로 park하며
-  D1u를 재시도하지 않는다. 후속 최소 조작은 별도 승인 대상으로 준비한다.
-  실제 pacing·경합 및 M5 운영 경계도 미완료다.
+- [x] 별도 승인 D1w에서 세 대 group OFF/ON 단회 성공을 확인했다. D1u Bar `send_once`
+  원 예외는 UNKNOWN으로 유지하며 성공을 원인 규명으로 올리지 않는다.
+  실제 pacing·경합 및 M5 운영 경계는 여전히 미완료다.
 - [x] D1u 보존 stream을 write-free 재분석: rev12→14 wall-clock 창은83.564ms이며,
   monotonic 측정이나 예외 클래스의 절대 배제가 아니다. 원인은 여전히UNKNOWN.
 - [x] failure-only 예외 chain·내부 위치·monotonic 경과·request digest의 ERROR 진단을
@@ -149,9 +160,9 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
   expected/baseline readback·baseline status 다섯 blob의 bytes가 D1u/D1v에서 exact 일치.
   두 Bar Flow의 자체 session 첫 control sequence1은 코드 추론으로 확인했다. record 생성 이후
   시도 창은 다르지만 실제 session idle이나 원인은 미확정이며 device/broker 접촉 없이 분석했다.
-- [ ] 상시 진단 배포 후속 절차를 먼저 완료한다. 후속 group/order 실기는 진단 image·새 질문·
-  복원 수단·별도 현장 승인이 있어야 하며 이번 Bar-only 승인을 재사용하지 않는다.
-  현재 근거만으로 retry/timeout을 바꾸지 않는다.
+- [ ] 상시 진단 배포는 별도 승인 대기로 남기며 native 준비보다 먼저 강제하지 않는다.
+  새 실기는 해당 image·새 질문·복원 수단·별도 현장 승인이 있어야 하며 과거 단회 승인을
+  재사용하지 않는다. 현재 근거만으로 retry/timeout을 바꾸지 않는다.
 
 ## 완성까지 전체 로드맵
 
@@ -330,8 +341,9 @@ software `Sync`/`Anti Phase`와 다른 장비 기능이지만 사용자 요구�
 
 ### M6 — native ASYNC 핵심 Q1/Q2 판정
 
-시작 시점은 **M2 actual recovery write 검증과 M4 software-independent 그룹 commissioning,
-M5 장애·복구 경계 확인이 끝난 직후**다. 그 전에는 과거 정보 0 실기를 반복하지 않는다.
+기존 로드맵은 M2·M4·M5 이후였으나, 사용자가 native 시험을 우선 요청해 **준비·설계는 지금
+앞당긴다**. M5 미완료는 유지하고, 실제 native operation은 별도 승인·동결 해제·복원 수단 확인
+전에는 시작하지 않는다. 순서 변경을 안전 핵심이나 승인 게이트 면제로 쓰지 않는다.
 M6는 상시 control service나 HA/MQTT에 native 시험 기능을 노출하는 단계가 아니라, control service를
 stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 
