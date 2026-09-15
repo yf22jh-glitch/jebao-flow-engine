@@ -4112,3 +4112,25 @@ slave async role만 UNCERTAIN인 형태다. child 첫 slave atomic UNCERTAIN/나
 가야 할거야”라고 했다. 앞선 Sync 원복은 실제 완료됐지만 새 Async 내부에도 Sync 경유가
 있었다. 이를 원인 확정으로 삼지 않고, 현재 원복 뒤 독립→Async 직접 진입 설계를 검토한다.
 이번 복구 정정에는 새 Async 재시험·Sync 재점화·factory reset을 포함하지 않는다.
+
+## 2026-09-15 제품 Async 역할 단독 전환의 제한된 재개
+
+사용자는 아까 응답 PASS인 시험과 현재 제품의 실제 코드/명령 차이를 보고받고
+“이어서 계속 진행하자 async 될때까지”라고 요청했다. 이전 성공 시험도 원복 뒤 내부 Sync를
+거쳤으며 제품과 달리 Async에서 Linkage만 썼다. `c8d116c`에 현재 자기 원복 완료를 먼저 기록했다.
+§7의 제품 실기2회 보고 뒤 새 승인에 따른 세 번째 제품 단회이며, 무기한 동일 명령 반복은 아니다.
+현재 사용자 요청을 성공했던 순서와 전송 차이를 좁혀 재개하는 것으로 해석해 먼저 공개한다.
+
+별도 정책 커밋 뒤 `local_control/wavemaker_lifecycle.py`와 직접 test·관련 문서만 정정한다.
+마지막 Async 전환을 Linkage 단독으로 바꾸고, 직전 양쪽 fresh session의 실제 상태를 보존한다.
+추가 기대값 게이트·ACK 면제·timeout/read retry 증가·동결 하네스 재사용은 없다. 기존 source
+7단계/앞6 VERIFIED/마지막만 UNCERTAIN인 소유 복구는 원3필드 또는 새Linkage단독 expected만
+허용한다. 나머지 소유/child/단일전송/원복 검사는 그대로이며 schema·writer·40receipt 불변이다.
+
+실장1회는 원복 확인 뒤 동일 Pro pair·동일 시간표의 새 operation으로 실행한다. 원복→Sync
+준비→Linkage단독 Async이며, 앞선 실패한 id/payload를 재전송하지 않는다. 전환 응답·전체image
+확인과 자기 원복까지 범위이며 시간표10/15분 경계 전체 재검증이나 위상 계측으로 주장하지 않는다.
+오류시 전진 중지·기존 자기 원복/소유 지원·기록을 먼저 수행한다. 같은질문 누적3회 및 새승인
+단회 결과를 분리하고, 새증거가 없으면 임의대안/값탐색/timeout확대 없이 보고한다.
+사용자의 최종 목적은 동작과 배포이며, 개별기능 자격·Async 수용·해제·운영generation을 각각
+검증한다. factory reset·상시group arming·first/Bar 앱이전원복 의무의 흡수는 없다.
