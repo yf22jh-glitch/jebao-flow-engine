@@ -207,6 +207,8 @@ class ConnectedDeviceWriter:
     ) -> PreparedDeviceWrite:
         if not _same_stable_target(intent.target, self.endpoint.target):
             raise ValueError("control intent target does not match the current endpoint")
+        if intent.function == "schedule":
+            return self._prepare_wavemaker_schedule(intent, current_status)
         if intent.function == "schedule_reset":
             return self._prepare_schedule_reset(intent, current_status)
         product_fields = _SCALAR_FIELD_BY_PRODUCT.get(intent.target.product_key)
@@ -272,6 +274,33 @@ class ConnectedDeviceWriter:
             restore_on_recovery=not (
                 intent.function == "power" and intent.value is False
             ),
+        )
+
+    def _prepare_wavemaker_schedule(
+        self,
+        intent: LocalControlIntent,
+        current_status: bytes,
+    ) -> PreparedDeviceWrite:
+        from jebao_flow.local_control.wavemaker import WavemakerSchedule
+
+        schedule = WavemakerSchedule.model_validate(intent.value)
+        if schedule.product_key != intent.target.product_key:
+            raise ValueError("시간표 가족과 실제 대상 장비가 다릅니다")
+        values = get_product_schema(intent.target.product_key).decode_status(current_status)
+        if values["TimerON"] or values["Linkage"] != "independent":
+            raise LocalDeviceWriteError("시간표 교체는 독립 상태·TimerOFF에서만 준비합니다")
+        baseline = extract_current_schedule_image(intent.target.product_key, current_status)
+        desired = schedule.compile_image()
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function="schedule",
+            forward_payload=build_exact_schedule_payload(intent.target.product_key, desired),
+            rollback_payload=build_exact_schedule_payload(intent.target.product_key, baseline),
+            baseline_status=bytes(current_status),
+            expected_readback=desired,
+            baseline_readback=baseline,
+            verification_kind="schedule_image",
+            no_change=desired == baseline,
         )
 
     def _prepare_schedule_reset(

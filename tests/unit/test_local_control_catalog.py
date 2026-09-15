@@ -232,7 +232,7 @@ def test_qualification_must_bind_current_install_content() -> None:
     assert stale_catalog.ignored_qualification_count == 1
 
 
-def test_encoder_without_an_end_to_end_surface_does_not_claim_a_control() -> None:
+def test_pro_schedule_has_qualified_product_execution_and_clock_stays_diagnostic() -> None:
     catalog = build_local_control_catalog(
         (_qualification("schedule"),),
         current_content=_content(),
@@ -242,12 +242,21 @@ def test_encoder_without_an_end_to_end_surface_does_not_claim_a_control() -> Non
 
     assert descriptor.encoding_available is True
     assert descriptor.stage.value == "qualified"
-    assert descriptor.control_exposed is False
-    assert descriptor.diagnostic_reason == (
-        "schedule feeding duration above vendor 1..60 remains unverified"
+    assert descriptor.control_exposed is True
+    assert descriptor.diagnostic_reason is None
+    assert catalog.validate_intent(_intent("schedule", {})) == descriptor
+
+    clock_catalog = build_local_control_catalog(
+        (_qualification("device_clock_sync"),),
+        current_content=_content(),
+        _qualification_verifier_for_test=lambda _item: _verified_keys("5"),
     )
+    clock = clock_catalog.find(LOCAL_WAVEMAKER_PRO_APP.product_key, "device_clock_sync")
+    assert clock.encoding_available is True
+    assert clock.stage.value == "qualified"
+    assert clock.control_exposed is False
     with pytest.raises(ValueError, match="not qualified"):
-        catalog.validate_intent(_intent("schedule", {}))
+        clock_catalog.validate_intent(_intent("device_clock_sync", {}))
 
 
 def test_unverified_receipt_strings_never_expose_a_control() -> None:

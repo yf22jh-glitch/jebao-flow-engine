@@ -38,6 +38,7 @@ from jebao_flow.local_control.install import (
 )
 from jebao_flow.local_control.journal import LocalControlJournalStore
 from jebao_flow.local_control.lease import LocalControlLease
+from jebao_flow.local_control.models import LocalControlIntent
 from jebao_flow.local_control.mqtt import (
     LocalControlGroupCommandRouter,
     LocalControlMqttAdapter,
@@ -58,6 +59,7 @@ from jebao_flow.local_control.service import (
     stable_role_binding_sha256,
 )
 from jebao_flow.local_control.state import FreshStatePoller, LocalControlStateProjector
+from jebao_flow.local_control.wavemaker import NativeWavemakerPlan, WavemakerSchedule
 from jebao_flow.operator_capture.app_catalog import public_app_catalog
 from jebao_flow.operator_capture.schedule_model import NativeLinkageMode
 from jebao_flow.protocol.discovery import GizwitsDiscovery
@@ -76,6 +78,22 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     catalog = subparsers.add_parser("catalog", help="show the complete English app catalog")
     catalog.add_argument("--product-key")
+
+    wavemaker = subparsers.add_parser(
+        "plan-wavemaker", help="외부 JSON의 Bar/Pro 시간표를 장비 접근 없이 검증합니다"
+    )
+    wavemaker.add_argument("--file", type=Path, required=True)
+    wavemaker.add_argument("--native", action="store_true", help="Pro Sync/Async 상속 계획")
+
+    schedule_apply = subparsers.add_parser(
+        "apply-wavemaker-schedule", help="자격이 있는 Pro의 독립·TimerOFF 시간표를 교체합니다"
+    )
+    _add_install_arguments(schedule_apply)
+    schedule_apply.add_argument("--file", type=Path, required=True)
+    schedule_apply.add_argument("--member", required=True)
+    schedule_apply.add_argument("--request-id", required=True)
+    schedule_apply.add_argument("--qualifications", type=Path, required=True)
+    schedule_apply.add_argument("--write-enabled", action="store_true")
 
     dosing = subparsers.add_parser(
         "plan-dosing",
@@ -215,6 +233,48 @@ def _add_install_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "plan-wavemaker":
+        model = NativeWavemakerPlan if args.native else WavemakerSchedule
+        plan = model.model_validate_json(args.file.read_bytes())
+        _print_json(plan.preview())
+        return 0
+    if args.command == "apply-wavemaker-schedule":
+        schedule = WavemakerSchedule.model_validate_json(args.file.read_bytes())
+        if schedule.family != "pro":
+            raise ValueError("Bar 시간표는 오프라인 전용이며 실기 복원 자격이 없습니다")
+        if not args.write_enabled:
+            raise ValueError("시간표 적용에는 명시적인 --write-enabled가 필요합니다")
+        _activate_current_hardware_safety_volume_identity()
+        prepared = _prepare_current(args)
+        if (
+            prepared.config.runtime.mode is not RuntimeMode.CONTROL
+            or prepared.config.runtime.dry_run
+        ):
+            raise ValueError("관측 전용 또는 dry-run에서는 시간표를 전송하지 않습니다")
+        target = next(
+            (item for item in prepared.manifest.devices if item.logical_member == args.member), None
+        )
+        device = next((item for item in prepared.config.devices if item.id == args.member), None)
+        if target is None or device is None or not device.control.allow_hardware_writes:
+            raise ValueError("현재 대상 장비가 없거나 write 잠금 상태입니다")
+        if target.product_key != schedule.product_key:
+            raise ValueError("시간표와 현재 장비의 제품 가족이 다릅니다")
+        catalog = build_local_control_catalog(
+            load_current_qualifications(args.qualifications),
+            current_content=prepared.manifest.content,
+        )
+        result = asyncio.run(
+            _coordinator(prepared.config, catalog).execute(
+                LocalControlIntent(
+                    request_id=args.request_id,
+                    target=target,
+                    function="schedule",
+                    value=schedule.model_dump(mode="json"),
+                )
+            )
+        )
+        _print_json(result.public_dict())
+        return 0 if result.accepted else 2
     if args.command == "catalog":
         _print_json(public_app_catalog(args.product_key))
         return 0

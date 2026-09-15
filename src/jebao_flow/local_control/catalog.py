@@ -86,6 +86,8 @@ _ENCODABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
 # schedule and clock bytes remain diagnostics until their coordinator/readback contracts exist.
 # Pro schedule reset is executable because the audited app supplies the exact 48-slot sentinel
 # image and the existing exact-image verifier covers its complete effect.
+# Pro의 선언 시간표도 같은 journal-first 실행과 전체 image read-back을 사용한다.
+# Bar compiler는 오프라인이며, 384-byte 복원 qualification 없이 실행 기능으로 승격하지 않는다.
 _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
     "50dbc92221fd4d33ae69a1fedd43b555": frozenset(
         {
@@ -97,6 +99,7 @@ _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
             "manual_frequency",
             "custom_wave_frequency",
             "feeding_duration",
+            "schedule",
             "schedule_reset",
             "slave_common_flow",
             "slave_per_slot_flow_extension",

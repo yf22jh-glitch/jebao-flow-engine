@@ -1,0 +1,7 @@
+{
+  "family": "bar",
+  "slots": [
+    {"slot_index": 0, "start": "00:00", "end": "12:00", "mode": "constant", "flow": 35},
+    {"slot_index": 1, "start": "12:00", "end": "23:59", "mode": "classic", "flow": 40, "frequency": 30, "pulse_tide": true}
+  ]
+}
