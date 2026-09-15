@@ -1,5 +1,8 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-15 제품 Async 역할 단독 전환](2026-09-15-product-async-role-only-stop.md) — Async ACK timeout, 변동값 gate 실패 아님.
+- [2026-09-15 역할 단독 실패의 소유 복원](2026-09-15-product-async-role-only-restored.md) — 원432B/8controls exact, 원 전달UNKNOWN·배포 미완료 유지.
+
 - [2026-09-15 제품 Async 자기 원본 복원](2026-09-15-product-async-owned-restored.md) — 별도 scalar 지원·원432B/8controls exact, 원 전송 UNKNOWN 유지.
 
 - [2026-09-15 제품 Async 전환 중단](2026-09-15-product-async-transition-stop.md) — 최종 역할·자동 해제 ACK timeout, 자기 원복 미완료.
