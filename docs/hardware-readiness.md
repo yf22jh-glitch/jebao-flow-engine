@@ -245,7 +245,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | 앱이 만든 제3자 baseline을 standalone으로 복원할 승인된 exact restore 수단과 권한이 있는가 | **BLOCKING / 미확보** — 선행조건 2; integrated harness가 자기 baseline을 소유하는 단회와 구분 |
 | native MASTER/SLAVE 역할 write와 Sync 복구가 검증됐는가 | PASS |
 | Sync 세 구간에서 slave 자기 AutoFlow와 별도 Mode 변화가 보고됐는가 | **보고값 CONFIRMED / 자동 판정 미달·종료 기술실패 별도** — raw97 pair에서 AutoFlow30→40→35 및 master Auto와 일치하는 별도 Mode Sine→Constant; 물리 출력·파형 미증명. 역할 해제 확인 오류 뒤 원432B/control fresh2 pair exact 복원, Anti 미실행. [실행 기록](runs/2026-09-14-native-sync-wave-flow.md) |
-| Sync 공통 시간표에서 Flow만 다른 세 슬롯이 각각 보고됐는가 | **보고값 CONFIRMED / 물리 출력 UNKNOWN·전체 시험 PASS 아님** — master35→32→38/slave30→40→35, raw97 pair. windows0·1/충돌1로 자동 미달, 종료 disarm 증명 실패의 site/class/frame 보존·근본 원인 UNKNOWN. 원432B/controls 사후2 pair exact, 앱 최종OFF·서비스 복귀 대기. [실행 기록](runs/2026-09-15-native-sync-master-template-flow-only.md) |
+| Sync 공통 시간표에서 Flow만 다른 세 슬롯이 각각 보고됐는가 | **사용자 기능 수용 기준 PASS — 정확한 입력·동작 반환값 확인 완료 / 전체 시험 정상 종료는 아님** — full432B master97/97·slave97/97 exact, master35→32→38/slave30→40→35 응답. 물리 계측은 수용 조건이 아니며 미실시. windows0·1/충돌1 자동 미달과 exit2/disarm 증명 실패·근본 원인 UNKNOWN은 별개 유지. 원432B/controls 사후2 pair exact, 앱 최종OFF·서비스 복귀 대기. [실행 기록](runs/2026-09-15-native-sync-master-template-flow-only.md) |
 | 최소 write-free read-only collector가 실기 검증됐는가 | PASS — 18/18 pair, 36/36 explicit reply, offline verify PASS |
 | 세 수류모터를 같은 증거 기준으로 read-only 수집할 수 있는가 | **NOT IMPLEMENTED** — 현재 collector와 predicate는 두 Pro 전용이며 가산적 v3가 필요 |
 | 바형 수류모터에 승인된 exact restore 수단이 있는가 | **NOT IMPLEMENTED / WRITE PROHIBITED** — 384-byte schedule snapshot·restore 부재 |
