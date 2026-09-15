@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-15 제품 Async 연결 유지·직접 응답 확인](2026-09-15-product-async-reply-reconciliation.md) — 누적4회, ACK/직접reply timeout·소유 원복 exact, 배포 미완료.
+
 - [2026-09-15 제품 Async 역할 단독 전환](2026-09-15-product-async-role-only-stop.md) — Async ACK timeout, 변동값 gate 실패 아님.
 - [2026-09-15 역할 단독 실패의 소유 복원](2026-09-15-product-async-role-only-restored.md) — 원432B/8controls exact, 원 전달UNKNOWN·배포 미완료 유지.
 

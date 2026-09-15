@@ -55,3 +55,19 @@ old는 Sync 뒤 fresh pair를 읽은 연결에서 Async를 썼고, new는 관측
 schema `81ee699d9a71d98a1caa8bc99ac1d9619d2959ba04f343335a31d27e8ac914f1`과 40receipt를
 그대로 사용한다. 새 실장1회는 제품 누적4번째이며 원복 뒤 배포를 잇는다. 실패 시 새로운
 전진을 반복하지 않는다. 기존 first/Bar 앱 이전 복귀와 원 서비스 대체 계정은 분리한다.
+
+## 2026-09-15 실장 결과 추가
+
+`37175c0` 이미지의 [누적4번째 실행과 자기 원복](runs/2026-09-15-product-async-reply-reconciliation.md)은
+Async ACK timeout 뒤 새 직접reply도 timeout으로 끝났다. owned assist·child 최종 원복과 별도
+6reply exact는 확인했으나 Async 수용·운영 배포는 완료하지 않았다. source/test 추가 수정0이다.
+
+독립 검토는 source/test diff `f71f87f39759c0431c8ced04345ccebe78f18d04fcf6544078a9b2d644091f67`,
+전체 diff `2444ebba2d35f5bae88790b225690a090819efdf030062704c3167cf6d78c2d8`와 landing 일치를
+재산출했고 차단0이었다. 리뷰어의 별도 환경은 lifecycle58 PASS, full2899 PASS/3 FAIL/경고2였다.
+boot identity1·receipt 동시성2만 실패했고 이쪽의 권한/umask2는 재현하지 않았다. 앞 절의
+이쪽 full2897/5 FAIL과 구분하며 어느 쪽도 전체 PASS가 아니다. 리뷰어는 실기에 접근하지 않았다.
+
+비차단 진단 한계: 두 endpoint BEFORE가 모두 실패하면 첫 예외만 전파된다. final의 누적
+master 행은 chain 전체 합산 때 중복될 수 있다. 이번 reply-only read는 observer 없이 실행돼
+제외한 report를 보존하지 않았으므로 직접reply0과 전체무응답을 동일시할 수 없다.
