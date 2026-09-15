@@ -289,7 +289,10 @@ class NativeWavemakerController(LocalControlCoordinator):
             or source.actions[6].target != context.originals[1].target
             or source.actions[6].function != "native_controls"
             or json.loads(self._journal.load_blob(source.actions[6].expected_readback_sha256))
-            != {"SwitchON": True, "TimerON": True, "Linkage": "async_slave"}
+            not in (
+                {"SwitchON": True, "TimerON": True, "Linkage": "async_slave"},
+                {"Linkage": "async_slave"},
+            )
         ):
             raise ValueError(
                 "지원에는 완료된 attach 또는 마지막 Async 전환만 미확인인 원본이 필요합니다"
@@ -368,7 +371,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 if index > 0 and context.plan.mode == "async":
                     prepared.append(
                         writers[name].prepare_native_controls(
-                            {**desired, "Linkage": "async_slave"},
+                            {"Linkage": "async_slave"},
                             snapshots[name].baseline_status,
                         )
                     )
@@ -423,6 +426,15 @@ class NativeWavemakerController(LocalControlCoordinator):
             writer = self._writer_factory(endpoint)
             started = failure_clock_ns()
             try:
+                if (
+                    context.kind == "attach"
+                    and context.plan.mode == "async"
+                    and action.phase is ActionPhase.PREPARED
+                    and action.function == "native_controls"
+                    and json.loads(self._journal.load_blob(action.expected_readback_sha256))
+                    == {"Linkage": "async_slave"}
+                ):
+                    record = await self._observe_before_async(record, endpoints, permit)
                 began = datetime.now(UTC)
                 # image 안전 전제는 기존 schedule writer와 같은 reply-only 읽기로 확인한다.
                 reports = action.verification_kind != "schedule_image"
@@ -499,6 +511,38 @@ class NativeWavemakerController(LocalControlCoordinator):
             finally:
                 await writer.close()
         return await self._finish(record, context, endpoints, permit)
+
+    async def _observe_before_async(self, record, endpoints, permit):
+        """Fresh paired sessions, observation only; no new expected-value gate.
+
+        The earlier native-scenario-async run refreshed both streams between Sync and Async.
+        Preserve the actual reports here without treating clock/Auto as immutable controls.
+        """
+        rows = []
+        for endpoint in endpoints:
+            capture, status = await self._read(endpoint, permit, reports=True)
+            values = get_product_schema(endpoint.target.product_key).decode_status(status)
+            rows.append(
+                {
+                    "stage": "before_async_role_only",
+                    "logical_member": endpoint.target.logical_member,
+                    "capture_sha256": capture,
+                    "actual_controls": {
+                        name: values[name]
+                        for name in (
+                            "SwitchON", "TimerON", "Linkage", "Mode", "Flow", "Frequency",
+                            "AutoMode", "AutoFlow", "AutoFreq",
+                        )
+                    },
+                    "actual_schedule_sha256": hashlib.sha256(
+                        extract_current_pro_schedule_image(status)
+                    ).hexdigest(),
+                    "complete": False,
+                    "physical_measurement": False,
+                }
+            )
+            record = self._save_final(record, rows)
+        return record
 
     async def _finish(self, record, context, endpoints, permit):
         rows = []

@@ -864,3 +864,47 @@ async def test_failed_source_outside_last_async_shape_is_not_assisted(tmp_path):
     with pytest.raises(ValueError, match="지원 범위"):
         await controller.assist_detach(request_id="attach_0001", targets=rig.targets)
     assert (len(rig.reads), len(rig.sent)) == (reads, sends)
+
+
+@pytest.mark.asyncio
+async def test_async_transition_only_writes_linkage_and_preserves_pair_observation(tmp_path):
+    rig = Rig(tmp_path)
+    await rig.attach("async")
+    assert rig.sent[6][0:2] == ("slave", {"Linkage": "async_slave"})
+    source = rig.store.load("attach_0001")
+    final = json.loads(rig.store.load_blob(source.native_final_sha256))
+    observed = None
+    while final["previous"] is not None:
+        final = json.loads(rig.store.load_blob(final["previous"]))
+        if final["devices"][0].get("stage") == "before_async_role_only":
+            observed = final
+            break
+    assert observed is not None
+    assert [d["logical_member"] for d in observed["devices"]] == ["master", "slave"]
+    assert [d["actual_controls"]["Linkage"] for d in observed["devices"]] == [
+        "master", "sync_slave"
+    ]
+    assert all(d["complete"] is False for d in observed["devices"])
+    for row in observed["devices"]:
+        capture = json.loads(rig.store.load_blob(row["capture_sha256"]))
+        assert capture["action"] == 4  # fixture reports only, not a firmware assertion
+        assert rig.store.load_blob(capture["wire_sha256"])
+    await rig.detach()
+    assert rig.states == rig.originals
+
+
+@pytest.mark.asyncio
+async def test_pre_async_pair_read_failure_sends_no_async_and_restores(tmp_path):
+    rig = Rig(tmp_path)
+
+    def fail_pair(address, status, reports):
+        if len(rig.sent) == 6 and address == "master":
+            raise TimeoutError("synthetic paired observation read failure")
+        return status
+
+    rig.read_transform = fail_pair
+    with pytest.raises(LocalControlExecutionError, match="자기 원본 복원 확인"):
+        await rig.attach("async")
+    assert all(row[1].get("Linkage") != "async_slave" for row in rig.sent)
+    assert rig.store.load("attach_0001").actions[6].acknowledgement_sha256 is None
+    assert rig.states == rig.originals
