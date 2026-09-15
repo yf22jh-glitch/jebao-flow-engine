@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-15 master 링크 앱 재설정 후 Async 확인](2026-09-15-async-master-link-app-rearm.md) — 누적7회 ACK 미확인 뒤 앱 해제·재설정, Async 직접reply1/이후보고6, 원복·배포0.
+
 - [2026-09-15 앱 Async 조작 관측·명시 원복](2026-09-15-app-async-toggle-and-owned-restore.md) — 25pair에서 Sync 보고 유지, 사용자 화면 관찰 별도; 자기 원432B/8controls 복원, 새 결속0.
 
 - [2026-09-15 Async 사용자 관찰 대기](2026-09-15-product-async-operator-observation.md) — 누적6회, 마지막 전환9 send/8 ACK, 자동 원복0·사용자 지시 대기·배포 미완료.
