@@ -3642,6 +3642,63 @@ slave에 Mode 필드를 생략하는 것이 아니라 전체432B image에서 mas
 현재 TimerON을 이어 쓰더라도 전후 snapshot을 혼동하지 않고 마지막 앱 원복은 사용자 소유다.
 실행·원복·독립 검토를 기록 커밋하면 이번 실기 권한도 소진된다. 사용자 중지는 항상 우선한다.
 
+### 2026-09-15 — 외부 시나리오 실행·응답 대조 이미지 한정 재개
+
+사용자는 Sync/Async·파형·파형별 옵션·Flow·시간표를 외부에서 지정하고, 시나리오대로
+반환값이 오는지 확인하는 재사용 이미지를 먼저 만들어 통합 시험하라고 요청했다.
+"지금 뭐 할때마다 빌드하고 검증하고 시간이 너무 들어"라는 지적에 따라 시험값을 코드의
+고정 서명으로 추가하는 방식을 중단한다. 이 요청은 아래 구현과 최초 통합 시험의 근거이며,
+과거 단회 권한을 재사용하지 않는다. 이 절을 별도 커밋한 뒤 구현한다.
+
+구현·오프라인 검증 범위는 다음 열두 파일과 대응 사용법·시나리오·결과 문서다.
+
+1. `src/jebao_flow/devices/native_scenario.py` (신규: 순수 입력 계약·스케줄 컴파일)
+2. `src/jebao_flow/devices/native_scenario_evidence.py` (신규: 순수 기대값/실측값 대조)
+3. `src/jebao_flow/devices/schedule_flow_experiment.py`
+4. `src/jebao_flow/devices/schedule_linkage.py`
+5. `src/jebao_flow/devices/schedule_transaction.py`
+6. `src/jebao_flow/schedule_flow_experiment_cli.py`
+7. `tests/unit/test_native_scenario.py`
+8. `tests/unit/test_native_scenario_evidence.py`
+9. `tests/unit/test_schedule_flow_experiment.py`
+10. `tests/unit/test_schedule_linkage_transaction.py`
+11. `tests/unit/test_schedule_transaction.py`
+12. `tests/unit/test_schedule_flow_experiment_cli.py`
+
+JSON 시나리오는 실행 코드가 아닌 자료다. 임의 Python·셸 명령·원격 주소·비밀값을 받지
+않는다. 역할, 슬롯, 파형별 옵션, Flow, 전환 시각, 명시적 기대 반환값을 검증하고 canonical
+digest로 preflight·intent·journal·raw·결과를 결속한다. preflight 뒤 입력이 달라지면 기존
+확인 토큰으로 실행하지 않는다. 날짜·분·표본 안정성의 기존 판정은 조용히 완화하지 않는다.
+새 자료 기반 판정은 별도 계약으로 명시하고 입력 read-back·기능 응답·기술 종료·원복을
+분리한다. 누락을 기대값으로 채우거나 시험 코드가 펌웨어 답을 만드는 fake는 금지한다.
+
+기존 outer/temporary/role 트랜잭션의 identity·binding·cap/step·single-write·journal/fsync·
+역순 복원·취소 shield를 그대로 사용한다. legacy spec의 직렬화·확인 토큰·recovery 의미를
+보존한다. 고정 실험값은 새 시나리오에서만 자료로 대체하며 기존 허용 목록을 전역 삭제하지
+않는다. 파형별 입력은 기존 Pro codec과 장비 capability가 표현하는 범위로 제한하고,
+인코딩 가능성을 실기 검증 완료로 쓰지 않는다. 임시 Flow 상한41과 safe manual30/31을
+유지한다. 공용 guard, `devices/linkage.py`, `local_control/`, protocol/schema 입력,
+다른 CLI·timeout/retry·전송 정책은 범위 밖이다. 실제 추가 범위가 필요하면 보고한다.
+
+직전 disarm 실패는 해결됐다고 쓰지 않는다. 이 범위에서 기대/실측 보호 필드와 실패 분기를
+비밀값 없이 보존하는 진단을 보강할 수 있으나 안전 거부·예외 전파·원복 순서는 바꾸지
+않는다. 새 master-only 실시간 schedule write 경로를 만들거나 detach/stage/relink를
+"연동 중 자동 전파" 시험으로 이름만 바꾸는 것은 포함하지 않는다.
+
+최초 통합 실기는 Pro pair에 Sync1회·Async1회, 최대 두 operation이다. 각 operation의
+시나리오·현재 신원·원 시간표432B·controls·image/source·지명 native receipt를 실행 전에
+결속한다. receipt 만료 한정 예외를 사용할 경우 이번 두 operation에만 결속하고 나머지
+존재·operation·device·physical binding 검사는 유지한다. 새 qualification은 자동 실행하지
+않는다. 각 회차는 자기 baseline을 복원하며 기술 실패·위험·원복 미확인 시 다음 회차는
+자동 중단한다. 기능 가설과 다른 응답 자체는 보존할 결과이지 반복 명령의 근거가 아니다.
+현장 감시와 사용자 중단 우선은 유지하되 같은 승인·현장 질문을 반복하지 않는다.
+
+동일 이미지에서 자료만 바꾸는 것은 재빌드·전체 suite 반복 사유가 아니다. 매 자료의 순수
+검증과 실행 전 fresh 확인은 남는다. 실행 로직이 바뀔 때만 이미지·코드 검증을 갱신한다.
+구현 결과 커밋 시 source/test 예외는 재동결되고, 두 실기 결과·원복 기록 커밋으로 실행
+권한을 소진한다. 기존 first Pro 앱 이전 TimerOFF/manual constant40/F34와 원 서비스 복귀
+의무는 별도 유지하며 현재 TimerON을 원본으로 혼동하지 않는다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
