@@ -3699,6 +3699,32 @@ digest로 preflight·intent·journal·raw·결과를 결속한다. preflight 뒤
 권한을 소진한다. 기존 first Pro 앱 이전 TimerOFF/manual constant40/F34와 원 서비스 복귀
 의무는 별도 유지하며 현재 TimerON을 원본으로 혼동하지 않는다.
 
+### 2026-09-15 — Sync 종료 결과 보고 뒤 Async 한 회 재개
+
+사용자는 `29078d3`의 Sync 결과(입력/응답 PASS, 종료 exit2, 사후 원432B/controls exact,
+Async 미실행)를 안내받은 뒤 **"async 진행해"**라고 명시적으로 재개를 지시했다.
+이는 이전 기술 실패 후 자동 중단을 없던 것으로 만드는 것이 아니라, 중단·보고 이후의
+새 Async1회 승인이다. 같은 현장 질문을 반복하거나 이 지시를 앱 OFF 완료 회신으로 바꾸지 않는다.
+
+이번 범위는 source `a4fcd98`·기존 재사용 이미지와 외부 `async-wave-and-own-flow` case를
+그대로 사용한 Async1회다. source/test 수정·재빌드·전체 suite 반복·새 timeout/retry·새
+장비 write 경로는 포함하지 않는다. 이 절을 별도 커밋하고 현재 신원·원432B·controls·
+차단 journal 부재·source/image·scenario와 새 operation을 결속한 뒤 실행한다.
+기존 parent 정책의 지명 native receipt 만료 한정 예외를 이번 Async1회에만 유지하며,
+존재·operation·device·physical binding 및 나머지 안전 검사는 그대로 둔다.
+
+직전 최초 role 오류와 composed disarm의 근본 원인은 UNKNOWN이며 재발할 수 있다.
+이 위험을 해결됐다고 쓰지 않고 기존 복원·취소 shield·진단을 그대로 사용한다. 현재 복원
+미확인이나 위험·실행 오류가 나오면 추가 전진/반복을 중단하고 자기 snapshot 복원을
+확인·보고한다. 정상 경로 logical 예상23은 physical send 수나 성공 횟수가 아니다.
+기능 기대와 다른 응답은 보존할 결과이고 성공할 때까지 반복할 권한은 아니다.
+
+각 구간의 기대/실측·원본·세 창 response, 기술 종료, 원복을 각각 기록한다. Async PASS를
+물리 역위상 계측이나 내부 파형/시계 소유 증명으로 올리지 않는다. 이번 시작 snapshot과
+기존 first Pro 앱 이전 TimerOFF/manual constant40/F34·원 서비스 복귀 의무는 분리한다.
+최종 앱 조작은 사용자 소유로 유지하며 불필요한 OFF→ON 왕복을 만들지 않는다.
+실기 결과·원복 기록 커밋으로 이번 Async 단회 권한은 소진되고 source/test는 계속 동결이다.
+
 ## 2. 첫 write 이전 게이트 — 무엇을 줄이고 무엇을 지키는가
 
 이 규칙은 **게이트를 무조건 줄이라는 뜻이 아닙니다.** 늘리기만 하던 방향을 멈추는 것이 목적이며,
