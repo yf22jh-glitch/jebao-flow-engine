@@ -74,6 +74,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 
 | 파일 | 범위 | 요지 |
 |---|---|---|
+| [2026-09-15 외부 시나리오 Async](2026-09-15-native-scenario-async.md) | 재빌드 없이 Async1회, raw96 pair 중 Sync 경유1·Async95, 원432B/control 사후2 pair exact | 입력/세 창 응답 PASS·192비교 불일치0, 종료 exit2·해제 실패 필드3개는 별도; 최종 앱/서비스 복귀 대기 |
 | [2026-09-15 외부 시나리오 Sync](2026-09-15-native-scenario-sync.md) | 동일 이미지·외부 JSON Sync1회, raw96 pair, 원432B/control 사후2 pair exact | 입력/세 창 응답 PASS, 종료 exit2·첫 composed disarm slave3조건 미일치 별도; Async0·최종 앱/서비스 복귀 대기 |
 | [2026-09-15 Native Sync 공통 시간표·Flow 차이](2026-09-15-native-sync-master-template-flow-only.md) | Sync1회, raw97 pair, 원 시간표·controls 사후2 pair exact | master35→32→38/slave30→40→35 Auto 보고 확인; 자동 창 충돌·종료 disarm 증명 실패 별도, 실제 수류 미확정·최종 앱/서비스 복귀 대기 |
 | [2026-09-14 Native Sync 파형·Flow 세 구간](2026-09-14-native-sync-wave-flow.md) | Sync1회, raw97 pair, 원 시간표·controls 사후2 pair exact | slave AutoFlow30→40→35·별도 Mode 변화 보고 확인; 자동 창 자격 미달과 종료 시 역할 해제 오류는 별개, Anti 미실행·최종 앱/서비스 복귀 대기 |

@@ -239,6 +239,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 
 | 질문 | 판정 |
 |---|---|
+| 재사용 이미지·외부 JSON의 Async 세 구간 입력과 응답이 일치하는가 | **입력 read-back PASS / response PASS — 전체 정상 종료 아님**; Async95 pair·192비교 불일치0, Sync 경유1 pair 별도 보존. 종료 exit2·최초 role 오류 UNKNOWN·해제 실패 필드3개 별도. 원432B/controls fresh2 pair exact, 최종 앱OFF/서비스 복귀 대기. 위상은 비교 대상 아님. [실행 기록](runs/2026-09-15-native-scenario-async.md) |
 | 재사용 이미지·외부 JSON의 Sync 세 구간 입력과 응답이 일치하는가 | **입력 read-back PASS / response PASS — 전체 정상 종료 아님**; raw96 pair·세 창 안정17/6/2 pair·비교200건 불일치0. 종료 exit2·첫 composed disarm slave3조건 미일치와 최초 role 오류 UNKNOWN 별도. 원432B/controls fresh2 pair exact, Async0·최종 앱OFF/서비스 복귀 대기. [실행 기록](runs/2026-09-15-native-scenario-sync.md) |
 | ASYNC 대상 두 Pro를 정확히 식별했는가 | PASS |
 | 필요한 로컬 transport와 Pro wire schema가 있는가 | PASS |
