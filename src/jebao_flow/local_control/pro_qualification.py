@@ -40,6 +40,7 @@ from jebao_flow.local_control.wavemaker_restore import (
     WavemakerRestoreSnapshot,
     compare_restore_readback,
 )
+from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 
 _FUNCTIONS = (
     "schedule",
@@ -79,6 +80,18 @@ def _schedule(flow):
             ],
         }
     )
+
+
+def _app_trial_values(product_key, function, baseline):
+    """Two distinct app-declared values; avoid a first-step NO_CHANGE.
+
+    The 2026-09-15 custom-frequency run sent 1 below the declared minimum 5.
+    This chooses from the existing app contract, not an inferred firmware clamp.
+    """
+    minimum, maximum = declared_app_integer_range(product_key, function)
+    if minimum + 1 > maximum:
+        raise QualificationProductionError("app range has no two distinct trial values")
+    return (minimum + 1, minimum) if baseline == minimum else (minimum, minimum + 1)
 
 
 def _plan(targets):
@@ -255,8 +268,20 @@ class ProQualificationProducer(NativeWavemakerController):
                 ("schedule_enable", (True, False)),
                 ("manual_mode", ("sine", "constant")),
                 ("manual_frequency", (21, 20)),
-                ("feeding_duration", (2, 1) if controls["FeedTime"] == 1 else (1, 2)),
-                ("custom_wave_frequency", (2, 1) if controls["Cust_Wav_Freq"] == 1 else (1, 2)),
+                (
+                    "feeding_duration",
+                    _app_trial_values(
+                        endpoint.target.product_key, "feeding_duration", controls["FeedTime"]
+                    ),
+                ),
+                (
+                    "custom_wave_frequency",
+                    _app_trial_values(
+                        endpoint.target.product_key,
+                        "custom_wave_frequency",
+                        controls["Cust_Wav_Freq"],
+                    ),
+                ),
                 ("manual_flow", (39, 40)),
                 ("power", (False, True)),
                 ("linkage_role", ("master", "independent")),
@@ -371,8 +396,9 @@ class ProQualificationProducer(NativeWavemakerController):
                 raise QualificationProductionError(
                     "qualification has no actual ACK/verified action"
                 )
-            if not self._journal.load_blob(action.acknowledgement_sha256):
-                raise QualificationProductionError("qualification ACK is empty")
+            # send_raw_control validates command/sequence before returning the body.
+            # Empty is valid (2026-09-11 and 2026-09-15 runs); missing/corrupt is not.
+            self._journal.load_blob(action.acknowledgement_sha256)
             entry = json.loads(self._journal.load_blob(action.native_evidence_sha256))
             if entry["stage"] != "after" or entry["match"] is not True:
                 raise QualificationProductionError("qualification lacks post-send raw evidence")

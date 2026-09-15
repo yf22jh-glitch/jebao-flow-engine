@@ -9,15 +9,21 @@ import pytest
 from jebao_flow import local_control_pro_qualification_cli as cli
 from jebao_flow.local_control.device_writer import ConnectedDeviceWriter
 from jebao_flow.local_control.install import current_protocol_schema_sha256
-from jebao_flow.local_control.journal import ActionPhase, TransactionPhase, native_detach_request_id
+from jebao_flow.local_control.journal import (
+    ActionPhase,
+    LocalControlJournalError,
+    TransactionPhase,
+    native_detach_request_id,
+)
 from jebao_flow.local_control.models import LocalControlIntent, QualificationBinding
-from jebao_flow.local_control.pro_qualification import ProQualificationProducer
+from jebao_flow.local_control.pro_qualification import ProQualificationProducer, _app_trial_values
 from jebao_flow.local_control.qualification import verify_qualification_receipts
 from jebao_flow.local_control.qualification_producer import (
     QualificationArtifactStore,
     QualificationEpoch,
     QualificationProductionError,
 )
+from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
 from tests.unit.test_local_control_wavemaker_lifecycle import FUNCTIONS, MemoryTransport, Rig, _plan
 
@@ -224,7 +230,10 @@ async def test_output_metadata_failure_precedes_hardware(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", ["readback", "report", "kind", "ack", "final"])
+@pytest.mark.parametrize(
+    "corruption",
+    ["readback", "report", "kind", "ack", "ack_missing_blob", "ack_corrupt_blob", "final"],
+)
 async def test_offline_finalizer_rechecks_raw_and_declared_action_before_receipts(
     tmp_path, corruption
 ):
@@ -257,7 +266,12 @@ async def test_offline_finalizer_rechecks_raw_and_declared_action_before_receipt
     elif corruption == "kind":
         action = action.model_copy(update={"verification_kind": "scalar_fields"})
     elif corruption == "ack":
-        action = action.model_copy(update={"acknowledgement_sha256": rig.store.install_blob(b"")})
+        # An absent ACK is invalid; an empty, sequence-confirmed body is valid.
+        action = action.model_copy(update={"acknowledgement_sha256": None})
+    elif corruption == "ack_missing_blob":
+        action = action.model_copy(update={"acknowledgement_sha256": "f" * 64})
+    elif corruption == "ack_corrupt_blob":
+        (rig.store.blobs / action.acknowledgement_sha256).write_bytes(b"tampered-test-ack")
     else:
         restored = rig.store.load(native_detach_request_id(OPERATION))
         final = json.loads(rig.store.load_blob(restored.native_final_sha256))
@@ -270,7 +284,11 @@ async def test_offline_finalizer_rechecks_raw_and_declared_action_before_receipt
         )
     actions[2] = action
     record = record.model_copy(update={"actions": tuple(actions)})
-    with pytest.raises(QualificationProductionError):
+    error_type = {
+        "ack_missing_blob": FileNotFoundError,
+        "ack_corrupt_blob": LocalControlJournalError,
+    }.get(corruption, QualificationProductionError)
+    with pytest.raises(error_type):
         producer._finalize(record, tuple(epochs), current=False)
     assert not list((tmp_path / "receipts").glob("*.json"))
 
@@ -320,3 +338,40 @@ def test_cli_no_write_opt_in_reports_error_without_loading_private_input(capsys)
     assert output["accepted"] is False
     assert output["record"] is None
     assert "recover-wavemaker" in output["next_command"]
+
+
+@pytest.mark.parametrize("function", ["feeding_duration", "custom_wave_frequency"])
+@pytest.mark.parametrize("baseline", [0, 1, 2, 5, 6, 100])
+def test_trial_values_use_declared_app_range_not_encoder_range(function, baseline):
+    minimum, maximum = declared_app_integer_range(SCHEMA.product_key, function)
+    first, second = _app_trial_values(SCHEMA.product_key, function, baseline)
+    assert minimum <= first <= maximum and minimum <= second <= maximum
+    assert first != second and first != baseline
+    assert {first, second} == {minimum, minimum + 1}
+
+
+@pytest.mark.asyncio
+async def test_sequence_confirmed_empty_ack_body_can_qualify_and_replay(tmp_path, monkeypatch):
+    # ACK return shape observed in docs/runs/2026-09-15-pro-qualification-custom-frequency-stop.md;
+    # this wraps only transport bookkeeping, not a guessed firmware response rule.
+    original_send = MemoryTransport.send_raw_control
+
+    async def empty_body(session, payload):
+        await original_send(session, payload)
+        return b""
+
+    monkeypatch.setattr(MemoryTransport, "send_raw_control", empty_body)
+    rig, producer, _ = _setup(tmp_path)
+    result = await producer.execute(OPERATION)
+    assert result["qualification_pairs"] == 18 and result["receipt_count"] == 36
+    assert result["restored"] and rig.states == rig.originals
+    record = rig.store.load(OPERATION)
+    assert all(
+        a.acknowledgement_sha256 == hashlib.sha256(b"").hexdigest() for a in record.actions[2:]
+    )
+    assert all(rig.store.load_blob(a.acknowledgement_sha256) == b"" for a in record.actions[2:])
+    sent, reads = len(rig.sent), len(rig.reads)
+    replay = await producer.execute(OPERATION)
+    assert replay["candidates"] == result["candidates"]
+    assert not replay["current_state_verified"]
+    assert (len(rig.sent), len(rig.reads)) == (sent, reads)

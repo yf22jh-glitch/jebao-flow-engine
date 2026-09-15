@@ -24,7 +24,7 @@ context의 독립 reply만 사용하고 action별 일반 역순 복원을 사용
 | Timer | ON → OFF, 앱과 같은 SwitchON 반전 | schedule_enable 두 결합 응답 |
 | Mode | sine → constant | manual_mode 두 응답 |
 | Frequency | 21 → 20 | manual_frequency 두 응답 |
-| Feed/custom | 각각 1→2, 원래 1이면 2→1 | 각 선택 필드 두 응답; 새 입력 0 금지 |
+| Feed/custom | app 최소·최소+1, 원본이 최소면 역순. Feed1/2·custom5/6 | 각 선택 필드 두 응답; 새 입력 0 금지 |
 | Flow | 39 → 40 | manual_flow 두 응답 |
 | Power | OFF → ON, TimerOFF 유지 | power 두 응답 |
 | Role | master → independent | linkage_role 두 응답; Sync/Async 수용 증거 아님 |
@@ -70,3 +70,13 @@ Bar는 기존 두 producer의 ON·TimerOFF·independent·constant·허용 Flow �
 이전 first Pro 앱 TimerOFF 의무는 이번 실기 **이후**에 남긴다. 지금 OFF→ON 왕복을 만들지
 않으며 현재 실제 Timer 상태로 자기 baseline을 잡고 그 상태까지만 복원한다. 이전 앱 원본과
 이번 시작 원본을 분리 계상한다. 새 generation 기동을 이전 exact 서비스 복귀로 쓰지 않는다.
+
+## 2026-09-15 실패 근거에 따른 재개
+
+첫 Pro qualification은 [기록](runs/2026-09-15-pro-qualification-custom-frequency-stop.md)처럼
+custom에 app 최소5 미만인1을 보내5가 반환되어 중단·원복했다. 이 질문의 실기는1회이며 정보0이 아니다.
+사용자의 “될때까지 수정하고 배포해” 승인으로 두 소프트웨어 결함을 정정하고 새 operation으로 재개한다.
+두 번째 단회에는 app 범위 helper로 값 선정, command·sequence 확인 뒤 empty ACK body 정상 수용을
+적용한다. 존재하지 않거나 손상된 ACK, 불일치 raw, 원복 미확인으로 receipt를 만들지는 않는다.
+writer·protocol·schema는 유지한다. 직전 실패 id를 재실행하거나 이전 journal/receipt를 고치지 않는다.
+그 뒤 자격/원복을 확인한 경우에만 Bar 두 producer, Sync/Async 제품 lifecycle과 배포를 잇는다.
