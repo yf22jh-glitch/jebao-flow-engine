@@ -3994,3 +3994,23 @@ schema digest 변경을 수반하므로 기존 receipt는 새 내용에 자동 �
 오류 시 자동 반복·timeout 증가·Sync 재점화·factory reset은 포함하지 않는다.
 이전 first Pro 최종 앱 OFF·서비스 복귀 의무는 새 제품 작업과 별개로 유지한다.
 구현 단계별 결과를 문서화하고, 완료 커밋으로 그 구현 범위를 소진한다. 미완료 단계는 명시한다.
+
+## 2026-09-15 수류모터 native lifecycle 실행기 구현 재개
+
+repository maintainer는 1차 구현의 미완료 범위를 보고받은 뒤
+“실제 Sync/Async 결속·해제 실행기는 아직 미완료예요--- 이것도 완료 해야하는데”라고 요청했다.
+이는 실제 실행기의 소프트웨어 구현·오프라인 검증 재개이며 새 실기·배포 승인이 아니다.
+상세 계약은 `docs/wavemaker-lifecycle-plan.md`다.
+
+범위는 `local_control/journal.py`, `coordinator.py`, `device_writer.py`,
+`wavemaker.py`, `wavemaker_restore.py`, 새 `wavemaker_lifecycle.py`, `local_control_cli.py`와
+직접 tests·예시·문서다. journal 변경은 기존 root 안의 소유 원본·단계·증거 결속이며 별도 safety
+namespace를 만들지 않는다. legacy 직렬화·일반 recovery·power-off 정책은 유지한다.
+native 작업만 일반 reverse rollback과 구분하고, 역할 해제와 TimerOFF·safe 제어를 atomic frame으로
+실행한 뒤 원 image·원 controls 순서로 복원한다. 해제 실패 후 재결속·같은 frame 자동 재시도는 없다.
+성공한 attach 기록은 undo로 재실행하지 않고, 자기 원본에 결속된 새 detach 작업을 기록한다.
+신원·출력 범위/step·단일 전송·fsync·원복 권한·현재 qualification 결속은 유지한다.
+reply/report를 수용하는 native 전용 읽기는 action·raw·시각을 보존하며 기존 읽기 정책은 바꾸지 않는다.
+§1 frozen native·직접 tests, `protocol/`, 공용 guard, 기존 HA/MQTT/서비스는 변경하지 않는다.
+schema fingerprint 변경을 숨기거나 기존 자격으로 새 구현이 검증됐다고 쓰지 않는다.
+완료 커밋으로 이번 구현 범위를 소진하고 실장 자격·배포·이전 원복 의무는 별도 상태로 남긴다.
