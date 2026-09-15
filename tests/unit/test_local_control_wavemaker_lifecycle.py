@@ -798,3 +798,69 @@ async def test_legacy_native_context_serialization_omits_new_field(tmp_path):
     raw = rig.store.load_blob(rig.store.load("attach_0001").native_context_sha256)
     assert b"assisted_record_sha256" not in raw
     assert NativeContext.model_validate_json(raw).model_dump_json().encode() == raw
+
+
+@pytest.mark.asyncio
+async def test_failed_last_async_and_detach_can_restore_owned_original_without_resend(tmp_path):
+    rig = Rig(tmp_path)
+
+    def timeout_before_copy(number, address, changes):
+        if number in {7, 8}:
+            raise TimeoutError("synthetic final role and first detach ACK loss")
+
+    rig.before_send = timeout_before_copy
+    with pytest.raises(LocalControlExecutionError, match="원복 미확인"):
+        await rig.attach("async")
+    source = rig.store.load("attach_0001")
+    child = rig.store.load(native_detach_request_id(source.request_id))
+    assert source.phase is TransactionPhase.RECOVERY_REQUIRED
+    assert [a.phase for a in source.actions] == [ActionPhase.VERIFIED] * 6 + [ActionPhase.UNCERTAIN]
+    assert child.actions[0].phase is ActionPhase.UNCERTAIN
+    assert all(a.phase is ActionPhase.PREPARED for a in child.actions[1:])
+    failed = source.actions[6]
+    rig.before_send = None
+    sent = len(rig.sent)
+    result = await rig.controller().assist_detach(request_id=source.request_id, targets=rig.targets)
+    assert result["accepted"] and result["current_state_verified"]
+    assert rig.states == rig.originals
+    recovered = rig.store.load(source.request_id)
+    assert recovered.phase is TransactionPhase.ROLLED_BACK
+    assert recovered.native_context_sha256 == source.native_context_sha256
+    assert recovered.actions[6].acknowledgement_sha256 is None
+    assert recovered.actions[6].native_evidence_sha256 == failed.native_evidence_sha256
+    assert recovered.actions[6].diagnostic == "native_own_baseline_restored_delivery_unknown"
+    assert all(
+        row[0] != "slave"
+        or (
+            row[4] != rig.store.load_blob(failed.forward_payload_sha256)
+            and row[4] != rig.store.load_blob(child.actions[0].forward_payload_sha256)
+        )
+        for row in rig.sent[sent:]
+    )
+    assert rig.store.load(child.request_id).phase is TransactionPhase.VERIFIED
+    reads, sends = len(rig.reads), len(rig.sent)
+    replay = await rig.controller().assist_detach(request_id=source.request_id, targets=rig.targets)
+    assert replay["accepted"] and replay["current_state_verified"] is False
+    assert (len(rig.reads), len(rig.sent)) == (reads, sends)
+
+
+@pytest.mark.asyncio
+async def test_failed_source_outside_last_async_shape_is_not_assisted(tmp_path):
+    rig = Rig(tmp_path)
+
+    def timeout_before_copy(number, address, changes):
+        if number in {6, 7}:
+            raise TimeoutError("synthetic earlier role and first detach ACK loss")
+
+    rig.before_send = timeout_before_copy
+    with pytest.raises(LocalControlExecutionError, match="원복 미확인"):
+        await rig.attach("async")
+    rig.before_send = None
+    reads, sends = len(rig.reads), len(rig.sent)
+    controller = rig.controller()
+    source = rig.store.load("attach_0001")
+    with pytest.raises(ValueError, match="마지막 Async 전환만"):
+        controller._require_assistance_source(source, controller._context(source))
+    with pytest.raises(ValueError, match="지원 범위"):
+        await controller.assist_detach(request_id="attach_0001", targets=rig.targets)
+    assert (len(rig.reads), len(rig.sent)) == (reads, sends)

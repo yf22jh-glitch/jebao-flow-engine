@@ -203,8 +203,8 @@ class NativeWavemakerController(LocalControlCoordinator):
         """명시적으로 승인된 별도 scalar 5단계. 기존 atomic 재전송·역순 복구 없음."""
         source = self._required(request_id)
         context = self._context(source)
-        if context.kind != "attach" or source.phase is not TransactionPhase.VERIFIED:
-            raise ValueError("지원에는 완료된 자기 attach 원본이 필요합니다")
+        if context.kind != "attach":
+            raise ValueError("지원에는 자기 attach 원본이 필요합니다")
         self._require_current_targets(context, targets)
         child_id = native_detach_request_id(request_id)
         assist_id = native_assistance_request_id(request_id)
@@ -218,6 +218,8 @@ class NativeWavemakerController(LocalControlCoordinator):
                     return self._public(child, current=False)
             else:
                 self._require_stalled_first_slave(child, context)
+            source = self._required(request_id)
+            self._require_assistance_source(source, context)
             self._require_available(targets, allowed=(request_id, child_id, assist_id))
             originals = tuple(o.target for o in context.originals)
             endpoints = await self._resolver.resolve_many(originals)
@@ -271,6 +273,27 @@ class NativeWavemakerController(LocalControlCoordinator):
             if record.phase is not TransactionPhase.VERIFIED:
                 await self._advance(record, assist_context, endpoints, permit)
             return await self._detach_locked(source, context, endpoints, permit)
+
+    def _require_assistance_source(self, source, context):
+        if source.phase is TransactionPhase.VERIFIED:
+            return
+        # 2026-09-15 product Async: original ownership survives its last-role ACK timeout.
+        # This admits recovery only; neither the role command nor the child atomic is resent.
+        if (
+            source.phase is not TransactionPhase.RECOVERY_REQUIRED
+            or context.plan.mode != "async"
+            or len(context.originals) != 2
+            or len(source.actions) != 7
+            or any(a.phase is not ActionPhase.VERIFIED for a in source.actions[:6])
+            or source.actions[6].phase is not ActionPhase.UNCERTAIN
+            or source.actions[6].target != context.originals[1].target
+            or source.actions[6].function != "native_controls"
+            or json.loads(self._journal.load_blob(source.actions[6].expected_readback_sha256))
+            != {"SwitchON": True, "TimerON": True, "Linkage": "async_slave"}
+        ):
+            raise ValueError(
+                "지원에는 완료된 attach 또는 마지막 Async 전환만 미확인인 원본이 필요합니다"
+            )
 
     @staticmethod
     def _assistance_steps(context, endpoints):
@@ -617,7 +640,11 @@ class NativeWavemakerController(LocalControlCoordinator):
                 {
                     **item.model_dump(),
                     "phase": ActionPhase.ROLLED_BACK,
-                    "diagnostic": "native_own_baseline_restored",
+                    "diagnostic": (
+                        "native_own_baseline_restored_delivery_unknown"
+                        if item.phase is ActionPhase.UNCERTAIN
+                        else "native_own_baseline_restored"
+                    ),
                 }
             )
             for item in source.actions
