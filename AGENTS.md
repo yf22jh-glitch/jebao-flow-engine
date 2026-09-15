@@ -4168,3 +4168,43 @@ writer/schema9개·40receipt·공용 coordinator/guard·protocol timeout/retry·
 새 상태 확인 뒤 final 대조가 실패한 source도 자기 원복이 가능해야 한다. 소유 지원의 기존
 Async7단계/앞6 VERIFIED/마지막 exact payload/원본/child 전제는 유지하면서, 마지막이
 ACKNone·reply확인 전용 진단·VERIFIED인 경우도 포함한다. 원 명령 전달 UNKNOWN은 유지한다.
+
+## 2026-09-15 성공했던 단계별 활성화 절차로 제품 재검증
+
+`9c02764`에 제품 누적4회 실패와 자기 원복 완료를 기록·보고한 뒤, 사용자가 “야 확인하고 다시
+수정 배포해 뭐가 잘 못되었는지 ?? 성공했던 절차대로 진행해봐”라고 새로 지시했다. 이는 §7
+보고 뒤 성공 경로와의 실제 차이를 대조하고 수정·단회 재검증·배포하는 새 범위다. 앞선 실행이
+성공 절차 전체의 재현이었다고 쓰지 않는다. 누적 횟수를 초기화하지 않으며 이번은 제품5회차다.
+
+먼저 `a4fcd98` 성공 하네스의 명령 mapping·호출 순서·연결 교체·읽기·간격을 정적으로 대조한다.
+제품의 TimerON+역할 복합 쓰기를 independent TimerON 두 단계와 master/Sync/Async 역할 단독
+쓰기로 분리한다. 기존 준비·image와 합해 Async9개/Sync8개 action이며 첫 전송 전에 전량
+내구화한다. 양쪽 연결 준비 완료 뒤 pair read, 그 연결에서 다음 역할 write, 기존 성공 adapter의
+명령 간격1초·ACK 후 읽기 간격0.5초/최대3회 및 역할 전 read-only settle1초를 명시해 적용한다.
+이는 해당 제품 절차의 정상 readback을 기존 성공 경로에 맞추는 변경이지 shared transport의
+timeout·제어 재전송 변경이 아니다. ACK 오류 뒤 직접reply1회·원 전달UNKNOWN 경계는 유지한다.
+
+source 범위는 `local_control/wavemaker_lifecycle.py`, `wavemaker.py`, 필요한 native 전용
+연결/순서 모듈과 직접 tests·문서다. 기존 writer의 payload·single-send를 재사용하며, 양쪽 인증
+완료를 기다리는 native 읽기 표면만 따로 구성한다. `device_writer.py`와 schema9개·40receipt·
+일반 coordinator/guard·protocol·frozen native6개는 불변이다. 새 prepare Flow 지정은 기존
+모델 범위·qualification 검사 안에서 master30/slave31/F20을 명시할 수 있게 하며 과거 실기
+상수를 숨은 제품 기본값으로 승계하지 않는다. 기본 공통 준비값은 그대로다.
+
+신규 context에 절차 버전을 결속하고 옛 context는 새 단계를 재해석하지 않는다. 기존6개 child
+복원과5개 scalar assist는 자기 원본·identity·qualification·3-id·no-resend를 유지한다. 새9단계의
+slave 역할 전송 실패/ACK 없는 상태확인 뒤 final 실패도 정확한 source 형상을 대조해 자기
+원복이 막히지 않게 한다. 원복은 전달 성공의 증명이 아니며 UNKNOWN 진단을 계속 보존한다.
+읽기 중 관측되는 frame은 기존 진단 observer로 수집하되 판정/timeout에 개입하지 않는다.
+
+이번 동일화 대상은 제품의 정상 활성화 명령·연결·읽기 절차다. 이미 current인 자격을 얻기 위한
+옛 sentinel 쓰기, 동결 하네스의 날짜/Auto/같은 분 게이트·10/15분 epoch는 되살리지 않는다.
+현재 선언 시간표의 값·절대시각과 과거 시험 조건도 동일하다고 주장하지 않는다. 명령순서와
+펌웨어 원인의 동일성은 별개다. mock은 byte-copy·fault injection과 순서 검사뿐이다.
+
+최종 source/image/자격·자기 원복 상태를 결속한 Pro pair 신규 operation1회만 실행한다.
+실패하면 기존 자기 원복/소유 지원과 증거 보존을 먼저 완료하고 보고한다. 동일payload 재전송·
+임의 대안 반복·여섯 번째 전진은 이번 범위가 아니다. 수용·원복 확인 뒤 기존6개 제어를 보존해
+운영 generation 교체와 startup write0·group 비무장·상태 출판을 검증한다. 배포 실패 시 exact
+prior 서비스 rollback, first 앱OFF·Bar 앱이전값 복귀 별도 의무를 유지한다. 동일 현장 질문을
+반복하지 않으며 사용자 발언을 새 앱 완료나 물리 안전 선언으로 바꾸지 않는다.
