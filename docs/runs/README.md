@@ -1,5 +1,8 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-15 Pro 일일 Async·master cycle 적용](2026-09-15-pro-daily-async-master-cycle.md) — 위 master/아래 Async,16슬롯 전체 일치·현재35/30 F70, 별도24h RO 관측 진행.
+- [2026-09-15 일일 운영 전 자기 원복](2026-09-15-before-daily-pro-owned-restored.md) — 기존 보류02 원432B/8controls 복원, 미전송 assist 재개·동일 명령 재전송0.
+
 - [2026-09-15 master 링크 앱 재설정 후 Async 확인](2026-09-15-async-master-link-app-rearm.md) — 누적7회 ACK 미확인 뒤 앱 해제·재설정, Async 직접reply1/이후보고6, 원복·배포0.
 
 - [2026-09-15 앱 Async 조작 관측·명시 원복](2026-09-15-app-async-toggle-and-owned-restore.md) — 25pair에서 Sync 보고 유지, 사용자 화면 관찰 별도; 자기 원432B/8controls 복원, 새 결속0.
