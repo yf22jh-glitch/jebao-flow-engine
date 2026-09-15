@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-15 Pro 자격 정정 후 발급·원복 PASS](2026-09-15-pro-qualification-app-range-pass.md) — 두 Pro9종, 후보18/영수증36; 제품 결속·배포는 별도.
+
 - [2026-09-14 Native Sync 준비: 검색 설정 정정과 진입 차단](2026-09-14-native-sync-preparation-admission.md) — 장비 write0, Sync 미실행.
 
 이 디렉터리는 실제 장비에 대해 수행한 모든 실기 실행을 **한 번 쓰고 고치지 않는 기록**으로
