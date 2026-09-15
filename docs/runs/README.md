@@ -74,6 +74,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 
 | 파일 | 범위 | 요지 |
 |---|---|---|
+| [2026-09-15 수류모터 배포 사전 대조](2026-09-15-wavemaker-deployment-precheck.md) | 운영 입력 read-only·장비 접촉0·서비스 변경0 | 구 schema 4 binding/6 제어 pair 확인, 새 구현 전환은 재자격 범위 결정 전 정지·배포 미완료 |
 | [2026-09-15 외부 시나리오 Async](2026-09-15-native-scenario-async.md) | 재빌드 없이 Async1회, raw96 pair 중 Sync 경유1·Async95, 원432B/control 사후2 pair exact | 입력/세 창 응답 PASS·192비교 불일치0, 종료 exit2·해제 실패 필드3개는 별도; 최종 앱/서비스 복귀 대기 |
 | [2026-09-15 외부 시나리오 Sync](2026-09-15-native-scenario-sync.md) | 동일 이미지·외부 JSON Sync1회, raw96 pair, 원432B/control 사후2 pair exact | 입력/세 창 응답 PASS, 종료 exit2·첫 composed disarm slave3조건 미일치 별도; Async0·최종 앱/서비스 복귀 대기 |
 | [2026-09-15 Native Sync 공통 시간표·Flow 차이](2026-09-15-native-sync-master-template-flow-only.md) | Sync1회, raw97 pair, 원 시간표·controls 사후2 pair exact | master35→32→38/slave30→40→35 Auto 보고 확인; 자동 창 충돌·종료 disarm 증명 실패 별도, 실제 수류 미확정·최종 앱/서비스 복귀 대기 |
