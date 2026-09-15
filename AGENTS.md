@@ -4164,3 +4164,7 @@ writer/schema9개·40receipt·공용 coordinator/guard·protocol timeout/retry·
 원 서비스의 동일 복귀가 아니라 대체다. first 앱OFF·Bar 앱이전값 복귀 의무는 별도로 남긴다.
 같은 승인/현장 질문을 반복하지 않으며 이를 앱 완료·물리 안전 선언으로 각색하지 않는다.
 각 결과를 기록하고 구현/실기 단회 권한을 소진한다. 배포·기능수용·원복 완료를 서로 대체하지 않는다.
+
+새 상태 확인 뒤 final 대조가 실패한 source도 자기 원복이 가능해야 한다. 소유 지원의 기존
+Async7단계/앞6 VERIFIED/마지막 exact payload/원본/child 전제는 유지하면서, 마지막이
+ACKNone·reply확인 전용 진단·VERIFIED인 경우도 포함한다. 원 명령 전달 UNKNOWN은 유지한다.
