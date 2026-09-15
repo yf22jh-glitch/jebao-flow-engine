@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-15 소유 해제 지원 전송 전 조회 중단](2026-09-15-owned-detach-assistance-read-stop.md) — master 해제 확인, slave PREPARED·원복/배포 미완료.
+
 - [2026-09-15 Bar Flow 재자격](2026-09-15-bar-flow-requalification.md) — PASS, 준비40 원복.
 - [2026-09-15 Bar power 재자격](2026-09-15-bar-power-requalification.md) — PASS, 기존6개 보존 후보 확보.
 - [2026-09-15 제품 Sync 해제 ACK timeout](2026-09-15-product-sync-detach-ack-timeout.md) — attach PASS, 원복 미완료·배포 정지.
