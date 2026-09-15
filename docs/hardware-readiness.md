@@ -239,7 +239,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 
 | 질문 | 판정 |
 |---|---|
-| 새 제품 이미지로 기존6개 제어와 native 자격을 보존해 배포했는가 | **미완료 / Bar 준비 범위 결정 대기** — source28d885c·schema81ee699d 이미지 대조 완료, 새 자격/write0. 실제 Bar classic91은 기존 producer의 constant/≤45 조건과 다름. 기존 서비스 stopped·최종 앱OFF 의무 유지. [추가 기록](runs/2026-09-15-wavemaker-deployment-precheck.md#2026-09-15-0744-utc-추가--이미지-완료-실제-bar-준비-상태의-범위-경계) |
+| 새 제품 이미지로 기존6개 제어와 native 자격을 보존해 배포했는가 | **미완료 / Pro 시험값 결함으로 중단·원복 완료** — Bar constant40 앱 준비 확인. custom의 app 최소5 미만 시험1에 반환5·exit2, 전진13/복원3 ACK 기록, Pro 원432B/8controls 사후2 pair exact. 자격0·Bar시험/native/배포0. empty-ACK 발급 gate는 별도 정적 결함. 기존 서비스 stopped·first 최종OFF/Bar 앱 원복 의무 유지. [실행 기록](runs/2026-09-15-pro-qualification-custom-frequency-stop.md) |
 | 재사용 이미지·외부 JSON의 Async 세 구간 입력과 응답이 일치하는가 | **입력 read-back PASS / response PASS — 전체 정상 종료 아님**; Async95 pair·192비교 불일치0, Sync 경유1 pair 별도 보존. 종료 exit2·최초 role 오류 UNKNOWN·해제 실패 필드3개 별도. 원432B/controls fresh2 pair exact, 최종 앱OFF/서비스 복귀 대기. 위상은 비교 대상 아님. [실행 기록](runs/2026-09-15-native-scenario-async.md) |
 | 재사용 이미지·외부 JSON의 Sync 세 구간 입력과 응답이 일치하는가 | **입력 read-back PASS / response PASS — 전체 정상 종료 아님**; raw96 pair·세 창 안정17/6/2 pair·비교200건 불일치0. 종료 exit2·첫 composed disarm slave3조건 미일치와 최초 role 오류 UNKNOWN 별도. 원432B/controls fresh2 pair exact, Async0·최종 앱OFF/서비스 복귀 대기. [실행 기록](runs/2026-09-15-native-scenario-sync.md) |
 | ASYNC 대상 두 Pro를 정확히 식별했는가 | PASS |
