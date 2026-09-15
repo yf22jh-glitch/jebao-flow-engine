@@ -1,0 +1,41 @@
+{
+  "mode": "async",
+  "master": "upper_pro",
+  "preparation_flow": 30,
+  "preparation_slave_flow": 31,
+  "preparation_frequency": 20,
+  "schedule": {
+    "family": "pro",
+    "slots": [
+      {"slot_index": 0, "start": "00:00", "end": "08:00", "mode": "sine", "flow": 35, "frequency": 70},
+      {"slot_index": 1, "start": "08:00", "end": "10:00", "mode": "pulse", "flow": 40, "frequency": 70},
+      {"slot_index": 2, "start": "10:00", "end": "11:00", "mode": "constant", "flow": 30},
+      {"slot_index": 3, "start": "11:00", "end": "12:00", "mode": "random", "flow": 45, "frequency": 50},
+      {"slot_index": 4, "start": "12:00", "end": "13:00", "mode": "tidal", "flow": 45},
+      {"slot_index": 5, "start": "13:00", "end": "13:10", "mode": "nutrient_transport", "flow": 40},
+      {"slot_index": 6, "start": "13:10", "end": "14:00", "mode": "sine", "flow": 45, "frequency": 50},
+      {"slot_index": 7, "start": "14:00", "end": "15:00", "mode": "constant", "flow": 30},
+      {"slot_index": 8, "start": "15:00", "end": "15:10", "mode": "circulation", "flow": 40, "frequency": 30},
+      {"slot_index": 9, "start": "15:10", "end": "17:00", "mode": "random", "flow": 45, "frequency": 50},
+      {"slot_index": 10, "start": "17:00", "end": "17:10", "mode": "constant", "flow": 35},
+      {"slot_index": 11, "start": "17:10", "end": "18:00", "mode": "constant", "flow": 30},
+      {"slot_index": 12, "start": "18:00", "end": "19:00", "mode": "tidal", "flow": 45},
+      {"slot_index": 13, "start": "19:00", "end": "20:00", "mode": "pulse", "flow": 40, "frequency": 60},
+      {"slot_index": 14, "start": "20:00", "end": "22:00", "mode": "sine", "flow": 40, "frequency": 70},
+      {"slot_index": 15, "start": "22:00", "end": "24:00", "mode": "sine", "flow": 35, "frequency": 70}
+    ]
+  },
+  "slaves": [{
+    "logical_member": "lower_pro",
+    "flows": [
+      {"slot_index": 0, "flow": 30}, {"slot_index": 1, "flow": 30},
+      {"slot_index": 2, "flow": 30}, {"slot_index": 3, "flow": 35},
+      {"slot_index": 4, "flow": 35}, {"slot_index": 5, "flow": 30},
+      {"slot_index": 6, "flow": 35}, {"slot_index": 7, "flow": 30},
+      {"slot_index": 8, "flow": 30}, {"slot_index": 9, "flow": 35},
+      {"slot_index": 10, "flow": 30}, {"slot_index": 11, "flow": 30},
+      {"slot_index": 12, "flow": 35}, {"slot_index": 13, "flow": 35},
+      {"slot_index": 14, "flow": 35}, {"slot_index": 15, "flow": 30}
+    ]
+  }]
+}

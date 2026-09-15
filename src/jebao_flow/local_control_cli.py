@@ -103,6 +103,10 @@ def build_parser() -> argparse.ArgumentParser:
         ("detach-wavemaker", "자기 attach 원본으로 해제·시간표·제어값을 복원합니다"),
         ("recover-wavemaker", "미완료 native 실행을 재결속 없이 자기 원본 방향으로 복구합니다"),
         ("assist-wavemaker-detach", "미확인 첫 해제를 자격 있는 별도 scalar로 지원합니다"),
+        (
+            "cycle-wavemaker-master",
+            "명시 옵션의 자기 Async 보류를 master 링크 두 단계로 지원합니다",
+        ),
     ):
         native = subparsers.add_parser(name, help=description)
         _add_install_arguments(native)
@@ -116,11 +120,16 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="Async 최종 명령 시도 후 자동 원복 없이 사용자 지시를 기다립니다",
             )
+            native.add_argument(
+                "--master-cycle-on-async-failure",
+                action="store_true",
+                help="최종 Async 미확인 시 별도 master 해제/재설정 1회를 수행합니다",
+            )
         elif name == "detach-wavemaker":
             native.add_argument("--attachment-id", required=True)
         else:
             native.add_argument("--request-id", required=True)
-            if name == "assist-wavemaker-detach":
+            if name in {"assist-wavemaker-detach", "cycle-wavemaker-master"}:
                 native.add_argument("--qualifications", type=Path, required=True)
     native_status = subparsers.add_parser(
         "wavemaker-status", help="장비 접근 없이 native 보존 기록을 봅니다"
@@ -270,6 +279,7 @@ def _run(args: argparse.Namespace) -> int:
         "detach-wavemaker",
         "recover-wavemaker",
         "assist-wavemaker-detach",
+        "cycle-wavemaker-master",
         "wavemaker-status",
     }:
         return _run_wavemaker_native(args)
@@ -644,8 +654,9 @@ def _run_wavemaker_native(args) -> int:
         raise ValueError("관측 전용 또는 dry-run에서는 native 명령을 전송하지 않습니다")
     attach = args.command == "attach-wavemaker"
     assist = args.command == "assist-wavemaker-detach"
+    cycle = args.command == "cycle-wavemaker-master"
     catalog = build_local_control_catalog(
-        load_current_qualifications(args.qualifications) if attach or assist else (),
+        load_current_qualifications(args.qualifications) if attach or assist or cycle else (),
         current_content=prepared.manifest.content,
     )
     controller = _native_coordinator(prepared.config, catalog)
@@ -669,6 +680,8 @@ def _run_wavemaker_native(args) -> int:
         observation = (
             {"await_operator_observation": True} if args.await_operator_observation else {}
         )
+        if args.master_cycle_on_async_failure:
+            observation["master_cycle_on_async_failure"] = True
         task = controller.attach(
             request_id=args.request_id, plan=plan, targets=targets, **observation
         )
@@ -676,6 +689,8 @@ def _run_wavemaker_native(args) -> int:
         task = controller.detach(attachment_id=args.attachment_id, targets=targets)
     elif assist:
         task = controller.assist_detach(request_id=args.request_id, targets=targets)
+    elif cycle:
+        task = controller.cycle_master(request_id=args.request_id, targets=targets)
     else:
         task = controller.recover_native(request_id=args.request_id, targets=targets)
     try:
@@ -686,6 +701,11 @@ def _run_wavemaker_native(args) -> int:
         try:
             source = controller.status(request_id)
             records.append(source)
+            if "master_cycle_request_id" in source:
+                try:
+                    records.append(controller.status(source["master_cycle_request_id"]))
+                except KeyError:
+                    pass
             if assist:
                 try:
                     records.append(controller.status(source["assistance_request_id"]))

@@ -62,6 +62,10 @@ def native_assistance_request_id(attach_id: str) -> str:
     return "wm_assist_" + hashlib.sha256(attach_id.encode("ascii")).hexdigest()
 
 
+def native_master_cycle_request_id(attach_id: str) -> str:
+    return "wm_cycle_" + hashlib.sha256(attach_id.encode("ascii")).hexdigest()
+
+
 class NativeOriginal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -74,7 +78,7 @@ class NativeContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     version: Literal[1] = 1
-    kind: Literal["attach", "detach", "detach_assist"]
+    kind: Literal["attach", "detach", "detach_assist", "master_link_cycle_v1"]
     attach_request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,128}$")
     source_context_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     schema_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -83,6 +87,7 @@ class NativeContext(BaseModel):
     assisted_record_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     activation_sequence: Literal["staged_roles_v1"] | None = None
     await_operator_observation: Literal[True] | None = None
+    master_cycle_on_async_failure: Literal[True] | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_assistance(self, handler):
@@ -93,6 +98,8 @@ class NativeContext(BaseModel):
             result.pop("activation_sequence", None)
         if self.await_operator_observation is None:
             result.pop("await_operator_observation", None)
+        if self.master_cycle_on_async_failure is None:
+            result.pop("master_cycle_on_async_failure", None)
         return result
 
 
@@ -129,8 +136,13 @@ class NativeWavemakerController(LocalControlCoordinator):
         plan: NativeWavemakerPlan,
         targets: tuple[LocalDeviceBinding, ...],
         await_operator_observation: bool = False,
+        master_cycle_on_async_failure: bool = False,
     ) -> dict[str, object]:
         self._validate_targets(plan, targets)
+        if type(master_cycle_on_async_failure) is not bool or (
+            master_cycle_on_async_failure and plan.mode != "async"
+        ):
+            raise ValueError("master 링크 cycle은 명시적인 Async 옵션입니다")
         if type(await_operator_observation) is not bool or (
             await_operator_observation and plan.mode != "async"
         ):
@@ -138,6 +150,8 @@ class NativeWavemakerController(LocalControlCoordinator):
         observation_intent = (
             {"await_operator_observation": True} if await_operator_observation else {}
         )
+        if master_cycle_on_async_failure:
+            observation_intent["master_cycle_on_async_failure"] = True
         # 기존 request와 재생성된 attestation 시각은 다를 수 있다. 신원 4요소는 고정이다.
         intent = hashlib.sha256(
             _json(
@@ -156,6 +170,9 @@ class NativeWavemakerController(LocalControlCoordinator):
                 if previous.phase in _TERMINAL:
                     return self._public(previous, current=False)
                 if self._awaiting_operator(previous, self._context(previous)):
+                    cycle = self._journal.load(native_master_cycle_request_id(request_id))
+                    if cycle is not None:
+                        return self._public(cycle, current=False)
                     return self._public(previous, current=False)
                 raise LocalControlExecutionError(
                     f"미완료 결속입니다: recover-wavemaker --request-id {request_id}"
@@ -185,6 +202,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 originals=tuple(originals),
                 activation_sequence=STAGED_ROLES,
                 await_operator_observation=True if await_operator_observation else None,
+                master_cycle_on_async_failure=True if master_cycle_on_async_failure else None,
             )
             record = self._prepare(request_id, intent, context, endpoints)
             try:
@@ -197,6 +215,10 @@ class NativeWavemakerController(LocalControlCoordinator):
                     current = self._save_transaction_phase(
                         current, TransactionPhase.RECOVERY_REQUIRED
                     )
+                    if master_cycle_on_async_failure and isinstance(original_error, Exception):
+                        from jebao_flow.local_control.wavemaker_master_cycle import cycle_locked
+
+                        return await cycle_locked(self, current, context, endpoints, permit)
                     return self._public(current, current=False)
                 # 복구는 caller 취소와 분리해 완료까지 기다린다. 성공 여부는 별도로 보존한다.
                 task = asyncio.create_task(self._detach_locked(record, context, endpoints, permit))
@@ -219,11 +241,18 @@ class NativeWavemakerController(LocalControlCoordinator):
 
     def _awaiting_operator(self, record, context):
         if (
-            context.await_operator_observation is not True
+            (
+                context.await_operator_observation is not True
+                and context.master_cycle_on_async_failure is not True
+            )
             or context.kind != "attach"
             or context.plan.mode != "async"
             or context.activation_sequence != STAGED_ROLES
             or record.phase is TransactionPhase.ROLLED_BACK
+            or (
+                record.phase is TransactionPhase.VERIFIED
+                and context.await_operator_observation is not True
+            )
             or len(record.actions) != 9
             or any(
                 a.phase not in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
@@ -268,7 +297,12 @@ class NativeWavemakerController(LocalControlCoordinator):
                 self._close_failed_source(source)
                 return self._public(done, current=False)
             self._require_available(
-                targets, allowed=(attachment_id, native_detach_request_id(attachment_id))
+                targets,
+                allowed=(
+                    attachment_id,
+                    native_detach_request_id(attachment_id),
+                    *self._owned_cycle_ids(context),
+                ),
             )
             endpoints = await self._resolver.resolve_many(
                 tuple(o.target for o in context.originals)
@@ -306,7 +340,9 @@ class NativeWavemakerController(LocalControlCoordinator):
                 self._require_stalled_first_slave(child, context)
             source = self._required(request_id)
             self._require_assistance_source(source, context)
-            self._require_available(targets, allowed=(request_id, child_id, assist_id))
+            self._require_available(
+                targets, allowed=(request_id, child_id, assist_id, *self._owned_cycle_ids(context))
+            )
             originals = tuple(o.target for o in context.originals)
             endpoints = await self._resolver.resolve_many(originals)
             self._validate_endpoints(originals, endpoints)
@@ -359,6 +395,37 @@ class NativeWavemakerController(LocalControlCoordinator):
             if record.phase is not TransactionPhase.VERIFIED:
                 await self._advance(record, assist_context, endpoints, permit)
             return await self._detach_locked(source, context, endpoints, permit)
+
+    def _owned_cycle_ids(self, context):
+        if context.master_cycle_on_async_failure is not True:
+            return ()
+        request_id = native_master_cycle_request_id(context.attach_request_id)
+        record = self._journal.load(request_id)
+        if record is not None:
+            self._context(record)
+        return (request_id,)
+
+    async def cycle_master(self, *, request_id, targets):
+        """Resume only this explicitly opted-in source's two master-only actions."""
+        from jebao_flow.local_control.wavemaker_master_cycle import cycle_locked
+
+        source = self._required(request_id)
+        context = self._context(source)
+        self._require_current_targets(context, targets)
+        if context.kind != "attach" or context.master_cycle_on_async_failure is not True:
+            raise ValueError("이 attach에는 master cycle 승인이 없습니다")
+        with self._lease.acquire(tuple(t.physical_identity_key for t in targets)) as permit:
+            cycle = self._journal.load(native_master_cycle_request_id(request_id))
+            if cycle is not None and cycle.phase in _TERMINAL:
+                return self._public(cycle, current=False)
+            self._require_available(targets, allowed=(request_id, *self._owned_cycle_ids(context)))
+            if not self._awaiting_operator(source, context):
+                raise ValueError("마지막 Async 이후 보류된 자기 source만 지원합니다")
+            endpoints = await self._resolver.resolve_many(
+                tuple(o.target for o in context.originals)
+            )
+            self._validate_endpoints(tuple(o.target for o in context.originals), endpoints)
+            return await cycle_locked(self, source, context, endpoints, permit)
 
     def _require_assistance_source(self, source, context):
         if source.phase is TransactionPhase.VERIFIED:
@@ -833,7 +900,7 @@ class NativeWavemakerController(LocalControlCoordinator):
         record = self._save_transaction_phase(
             record,
             TransactionPhase.RECOVERY_REQUIRED
-            if self._awaiting_operator(record, context)
+            if context.await_operator_observation and self._awaiting_operator(record, context)
             else TransactionPhase.VERIFIED,
         )
         return self._public(record, current=True)
@@ -913,6 +980,12 @@ class NativeWavemakerController(LocalControlCoordinator):
 
     def _close_failed_source(self, source):
         source = self._required(source.request_id)
+        context = self._context(source)
+        if context.kind == "attach":
+            for request_id in self._owned_cycle_ids(context):
+                cycle = self._journal.load(request_id)
+                if cycle is not None and cycle.phase not in _TERMINAL:
+                    self._close_failed_source(cycle)
         if source.phase in _TERMINAL:
             return
         actions = tuple(
@@ -941,18 +1014,15 @@ class NativeWavemakerController(LocalControlCoordinator):
         )
         targets = tuple(item.target for item in context.originals)
         self._validate_targets(context.plan, targets)
-        expected_id = (
-            context.attach_request_id
-            if context.kind == "attach"
-            else (
-                native_assistance_request_id(context.attach_request_id)
-                if context.kind == "detach_assist"
-                else native_detach_request_id(context.attach_request_id)
-            )
-        )
+        expected_id = {
+            "attach": context.attach_request_id,
+            "detach": native_detach_request_id(context.attach_request_id),
+            "detach_assist": native_assistance_request_id(context.attach_request_id),
+            "master_link_cycle_v1": native_master_cycle_request_id(context.attach_request_id),
+        }[context.kind]
         if record.request_id != expected_id:
             raise ValueError("native 원본 소유 요청이 다릅니다")
-        if context.kind in {"detach", "detach_assist"}:
+        if context.kind in {"detach", "detach_assist", "master_link_cycle_v1"}:
             source = self._required(context.attach_request_id)
             source_context = self._context(source)
             if (
@@ -960,6 +1030,8 @@ class NativeWavemakerController(LocalControlCoordinator):
                 or source.native_context_sha256 != context.source_context_sha256
                 or source_context.originals != context.originals
                 or source_context.plan != context.plan
+                or source_context.master_cycle_on_async_failure
+                != context.master_cycle_on_async_failure
             ):
                 raise ValueError("자기 attach가 포착하지 않은 baseline 복원 금지")
         if context.kind == "detach_assist":
@@ -971,6 +1043,10 @@ class NativeWavemakerController(LocalControlCoordinator):
             if self._context(stalled).kind != "detach":
                 raise ValueError("자기 detach 기록만 지원할 수 있습니다")
             self._require_stalled_first_slave(stalled, context)
+        elif context.kind == "master_link_cycle_v1":
+            from jebao_flow.local_control.wavemaker_master_cycle import validate_cycle
+
+            validate_cycle(self, record, context)
         elif context.assisted_record_sha256 is not None:
             raise ValueError("기존 native 기록에는 지원 범위를 넣지 않습니다")
         for action in record.actions:
@@ -1129,12 +1205,42 @@ class NativeWavemakerController(LocalControlCoordinator):
             "attach_request_id": context.attach_request_id,
             "detach_request_id": native_detach_request_id(context.attach_request_id),
             "assistance_request_id": native_assistance_request_id(context.attach_request_id),
+            **(
+                {
+                    "master_cycle_request_id": native_master_cycle_request_id(
+                        context.attach_request_id
+                    )
+                }
+                if context.master_cycle_on_async_failure
+                else {}
+            ),
             "accepted": record.phase is TransactionPhase.VERIFIED,
             "current_state_verified": current,
             "physical_measurement": False,
             "journal_sha256": self._journal.record_digest(record),
             "context_sha256": record.native_context_sha256,
             "verification": final,
+            **(
+                {
+                    "original_async_delivery": (
+                        "ACKNOWLEDGED"
+                        if self._required(context.attach_request_id)
+                        .actions[-1]
+                        .acknowledgement_sha256
+                        is not None
+                        else "UNKNOWN"
+                    ),
+                    "source_phase": self._required(context.attach_request_id).phase.value,
+                    "acceptance_basis": "master_release_reply_then_rearm_pair_observation",
+                    "automatic_restore": False,
+                    "restoration_complete": False,
+                    "restore_command": (
+                        f"recover-wavemaker --request-id {context.attach_request_id}"
+                    ),
+                }
+                if context.kind == "master_link_cycle_v1"
+                else {}
+            ),
             **(
                 {
                     "awaiting_operator_observation": True,
