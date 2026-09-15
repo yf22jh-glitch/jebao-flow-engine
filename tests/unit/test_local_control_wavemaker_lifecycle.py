@@ -286,15 +286,132 @@ async def test_attach_ack_loss_at_each_async_write_restores_without_replaying_at
 ):
     rig = Rig(tmp_path)
     rig.fail_ack = failure
-    with pytest.raises(LocalControlExecutionError, match="자기 원본 복원 확인"):
-        await rig.attach("async")
+    if failure == 7:
+        # The last role alone may be confirmed by one explicit reply, without an ACK.
+        result = await rig.attach("async")
+        assert result["accepted"]
+        assert result["actions"][-1]["delivery"] == "UNKNOWN"
+        assert result["actions"][-1]["acknowledgement_received"] is False
+        await rig.detach()
+    else:
+        with pytest.raises(LocalControlExecutionError, match="자기 원본 복원 확인"):
+            await rig.attach("async")
     assert rig.states == rig.originals
-    assert rig.store.load("attach_0001").phase is TransactionPhase.ROLLED_BACK
+    assert rig.store.load("attach_0001").phase is (
+        TransactionPhase.VERIFIED if failure == 7 else TransactionPhase.ROLLED_BACK
+    )
     assert (
         rig.store.load(native_detach_request_id("attach_0001")).phase is TransactionPhase.VERIFIED
     )
     keys = [(s[2], s[3]) for s in rig.sent]
     assert len(keys) == len(set(keys))
+
+
+@pytest.mark.asyncio
+async def test_async_uses_observed_slave_connection_without_second_before_read(
+    tmp_path, monkeypatch
+):
+    rig = Rig(tmp_path)
+    events = []
+    original_read = MemoryTransport.read_raw_state_capture
+    original_send = MemoryTransport.send_raw_control
+
+    async def read(self, *, accept_reports):
+        events.append(("read", id(self), self.address))
+        return await original_read(self, accept_reports=accept_reports)
+
+    async def send(self, payload):
+        events.append(("send", id(self), self.address))
+        return await original_send(self, payload)
+
+    monkeypatch.setattr(MemoryTransport, "read_raw_state_capture", read)
+    monkeypatch.setattr(MemoryTransport, "send_raw_control", send)
+    await rig.attach("async")
+    last_send = max(i for i, event in enumerate(events) if event[0] == "send")
+    connection = events[last_send][1]
+    prior = [e for e in events[:last_send] if e[1] == connection]
+    assert prior == [("read", connection, "slave")]
+    assert len(rig.sent) == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["mismatch", "timeout", "report", "cancel"])
+async def test_async_ack_error_never_accepts_missing_mismatched_or_report_only_reply(
+    tmp_path, monkeypatch, failure
+):
+    rig = Rig(tmp_path)
+    rig.fail_ack = 7
+    original_read = MemoryTransport.read_raw_state_capture
+    reads = []
+
+    async def read(self, *, accept_reports):
+        if len(rig.sent) == 7 and self.address == "slave" and not accept_reports:
+            reads.append(accept_reports)
+            if failure == "timeout":
+                raise TimeoutError("synthetic reply loss")
+            if failure == "cancel":
+                raise asyncio.CancelledError()
+            raw = await original_read(self, accept_reports=accept_reports)
+            status = (
+                _put(raw.status_payload, {"Linkage": "sync_slave"})
+                if failure == "mismatch"
+                else raw.status_payload
+            )
+            return RawStateCapture(raw.wire_frame, 4 if failure == "report" else 3, status)
+        return await original_read(self, accept_reports=accept_reports)
+
+    monkeypatch.setattr(MemoryTransport, "read_raw_state_capture", read)
+    with pytest.raises(
+        asyncio.CancelledError if failure == "cancel" else LocalControlExecutionError
+    ):
+        await rig.attach("async")
+    assert reads == [False]
+    assert rig.states == rig.originals
+    source = rig.store.load("attach_0001")
+    assert source.actions[6].acknowledgement_sha256 is None
+    assert source.actions[6].diagnostic == "native_own_baseline_restored_delivery_unknown"
+    assert sum(s[2] == "attach_0001" and s[1] == {"Linkage": "async_slave"} for s in rig.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_reply_confirmed_async_final_failure_can_use_owned_assistance(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+    rig.fail_ack = 7
+    original_read = MemoryTransport.read_raw_state_capture
+    original_send = MemoryTransport.send_raw_control
+
+    async def read(self, *, accept_reports):
+        raw = await original_read(self, accept_reports=accept_reports)
+        # Final attach comparison fails after the reply-confirmed role. No firmware model.
+        if len(rig.sent) == 7 and self.address == "master":
+            return RawStateCapture(
+                raw.wire_frame,
+                raw.action,
+                _put(raw.status_payload, {"Flow": 40, "Linkage": "independent"}),
+            )
+        return raw
+
+    async def send(self, payload):
+        if len(rig.sent) == 7:
+            rig.fail_ack = rig.reject_send = 8
+        return await original_send(self, payload)
+
+    monkeypatch.setattr(MemoryTransport, "read_raw_state_capture", read)
+    monkeypatch.setattr(MemoryTransport, "send_raw_control", send)
+    with pytest.raises(LocalControlExecutionError, match="원복 미확인"):
+        await rig.attach("async")
+    source = rig.store.load("attach_0001")
+    assert source.phase is TransactionPhase.RECOVERY_REQUIRED
+    assert source.actions[6].phase is ActionPhase.VERIFIED
+    assert source.actions[6].acknowledgement_sha256 is None
+    monkeypatch.setattr(MemoryTransport, "send_raw_control", original_send)
+    rig.fail_ack = rig.reject_send = None
+    result = await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    assert result["accepted"] and rig.states == rig.originals
+    assert (
+        rig.store.load("attach_0001").actions[6].diagnostic
+        == "native_own_baseline_restored_delivery_unknown"
+    )
 
 
 @pytest.mark.asyncio
@@ -882,7 +999,8 @@ async def test_async_transition_only_writes_linkage_and_preserves_pair_observati
     assert observed is not None
     assert [d["logical_member"] for d in observed["devices"]] == ["master", "slave"]
     assert [d["actual_controls"]["Linkage"] for d in observed["devices"]] == [
-        "master", "sync_slave"
+        "master",
+        "sync_slave",
     ]
     assert all(d["complete"] is False for d in observed["devices"])
     for row in observed["devices"]:

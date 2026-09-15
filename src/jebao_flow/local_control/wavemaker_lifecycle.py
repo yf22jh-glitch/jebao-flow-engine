@@ -36,10 +36,12 @@ from jebao_flow.local_control.wavemaker_restore import (
     WavemakerRestoreSnapshot,
     compare_restore_readback,
 )
+from jebao_flow.protocol.errors import ProtocolError
 from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_MODES, LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
 
 _TERMINAL = {TransactionPhase.VERIFIED, TransactionPhase.ROLLED_BACK}
+_REPLY_WITHOUT_ACK = "native_async_reply_verified_delivery_unknown"
 
 
 def _json(value) -> bytes:
@@ -285,7 +287,14 @@ class NativeWavemakerController(LocalControlCoordinator):
             or len(context.originals) != 2
             or len(source.actions) != 7
             or any(a.phase is not ActionPhase.VERIFIED for a in source.actions[:6])
-            or source.actions[6].phase is not ActionPhase.UNCERTAIN
+            or not (
+                source.actions[6].phase is ActionPhase.UNCERTAIN
+                or (
+                    source.actions[6].phase is ActionPhase.VERIFIED
+                    and source.actions[6].acknowledgement_sha256 is None
+                    and source.actions[6].diagnostic == _REPLY_WITHOUT_ACK
+                )
+            )
             or source.actions[6].target != context.originals[1].target
             or source.actions[6].function != "native_controls"
             or json.loads(self._journal.load_blob(source.actions[6].expected_readback_sha256))
@@ -424,6 +433,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 continue
             endpoint = by_name[action.target.logical_member]
             writer = self._writer_factory(endpoint)
+            open_writers = {endpoint.target.logical_member: writer}
             started = failure_clock_ns()
             try:
                 if (
@@ -434,11 +444,20 @@ class NativeWavemakerController(LocalControlCoordinator):
                     and json.loads(self._journal.load_blob(action.expected_readback_sha256))
                     == {"Linkage": "async_slave"}
                 ):
-                    record = await self._observe_before_async(record, endpoints, permit)
-                began = datetime.now(UTC)
+                    for item in endpoints:
+                        if item.target.logical_member not in open_writers:
+                            open_writers[item.target.logical_member] = self._writer_factory(item)
+                    record, captures = await self._observe_before_async(
+                        record, endpoints, permit, open_writers
+                    )
+                    began, capture = captures[endpoint.target.logical_member]
+                else:
+                    began = datetime.now(UTC)
+                    capture = await writer.connect_and_capture(
+                        accept_reports=action.verification_kind != "schedule_image"
+                    )
                 # image 안전 전제는 기존 schedule writer와 같은 reply-only 읽기로 확인한다.
                 reports = action.verification_kind != "schedule_image"
-                capture = await writer.connect_and_capture(accept_reports=reports)
                 permit.require_permitted()
                 prepared = self._forward_prepared(action, endpoint)
                 record = self._evidence(record, index, capture, began, prepared, "before")
@@ -507,20 +526,103 @@ class NativeWavemakerController(LocalControlCoordinator):
                 report_action_failure(
                     record, index, error, started_ns=started, failed_ns=failure_clock_ns()
                 )
+                if (
+                    isinstance(error, (ProtocolError, OSError))
+                    and current.actions[index].phase is ActionPhase.FORWARD_ATTEMPTING
+                    and self._can_reconcile_async(current, context, index)
+                ):
+                    # The failed exchange is never reused. Persist its failure before one read.
+                    open_writers.pop(endpoint.target.logical_member)
+                    await writer.close()
+                    record = await self._reconcile_async_reply(record, index, endpoint, permit)
+                    continue
                 raise
             finally:
-                await writer.close()
+                await asyncio.gather(*(item.close() for item in open_writers.values()))
         return await self._finish(record, context, endpoints, permit)
 
-    async def _observe_before_async(self, record, endpoints, permit):
-        """Fresh paired sessions, observation only; no new expected-value gate.
+    def _can_reconcile_async(self, record, context, index):
+        """Only the final role delta after this pair's verified Sync, never qualification."""
+        return (
+            context.kind == "attach"
+            and context.plan.mode == "async"
+            and len(context.originals) == 2
+            and len(record.actions) == 7
+            and index == 6
+            and record.actions[index].acknowledgement_sha256 is None
+            and record.actions[index].function == "native_controls"
+            and record.actions[index].target == context.originals[1].target
+            and record.actions[index - 1].target == record.actions[index].target
+            and record.actions[index - 1].phase is ActionPhase.VERIFIED
+            and json.loads(self._journal.load_blob(record.actions[index].expected_readback_sha256))
+            == {"Linkage": "async_slave"}
+            and json.loads(
+                self._journal.load_blob(record.actions[index - 1].expected_readback_sha256)
+            )
+            == {"SwitchON": True, "TimerON": True, "Linkage": "sync_slave"}
+        )
+
+    async def _reconcile_async_reply(self, record, index, endpoint, permit):
+        """One fresh reply, no sends. State evidence cannot manufacture an ACK or delivery proof."""
+        writer = self._writer_factory(endpoint)
+        began = datetime.now(UTC)
+        started = failure_clock_ns()
+        try:
+            capture = await writer.connect_and_capture(accept_reports=False)
+            permit.require_permitted()
+            prepared = self._forward_prepared(record.actions[index], endpoint)
+            record = self._evidence(
+                record, index, capture, began, prepared, "after_ack_error_reply"
+            )
+            if capture.action != 3 or not verify_prepared_readback(
+                prepared, capture.status_payload
+            ):
+                raise LocalControlExecutionError("ACK 부재 후 직접 응답에서 Async 미확인")
+            return self._save_action(
+                record,
+                index,
+                phase=ActionPhase.VERIFIED,
+                transaction_phase=TransactionPhase.EXECUTING,
+                diagnostic=_REPLY_WITHOUT_ACK,
+            )
+        except BaseException as error:
+            report_action_failure(
+                self._required(record.request_id),
+                index,
+                error,
+                started_ns=started,
+                failed_ns=failure_clock_ns(),
+            )
+            raise
+        finally:
+            await writer.close()
+
+    async def _observe_before_async(self, record, endpoints, permit, writers):
+        """Observe both fresh streams, then send on the same slave connection.
 
         The earlier native-scenario-async run refreshed both streams between Sync and Async.
-        Preserve the actual reports here without treating clock/Auto as immutable controls.
+        No reconnect or duplicate BEFORE read intervenes. Clock/Auto are observations only.
         """
+
+        async def capture_one(endpoint):
+            began = datetime.now(UTC)
+            capture = await writers[endpoint.target.logical_member].connect_and_capture(
+                accept_reports=True
+            )
+            permit.require_permitted()
+            return began, capture
+
+        results = await asyncio.gather(
+            *(capture_one(endpoint) for endpoint in endpoints), return_exceptions=True
+        )
         rows = []
-        for endpoint in endpoints:
-            capture, status = await self._read(endpoint, permit, reports=True)
+        captures = {}
+        for endpoint, result in zip(endpoints, results, strict=True):
+            if isinstance(result, BaseException):
+                continue
+            began, raw = result
+            captures[endpoint.target.logical_member] = result
+            capture, status = self._capture(raw, began), raw.status_payload
             values = get_product_schema(endpoint.target.product_key).decode_status(status)
             rows.append(
                 {
@@ -530,8 +632,15 @@ class NativeWavemakerController(LocalControlCoordinator):
                     "actual_controls": {
                         name: values[name]
                         for name in (
-                            "SwitchON", "TimerON", "Linkage", "Mode", "Flow", "Frequency",
-                            "AutoMode", "AutoFlow", "AutoFreq",
+                            "SwitchON",
+                            "TimerON",
+                            "Linkage",
+                            "Mode",
+                            "Flow",
+                            "Frequency",
+                            "AutoMode",
+                            "AutoFlow",
+                            "AutoFreq",
                         )
                     },
                     "actual_schedule_sha256": hashlib.sha256(
@@ -542,7 +651,10 @@ class NativeWavemakerController(LocalControlCoordinator):
                 }
             )
             record = self._save_final(record, rows)
-        return record
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return record, captures
 
     async def _finish(self, record, context, endpoints, permit):
         rows = []
@@ -687,6 +799,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                     "diagnostic": (
                         "native_own_baseline_restored_delivery_unknown"
                         if item.phase is ActionPhase.UNCERTAIN
+                        or item.diagnostic == _REPLY_WITHOUT_ACK
                         else "native_own_baseline_restored"
                     ),
                 }
@@ -903,6 +1016,14 @@ class NativeWavemakerController(LocalControlCoordinator):
                     "member": a.target.logical_member,
                     "phase": a.phase.value,
                     "diagnostic": a.diagnostic,
+                    "acknowledgement_received": a.acknowledgement_sha256 is not None,
+                    "delivery": (
+                        "ACKNOWLEDGED"
+                        if a.acknowledgement_sha256 is not None
+                        else "NOT_SENT"
+                        if a.phase is ActionPhase.NO_CHANGE
+                        else "UNKNOWN"
+                    ),
                     "evidence_sha256": a.native_evidence_sha256,
                     "comparison": None
                     if a.native_evidence_sha256 is None
