@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-15 소유 해제 지원 원본 복원](2026-09-15-owned-detach-assistance-restored.md) — 같은 operation 연속, 원432B·8controls exact·원 atomic 재전송0.
+
 - [2026-09-15 소유 해제 지원 전송 전 조회 중단](2026-09-15-owned-detach-assistance-read-stop.md) — master 해제 확인, slave PREPARED·원복/배포 미완료.
 
 - [2026-09-15 Bar Flow 재자격](2026-09-15-bar-flow-requalification.md) — PASS, 준비40 원복.
