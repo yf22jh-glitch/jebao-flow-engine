@@ -4043,3 +4043,26 @@ Bar는 기존 manual_flow/power producer만 사용하며 native·시간표 write
 실기 결과는 source 수정 전에 append-only 커밋한다. 실패·미확인·중단 요청 시 전진을 멈추고
 자기 원본 복원 또는 증거가 남는 미확인 정지로 끝낸다. 초기화·무인 반복은 포함하지 않는다.
 이전 앱 OFF/원 서비스 복귀 의무는 별도 유지한다. 결과 기록으로 이번 실행 권한을 소진한다.
+
+## 2026-09-15 자격 시험값·ACK 계약 정정 후 배포 재개
+
+사용자는 `f50a63a`의 실기 중단·원본 복원, app 최소5 미만 custom 시험값1·2 및
+빈 ACK body를 거부하는 별도 발급 gate를 보고받고 “될때까지 수정하고 배포해”라고 요청했다.
+이는 보고된 결함을 수정·검증하고 실제 자격·제품 Sync/Async 결속/해제·배포를 이어가라는 승인이다.
+동일 현장 확인 질문을 반복하지 않으며, 사용자 발언을 최종 앱 원복 완료로 각색하지 않는다.
+
+첫 정정 범위는 `local_control/pro_qualification.py`와 그 직접 test,
+`docs/wavemaker-qualification-plan.md` 및 구현/실기 기록이다. 기존 app 범위 helper로 부가값을
+선정하고 command·sequence 검증 뒤 빈 body도 정상 ACK가 될 수 있다는 기존 계약을 따른다.
+ACK digest 부재·blob 손상·실제 전송/after raw 부재·원복 미확인 시 발급 금지는 그대로다.
+writer·protocol·schema fingerprint·기존 receipt·transport timeout/retry는 변경하지 않는다.
+이 문서의 별도 커밋 뒤 구현한다. source 변경이 필요할 때마다 앞선 실기 결과부터 커밋한다.
+
+새 Pro 단회는 별도 operation과 후보 산출물로 실행하며 이전 실패 id를 재전송하지 않는다.
+완료 후 Bar 기존 두 producer, Sync/Async 제품 lifecycle 각1회와 기존6개 제어 보존 배포를 잇는다.
+실패 시 해당 전진을 멈추고 자기 원본 복원·실제 증거·원인을 먼저 확인한다. 이 승인은 같은 실패
+명령의 자동 재시도·근거 없는 값 탐색·factory reset·안전 게이트 완화가 아니다. 증거로 확인한
+같은 제품화 결함의 정정과 재검증은 결과를 보고하며 계속하고, 다른 장비/권한으로 확대하지 않는다.
+Bar bootstrap/native/schedule write, 무인 시험, 상시 group arming은 포함하지 않는다.
+§1 frozen native 여섯 파일과 직접 tests는 해제하지 않는다. 재개 판단과 실제 결과를 매번 분리해
+기록하며 기능 응답·자격 발급·원복·운영 서비스 교체를 각각 확인하기 전 완료로 올리지 않는다.
