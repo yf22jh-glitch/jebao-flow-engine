@@ -4134,3 +4134,33 @@ slave async role만 UNCERTAIN인 형태다. child 첫 slave atomic UNCERTAIN/나
 단회 결과를 분리하고, 새증거가 없으면 임의대안/값탐색/timeout확대 없이 보고한다.
 사용자의 최종 목적은 동작과 배포이며, 개별기능 자격·Async 수용·해제·운영generation을 각각
 검증한다. factory reset·상시group arming·first/Bar 앱이전원복 의무의 흡수는 없다.
+
+## 2026-09-15 Async 연결 유지·ACK 부재의 상태 확인 후 배포
+
+사용자는 누적3회 결과와 보존 원복 raw의 Async 보고 재발견을 보고받고 “수정해서 배포해”라고
+요청했다. 원인 미확정과 §7 보고 뒤의 새 수정·단회 검증·배포 승인으로 기록한다. 과거 성공이나
+이번 보고를 원 명령 ACK로 바꾸지 않는다. 별도 정책 커밋 뒤 `local_control/wavemaker_lifecycle.py`,
+`local_control_cli.py`(공개 결과가 필요한 경우만), 직접 tests와 관련 문서만 수정한다.
+
+마지막 Async 직전 fresh pair read에 사용한 연결을 그 역할 단독 write까지 유지하여 현재의
+관측 close→재연결→중복 BEFORE 읽기를 없앤다. pair 읽기는 관측이며 Auto/시각 고정 게이트가 아니다.
+마지막 Async send_once의 통신 오류 뒤에만 원 오류·UNCERTAIN·ACK 부재를 먼저 내구화하고,
+기존 writer를 닫은 뒤 새 연결의 reply-only 읽기1회로 목표 Linkage를 확인한다. 재전송은0이다.
+일치하면 ACK 성공과 구분되는 상태 확인 진단을 남긴다. 불일치·읽기 실패·취소는 성공 처리하지
+않고 기존 자기 원복으로 간다. report 단독으로 이 ACK 부재를 해소하지 않는다. 명령 전달의
+인과는 UNKNOWN으로 두고 새로운 직접 응답의 목표 상태 확인만 주장한다. 최종 전체 image와
+명시 제어 대조는 유지한다. 다른 단계·qualification의 실제 ACK 요구는 불변이다.
+
+writer/schema9개·40receipt·공용 coordinator/guard·protocol timeout/retry·frozen native6개와
+직접 tests는 불변이다. 새 firmware fake·재전송·원본 외 복구·factory reset은 없다. 연결 변경과
+후속 상태 확인을 함께 도입하므로 성공을 하나의 원인 규명으로 귀속하지 않는다.
+기존 시험 단언의 변경은 마지막 Async ACK 부재에서 직접 상태가 확인되는 새 계약에만 한정한다.
+
+실장은 동일 Pro pair의 원복 상태·source/image/자격을 결속한 새 operation1회다(제품 누적4회).
+전진 실패 때는 원본 보존·known scalar assist를 포함한 자기 복원을 먼저 끝내고 보고한다.
+동일 명령 자동 반복이나 추가 다섯 번째 전진은 포함하지 않는다. 소프트웨어·수용/원복 검증 후
+기존6개 제어가 포함된 새 자격으로 운영 generation을 교체·확인한다. startup 장비 write0,
+상시 group 비무장과 설치 실패 시 exact prior 서비스 rollback을 유지한다. 새 서비스는 중단된
+원 서비스의 동일 복귀가 아니라 대체다. first 앱OFF·Bar 앱이전값 복귀 의무는 별도로 남긴다.
+같은 승인/현장 질문을 반복하지 않으며 이를 앱 완료·물리 안전 선언으로 각색하지 않는다.
+각 결과를 기록하고 구현/실기 단회 권한을 소진한다. 배포·기능수용·원복 완료를 서로 대체하지 않는다.
