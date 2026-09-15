@@ -1,5 +1,9 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-15 Bar Flow 재자격](2026-09-15-bar-flow-requalification.md) — PASS, 준비40 원복.
+- [2026-09-15 Bar power 재자격](2026-09-15-bar-power-requalification.md) — PASS, 기존6개 보존 후보 확보.
+- [2026-09-15 제품 Sync 해제 ACK timeout](2026-09-15-product-sync-detach-ack-timeout.md) — attach PASS, 원복 미완료·배포 정지.
+
 - [2026-09-15 Pro 자격 정정 후 발급·원복 PASS](2026-09-15-pro-qualification-app-range-pass.md) — 두 Pro9종, 후보18/영수증36; 제품 결속·배포는 별도.
 
 - [2026-09-14 Native Sync 준비: 검색 설정 정정과 진입 차단](2026-09-14-native-sync-preparation-admission.md) — 장비 write0, Sync 미실행.
