@@ -4066,3 +4066,28 @@ writer·protocol·schema fingerprint·기존 receipt·transport timeout/retry는
 Bar bootstrap/native/schedule write, 무인 시험, 상시 group arming은 포함하지 않는다.
 §1 frozen native 여섯 파일과 직접 tests는 해제하지 않는다. 재개 판단과 실제 결과를 매번 분리해
 기록하며 기능 응답·자격 발급·원복·운영 서비스 교체를 각각 확인하기 전 완료로 올리지 않는다.
+
+## 2026-09-15 제품 Sync 미완료 해제의 소유 복구·배포 재개
+
+사용자는 `31dc0a0`의 ACK timeout·재전송 없는 복구 정지와 별도 복구 절차 제안을 보고받고
+“ㅇㅇㅇㅇ 진행해”, “끝까지 진행시켜서 배포 완료해”라고 승인했다. 기존 미완료 detach를 지우거나
+같은 atomic 명령을 재전송하지 않고, 자기 attach 원본에 결속된 별도 scalar 지원 작업으로
+복구·검증·배포를 이어간다. 상세 계약은 `docs/wavemaker-owned-detach-assistance.md`다.
+
+범위는 `local_control/wavemaker_lifecycle.py`, `local_control_cli.py`, 두 직접 test 파일과
+관련 계획·구현·실기 문서다. 기존 journal/lease에 결정적 지원 id와 원본/실패 기록의 결속을
+보존한다. writer·schema 입력9개·기존 자격·일반 coordinator/guard·transport timeout/retry·
+§1 frozen 파일/직접 tests는 불변이다. 이 별도 정책 커밋 뒤 구현하며 결과 기록을 먼저 보존한다.
+
+단회 실장은 자기 Pro pair의 첫 slave atomic 해제가 UNCERTAIN이고 나머지5단계가 미시도인
+경우에 한한다. master independent → slave 앱 schedule_enable=False → slave constant·준비
+Flow·Frequency라는 최대5개 새 scalar 단계다. 모두 기존 실장 자격을 요구하며 실제 일치 단계는
+전송하지 않는다. master 먼저 해제하는 순서 변경과 TimerOFF 중 수동 운전은 명시적 범위다.
+성공을 가정하지 않으며 시도한 scalar도 재전송하지 않는다. 기존 실패 payload는 재사용하지 않는다.
+준비 상태가 실제 확인되면 기존 UNCERTAIN은 fresh 일치로만 해소하고 자기 원432B·8controls를
+기존 나머지 단계로 복원한다. 다른 미완료 기록은 허용하지 않고 generic recover는 계속 거부한다.
+
+실패 시 증거·원본·미완료 상태를 유지하고 자동 대안 반복하지 않는다. 사용자에게 같은 현장
+질문을 반복하지 않는다. 이전 first 앱 OFF·Bar 앱 준비 이전 복귀·원 서비스 의무를 흡수하지
+않으며 새 운영 generation은 원 서비스의 동일 복귀가 아니라 대체임을 기록한다. 복원 확인 후
+남은 제품 Async 단회와 기존6개 제어 보존 배포를 잇는다. 초기화·상시 group arming은 없다.
