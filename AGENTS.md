@@ -3967,3 +3967,30 @@ gitignored private 경로에 보존하고, 저장소에는 다음만 남깁니�
 > "내가 지금 하려는 일은 **어떤 미확정 질문을 어떤 증거로** 닫는가?"
 
 답할 수 없으면 그 일은 하지 않습니다.
+
+## 2026-09-15 수류모터 제품 구현 범위
+
+repository maintainer는 Bar 한 대·Pro 두 대의 앱 동등 개별 기능과 master 시간표·파형·부가값
+상속 및 slave 슬롯별 Flow를 요청하고 “일단 계획서 만들고 검토한 후 바로 구현들어가자”라고 했다.
+추가로 “sync랑 async 해제는 기존 값으로 덮어 씌워서 해제하는걸로 구현하자”라고 요청했다.
+계획은 `docs/wavemaker-product-plan.md`이며 정적 계약 검토 후 제품 구현을 진행한다.
+
+이번 허용은 `local_control/`의 `wavemaker.py`, `wavemaker_restore.py`, `coordinator.py`,
+`device_writer.py`, `catalog.py`, `ha.py`, `mqtt.py`, `local_control_cli.py` 및 직접 테스트와
+예시·제품 문서의 소프트웨어 구현·오프라인 검증이다. 기존 `local_control/schedule.py` compiler는
+재사용하며 이 범위에서 수정하지 않는다. 범위 밖 필수 변경이 발견되면 근거를 보고한다.
+§1 frozen native 여섯 파일과 그 직접 tests, `protocol/`, 공용 hardware guard, 옛 daemon/HA는
+재동결 그대로다. 새 실기·배포·장비 초기화·상시 write 승인이 아니다.
+
+identity·range/step·single-write·journal/fsync·qualification·복구 권한은 유지한다.
+Bar의 384-byte 시간표·반환값 소프트웨어 구현을 실제 복원 자격으로 올리지 않는다.
+Bar timer의 미확정 앱 coupling을 Pro bool 명령으로 대체하지 않는다. `device_writer.py` 수정은
+schema digest 변경을 수반하므로 기존 receipt는 새 내용에 자동 유효하지 않다. fingerprint 계산을
+바꿔 재qualification을 회피하지 않는다.
+
+해제는 연동 전 자기 snapshot을 사용하는 명시적 새 작업이다. 기존 `VERIFIED` 기록에 대한
+`recover` 의미를 바꾸거나 과거 성공을 현재 상태라고 출판하지 않는다. 시간표 overwrite만으로
+역할이 해제됐다고 판정하지 않으며 원본 image·독립 역할·제어값의 실제 반환값을 비교한다.
+오류 시 자동 반복·timeout 증가·Sync 재점화·factory reset은 포함하지 않는다.
+이전 first Pro 최종 앱 OFF·서비스 복귀 의무는 새 제품 작업과 별개로 유지한다.
+구현 단계별 결과를 문서화하고, 완료 커밋으로 그 구현 범위를 소진한다. 미완료 단계는 명시한다.
