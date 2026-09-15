@@ -5,7 +5,15 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    model_serializer,
+    model_validator,
+)
 
 from jebao_flow.protocol.models import ScheduleEndTime, ScheduleStartTime
 from jebao_flow.protocol.schedule import (
@@ -148,6 +156,19 @@ class NativeWavemakerPlan(BaseModel):
     slaves: tuple[NativeSlaveDefinition, ...] = Field(min_length=1)
     preparation_flow: int = Field(default=30, ge=30, le=100, strict=True)
     preparation_frequency: int = Field(default=20, ge=0, le=100, strict=True)
+    preparation_slave_flow: int | None = Field(default=None, ge=30, le=100, strict=True)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_slave_preparation(self, handler):
+        result = handler(self)
+        if self.preparation_slave_flow is None:
+            result.pop("preparation_slave_flow", None)
+        return result
+
+    def preparation_flow_for(self, member: str) -> int:
+        if member != self.master and self.preparation_slave_flow is not None:
+            return self.preparation_slave_flow
+        return self.preparation_flow
 
     @model_validator(mode="after")
     def validate_topology(self) -> Self:
@@ -188,6 +209,7 @@ class NativeWavemakerPlan(BaseModel):
             "master": self.master,
             "preparation_flow": self.preparation_flow,
             "preparation_frequency": self.preparation_frequency,
+            "preparation_flows": {member: self.preparation_flow_for(member) for member in images},
             "schedule": self.schedule.model_dump(mode="json"),
             "slaves": [slave.model_dump(mode="json") for slave in self.slaves],
             "images": {

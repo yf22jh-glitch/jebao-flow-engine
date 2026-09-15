@@ -114,21 +114,26 @@ def _initial(timer=False, flow=40):
 class MemoryTransport:
     def __init__(self, address, rig):
         self.address, self.rig = address, rig
+        rig.sessions.append(self)
+        self.closed = 0
 
     async def connect(self):
-        pass
+        self.rig.events.append(("connect", self, self.rig.virtual_time))
 
     async def authenticate(self):
+        self.rig.events.append(("authenticate", self, self.rig.virtual_time))
         return b"synthetic-auth"
 
     async def disconnect(self):
-        pass
+        self.closed += 1
+        self.rig.events.append(("close", self, self.rig.virtual_time))
 
     def quarantine(self):
-        pass
+        self.rig.events.append(("quarantine", self, self.rig.virtual_time))
 
-    async def read_raw_state_capture(self, *, accept_reports):
+    async def read_raw_state_capture(self, *, accept_reports, state_frame_observer=None):
         rig = self.rig
+        rig.events.append(("read", self, rig.virtual_time))
         rig.reads.append((self.address, accept_reports))
         if (
             rig.reject_final_reply
@@ -141,10 +146,14 @@ class MemoryTransport:
         if rig.read_transform is not None:
             status = rig.read_transform(self.address, status, accept_reports)
         action = 4 if accept_reports else 3
-        return RawStateCapture(b"synthetic-wire" + bytes([action]) + status, action, status)
+        capture = RawStateCapture(b"synthetic-wire" + bytes([action]) + status, action, status)
+        if state_frame_observer is not None:
+            state_frame_observer(capture, True)
+        return capture
 
     async def send_raw_control(self, payload):
         rig = self.rig
+        rig.events.append(("send", self, rig.virtual_time))
         # 전송 직전에 durable attempting과 모든 blob이 존재해야 한다.
         matches = [
             (r, a)
@@ -218,6 +227,13 @@ class Rig:
         self.reject_final_reply = False
         self.before_send = None
         self.read_transform = None
+        self.virtual_time = 0.0
+        self.sleeps = []
+        self.events, self.sessions = [], []
+
+    async def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.virtual_time += seconds
 
     def controller(self):
         return NativeWavemakerController(
@@ -227,6 +243,8 @@ class Rig:
             lease=self.lease,
             session_factory=lambda address: MemoryTransport(address, self),
             qualification_verifier=lambda _: self.keys,
+            sequence_sleep=self.sleep,
+            sequence_clock=lambda: self.virtual_time,
         )
 
     async def attach(self, mode="sync", request_id="attach_0001"):
@@ -250,12 +268,12 @@ async def test_both_roles_wire_journal_original_restore_and_cached_requests(tmp_
     assert SCHEMA.decode_status(rig.states["slave"])["Linkage"] == mode + "_slave"
     assert rig.states["master"][11:443] == _plan(mode).compile_images()["master"]
     assert rig.states["slave"][11:443] == _plan(mode).compile_images()["slave"]
-    assert [s[0] for s in rig.sent[:2]] == ["slave", "master"]
+    assert [s[0] for s in rig.sent[:2]] == ["master", "slave"]
     assert all(s[1]["TimerON"] is False and s[1]["Linkage"] == "independent" for s in rig.sent[:2])
     assert rig.sent[0][1]["Flow"] == 32 and rig.sent[0][1]["Frequency"] == 21
     if mode == "async":
         roles = [s[1]["Linkage"] for s in rig.sent if s[0] == "slave" and "Linkage" in s[1]]
-        assert roles == ["independent", "sync_slave", "async_slave"]
+        assert roles == ["independent", "independent", "sync_slave", "async_slave"]
     count = len(rig.sent)
     cached = await rig.attach(mode)
     assert cached["accepted"] and not cached["current_state_verified"]
@@ -280,13 +298,13 @@ async def test_both_roles_wire_journal_original_restore_and_cached_requests(tmp_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", range(1, 8))
+@pytest.mark.parametrize("failure", range(1, 10))
 async def test_attach_ack_loss_at_each_async_write_restores_without_replaying_attach(
     tmp_path, failure
 ):
     rig = Rig(tmp_path)
     rig.fail_ack = failure
-    if failure == 7:
+    if failure == 9:
         # The last role alone may be confirmed by one explicit reply, without an ACK.
         result = await rig.attach("async")
         assert result["accepted"]
@@ -298,7 +316,7 @@ async def test_attach_ack_loss_at_each_async_write_restores_without_replaying_at
             await rig.attach("async")
     assert rig.states == rig.originals
     assert rig.store.load("attach_0001").phase is (
-        TransactionPhase.VERIFIED if failure == 7 else TransactionPhase.ROLLED_BACK
+        TransactionPhase.VERIFIED if failure == 9 else TransactionPhase.ROLLED_BACK
     )
     assert (
         rig.store.load(native_detach_request_id("attach_0001")).phase is TransactionPhase.VERIFIED
@@ -316,12 +334,12 @@ async def test_async_uses_observed_slave_connection_without_second_before_read(
     original_read = MemoryTransport.read_raw_state_capture
     original_send = MemoryTransport.send_raw_control
 
-    async def read(self, *, accept_reports):
-        events.append(("read", id(self), self.address))
-        return await original_read(self, accept_reports=accept_reports)
+    async def read(self, *, accept_reports, **kwargs):
+        events.append(("read", self, self.address))
+        return await original_read(self, accept_reports=accept_reports, **kwargs)
 
     async def send(self, payload):
-        events.append(("send", id(self), self.address))
+        events.append(("send", self, self.address))
         return await original_send(self, payload)
 
     monkeypatch.setattr(MemoryTransport, "read_raw_state_capture", read)
@@ -331,7 +349,7 @@ async def test_async_uses_observed_slave_connection_without_second_before_read(
     connection = events[last_send][1]
     prior = [e for e in events[:last_send] if e[1] == connection]
     assert prior == [("read", connection, "slave")]
-    assert len(rig.sent) == 7
+    assert len(rig.sent) == 9
 
 
 @pytest.mark.asyncio
@@ -340,25 +358,25 @@ async def test_async_ack_error_never_accepts_missing_mismatched_or_report_only_r
     tmp_path, monkeypatch, failure
 ):
     rig = Rig(tmp_path)
-    rig.fail_ack = 7
+    rig.fail_ack = 9
     original_read = MemoryTransport.read_raw_state_capture
     reads = []
 
-    async def read(self, *, accept_reports):
-        if len(rig.sent) == 7 and self.address == "slave" and not accept_reports:
+    async def read(self, *, accept_reports, **kwargs):
+        if len(rig.sent) == 9 and self.address == "slave" and not accept_reports:
             reads.append(accept_reports)
             if failure == "timeout":
                 raise TimeoutError("synthetic reply loss")
             if failure == "cancel":
                 raise asyncio.CancelledError()
-            raw = await original_read(self, accept_reports=accept_reports)
+            raw = await original_read(self, accept_reports=accept_reports, **kwargs)
             status = (
                 _put(raw.status_payload, {"Linkage": "sync_slave"})
                 if failure == "mismatch"
                 else raw.status_payload
             )
             return RawStateCapture(raw.wire_frame, 4 if failure == "report" else 3, status)
-        return await original_read(self, accept_reports=accept_reports)
+        return await original_read(self, accept_reports=accept_reports, **kwargs)
 
     monkeypatch.setattr(MemoryTransport, "read_raw_state_capture", read)
     with pytest.raises(
@@ -368,22 +386,22 @@ async def test_async_ack_error_never_accepts_missing_mismatched_or_report_only_r
     assert reads == [False]
     assert rig.states == rig.originals
     source = rig.store.load("attach_0001")
-    assert source.actions[6].acknowledgement_sha256 is None
-    assert source.actions[6].diagnostic == "native_own_baseline_restored_delivery_unknown"
+    assert source.actions[8].acknowledgement_sha256 is None
+    assert source.actions[8].diagnostic == "native_own_baseline_restored_delivery_unknown"
     assert sum(s[2] == "attach_0001" and s[1] == {"Linkage": "async_slave"} for s in rig.sent) == 1
 
 
 @pytest.mark.asyncio
 async def test_reply_confirmed_async_final_failure_can_use_owned_assistance(tmp_path, monkeypatch):
     rig = Rig(tmp_path)
-    rig.fail_ack = 7
+    rig.fail_ack = 9
     original_read = MemoryTransport.read_raw_state_capture
     original_send = MemoryTransport.send_raw_control
 
-    async def read(self, *, accept_reports):
-        raw = await original_read(self, accept_reports=accept_reports)
+    async def read(self, *, accept_reports, **kwargs):
+        raw = await original_read(self, accept_reports=accept_reports, **kwargs)
         # Final attach comparison fails after the reply-confirmed role. No firmware model.
-        if len(rig.sent) == 7 and self.address == "master":
+        if len(rig.sent) == 9 and self.address == "master":
             return RawStateCapture(
                 raw.wire_frame,
                 raw.action,
@@ -392,8 +410,8 @@ async def test_reply_confirmed_async_final_failure_can_use_owned_assistance(tmp_
         return raw
 
     async def send(self, payload):
-        if len(rig.sent) == 7:
-            rig.fail_ack = rig.reject_send = 8
+        if len(rig.sent) == 9:
+            rig.fail_ack = rig.reject_send = 10
         return await original_send(self, payload)
 
     monkeypatch.setattr(MemoryTransport, "read_raw_state_capture", read)
@@ -402,14 +420,14 @@ async def test_reply_confirmed_async_final_failure_can_use_owned_assistance(tmp_
         await rig.attach("async")
     source = rig.store.load("attach_0001")
     assert source.phase is TransactionPhase.RECOVERY_REQUIRED
-    assert source.actions[6].phase is ActionPhase.VERIFIED
-    assert source.actions[6].acknowledgement_sha256 is None
+    assert source.actions[8].phase is ActionPhase.VERIFIED
+    assert source.actions[8].acknowledgement_sha256 is None
     monkeypatch.setattr(MemoryTransport, "send_raw_control", original_send)
     rig.fail_ack = rig.reject_send = None
     result = await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
     assert result["accepted"] and rig.states == rig.originals
     assert (
-        rig.store.load("attach_0001").actions[6].diagnostic
+        rig.store.load("attach_0001").actions[8].diagnostic
         == "native_own_baseline_restored_delivery_unknown"
     )
 
@@ -922,7 +940,7 @@ async def test_failed_last_async_and_detach_can_restore_owned_original_without_r
     rig = Rig(tmp_path)
 
     def timeout_before_copy(number, address, changes):
-        if number in {7, 8}:
+        if number in {9, 10}:
             raise TimeoutError("synthetic final role and first detach ACK loss")
 
     rig.before_send = timeout_before_copy
@@ -931,10 +949,10 @@ async def test_failed_last_async_and_detach_can_restore_owned_original_without_r
     source = rig.store.load("attach_0001")
     child = rig.store.load(native_detach_request_id(source.request_id))
     assert source.phase is TransactionPhase.RECOVERY_REQUIRED
-    assert [a.phase for a in source.actions] == [ActionPhase.VERIFIED] * 6 + [ActionPhase.UNCERTAIN]
+    assert [a.phase for a in source.actions] == [ActionPhase.VERIFIED] * 8 + [ActionPhase.UNCERTAIN]
     assert child.actions[0].phase is ActionPhase.UNCERTAIN
     assert all(a.phase is ActionPhase.PREPARED for a in child.actions[1:])
-    failed = source.actions[6]
+    failed = source.actions[8]
     rig.before_send = None
     sent = len(rig.sent)
     result = await rig.controller().assist_detach(request_id=source.request_id, targets=rig.targets)
@@ -943,9 +961,9 @@ async def test_failed_last_async_and_detach_can_restore_owned_original_without_r
     recovered = rig.store.load(source.request_id)
     assert recovered.phase is TransactionPhase.ROLLED_BACK
     assert recovered.native_context_sha256 == source.native_context_sha256
-    assert recovered.actions[6].acknowledgement_sha256 is None
-    assert recovered.actions[6].native_evidence_sha256 == failed.native_evidence_sha256
-    assert recovered.actions[6].diagnostic == "native_own_baseline_restored_delivery_unknown"
+    assert recovered.actions[8].acknowledgement_sha256 is None
+    assert recovered.actions[8].native_evidence_sha256 == failed.native_evidence_sha256
+    assert recovered.actions[8].diagnostic == "native_own_baseline_restored_delivery_unknown"
     assert all(
         row[0] != "slave"
         or (
@@ -966,7 +984,7 @@ async def test_failed_source_outside_last_async_shape_is_not_assisted(tmp_path):
     rig = Rig(tmp_path)
 
     def timeout_before_copy(number, address, changes):
-        if number in {6, 7}:
+        if number in {7, 8}:
             raise TimeoutError("synthetic earlier role and first detach ACK loss")
 
     rig.before_send = timeout_before_copy
@@ -976,9 +994,9 @@ async def test_failed_source_outside_last_async_shape_is_not_assisted(tmp_path):
     reads, sends = len(rig.reads), len(rig.sent)
     controller = rig.controller()
     source = rig.store.load("attach_0001")
-    with pytest.raises(ValueError, match="마지막 Async 전환만"):
+    with pytest.raises(ValueError, match="slave 역할 또는 최종 대조"):
         controller._require_assistance_source(source, controller._context(source))
-    with pytest.raises(ValueError, match="지원 범위"):
+    with pytest.raises(ValueError, match="slave 역할 또는 최종 대조"):
         await controller.assist_detach(request_id="attach_0001", targets=rig.targets)
     assert (len(rig.reads), len(rig.sent)) == (reads, sends)
 
@@ -987,7 +1005,7 @@ async def test_failed_source_outside_last_async_shape_is_not_assisted(tmp_path):
 async def test_async_transition_only_writes_linkage_and_preserves_pair_observation(tmp_path):
     rig = Rig(tmp_path)
     await rig.attach("async")
-    assert rig.sent[6][0:2] == ("slave", {"Linkage": "async_slave"})
+    assert rig.sent[8][0:2] == ("slave", {"Linkage": "async_slave"})
     source = rig.store.load("attach_0001")
     final = json.loads(rig.store.load_blob(source.native_final_sha256))
     observed = None
@@ -1016,7 +1034,7 @@ async def test_pre_async_pair_read_failure_sends_no_async_and_restores(tmp_path)
     rig = Rig(tmp_path)
 
     def fail_pair(address, status, reports):
-        if len(rig.sent) == 6 and address == "master":
+        if len(rig.sent) == 8 and address == "master":
             raise TimeoutError("synthetic paired observation read failure")
         return status
 
@@ -1024,5 +1042,5 @@ async def test_pre_async_pair_read_failure_sends_no_async_and_restores(tmp_path)
     with pytest.raises(LocalControlExecutionError, match="자기 원본 복원 확인"):
         await rig.attach("async")
     assert all(row[1].get("Linkage") != "async_slave" for row in rig.sent)
-    assert rig.store.load("attach_0001").actions[6].acknowledgement_sha256 is None
+    assert rig.store.load("attach_0001").actions[8].acknowledgement_sha256 is None
     assert rig.states == rig.originals

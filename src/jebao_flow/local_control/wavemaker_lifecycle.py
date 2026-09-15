@@ -36,6 +36,13 @@ from jebao_flow.local_control.wavemaker_restore import (
     WavemakerRestoreSnapshot,
     compare_restore_readback,
 )
+from jebao_flow.local_control.wavemaker_sequence import (
+    STAGED_ROLES,
+    SequenceDeviceWriter,
+    advance_staged_roles,
+    staged_controls,
+    validate_staged_assistance_source,
+)
 from jebao_flow.protocol.errors import ProtocolError
 from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_MODES, LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
@@ -73,17 +80,36 @@ class NativeContext(BaseModel):
     plan: NativeWavemakerPlan
     originals: tuple[NativeOriginal, ...] = Field(min_length=2)
     assisted_record_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    activation_sequence: Literal["staged_roles_v1"] | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_assistance(self, handler):
         result = handler(self)
         if self.assisted_record_sha256 is None:
             result.pop("assisted_record_sha256", None)
+        if self.activation_sequence is None:
+            result.pop("activation_sequence", None)
         return result
 
 
 class NativeWavemakerController(LocalControlCoordinator):
     """기존 qualified writer를 순서 있는 제품 lifecycle에 연결한다."""
+
+    def __init__(self, *, sequence_sleep=asyncio.sleep, sequence_clock=None, **kwargs):
+        session_factory = kwargs.pop("session_factory", None)
+        if kwargs.get("writer_factory") is not None and session_factory is not None:
+            raise ValueError("choose either a session factory or a writer factory")
+        if kwargs.get("writer_factory") is None:
+            kwargs["writer_factory"] = (
+                SequenceDeviceWriter
+                if session_factory is None
+                else lambda endpoint: SequenceDeviceWriter(
+                    endpoint, session_factory=session_factory
+                )
+            )
+        super().__init__(**kwargs)
+        self._sequence_sleep = sequence_sleep
+        self._sequence_clock = sequence_clock or (lambda: asyncio.get_running_loop().time())
 
     def targets_for(self, request_id: str) -> tuple[LocalDeviceBinding, ...]:
         record = self._required(request_id)
@@ -120,6 +146,8 @@ class NativeWavemakerController(LocalControlCoordinator):
                     f"미완료 결속입니다: recover-wavemaker --request-id {request_id}"
                 )
             self._require_available(targets, allowed=())
+            if len(targets) != 2:
+                raise ValueError("단계별 native 실행은 Pro master/slave 한 쌍입니다")
             endpoints = await self._resolver.resolve_many(targets)
             self._validate_endpoints(targets, endpoints)
             self._qualify(request_id, plan, endpoints)
@@ -140,6 +168,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 plan=plan,
                 schema_sha256=current_protocol_schema_sha256(),
                 originals=tuple(originals),
+                activation_sequence=STAGED_ROLES,
             )
             record = self._prepare(request_id, intent, context, endpoints)
             try:
@@ -279,6 +308,9 @@ class NativeWavemakerController(LocalControlCoordinator):
     def _require_assistance_source(self, source, context):
         if source.phase is TransactionPhase.VERIFIED:
             return
+        if context.activation_sequence == STAGED_ROLES:
+            validate_staged_assistance_source(self, source, context)
+            return
         # 2026-09-15 product Async: original ownership survives its last-role ACK timeout.
         # This admits recovery only; neither the role command nor the child atomic is resent.
         if (
@@ -314,7 +346,7 @@ class NativeWavemakerController(LocalControlCoordinator):
             (master, "linkage_role", "independent"),
             (slave, "schedule_enable", False),
             (slave, "manual_mode", "constant"),
-            (slave, "manual_flow", context.plan.preparation_flow),
+            (slave, "manual_flow", context.plan.preparation_flow_for(slave.target.logical_member)),
             (slave, "manual_frequency", context.plan.preparation_frequency),
         )
 
@@ -329,7 +361,7 @@ class NativeWavemakerController(LocalControlCoordinator):
             or child.actions[0].target != context.originals[1].target
             or any(a.phase is not ActionPhase.PREPARED for a in child.actions[1:])
             or json.loads(self._journal.load_blob(child.actions[0].expected_readback_sha256))
-            != self._safe(context.plan)
+            != self._safe(context.plan, context.originals[1].target.logical_member)
         ):
             raise ValueError("지원 범위는 첫 slave 해제만 미확인인 자기 Pro pair입니다")
 
@@ -355,11 +387,13 @@ class NativeWavemakerController(LocalControlCoordinator):
         snapshots = self._snapshots(context)
         writers = {e.target.logical_member: self._writer_factory(e) for e in endpoints}
         names = [item.target.logical_member for item in context.originals]
-        safe = self._safe(context.plan)
+        staged = context.kind == "attach" and context.activation_sequence == STAGED_ROLES
         # 전송 전 준비만 한다. 각 action의 실제 no-change와 image 안전 조건은 직전 읽기로 판정한다.
-        for name in names[1:] + names[:1]:
+        for name in names if staged else names[1:] + names[:1]:
             prepared.append(
-                writers[name].prepare_native_controls(safe, snapshots[name].baseline_status)
+                writers[name].prepare_native_controls(
+                    self._safe(context.plan, name), snapshots[name].baseline_status
+                )
             )
         images = (
             context.plan.compile_images()
@@ -370,7 +404,12 @@ class NativeWavemakerController(LocalControlCoordinator):
             prepared.append(
                 writers[name].prepare_native_image(images[name], snapshots[name].baseline_status)
             )
-        if context.kind == "attach":
+        if staged:
+            for name, desired in staged_controls(context):
+                prepared.append(
+                    writers[name].prepare_native_controls(desired, snapshots[name].baseline_status)
+                )
+        elif context.kind == "attach":
             for index, name in enumerate(names):
                 role = "master" if index == 0 else "sync_slave"
                 desired = {"SwitchON": True, "TimerON": True, "Linkage": role}
@@ -426,6 +465,8 @@ class NativeWavemakerController(LocalControlCoordinator):
         return result
 
     async def _advance(self, record, context, endpoints, permit):
+        if context.kind == "attach" and context.activation_sequence == STAGED_ROLES:
+            return await advance_staged_roles(self, record, context, endpoints, permit)
         by_name = {e.target.logical_member: e for e in endpoints}
         for index in range(len(record.actions)):
             action = record.actions[index]
@@ -543,12 +584,13 @@ class NativeWavemakerController(LocalControlCoordinator):
 
     def _can_reconcile_async(self, record, context, index):
         """Only the final role delta after this pair's verified Sync, never qualification."""
+        staged = context.activation_sequence == STAGED_ROLES
         return (
             context.kind == "attach"
             and context.plan.mode == "async"
             and len(context.originals) == 2
-            and len(record.actions) == 7
-            and index == 6
+            and len(record.actions) == (9 if staged else 7)
+            and index == (8 if staged else 6)
             and record.actions[index].acknowledgement_sha256 is None
             and record.actions[index].function == "native_controls"
             and record.actions[index].target == context.originals[1].target
@@ -559,16 +601,24 @@ class NativeWavemakerController(LocalControlCoordinator):
             and json.loads(
                 self._journal.load_blob(record.actions[index - 1].expected_readback_sha256)
             )
-            == {"SwitchON": True, "TimerON": True, "Linkage": "sync_slave"}
+            == (
+                {"Linkage": "sync_slave"}
+                if staged
+                else {"SwitchON": True, "TimerON": True, "Linkage": "sync_slave"}
+            )
         )
 
-    async def _reconcile_async_reply(self, record, index, endpoint, permit):
+    async def _reconcile_async_reply(self, record, index, endpoint, permit, *, observe=False):
         """One fresh reply, no sends. State evidence cannot manufacture an ACK or delivery proof."""
         writer = self._writer_factory(endpoint)
         began = datetime.now(UTC)
         started = failure_clock_ns()
         try:
-            capture = await writer.connect_and_capture(accept_reports=False)
+            if observe:
+                await writer.connect_only()
+                capture = await writer.capture_sequence(permit, accept_reports=False)
+            else:
+                capture = await writer.connect_and_capture(accept_reports=False)
             permit.require_permitted()
             prepared = self._forward_prepared(record.actions[index], endpoint)
             record = self._evidence(
@@ -595,7 +645,13 @@ class NativeWavemakerController(LocalControlCoordinator):
             )
             raise
         finally:
-            await writer.close()
+            try:
+                if observe:
+                    from jebao_flow.local_control.wavemaker_sequence import persist_frames
+
+                    persist_frames(self, record, writer, "after_ack_error_reply_frames")
+            finally:
+                await writer.close()
 
     async def _observe_before_async(self, record, endpoints, permit, writers):
         """Observe both fresh streams, then send on the same slave connection.
@@ -656,15 +712,19 @@ class NativeWavemakerController(LocalControlCoordinator):
                 raise result
         return record, captures
 
-    async def _finish(self, record, context, endpoints, permit):
+    async def _finish(self, record, context, endpoints, permit, *, captures=None):
         rows = []
         try:
             snapshots = self._snapshots(context)
             images = context.plan.compile_images()
             for index, endpoint in enumerate(endpoints):
-                capture, status = await self._read(
-                    endpoint, permit, reports=context.kind == "attach"
-                )
+                if captures is None:
+                    capture, status = await self._read(
+                        endpoint, permit, reports=context.kind == "attach"
+                    )
+                else:
+                    began, raw = captures[endpoint.target.logical_member]
+                    capture, status = self._capture(raw, began), raw.status_payload
                 name = endpoint.target.logical_member
                 if context.kind == "detach":
                     row = compare_restore_readback(
@@ -672,7 +732,11 @@ class NativeWavemakerController(LocalControlCoordinator):
                     )
                 else:
                     expected = (
-                        ({"Linkage": "independent"} if index == 0 else self._safe(context.plan))
+                        (
+                            {"Linkage": "independent"}
+                            if index == 0
+                            else self._safe(context.plan, name)
+                        )
                         if context.kind == "detach_assist"
                         else {
                             "SwitchON": True,
@@ -927,7 +991,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 self._require_current_qualification(descriptor, endpoint)
             # 준비의 정상 Flow/주파수도 제품 범위·step 검증을 그대로 거친다.
             for function, value in (
-                ("manual_flow", plan.preparation_flow),
+                ("manual_flow", plan.preparation_flow_for(endpoint.target.logical_member)),
                 ("manual_frequency", plan.preparation_frequency),
             ):
                 self._catalog.validate_intent(
@@ -940,13 +1004,13 @@ class NativeWavemakerController(LocalControlCoordinator):
                 )
 
     @staticmethod
-    def _safe(plan):
+    def _safe(plan, member=None):
         return {
             "SwitchON": True,
             "TimerON": False,
             "Linkage": "independent",
             "Mode": "constant",
-            "Flow": plan.preparation_flow,
+            "Flow": plan.preparation_flow_for(member or plan.master),
             "Frequency": plan.preparation_frequency,
         }
 
