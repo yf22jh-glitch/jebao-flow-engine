@@ -56,3 +56,13 @@ source 범위는 lifecycle/CLI 두 파일뿐이다. writer/schema9개·공유 ti
 schema 직접 재계산은`81ee699d9a71d98a1caa8bc99ac1d9619d2959ba04f343335a31d27e8ac914f1`로
 불변이며 기존 자격 currency 유지이지 새 실장 수용 증명은 아니다. 기존 tests 수정0이고
 source 삭제2행은 CLI attach 호출과 `_finish`의 transaction 저장을 관찰 옵션 분기로 치환한 것이다.
+
+독립 리뷰는 같은 source에서 targeted80 PASS, full2922 PASS/2 FAIL/경고1(105.20초)을 보고했다.
+총2924개는 우리2919/5와 같지만 receipt 동시성 시험의 결과도 환경/실행마다 달랐다. 따라서
+이전 실패 이름 목록을 고정 원인 baseline으로 취급하지 않는다. 리뷰어는 실기를 실행하지 않았다.
+소유 계획이 손상되면 관찰 술어/status도 예외로 멈출 수 있다. 이를 False로 숨겨 자동 원복 분기로
+넘기지 않으며, 정상 보존물에 대한 무접촉 replay와 손상 시 보고 실패는 구분한다.
+
+[관찰 실행](runs/2026-09-15-product-async-operator-observation.md)은 마지막 Async 미확인 뒤
+사용자 지시대로 자동 원복 없이 남겼다. 최종 시도 뒤 취소/프로세스 종료도 자동 원복하지 않는다.
+향후 원복 뒤 ROLLED_BACK은 복구 회계이며, 실제 수용 여부는 phase가 아닌 final/증거 chain을 본다.
