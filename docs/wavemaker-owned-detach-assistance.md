@@ -53,3 +53,40 @@ writer·schema81ee699d·40영수증·일반 guard·timeout/retry는 불변이다
 성공 가설을 추가하지 않는다. 결정적 id·원본 결속·다른 미완료 차단·첫 write 전 내구화·
 각 단계 no-resend·재생 무접촉·최종 전체 원복·CLI 자격 전달과 실패 출력이 대상이다.
 실장 전 최종 source/image/schema를 결속하고 지원1회만 수행한다. 실패하면 새 실행 없이 보고한다.
+
+## 소프트웨어 구현·검증 (2026-09-15)
+
+정책 `8094cc4` 뒤 source2/test2를 변경했다. **실제 장비 복원·배포는 아직 완료가 아니다.**
+`assist-wavemaker-detach --request-id <attach-id> --qualifications <current-file> --write-enabled`
+진입점은 지원 뒤 같은 lease에서 기존 detach를 이어 실행한다. **exit0은 지원만의 성공이 아니라
+child 최종 원복 완료**다. 지원 실패 출력에는 source/support/child 상태와 다음 명령을 함께 둔다.
+설정·manifest·template·운영 mode 등 기존 설치 입력도 필요하며 observer/dry-run은 거부한다.
+
+지원 id는 attach에서 결정되고 context에 지원 전 실패 record의 immutable blob을 결속한다.
+새 context 필드는 None일 때 생략하여 기존 native context 직렬화 바이트를 보존한다.
+다른 미완료 작업의 면제는 없고 자기 attach/child/assist 정확 세 id만 허용한다. 이후의 일반
+recovery·power-retain·writer·transport·frozen native 파일은 변경하지 않았다.
+
+초기 targeted v1은 74 PASS/3 FAIL이었다. 구현에서 datetime을 JSON mode 없이 hash한 오류2개와
+시험 helper가 revision-zero PREPARED가 아닌 record를 create한 오류1개다. 두 부분을 정정했다.
+Ruff 길이 오류1건도 정정했고, 빈 patch의 context 불일치1건은 파일 변경 없이 종료됐다.
+v2는 77 PASS, CLI 자격 전달·write lock 회귀를 더한 v3는 **128 PASS**다.
+기존 test 함수 제거0·AST 변경0이다. CLI 시험의 삭제4행은 포맷 정리이며 단언 제거가 아니다.
+
+최종 source/test 트리의 전체 시험은 **2887 PASS / 5 FAIL / 경고2**다. 전체 PASS가 아니다.
+실패 이름은 직전 전체 시험과 동일한 boot identity1, receipt 동시성2, umask 관련2다.
+이름 일치로 근본 원인 동일성을 주장하지 않으며 재실행으로 이 실패를 씻지 않았다.
+Ruff는 통과했다. reviewer는 소유권/재전송/출처 보존의 정적 경로를 검토했으며 pytest·실기는
+재실행하지 않았다. 성공이 지원까지만 반환된다는 지적은 함수가 child 결과를 반환함을 확인하고
+철회됐다. 최초 잘못된 시험/진단 로그를 보존한다.
+
+| 보존 검사 로그 | SHA-256 |
+|---|---|
+| targeted v1 | `29aea050046943fe4808f128d3ba254ced49c68d791231cdf1440d1788de2508` |
+| targeted v2 | `4c47c452ff98db4dc283a3c40ecd189bb734e8ac976793e8c16e5391f56f18bd` |
+| targeted v3 | `fae692e4a58fc9ef213189261a592f29c9c1eab1716785b1f09e9e3b0300b4f2` |
+
+schema `81ee699d9a71d98a1caa8bc99ac1d9619d2959ba04f343335a31d27e8ac914f1`은 불변이며
+발급된 40영수증을 수정하거나 다시 발급하지 않는다. 첫 실제 지원에 쓸 원본은 기존 attach가
+포착한 두432B·8controls다. source 구현 커밋으로 이번 구현 범위를 소진하고 실제 단회 지원과
+후속 배포의 결과는 각각 별도 기록한다.

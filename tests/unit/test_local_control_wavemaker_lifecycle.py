@@ -669,3 +669,132 @@ async def test_corrupt_context_still_directs_generic_recover_to_dedicated_path(
     with pytest.raises(NativeRecoveryRequiredError) as caught:
         await LocalControlCoordinator.recover(rig.controller(), "attach_0001")
     assert caught.value.detach_id is None
+
+
+async def _stalled_detach(rig):
+    await rig.attach()
+    rig.fail_ack = rig.reject_send = len(rig.sent) + 1
+    with pytest.raises(TimeoutError):
+        await rig.detach()
+    child = rig.store.load(native_detach_request_id("attach_0001"))
+    assert child.actions[0].phase is ActionPhase.UNCERTAIN
+    assert all(a.phase is ActionPhase.PREPARED for a in child.actions[1:])
+    rig.fail_ack = rig.reject_send = None
+    return child
+
+
+@pytest.mark.asyncio
+async def test_owned_assistance_retains_unknown_delivery_and_restores_without_resend(tmp_path):
+    from jebao_flow.local_control.wavemaker_lifecycle import native_assistance_request_id
+
+    rig = Rig(tmp_path)
+    child = await _stalled_detach(rig)
+    old_context = rig.store.load("attach_0001").native_context_sha256
+    count = len(rig.sent)
+    result = await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    assert result["accepted"] and result["current_state_verified"]
+    assert rig.states == rig.originals
+    assert rig.store.load("attach_0001").native_context_sha256 == old_context
+    support = rig.store.load(native_assistance_request_id("attach_0001"))
+    assert support.phase is TransactionPhase.VERIFIED
+    assert [a.function for a in support.actions] == [
+        "linkage_role",
+        "schedule_enable",
+        "manual_mode",
+        "manual_flow",
+        "manual_frequency",
+    ]
+    assert all(
+        a.baseline_status_sha256
+        in {child.actions[0].baseline_status_sha256, child.actions[1].baseline_status_sha256}
+        for a in support.actions
+    )
+    new = rig.sent[count:]
+    assert new[0][0:2] == ("master", {"Linkage": "independent"})
+    assert new[1][0:2] == ("slave", {"SwitchON": True, "TimerON": False, "Linkage": "independent"})
+    assert all(not (s[2] == child.request_id and s[3] == child.actions[0].action_id) for s in new)
+    recovered = rig.store.load(child.request_id)
+    action = recovered.actions[0]
+    assert action.phase is ActionPhase.VERIFIED and action.acknowledgement_sha256 is None
+    assert action.forward_payload_sha256 == child.actions[0].forward_payload_sha256
+    assert action.diagnostic == "assisted_target_observed_delivery_unknown"
+    evidence = json.loads(rig.store.load_blob(action.native_evidence_sha256))
+    assert evidence["assistance"]["request_id"] == support.request_id
+    assert evidence["assistance"]["original_delivery"] == "UNKNOWN"
+    context = json.loads(rig.store.load_blob(support.native_context_sha256))
+    before = json.loads(rig.store.load_blob(context["assisted_record_sha256"]))
+    assert before["actions"][0]["phase"] == ActionPhase.UNCERTAIN.value
+    reads, sends = len(rig.reads), len(rig.sent)
+    replay = await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    assert replay["accepted"] and replay["current_state_verified"] is False
+    assert (len(rig.reads), len(rig.sent)) == (reads, sends)
+
+
+@pytest.mark.asyncio
+async def test_assistance_failure_never_rolls_back_or_resends_attempted_scalar(tmp_path):
+    from jebao_flow.local_control.coordinator import NativeRecoveryRequiredError
+    from jebao_flow.local_control.wavemaker_lifecycle import native_assistance_request_id
+
+    rig = Rig(tmp_path)
+    await _stalled_detach(rig)
+    count = len(rig.sent)
+    rig.fail_ack = rig.reject_send = count + 2
+    with pytest.raises(TimeoutError):
+        await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    assert len(rig.sent) == count + 2
+    assert SCHEMA.decode_status(rig.states["master"])["Linkage"] == "independent"
+    support = rig.store.load(native_assistance_request_id("attach_0001"))
+    assert support.actions[1].phase is ActionPhase.UNCERTAIN
+    assert all(a.phase is ActionPhase.PREPARED for a in support.actions[2:])
+    with pytest.raises(LocalControlExecutionError, match="재전송하지"):
+        await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    assert len(rig.sent) == count + 2
+    with pytest.raises(NativeRecoveryRequiredError):
+        await LocalControlCoordinator.recover(rig.controller(), support.request_id)
+    assert len(rig.sent) == count + 2
+
+
+@pytest.mark.asyncio
+async def test_assistance_requires_exact_stalled_shape_and_current_qualifications(tmp_path):
+    rig = Rig(tmp_path)
+    await rig.attach()
+    count = len(rig.sent)
+    with pytest.raises(KeyError):
+        await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    assert len(rig.sent) == count
+    rig.fail_ack = rig.reject_send = count + 1
+    with pytest.raises(TimeoutError):
+        await rig.detach()
+    rig.catalog = build_local_control_catalog()
+    with pytest.raises(ValueError, match="자격"):
+        await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    assert len(rig.sent) == count + 1
+
+
+@pytest.mark.asyncio
+async def test_assistance_rejects_unrelated_unfinished_record(tmp_path):
+    rig = Rig(tmp_path)
+    child = await _stalled_detach(rig)
+    unrelated = child.model_copy(
+        update={
+            "request_id": "unrelated_0001",
+            "revision": 0,
+            "phase": TransactionPhase.PREPARED,
+        }
+    )
+    rig.store.create(unrelated)
+    count, reads = len(rig.sent), len(rig.reads)
+    with pytest.raises(LocalControlExecutionError, match="다른 local-control"):
+        await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    assert (len(rig.sent), len(rig.reads)) == (count, reads)
+
+
+@pytest.mark.asyncio
+async def test_legacy_native_context_serialization_omits_new_field(tmp_path):
+    from jebao_flow.local_control.wavemaker_lifecycle import NativeContext
+
+    rig = Rig(tmp_path)
+    await rig.attach()
+    raw = rig.store.load_blob(rig.store.load("attach_0001").native_context_sha256)
+    assert b"assisted_record_sha256" not in raw
+    assert NativeContext.model_validate_json(raw).model_dump_json().encode() == raw

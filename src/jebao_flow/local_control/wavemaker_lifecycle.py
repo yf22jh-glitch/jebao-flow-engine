@@ -9,10 +9,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from jebao_flow.local_control.coordinator import LocalControlCoordinator, LocalControlExecutionError
 from jebao_flow.local_control.device_writer import (
@@ -47,6 +48,10 @@ def _json(value) -> bytes:
     )
 
 
+def native_assistance_request_id(attach_id: str) -> str:
+    return "wm_assist_" + hashlib.sha256(attach_id.encode("ascii")).hexdigest()
+
+
 class NativeOriginal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -59,12 +64,20 @@ class NativeContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     version: Literal[1] = 1
-    kind: Literal["attach", "detach"]
+    kind: Literal["attach", "detach", "detach_assist"]
     attach_request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,128}$")
     source_context_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     schema_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     plan: NativeWavemakerPlan
     originals: tuple[NativeOriginal, ...] = Field(min_length=2)
+    assisted_record_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_assistance(self, handler):
+        result = handler(self)
+        if self.assisted_record_sha256 is None:
+            result.pop("assisted_record_sha256", None)
+        return result
 
 
 class NativeWavemakerController(LocalControlCoordinator):
@@ -186,6 +199,122 @@ class NativeWavemakerController(LocalControlCoordinator):
         context = self._context(self._required(request_id))
         return await self.detach(attachment_id=context.attach_request_id, targets=targets)
 
+    async def assist_detach(self, *, request_id, targets):
+        """명시적으로 승인된 별도 scalar 5단계. 기존 atomic 재전송·역순 복구 없음."""
+        source = self._required(request_id)
+        context = self._context(source)
+        if context.kind != "attach" or source.phase is not TransactionPhase.VERIFIED:
+            raise ValueError("지원에는 완료된 자기 attach 원본이 필요합니다")
+        self._require_current_targets(context, targets)
+        child_id = native_detach_request_id(request_id)
+        assist_id = native_assistance_request_id(request_id)
+        with self._lease.acquire(tuple(t.physical_identity_key for t in targets)) as permit:
+            child = self._required(child_id)
+            self._context(child)
+            record = self._journal.load(assist_id)
+            if record is not None:
+                assist_context = self._context(record)
+                if child.phase is TransactionPhase.VERIFIED:
+                    return self._public(child, current=False)
+            else:
+                self._require_stalled_first_slave(child, context)
+            self._require_available(targets, allowed=(request_id, child_id, assist_id))
+            originals = tuple(o.target for o in context.originals)
+            endpoints = await self._resolver.resolve_many(originals)
+            self._validate_endpoints(originals, endpoints)
+            self._qualify(assist_id, context.plan, endpoints)
+            if record is None:
+                assist_context = NativeContext(
+                    **{
+                        **context.model_dump(),
+                        "kind": "detach_assist",
+                        "source_context_sha256": source.native_context_sha256,
+                        "assisted_record_sha256": self._journal.install_blob(
+                            child.model_dump_json().encode()
+                        ),
+                    }
+                )
+                # 현재 raw는 앱 명령 shape용, rollback 원본은 항상 attach 전 raw다.
+                current = {}
+                for endpoint in endpoints:
+                    _, status = await self._read(endpoint, permit, reports=True)
+                    current[endpoint.target.logical_member] = status
+                snapshots = self._snapshots(context)
+                prepared = []
+                for endpoint, function, value in self._assistance_steps(context, endpoints):
+                    intent = LocalControlIntent(
+                        request_id=assist_id, target=endpoint.target, function=function, value=value
+                    )
+                    self._catalog.validate_intent(intent)
+                    writer = self._writer_factory(endpoint)
+                    scalar = writer.prepare_scalar(intent, current[endpoint.target.logical_member])
+                    owned = writer.prepare_native_controls(
+                        json.loads(scalar.expected_readback),
+                        snapshots[endpoint.target.logical_member].baseline_status,
+                    )
+                    if scalar.forward_payload != owned.forward_payload:
+                        raise ValueError("앱 scalar와 소유 복구 payload가 다릅니다")
+                    if owned.forward_payload_sha256 == child.actions[0].forward_payload_sha256:
+                        raise ValueError("미확인 atomic payload 재사용 금지")
+                    prepared.append(replace(owned, function=function))
+                record = self._create_record(
+                    request_id=assist_id,
+                    intent_sha256=hashlib.sha256(
+                        _json(assist_context.model_dump(mode="json"))
+                    ).hexdigest(),
+                    prepared=tuple(prepared),
+                    native_context_sha256=self._journal.install_blob(
+                        assist_context.model_dump_json().encode()
+                    ),
+                )
+            # 실패는 _advance가 보존하고 정지한다. 일반 rollback/새 id 재시도는 없다.
+            if record.phase is not TransactionPhase.VERIFIED:
+                await self._advance(record, assist_context, endpoints, permit)
+            return await self._detach_locked(source, context, endpoints, permit)
+
+    @staticmethod
+    def _assistance_steps(context, endpoints):
+        master, slave = endpoints
+        return (
+            (master, "linkage_role", "independent"),
+            (slave, "schedule_enable", False),
+            (slave, "manual_mode", "constant"),
+            (slave, "manual_flow", context.plan.preparation_flow),
+            (slave, "manual_frequency", context.plan.preparation_frequency),
+        )
+
+    def _require_stalled_first_slave(self, child, context):
+        if (
+            len(context.originals) != 2
+            or child.request_id != native_detach_request_id(context.attach_request_id)
+            or child.phase is not TransactionPhase.RECOVERY_REQUIRED
+            or len(child.actions) != 6
+            or child.actions[0].phase is not ActionPhase.UNCERTAIN
+            or child.actions[0].function != "native_controls"
+            or child.actions[0].target != context.originals[1].target
+            or any(a.phase is not ActionPhase.PREPARED for a in child.actions[1:])
+            or json.loads(self._journal.load_blob(child.actions[0].expected_readback_sha256))
+            != self._safe(context.plan)
+        ):
+            raise ValueError("지원 범위는 첫 slave 해제만 미확인인 자기 Pro pair입니다")
+
+    def _assistance_evidence(self, record, index):
+        context = NativeContext.model_validate_json(
+            self._journal.load_blob(record.native_context_sha256)
+        )
+        if context.kind != "detach" or index != 0:
+            return None
+        support = self._journal.load(native_assistance_request_id(context.attach_request_id))
+        if support is None or support.phase is not TransactionPhase.VERIFIED:
+            return None
+        self._context(support)
+        return {
+            "request_id": support.request_id,
+            "journal_sha256": self._journal.record_digest(support),
+            "final_sha256": support.native_final_sha256,
+            "original_delivery": "UNKNOWN",
+        }
+
     def _prepare(self, request_id, intent, context, endpoints):
         prepared = []
         snapshots = self._snapshots(context)
@@ -285,7 +414,15 @@ class NativeWavemakerController(LocalControlCoordinator):
                         else ActionPhase.VERIFIED
                     )
                     record = self._save_action(
-                        record, index, phase=phase, transaction_phase=TransactionPhase.EXECUTING
+                        record,
+                        index,
+                        phase=phase,
+                        transaction_phase=TransactionPhase.EXECUTING,
+                        diagnostic=(
+                            "assisted_target_observed_delivery_unknown"
+                            if self._assistance_evidence(record, index) is not None
+                            else None
+                        ),
                     )
                     continue
                 if action.phase is not ActionPhase.PREPARED:
@@ -355,11 +492,15 @@ class NativeWavemakerController(LocalControlCoordinator):
                         snapshots[name], target=endpoint.target, status=status
                     )
                 else:
-                    expected = {
-                        "SwitchON": True,
-                        "TimerON": True,
-                        "Linkage": "master" if index == 0 else context.plan.mode + "_slave",
-                    }
+                    expected = (
+                        ({"Linkage": "independent"} if index == 0 else self._safe(context.plan))
+                        if context.kind == "detach_assist"
+                        else {
+                            "SwitchON": True,
+                            "TimerON": True,
+                            "Linkage": "master" if index == 0 else context.plan.mode + "_slave",
+                        }
+                    )
                     actual = get_product_schema(endpoint.target.product_key).decode_status(status)
                     fields = {
                         key: {
@@ -379,6 +520,11 @@ class NativeWavemakerController(LocalControlCoordinator):
                         "complete": image == images[name]
                         and all(v["match"] for v in fields.values()),
                     }
+                    if context.kind == "detach_assist":
+                        # 지원은 역할/준비 제어만 증명한다. 전체 원 image는 기존 detach가 검증한다.
+                        row.pop("schedule_match")
+                        row.pop("expected_schedule_sha256")
+                        row["complete"] = all(v["match"] for v in fields.values())
                 rows.append({**row, "capture_sha256": capture})
                 record = self._save_final(record, rows)
             if not all(row["complete"] for row in rows):
@@ -434,6 +580,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 {
                     "previous": action.native_evidence_sha256,
                     "stage": stage,
+                    "assistance": self._assistance_evidence(record, index),
                     "capture_sha256": self._capture(capture, began),
                     "comparison": comparison,
                     "match": verify_prepared_readback(prepared, capture.status_payload),
@@ -489,11 +636,15 @@ class NativeWavemakerController(LocalControlCoordinator):
         expected_id = (
             context.attach_request_id
             if context.kind == "attach"
-            else native_detach_request_id(context.attach_request_id)
+            else (
+                native_assistance_request_id(context.attach_request_id)
+                if context.kind == "detach_assist"
+                else native_detach_request_id(context.attach_request_id)
+            )
         )
         if record.request_id != expected_id:
             raise ValueError("native 원본 소유 요청이 다릅니다")
-        if context.kind == "detach":
+        if context.kind in {"detach", "detach_assist"}:
             source = self._required(context.attach_request_id)
             source_context = self._context(source)
             if (
@@ -503,6 +654,17 @@ class NativeWavemakerController(LocalControlCoordinator):
                 or source_context.plan != context.plan
             ):
                 raise ValueError("자기 attach가 포착하지 않은 baseline 복원 금지")
+        if context.kind == "detach_assist":
+            if context.assisted_record_sha256 is None:
+                raise ValueError("지원 전 미완료 기록 결속이 없습니다")
+            stalled = LocalControlJournalRecord.model_validate_json(
+                self._journal.load_blob(context.assisted_record_sha256)
+            )
+            if self._context(stalled).kind != "detach":
+                raise ValueError("자기 detach 기록만 지원할 수 있습니다")
+            self._require_stalled_first_slave(stalled, context)
+        elif context.assisted_record_sha256 is not None:
+            raise ValueError("기존 native 기록에는 지원 범위를 넣지 않습니다")
         for action in record.actions:
             original = next((o for o in context.originals if o.target == action.target), None)
             if original is None or action.baseline_status_sha256 != original.status_sha256:
@@ -657,6 +819,7 @@ class NativeWavemakerController(LocalControlCoordinator):
             "phase": record.phase.value,
             "attach_request_id": context.attach_request_id,
             "detach_request_id": native_detach_request_id(context.attach_request_id),
+            "assistance_request_id": native_assistance_request_id(context.attach_request_id),
             "accepted": record.phase is TransactionPhase.VERIFIED,
             "current_state_verified": current,
             "physical_measurement": False,

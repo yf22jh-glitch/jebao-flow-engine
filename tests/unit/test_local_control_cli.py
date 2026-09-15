@@ -606,9 +606,7 @@ def test_internal_compose_stage_runs_without_loading_install_inputs(
         lambda args: (_ for _ in ()).throw(AssertionError("install path was reached")),
     )
 
-    result = local_control_cli.main(
-        ["stage-compose-inputs", "--expected-generation", "6" * 32]
-    )
+    result = local_control_cli.main(["stage-compose-inputs", "--expected-generation", "6" * 32])
 
     output = capsys.readouterr()
     assert result == 0
@@ -767,6 +765,7 @@ def test_default_runtime_does_not_construct_a_write_coordinator(monkeypatch) -> 
         is None
     )
 
+
 def test_write_enabled_runtime_uses_only_current_receipts(monkeypatch) -> None:
     captured = []
 
@@ -782,7 +781,7 @@ def test_write_enabled_runtime_uses_only_current_receipts(monkeypatch) -> None:
         write_enabled=True,
     )
 
-    assert captured == [(('current-receipt',), "current-content")]
+    assert captured == [(("current-receipt",), "current-content")]
 
 
 def test_service_restart_binding_mismatch_fails_before_replacing_manifest(
@@ -1006,3 +1005,78 @@ def test_observer_ha_schema_does_not_read_qualifications_or_emit_controls(
     assert payload["group_resume_entity_count"] == 0
     assert not [entity for entity in payload["entities"] if entity["slot_index"] is not None]
     assert all(entity["command_topic"] is None for entity in payload["entities"])
+
+
+def test_owned_detach_assistance_cli_requires_current_qualifications_and_write_lock(
+    monkeypatch, capsys
+):
+    from jebao_flow.config import RuntimeMode
+
+    targets = _manifest().devices
+    calls = []
+    loaded = []
+
+    class Controller:
+        def targets_for(self, request):
+            assert request == "attach_0001"
+            return targets
+
+        async def assist_detach(self, **kwargs):
+            calls.append(kwargs)
+            return {"accepted": True, "current_state_verified": True}
+
+    config = SimpleNamespace(
+        runtime=SimpleNamespace(mode=RuntimeMode.CONTROL, dry_run=False),
+        devices=[
+            SimpleNamespace(
+                id=t.logical_member, control=SimpleNamespace(allow_hardware_writes=True)
+            )
+            for t in targets
+        ],
+    )
+    monkeypatch.setattr(
+        local_control_cli, "_activate_current_hardware_safety_volume_identity", lambda: None
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "_prepare_current",
+        lambda args: SimpleNamespace(config=config, manifest=_manifest()),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "load_current_qualifications",
+        lambda path: loaded.append(str(path)) or (),
+    )
+    monkeypatch.setattr(local_control_cli, "_native_coordinator", lambda *args: Controller())
+    argv = [
+        "assist-wavemaker-detach",
+        "--request-id",
+        "attach_0001",
+        "--role-attested-by",
+        "operator",
+        "--qualifications",
+        "/current/qualifications.json",
+    ]
+    assert local_control_cli.main(argv) == 2
+    assert calls == [] and loaded == []
+    assert local_control_cli.main([*argv, "--write-enabled"]) == 0
+    assert calls == [{"request_id": "attach_0001", "targets": targets}]
+    assert loaded == ["/current/qualifications.json"]
+    assert json.loads(capsys.readouterr().out)["current_state_verified"] is True
+    config.devices[1].control.allow_hardware_writes = False
+    assert local_control_cli.main([*argv, "--write-enabled"]) == 2
+    assert len(calls) == 1
+
+
+def test_owned_detach_assistance_cli_requires_qualification_file():
+    with pytest.raises(SystemExit):
+        local_control_cli.build_parser().parse_args(
+            [
+                "assist-wavemaker-detach",
+                "--request-id",
+                "attach_0001",
+                "--write-enabled",
+                "--role-attested-by",
+                "operator",
+            ]
+        )

@@ -102,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("attach-wavemaker", "외부 JSON의 Pro Sync/Async를 결속하고 자기 원본을 보존합니다"),
         ("detach-wavemaker", "자기 attach 원본으로 해제·시간표·제어값을 복원합니다"),
         ("recover-wavemaker", "미완료 native 실행을 재결속 없이 자기 원본 방향으로 복구합니다"),
+        ("assist-wavemaker-detach", "미확인 첫 해제를 자격 있는 별도 scalar로 지원합니다"),
     ):
         native = subparsers.add_parser(name, help=description)
         _add_install_arguments(native)
@@ -114,6 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
             native.add_argument("--attachment-id", required=True)
         else:
             native.add_argument("--request-id", required=True)
+            if name == "assist-wavemaker-detach":
+                native.add_argument("--qualifications", type=Path, required=True)
     native_status = subparsers.add_parser(
         "wavemaker-status", help="장비 접근 없이 native 보존 기록을 봅니다"
     )
@@ -261,6 +264,7 @@ def _run(args: argparse.Namespace) -> int:
         "attach-wavemaker",
         "detach-wavemaker",
         "recover-wavemaker",
+        "assist-wavemaker-detach",
         "wavemaker-status",
     }:
         return _run_wavemaker_native(args)
@@ -634,8 +638,9 @@ def _run_wavemaker_native(args) -> int:
     if prepared.config.runtime.mode is not RuntimeMode.CONTROL or prepared.config.runtime.dry_run:
         raise ValueError("관측 전용 또는 dry-run에서는 native 명령을 전송하지 않습니다")
     attach = args.command == "attach-wavemaker"
+    assist = args.command == "assist-wavemaker-detach"
     catalog = build_local_control_catalog(
-        load_current_qualifications(args.qualifications) if attach else (),
+        load_current_qualifications(args.qualifications) if attach or assist else (),
         current_content=prepared.manifest.content,
     )
     controller = _native_coordinator(prepared.config, catalog)
@@ -659,18 +664,23 @@ def _run_wavemaker_native(args) -> int:
         task = controller.attach(request_id=args.request_id, plan=plan, targets=targets)
     elif args.command == "detach-wavemaker":
         task = controller.detach(attachment_id=args.attachment_id, targets=targets)
+    elif assist:
+        task = controller.assist_detach(request_id=args.request_id, targets=targets)
     else:
         task = controller.recover_native(request_id=args.request_id, targets=targets)
     try:
         result = asyncio.run(task)
     except (OSError, RuntimeError, ValueError):
-        request_id = (
-            args.request_id if attach or args.command == "recover-wavemaker" else args.attachment_id
-        )
+        request_id = args.attachment_id if args.command == "detach-wavemaker" else args.request_id
         records = []
         try:
             source = controller.status(request_id)
             records.append(source)
+            if assist:
+                try:
+                    records.append(controller.status(source["assistance_request_id"]))
+                except KeyError:
+                    pass
             if source["detach_request_id"] != request_id:
                 try:
                     records.append(controller.status(source["detach_request_id"]))
@@ -682,7 +692,14 @@ def _run_wavemaker_native(args) -> int:
             {
                 "error": "native_operation_unverified",
                 "records": records,
-                "next_command": f"recover-wavemaker --request-id {request_id}" if records else None,
+                "next_command": (
+                    f"assist-wavemaker-detach --request-id {request_id} "
+                    "--qualifications <current-file>"
+                    if assist
+                    else f"recover-wavemaker --request-id {request_id}"
+                )
+                if records
+                else None,
             }
         )
         return 2
