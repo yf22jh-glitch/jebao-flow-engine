@@ -4208,3 +4208,16 @@ slave 역할 전송 실패/ACK 없는 상태확인 뒤 final 실패도 정확한
 운영 generation 교체와 startup write0·group 비무장·상태 출판을 검증한다. 배포 실패 시 exact
 prior 서비스 rollback, first 앱OFF·Bar 앱이전값 복귀 별도 의무를 유지한다. 동일 현장 질문을
 반복하지 않으며 사용자 발언을 새 앱 완료나 물리 안전 선언으로 바꾸지 않는다.
+
+구현 범위의 새 모듈은 `local_control/wavemaker_sequence.py`로 고정한다. native 읽기 subclass는
+`send_once`·`prepare_*`·payload 구성을 override하지 않는다. ACK 후 최대3회 읽기에서 transport
+실패가 난 stream은 기존대로 quarantine/close한다. 남은 읽기만 새 writer에서 재인증하고,
+제어는 재전송하지 않는다. 역할 write 뒤에는 양쪽 새 연결의 pair read를 다시 완료하고 그
+연결로 다음 역할을 쓴다. 따라서 읽기 실패 stream을 재사용하거나 최종 역할 직전에 별도로
+연결을 바꾸는 방식이 아니다. 취소는 읽기 재시도 대상이 아니다.
+
+단계 위치가 고정된 새 실행은 Pro pair에 한정한다. 소유 지원은 신규 절차 버전에 결속된
+Sync8개/Async9개 전체 target·function·expected를 대조하며, slave Sync/Async 단계 또는 완료
+action 뒤 pair/final 대조 실패만 추가로 받는다. 이전 context의7개 형상은 그대로다. 앞선
+준비/마스터 실패까지 임의로 확대하지 않는다. 이 명시는 이미 승인된 단계 분리에 따른
+도달 가능 상태와 연결 형상을 고정하며, 추가 전진 실기나 공유 writer 변경 권한은 아니다.
