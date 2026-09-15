@@ -4014,3 +4014,32 @@ reply/report를 수용하는 native 전용 읽기는 action·raw·시각을 보�
 §1 frozen native·직접 tests, `protocol/`, 공용 guard, 기존 HA/MQTT/서비스는 변경하지 않는다.
 schema fingerprint 변경을 숨기거나 기존 자격으로 새 구현이 검증됐다고 쓰지 않는다.
 완료 커밋으로 이번 구현 범위를 소진하고 실장 자격·배포·이전 원복 의무는 별도 상태로 남긴다.
+
+## 2026-09-15 제품 배포를 위한 새 실장 자격
+
+사용자는 `708d761`의 배포 중단 보고(기존 6개 제어의 schema 불일치와 신규 native의 자격 부재)를
+받고, “새 버전으로 실제 장비 검증·자격 갱신 … 설정 변경 후 원복하는 이 검증까지 포함”하는
+요청에 “ㅇㅇ 진행해줘”라고 승인했다. 구현·실장 검증·자격 발급·기존 기능을 보존한 배포를
+진행하며 동일 현장 질문을 반복하지 않는다. 이를 앱 OFF 완료 발언으로 각색하지 않는다.
+
+새 7종 qualification producer 부재를 메우는 범위는 새 `local_control/pro_qualification.py`와
+그 CLI, `pyproject.toml` entry point, 직접 tests·예시·문서다. 기존 NativeWavemakerController의
+원본 소유·순서·journal·raw capture·no-resend·전용 복구를 재사용한다. `device_writer.py`는
+관측된 inactive FeedTime=0의 선택 필드 rollback을 원본 bytes로 만드는 변경에 한정한다.
+현재 값의 encode 범위를 낮추거나 원본 0을 새 입력값으로 허용하지 않는다. 이 변경의 최종
+schema에 모든 새 자격을 결속하며 fingerprint 계산과 기존 영수증은 변경하지 않는다.
+
+Pro 두 대의 9종은 각 기능의 서로 다른 두 실제 명령과 ACK·반환값이 있는 경우만 발급한다.
+전체 432B 시간표 두 개, Timer/Switch 결합, master/independent 역할 전환을 포함한다.
+compound native 명령을 scalar 자격으로 바꾸어 세지 않는다. Flow 준비/시험은 39·40,
+주파수 20·21과 짧은 부가값을 사용하며 상세 순서는 `docs/wavemaker-qualification-plan.md`다.
+자기 시작 원본의 최종 전체 image·8개 controls 복원이 확인되기 전에는 자격을 발급하지 않는다.
+Bar는 기존 manual_flow/power producer만 사용하며 native·시간표 write를 하지 않는다.
+새 qualification은 후보로 격리하고, 기존 제어 6개와 필요한 native 자격의 보존/확인이 끝나기
+전 운영 generation을 교체하지 않는다. 새 Sync·Async 실제 결속/해제는 각각 한 번이며,
+전 회차 원복과 자격 확인 후 다음 회차로 간다. 전진 실패 시 자동 재시험하지 않는다.
+
+§1 frozen 여섯 파일·직접 tests, protocol, 공용 guard, transport timeout/retry는 불변이다.
+실기 결과는 source 수정 전에 append-only 커밋한다. 실패·미확인·중단 요청 시 전진을 멈추고
+자기 원본 복원 또는 증거가 남는 미확인 정지로 끝낸다. 초기화·무인 반복은 포함하지 않는다.
+이전 앱 OFF/원 서비스 복귀 의무는 별도 유지한다. 결과 기록으로 이번 실행 권한을 소진한다.
