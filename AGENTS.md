@@ -4091,3 +4091,24 @@ Flow·Frequency라는 최대5개 새 scalar 단계다. 모두 기존 실장 자�
 질문을 반복하지 않는다. 이전 first 앱 OFF·Bar 앱 준비 이전 복귀·원 서비스 의무를 흡수하지
 않으며 새 운영 generation은 원 서비스의 동일 복귀가 아니라 대체임을 기록한다. 복원 확인 후
 남은 제품 Async 단회와 기존6개 제어 보존 배포를 잇는다. 초기화·상시 group arming은 없다.
+
+## 2026-09-15 실패한 제품 Async의 자기 원본 복구
+
+`4c083af`로 마지막 Async 전환과 자동 detach의 ACK timeout을 먼저 기록했다. 사용자의
+“끝까지 진행시켜서 배포 완료해” 지시에 따라, 성공 attach에만 묶인 소유 지원 진입을 이번
+실패 형태에 한해 정정한다. 소유는 성공 여부가 아니라 첫 write 이전 reply 원본에 있다.
+범위는 `local_control/wavemaker_lifecycle.py`와 직접 test, 관련 문서다. 별도 정책 커밋 뒤
+구현한다. writer·schema9개·40receipt·공용 guard·timeout/retry·frozen native는 변경하지 않는다.
+
+추가 대상은 Pro pair/Async/source RECOVERY_REQUIRED, action7개 중 앞6 VERIFIED·마지막
+slave async role만 UNCERTAIN인 형태다. child 첫 slave atomic UNCERTAIN/나머지5 PREPARED,
+자기 attach/child/assist 세 id·원본·qualification·동일5scalar·no-resend·최종 reply 전체
+432B/8controls 조건은 유지한다. 복구 완료는 원 Async action의 전달 성공을 뜻하지 않는다.
+그 action의 ACK 부재·증거를 보존하고 전달 UNKNOWN을 별도 진단으로 남긴다.
+
+이번 작업은 미완료 자기 원복 의무의 수습이며 새로운 Async 전진 시험이 아니다. 제품 결속/
+해제 질문은 Sync/Async 두 실기 뒤 §7 보고 대상이고, 수습과 제품 재시험 횟수를 섞지 않는다.
+사용자는 추가로 “sync에서 async로 바로가면 안될꺼야 무조건 원복했다가 다시 async로
+가야 할거야”라고 했다. 앞선 Sync 원복은 실제 완료됐지만 새 Async 내부에도 Sync 경유가
+있었다. 이를 원인 확정으로 삼지 않고, 현재 원복 뒤 독립→Async 직접 진입 설계를 검토한다.
+이번 복구 정정에는 새 Async 재시험·Sync 재점화·factory reset을 포함하지 않는다.
