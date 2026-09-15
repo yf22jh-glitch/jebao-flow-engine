@@ -34,6 +34,7 @@ from jebao_flow.devices.linkage import (
     LinkageTransactionPhase,
     LinkageTransactionRecord,
 )
+from jebao_flow.devices.native_scenario import BoundScenario, NativeScenario, load_scenario_suite
 from jebao_flow.devices.schedule_flow_experiment import (
     SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT,
     SCHEDULE_FLOW_STAGE_EVENT_LIMIT,
@@ -201,7 +202,7 @@ def _schedule_flow_hardware_guard(
 class _PrivateRawCaptureSink:
     """Owner-only append-and-fsync sink for exact frames; never exposes its host path."""
 
-    def __init__(self, operation_id: str) -> None:
+    def __init__(self, operation_id: str, *, scenario: BoundScenario | None = None) -> None:
         operation_digest = hashlib.sha256(operation_id.encode()).hexdigest()
         self.artifact_id = f"JFR-{operation_digest[:12]}"
         self._path = hardware_safety_root() / f"schedule-flow-raw-{operation_digest[:20]}.jsonl"
@@ -230,6 +231,15 @@ class _PrivateRawCaptureSink:
                     "artifact_id": self.artifact_id,
                     "operation_binding_sha256": operation_digest,
                     "created_at": datetime.now(UTC).isoformat(),
+                    **(
+                        {
+                            "scenario_sha256": scenario.scenario.digest,
+                            "bound_sha256": scenario.digest,
+                            "scenario": scenario.model_dump(mode="json"),
+                        }
+                        if scenario is not None
+                        else {}
+                    ),
                 }
             )
             root_descriptor = os.open(
@@ -274,6 +284,10 @@ class _PrivateRawCaptureSink:
     @property
     def artifact_digest(self) -> str:
         return self._digest.hexdigest()
+
+    def append_scenario_report(self, report) -> None:
+        if report is not None:
+            self._append({"event": "scenario_report", **report.model_dump(mode="json")})
 
     def close(self) -> None:
         descriptor = self._descriptor
@@ -338,26 +352,38 @@ def _fixed_spec(
     allow_expired_qualification: bool = False,
     wave_flow_role: Literal["sync_slave", "async_slave"] | None = None,
     master_template_flow_only: bool = False,
+    scenario: BoundScenario | None = None,
 ) -> ScheduleFlowExperimentSpec:
     """Construct the fixed Sync preparation plan; this is not live-write authorization."""
 
     spec = ScheduleFlowExperimentSpec(
-        wave_flow_role=wave_flow_role,
+        scenario=scenario,
+        wave_flow_role=scenario.scenario.slave_role if scenario is not None else wave_flow_role,
         master_template_flow_only=master_template_flow_only,
         operation_id=operation_id,
         qualification_operation_id=qualification_operation_id,
         master_device_id=master_device_id,
         slave_device_id=slave_device_id,
         boundary_time=boundary_time,
-        master_before_flow=35,
-        slave_before_flow=30 if wave_flow_role is not None else 32,
-        master_after_flow=32 if wave_flow_role is not None else 30,
-        slave_after_flow=40,
+        master_before_flow=scenario.scenario.master[0].flow if scenario else 35,
+        slave_before_flow=scenario.scenario.slave_steps[0].flow
+        if scenario
+        else 30
+        if wave_flow_role is not None
+        else 32,
+        master_after_flow=scenario.scenario.master[1].flow
+        if scenario
+        else 32
+        if wave_flow_role is not None
+        else 30,
+        slave_after_flow=scenario.scenario.slave_steps[1].flow if scenario else 40,
         sine_frequency=30,
         safe_frequency=20,
         # ScheduleLinkageController retains a 15-second rollback reserve.  A 915-second
         # authority therefore yields the maintainer-approved full 900-second read-only epoch.
-        observation_window_seconds=1035 if wave_flow_role is not None else 915,
+        observation_window_seconds=1035
+        if scenario is not None or wave_flow_role is not None
+        else 915,
         post_boundary_stability_seconds=30,
         verification_interval_seconds=2,
         minimum_lead_seconds=60,
@@ -458,6 +484,11 @@ def _require_plan_supported(
         requested = {
             spec.master_device_id: (35, 32, 38),
             spec.slave_device_id: (30, 40, 35),
+        }
+    if spec.scenario is not None:
+        requested = {
+            spec.master_device_id: tuple(step.flow for step in spec.scenario.scenario.master),
+            spec.slave_device_id: tuple(step.flow for step in spec.scenario.scenario.slave_steps),
         }
     for device_id, flows in requested.items():
         capabilities = devices[device_id].capabilities
@@ -731,6 +762,7 @@ async def _preflight(
     qualification_store: JsonQualificationStore,
 ) -> int:
     _assert_no_verification_conflict()
+    requested_scenario = _selected_scenario(args)
     selected = _validate_config(config, frozenset({args.master, args.slave}))
     with PhysicalDeviceLease.from_selected(config, selected).acquire():
         if _safety_latch_present(emergency_stop_latch_path()):
@@ -745,7 +777,15 @@ async def _preflight(
         )
         devices = await _build_devices(config, selected, writable=False)
         async with _connected(devices):
+            provisional_scenario = (
+                requested_scenario.bind(
+                    datetime(2000, 1, 1, 12) - timedelta(seconds=requested_scenario.boundaries[0])
+                )
+                if requested_scenario is not None
+                else None
+            )
             provisional = _fixed_spec(
+                scenario=provisional_scenario,
                 wave_flow_role=getattr(args, "wave_flow_role", None),
                 master_template_flow_only=getattr(args, "master_template_flow_only", False),
                 operation_id=args.operation_id,
@@ -772,7 +812,13 @@ async def _preflight(
             snapshots,
             provisional.allow_expired_qualification,
         )
+        bound = None
+        if requested_scenario is not None:
+            if len(clocks) != 2 or clocks[0].date() != clocks[1].date():
+                raise ScheduleFlowCliError("시나리오 기준 날짜가 양쪽에서 일치하지 않습니다")
+            bound = requested_scenario.bind(max(clocks).replace(second=0, microsecond=0))
         spec = _fixed_spec(
+            scenario=bound,
             wave_flow_role=provisional.wave_flow_role,
             master_template_flow_only=provisional.master_template_flow_only,
             operation_id=args.operation_id,
@@ -780,7 +826,9 @@ async def _preflight(
             master_device_id=args.master,
             slave_device_id=args.slave,
             boundary_time=(
-                _next_boundary(clocks, wave_flow=True)
+                bound.boundary_time
+                if bound is not None
+                else _next_boundary(clocks, wave_flow=True)
                 if provisional.is_wave_flow_plan
                 else _next_boundary(clocks)
             ),
@@ -814,6 +862,16 @@ async def _preflight(
     print(f"Boundary: {spec.boundary_time} (device-local time)")
     if spec.sentinel_only:
         print("Plan: sparse unused-slot wire qualification only; no field or role activation.")
+    elif spec.scenario is not None:
+        print(f"시나리오: {spec.scenario.scenario.name}; SHA256: {spec.scenario.scenario.digest}")
+        print(f"Scenario anchor: {spec.scenario.anchor.isoformat()}")
+        print(f"Bound scenario SHA256: {spec.scenario.digest}")
+        print(f"역할: {spec.scenario.scenario.slave_role}; safe manual master30/slave31; 상한41")
+        print(
+            json.dumps(
+                spec.scenario.scenario.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
+            )
+        )
     elif spec.is_wave_flow_plan:
         print(f"역할: {spec.wave_flow_role}; safe manual master30/slave31, 상한41.")
         if spec.master_template_flow_only:
@@ -837,7 +895,15 @@ async def _preflight(
 
 
 def _spec_from_run_args(args: argparse.Namespace) -> ScheduleFlowExperimentSpec:
+    requested = _selected_scenario(args)
+    bound = None
+    if requested is not None:
+        anchor = getattr(args, "scenario_anchor", None)
+        if anchor is None:
+            raise ScheduleFlowCliError("preflight가 출력한 scenario-anchor가 필요합니다")
+        bound = requested.bind(datetime.fromisoformat(anchor))
     return _fixed_spec(
+        scenario=bound,
         wave_flow_role=getattr(args, "wave_flow_role", None),
         master_template_flow_only=getattr(args, "master_template_flow_only", False),
         operation_id=args.operation_id,
@@ -938,6 +1004,15 @@ def _print_sample(
 ) -> None:
     if sample is None:
         print("Effective sample: none")
+        return
+    if sample.scenario_report is not None:
+        print(
+            json.dumps(
+                {"event": "scenario_report", **sample.scenario_report.model_dump(mode="json")},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
         return
     print(
         "Effective sample: "
@@ -1111,7 +1186,20 @@ async def _run(
                 (spec.master_device_id, spec.slave_device_id),
             )
             _assert_digest_match(intent.schedule_image_digests, fresh_digests)
-            if spec.is_wave_flow_plan:
+            if spec.scenario is not None:
+                bound = spec.scenario
+                if any(clock.date() != bound.anchor.date() for clock in fresh_clocks):
+                    raise ScheduleFlowCliError("시나리오의 확정 날짜가 현재 장비 날짜와 다릅니다")
+                lead = (
+                    bound.anchor
+                    + timedelta(seconds=bound.scenario.boundaries[0])
+                    - max(fresh_clocks)
+                ).total_seconds()
+                if not bound.scenario.boundaries[0] - 80 <= lead <= bound.scenario.boundaries[0]:
+                    raise ScheduleFlowCliError(
+                        "시나리오 첫 경계의 기존 80초 준비 유효 폭을 벗어났습니다"
+                    )
+            elif spec.is_wave_flow_plan:
                 _require_boundary_still_fresh(spec.boundary_time, fresh_clocks, wave_flow=True)
             else:
                 _require_boundary_still_fresh(spec.boundary_time, fresh_clocks)
@@ -1298,7 +1386,10 @@ async def _run(
             guard.clear()
             if not guard.permitted:
                 raise ScheduleFlowCliError("persistent safety latch became active")
-            raw_sink = _PrivateRawCaptureSink(spec.operation_id)
+            raw_sink = _PrivateRawCaptureSink(
+                spec.operation_id,
+                **({"scenario": spec.scenario} if spec.scenario is not None else {}),
+            )
             try:
                 controller = ScheduleFlowExperimentController(
                     devices,
@@ -1321,12 +1412,23 @@ async def _run(
                     controller.run_experiment(spec),
                     task_name="schedule-flow-experiment",
                 )
+                if spec.scenario is not None:
+                    raw_sink.append_scenario_report(controller.last_scenario_report)
             except BaseException as error:
                 _report_failure_chain(
                     error,
                     operation_id=spec.operation_id,
                     stage=pending_stage_events[-1].stage.value if pending_stage_events else "run",
                 )
+                if spec.scenario is not None and controller is not None:
+                    try:
+                        raw_sink.append_scenario_report(controller.last_scenario_report)
+                    except BaseException as report_error:
+                        _report_failure_chain(
+                            report_error,
+                            operation_id=spec.operation_id,
+                            stage="scenario_report_persistence",
+                        )
                 raw_sink.close_best_effort()
                 pending_outer = outer_store.load()
                 pending = pending_outer is not None or any(
@@ -1446,9 +1548,20 @@ async def _run(
             intent_store.save(current)
 
     print(f"Schedule-flow result: {result_outcome}")
-    _print_sample(
-        result.last_after_sample, master_template_flow_only=spec.master_template_flow_only
-    )
+    if spec.scenario is not None and result.last_after_sample is not None:
+        report = result.last_after_sample.scenario_report
+        if report is not None:
+            print(
+                json.dumps(
+                    {"event": "scenario_report", **report.model_dump(mode="json")},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+    else:
+        _print_sample(
+            result.last_after_sample, master_template_flow_only=spec.master_template_flow_only
+        )
     if result_outcome != "wire_qualified":
         print(f"Stable observation: {result.stable_observation_seconds:g}s")
     print("Exact schedules and original control states were restored.")
@@ -1949,7 +2062,24 @@ async def _recover(
     return 0
 
 
+def _selected_scenario(args: argparse.Namespace) -> NativeScenario | None:
+    path = getattr(args, "scenario", None)
+    name = getattr(args, "case", None)
+    if path is None and name is None:
+        return None
+    if path is None or name is None:
+        raise ScheduleFlowCliError("--scenario와 --case를 함께 지정해야 합니다")
+    if any(
+        getattr(args, key, False)
+        for key in ("wave_flow_role", "master_template_flow_only", "sentinel_only")
+    ):
+        raise ScheduleFlowCliError("외부 시나리오와 기존 고정 계획 옵션을 섞을 수 없습니다")
+    return load_scenario_suite(Path(path)).select(name)
+
+
 def _add_identity_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--scenario", type=Path, help="이미지 밖의 선언형 JSON 시나리오")
+    parser.add_argument("--case", help="시나리오 파일 안의 시험 이름")
     parser.add_argument(
         "--master-template-flow-only", action="store_true",
         help="Sync 전용: master 시간표를 공유하고 slave 슬롯 Flow만 다르게 지정",
@@ -1987,6 +2117,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--boundary-time", required=True, help="HH:MM printed by preflight")
     run.add_argument("--confirm", required=True, help="JFE token printed by preflight")
     run.add_argument(
+        "--scenario-anchor", help="시나리오 preflight가 출력한 장비-local 기준 날짜/시각"
+    )
+    run.add_argument(
         "--sentinel-only",
         action="store_true",
         help="run the sentinel-only plan armed by preflight",
@@ -1994,6 +2127,10 @@ def build_parser() -> argparse.ArgumentParser:
     recover = commands.add_parser("recover", help="preview or confirm ordered recovery")
     recover.add_argument("--confirm", help="JFER token printed by status/recover preview")
     commands.add_parser("status", help="show only sanitized durable state")
+    validate = commands.add_parser(
+        "scenario-validate", help="장비 접근 없이 모든 입력·image·기대값 검증"
+    )
+    validate.add_argument("--scenario", type=Path, required=True)
     return parser
 
 
@@ -2046,6 +2183,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging("DEBUG" if args.verbose else "WARNING")
     try:
+        if args.command == "scenario-validate":
+            suite = load_scenario_suite(args.scenario)
+            print(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [
+                            {
+                                "name": case.name,
+                                "sha256": case.digest,
+                                "slave_role": case.slave_role,
+                                "boundaries_seconds": case.boundaries,
+                                "windows": [window.name for window in case.windows],
+                            }
+                            for case in suite.cases
+                        ],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            return 0
         config = load_config(args.config)
         return asyncio.run(dispatch(config, args))
     except (ScheduleFlowCliError, ConfirmationMismatchError) as error:

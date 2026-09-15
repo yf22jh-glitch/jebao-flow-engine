@@ -68,6 +68,90 @@ from jebao_flow.persistence.qualification import (
 from jebao_flow.protocol.models import LinkageRole
 
 
+def test_scenario_validation_does_not_load_config_or_guard(monkeypatch, capsys):
+    def prohibited(*_args, **_kwargs):
+        raise AssertionError("오프라인 검사에서 운영 경로에 접근했습니다")
+
+    monkeypatch.setattr(cli, "load_config", prohibited)
+    monkeypatch.setattr(cli, "validate_hardware_safety_root", prohibited)
+    assert (
+        cli.main(["scenario-validate", "--scenario", "docs/native-scenarios/sync-async.json"]) == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert len(result["cases"]) == 2
+
+
+def test_scenario_run_round_trip_binds_file_expectations_and_anchor(tmp_path):
+    from pathlib import Path
+
+    from jebao_flow.devices.native_scenario import load_scenario_suite
+
+    path = tmp_path / "scenario.json"
+    path.write_bytes(Path("docs/native-scenarios/sync-async.json").read_bytes())
+    case = load_scenario_suite(path).cases[0]
+    args = cli.build_parser().parse_args(
+        [
+            "run",
+            "--operation-id",
+            "scenario",
+            "--qualification-operation-id",
+            "qualified",
+            "--master",
+            "master",
+            "--slave",
+            "slave",
+            "--boundary-time",
+            "10:10",
+            "--confirm",
+            "token",
+            "--scenario",
+            str(path),
+            "--case",
+            case.name,
+            "--scenario-anchor",
+            "2026-09-15T10:00:00",
+        ]
+    )
+    spec = cli._spec_from_run_args(args)
+    assert spec.scenario.scenario == case
+    assert spec.scenario.anchor == datetime(2026, 9, 15, 10)
+    payload = json.loads(path.read_text())
+    payload["cases"][0]["windows"][1]["slave"]["auto_flow"] = 39
+    path.write_text(json.dumps(payload))
+    changed = cli._spec_from_run_args(args)
+    assert changed != spec
+    assert changed.scenario.digest != spec.scenario.digest
+    args.wave_flow_role = "sync_slave"
+    with pytest.raises(cli.ScheduleFlowCliError):
+        cli._spec_from_run_args(args)
+
+
+def test_scenario_raw_metadata_binds_external_input_and_keeps_final_report(tmp_path):
+    from pathlib import Path
+
+    from jebao_flow.devices.native_scenario import load_scenario_suite
+    from jebao_flow.devices.native_scenario_evidence import ScenarioEvidence
+
+    bound = (
+        load_scenario_suite(Path("docs/native-scenarios/sync-async.json"))
+        .cases[0]
+        .bind(datetime(2026, 9, 15, 10))
+    )
+    sink = cli._PrivateRawCaptureSink("scenario-metadata", scenario=bound)
+    sink.append_scenario_report(ScenarioEvidence(bound).report())
+    sink.close()
+    rows = [
+        json.loads(line)
+        for line in next(tmp_path.glob("schedule-flow-raw-*.jsonl")).read_text().splitlines()
+    ]
+    assert rows[0]["scenario_sha256"] == bound.scenario.digest
+    assert rows[0]["bound_sha256"] == bound.digest
+    assert rows[0]["scenario"] == bound.model_dump(mode="json")
+    assert rows[1]["event"] == "scenario_report"
+    assert rows[1]["response"] == "UNKNOWN"
+    assert sink.capture_count == 0
+
+
 @pytest.fixture(autouse=True)
 def _private_raw_capture_root(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cli, "hardware_safety_root", lambda: tmp_path)

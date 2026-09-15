@@ -21,11 +21,19 @@ from enum import StrEnum
 from typing import Annotated, Literal, Protocol, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_serializer,
+    model_validator,
+)
 
 from jebao_flow.devices.base import JebaoDevice
 from jebao_flow.devices.identity import PhysicalDeviceBinding, physical_identity_key
 from jebao_flow.devices.linkage import LinkageSafetyInterlock
+from jebao_flow.devices.native_scenario import BoundScenario
 from jebao_flow.protocol.models import DeviceState, LinkageRole
 from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
 from jebao_flow.protocol.schedule_wire import (
@@ -321,9 +329,25 @@ class TemporaryScheduleSpec(BaseModel):
     disarm_verify_timeout_seconds: float = Field(default=30, gt=0, le=120)
     restore_timeout_seconds: float = Field(default=90, gt=0, le=180)
     recovery_authority_seconds: float = Field(default=1800, ge=60, le=3600)
+    scenario: BoundScenario | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_shape(self, handler):
+        payload = handler(self)
+        if self.scenario is None:
+            payload.pop("scenario", None)
+        return payload
 
     @model_validator(mode="after")
     def validate_pair(self) -> Self:
+        if self.scenario is not None:
+            if self.kind is not TemporaryScheduleKind.FIELD_OBSERVATION:
+                raise ValueError("시나리오는 field schedule에만 결속할 수 있습니다")
+            for patch, participant in zip(self.device_patches, ("master", "slave"), strict=True):
+                if b"".join(slot.wire_bytes for slot in patch.slots) != self.scenario.image(
+                    participant
+                ):
+                    raise ValueError("시나리오와 실제 48슬롯 패치가 다릅니다")
         ids = tuple(patch.device_id for patch in self.device_patches)
         if len(set(ids)) != 2:
             raise ValueError("temporary schedule devices must be distinct")
@@ -1145,9 +1169,10 @@ class TemporaryScheduleController:
                         patch.device_id,
                         image,
                         wave_flow_plan=wave_flow_plan,
+                        scenario=spec.scenario,
                     )
                 )
-        if field_evidence and not wave_flow_plan:
+        if field_evidence and not wave_flow_plan and spec.scenario is None:
             master_topology, master_flows, master_frequencies = field_evidence[0]
             slave_topology, slave_flows, slave_frequencies = field_evidence[1]
             fixed_q2_opposing_topology = _is_fixed_q2_opposing_topology(
@@ -1269,6 +1294,7 @@ class TemporaryScheduleController:
         image: bytes,
         *,
         wave_flow_plan: bool = False,
+        scenario: BoundScenario | None = None,
     ) -> tuple[
         tuple[tuple[str, str, str], ...],
         tuple[int, ...],
@@ -1285,12 +1311,17 @@ class TemporaryScheduleController:
             )
             is not None
         )
-        if len(entries) != 2 and not (wave_flow_plan and len(entries) == 3):
+        if scenario is not None:
+            if image not in {scenario.image("master"), scenario.image("slave")}:
+                raise TemporarySchedulePreflightError(
+                    TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE
+                )
+        elif len(entries) != 2 and not (wave_flow_plan and len(entries) == 3):
             raise TemporarySchedulePreflightError(TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE)
         ordered = tuple(sorted(entries, key=lambda entry: _wall_minutes(entry.start)))
         # 새 slave의 두 번째·세 번째 슬롯은 모두 Sine이다. 이 세 슬롯 예외는
         # _is_wave_flow_patch_pair의 전체 exact 계획 일치에만 의존한다.
-        if ordered[0].mode == ordered[1].mode:
+        if scenario is None and ordered[0].mode == ordered[1].mode:
             raise TemporarySchedulePreflightError(TemporaryScheduleErrorCode.UNSAFE_INITIAL_STATE)
         cursor = 0
         capabilities = self._device(device_id).capabilities

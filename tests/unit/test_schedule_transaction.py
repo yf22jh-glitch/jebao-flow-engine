@@ -2046,6 +2046,36 @@ async def test_new_controller_manually_recovers_a_durable_staged_journal(
     assert recovered_store.load() is None
 
 
+@pytest.mark.parametrize("template", (False, True))
+def test_external_scenario_supplies_actual_lower_image_validator(template):
+    from jebao_flow.devices.native_scenario import NativeScenario, load_scenario_suite
+
+    case = load_scenario_suite(Path("docs/native-scenarios/sync-async.json")).cases[0]
+    if template:
+        payload = case.model_dump(mode="json")
+        payload["master"].append({"at": 900, "mode": "sine", "flow": 39, "frequency": 30})
+        payload["slave"] = None
+        payload["slave_flows"] = [31, 40, 36]
+        case = NativeScenario.model_validate(payload)
+    bound = case.bind(datetime(2026, 9, 15, 10))
+    spec = _fixed_spec(
+        operation_id="scenario",
+        qualification_operation_id="q",
+        master_device_id="left",
+        slave_device_id="right",
+        boundary_time=bound.boundary_time,
+        scenario=bound,
+    ).temporary_schedule_spec()
+    images = _expected_images_for_spec(spec)
+    assert images["left"] == bound.image("master")
+    assert images["right"] == bound.image("slave")
+    # typed scenario가 없는 기존 호출은 새 임의 계획의 허용권을 얻지 않는다.
+    if template:
+        legacy = type(spec).model_validate({**spec.model_dump(), "scenario": None})
+        with pytest.raises(TemporarySchedulePreflightError):
+            _expected_images_for_spec(legacy)
+
+
 def test_snapshot_model_rejects_tampered_hex_digest() -> None:
     snapshot = _record().snapshots[0]
 

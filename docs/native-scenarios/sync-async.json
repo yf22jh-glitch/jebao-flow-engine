@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "sync-wave-and-own-flow",
+      "slave_role": "sync_slave",
+      "master": [
+        {"at": 0, "mode": "sine", "flow": 35, "frequency": 30},
+        {"at": 600, "mode": "constant", "flow": 32}
+      ],
+      "slave": [
+        {"at": 0, "mode": "constant", "flow": 30},
+        {"at": 600, "mode": "sine", "flow": 40, "frequency": 30},
+        {"at": 900, "mode": "sine", "flow": 35, "frequency": 30}
+      ],
+      "windows": [
+        {"name": "initial", "start": 0, "end": 540,
+         "master": {"auto_mode": "sine", "auto_flow": 35, "auto_frequency": 30},
+         "slave": {"auto_mode": "constant", "auto_flow": 30, "auto_frequency": 5,
+                   "reported_mode": "sine", "reported_frequency": 30}},
+        {"name": "master-boundary", "start": 660, "end": 840,
+         "master": {"auto_mode": "constant", "auto_flow": 32, "auto_frequency": 5},
+         "slave": {"auto_mode": "sine", "auto_flow": 40, "auto_frequency": 30,
+                   "reported_mode": "constant", "reported_frequency": 5}},
+        {"name": "slave-flow-only", "start": 960, "end": 1020,
+         "master": {"auto_mode": "constant", "auto_flow": 32, "auto_frequency": 5},
+         "slave": {"auto_mode": "sine", "auto_flow": 35, "auto_frequency": 30,
+                   "reported_mode": "constant", "reported_frequency": 5}}
+      ]
+    },
+    {
+      "name": "async-wave-and-own-flow",
+      "slave_role": "async_slave",
+      "master": [
+        {"at": 0, "mode": "sine", "flow": 35, "frequency": 30},
+        {"at": 600, "mode": "constant", "flow": 32}
+      ],
+      "slave": [
+        {"at": 0, "mode": "constant", "flow": 30},
+        {"at": 600, "mode": "sine", "flow": 40, "frequency": 30},
+        {"at": 900, "mode": "sine", "flow": 35, "frequency": 30}
+      ],
+      "windows": [
+        {"name": "initial", "start": 0, "end": 540,
+         "master": {"auto_mode": "sine", "auto_flow": 35, "auto_frequency": 30},
+         "slave": {"auto_mode": "constant", "auto_flow": 30, "auto_frequency": 5,
+                   "reported_mode": "sine", "reported_frequency": 30}},
+        {"name": "master-boundary", "start": 660, "end": 840,
+         "master": {"auto_mode": "constant", "auto_flow": 32, "auto_frequency": 5},
+         "slave": {"auto_mode": "sine", "auto_flow": 40, "auto_frequency": 30,
+                   "reported_mode": "constant", "reported_frequency": 5}},
+        {"name": "slave-flow-only", "start": 960, "end": 1020,
+         "master": {"auto_mode": "constant", "auto_flow": 32, "auto_frequency": 5},
+         "slave": {"auto_mode": "sine", "auto_flow": 35, "auto_frequency": 30,
+                   "reported_mode": "constant", "reported_frequency": 5}}
+      ]
+    }
+  ]
+}

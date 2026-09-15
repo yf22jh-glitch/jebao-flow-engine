@@ -10,6 +10,9 @@ roles -> TimerOFF -> original 48 slots -> original controls.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -40,6 +43,7 @@ from jebao_flow.devices.linkage import (
     TemporaryLinkageController,
     schedule_structure_fingerprint,
 )
+from jebao_flow.devices.native_scenario import BoundScenario
 from jebao_flow.devices.schedule_linkage import (
     PrerequisiteAuthorizer,
     RawCaptureObserver,
@@ -74,6 +78,7 @@ from jebao_flow.devices.schedule_transaction import (
     TemporaryScheduleRecord,
     TemporaryScheduleResult,
     TemporaryScheduleSpec,
+    _report_observation_failure,
     behavior_neutral_unused_slot_patch,
 )
 from jebao_flow.protocol.models import (
@@ -115,6 +120,81 @@ _FIXED_Q2_SAFE_FREQUENCY = 20
 # read-only role epoch.  Keep their existing hard 20-minute ceiling while reserving enough time
 # that a slow diagnostic read cannot truncate the maintainer-approved 900-second observation.
 _COMPOSED_OPERATION_RESERVE_SECONDS = 285.0
+_LOGGER = logging.getLogger(__name__)
+
+
+def _report_disarm_state(record, device_id, power, state) -> None:
+    """원복 판단 값만 남기며 비밀값·오류 메시지·예외 체인은 렌더하지 않는다."""
+    try:
+
+        def public(value):
+            if value is None or isinstance(value, bool):
+                return value
+            if type(value) is int and 0 <= value <= 100:
+                return value
+            if isinstance(value, str) and value in {
+                "pulse",
+                "sine",
+                "constant",
+                "random",
+                "tidal",
+                "nutrient_transport",
+                "circulation",
+                "feed",
+                "custom",
+                "independent",
+                "master",
+                "sync_slave",
+                "async_slave",
+            }:
+                return value
+            return "unrecognized"
+
+        expected = {
+            "online": True,
+            "error_present": False,
+            "enabled": True,
+            "power": power,
+            "mode": record.spec.mode,
+            "frequency": record.spec.frequency,
+            "linkage": "independent",
+            "timer_enabled": False,
+        }
+        actual = {
+            "online": state.online,
+            "error_present": state.error is not None,
+            "enabled": state.enabled,
+            "power": state.power,
+            "mode": state.mode,
+            "frequency": state.frequency,
+            "linkage": state.linkage,
+            "timer_enabled": state.timer_enabled,
+        }
+        _LOGGER.warning(
+            "%s",
+            json.dumps(
+                {
+                    "event": "scenario_disarm_state",
+                    "event_version": 1,
+                    "operation_sha256": hashlib.sha256(record.operation_id.encode()).hexdigest(),
+                    "participant": "master"
+                    if device_id == record.spec.master_device_id
+                    else "slave",
+                    "fields": {
+                        key: {
+                            "expected": public(value),
+                            "actual": public(actual[key]),
+                            "matches": value == actual[key],
+                        }
+                        for key, value in expected.items()
+                    },
+                },
+                sort_keys=True,
+            ),
+        )
+    except BaseException:
+        pass
+
 
 SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT = 64
 SCHEDULE_FLOW_STAGE_EVENT_LIMIT = SCHEDULE_FLOW_PROGRESS_EVENT_LIMIT + 1
@@ -165,10 +245,13 @@ class ScheduleFlowExperimentSpec(BaseModel):
     full_epoch_after_roles: bool = False
     wave_flow_role: Literal["sync_slave", "async_slave"] | None = None
     master_template_flow_only: bool = False
+    scenario: BoundScenario | None = None
 
     @model_serializer(mode="wrap")
     def serialize_legacy_shape(self, handler):
         payload = handler(self)
+        if self.scenario is None:
+            payload.pop("scenario", None)
         if self.wave_flow_role is None:
             payload.pop("wave_flow_role", None)
         if not self.master_template_flow_only:
@@ -177,7 +260,9 @@ class ScheduleFlowExperimentSpec(BaseModel):
 
     @property
     def is_wave_flow_plan(self) -> bool:
-        return self.wave_flow_role is not None and _plan_signature(self) == _WAVE_FLOW_SIGNATURE
+        return self.scenario is not None or (
+            self.wave_flow_role is not None and _plan_signature(self) == _WAVE_FLOW_SIGNATURE
+        )
 
     @property
     def is_fixed_q2_plan(self) -> bool:
@@ -198,6 +283,31 @@ class ScheduleFlowExperimentSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_experiment(self) -> Self:
+        if self.scenario is not None:
+            plan = self.scenario.scenario
+            if (
+                self.wave_flow_role != plan.slave_role
+                or self.boundary_time != self.scenario.boundary_time
+                or self.master_template_flow_only
+                or self.sentinel_only
+                or self.master_device_id == self.slave_device_id
+                or self.observation_window_seconds != 1035
+                or self.post_boundary_stability_seconds != 30
+                or self.safe_frequency != 20
+                or self.verification_interval_seconds != 2
+                or self.minimum_lead_seconds != 60
+                or self.ambiguous_band_seconds != 1
+                or self.maximum_clock_skew_seconds != 30
+                or self.clock_advance_tolerance_seconds != 2
+                or not self.sentinel_qualification
+                or not self.full_epoch_after_roles
+                or (self.master_before_flow, self.master_after_flow)
+                != tuple(step.flow for step in plan.master[:2])
+                or (self.slave_before_flow, self.slave_after_flow)
+                != tuple(step.flow for step in plan.slave_steps[:2])
+            ):
+                raise ValueError("시나리오와 실제 실행 계약이 일치하지 않습니다")
+            return self
         if self.master_template_flow_only and (
             not self.is_wave_flow_plan or self.wave_flow_role != "sync_slave"
         ):
@@ -305,6 +415,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
 
     def role_observation_spec(self) -> ScheduleLinkageSpec:
         return ScheduleLinkageSpec(
+            scenario=self.scenario,
             wave_flow_role=self.wave_flow_role,
             master_template_flow_only=self.master_template_flow_only,
             operation_id=f"{self.operation_id}_roles",
@@ -324,7 +435,21 @@ class ScheduleFlowExperimentSpec(BaseModel):
         )
 
     def temporary_schedule_spec(self) -> TemporaryScheduleSpec:
-        if self.master_template_flow_only:
+        if self.scenario is not None:
+            master_patch, slave_patch = tuple(
+                DeviceSchedulePatch(
+                    device_id=device_id,
+                    slots=tuple(
+                        ScheduleSlotPatch.from_wire(index, image[index * 9 : index * 9 + 9])
+                        for index in range(LOCAL_WAVEMAKER_PRO_SLOT_COUNT)
+                    ),
+                )
+                for device_id, image in (
+                    (self.master_device_id, self.scenario.image("master")),
+                    (self.slave_device_id, self.scenario.image("slave")),
+                )
+            )
+        elif self.master_template_flow_only:
             master_patch = _master_template_flow_patch(
                 self.master_device_id, self.boundary_time, flows=(35, 32, 38)
             )
@@ -399,6 +524,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
                 after_frequency=self.sine_frequency,
             )
         return TemporaryScheduleSpec(
+            scenario=self.scenario,
             operation_id=f"{self.operation_id}_schedule",
             device_patches=(
                 master_patch,
@@ -408,11 +534,7 @@ class ScheduleFlowExperimentSpec(BaseModel):
             observation_timeout_seconds=min(
                 1200,
                 self.observation_window_seconds
-                + (
-                    _COMPOSED_OPERATION_RESERVE_SECONDS
-                    if self.full_epoch_after_roles
-                    else 120.0
-                ),
+                + (_COMPOSED_OPERATION_RESERVE_SECONDS if self.full_epoch_after_roles else 120.0),
             ),
             recovery_authority_seconds=2400,
         )
@@ -437,6 +559,7 @@ def _is_fixed_q2_plan(spec: ScheduleFlowExperimentSpec) -> bool:
 
 
 class ScheduleFlowOutcome(StrEnum):
+    SCENARIO_RESPONSES_OBSERVED = "scenario_responses_observed"
     WAVE_FLOW_OBSERVED = "wave_flow_observed"
     """Classification of the slave's effective post-boundary Auto tuple."""
 
@@ -808,6 +931,10 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
     @property
     def last_role_sample(self) -> ScheduleLinkageSample | None:
         return self._last_role_sample
+
+    @property
+    def last_scenario_report(self):
+        return self._role_controller.scenario_report
 
     @property
     def last_role_result(self) -> ScheduleLinkageResult | None:
@@ -1922,7 +2049,14 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 feed_time = values.get("AutoFeedTime")
                 if (
                     not isinstance(mode, str)
-                    or mode not in _STAGED_CURRENT_AUTO_MODES
+                    or mode
+                    not in (
+                        frozenset(
+                            entry.mode for entries in expected_entries.values() for entry in entries
+                        )
+                        if spec.scenario is not None
+                        else _STAGED_CURRENT_AUTO_MODES
+                    )
                     or isinstance(flow, bool)
                     or not isinstance(flow, int)
                     or not 0 <= flow <= 100
@@ -2019,6 +2153,14 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 *((35,) if spec.is_wave_flow_plan else ()),
             ),
         }
+        if spec.scenario is not None:
+            planned = {
+                spec.master_device_id: (30, *(step.flow for step in spec.scenario.scenario.master)),
+                spec.slave_device_id: (
+                    31,
+                    *(step.flow for step in spec.scenario.scenario.slave_steps),
+                ),
+            }
         for device_id, values in planned.items():
             for value in values:
                 self._assert_guarded_power_value(spec, device_id, value)
@@ -2270,9 +2412,15 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
             except asyncio.CancelledError:
                 cancellation_received = True
                 safe = False
+                _report_observation_failure(
+                    None, operation_id=record.operation_id, site="disarm_fresh_read_cancelled"
+                )
                 continue
-            except BaseException:
+            except BaseException as error:
                 safe = False
+                _report_observation_failure(
+                    error, operation_id=record.operation_id, site="disarm_fresh_read_failed"
+                )
                 continue
             state_is_safe = (
                 state.online
@@ -2284,12 +2432,16 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                 and state.linkage is LinkageRole.INDEPENDENT
                 and state.timer_enabled is False
             )
+            _report_disarm_state(record, device_id, power, state)
             if not state_is_safe:
                 safe = False
                 continue
             physical_binding = device.physical_binding
             if physical_binding is None:
                 safe = False
+                _report_observation_failure(
+                    None, operation_id=record.operation_id, site="disarm_binding_missing"
+                )
                 continue
             try:
                 proof_states[device_id] = ScheduleLinkageExternalDisarmState.from_state(
@@ -2297,8 +2449,11 @@ class ScheduleFlowExperimentController(TemporaryLinkageController):
                     state,
                     physical_binding=physical_binding,
                 )
-            except BaseException:
+            except BaseException as error:
                 safe = False
+                _report_observation_failure(
+                    error, operation_id=record.operation_id, site="disarm_proof_failed"
+                )
 
         if not safe:
             # This exact error tells the schedule transaction to retain its staged image and
@@ -2492,6 +2647,36 @@ def classify_schedule_flow_sample(
 
     if sample.slave_linkage is not spec.outer_linkage_spec().slave_role:
         return ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+    if spec.scenario is not None:
+        report = sample.scenario_report
+        if (
+            sample.phase != "after"
+            or report is None
+            or report.bound_sha256 != spec.scenario.digest
+            or report.scenario_sha256 != spec.scenario.scenario.digest
+            or report.input_readback != "PASS"
+            or tuple(window["name"] for window in report.windows)
+            != tuple(window.name for window in spec.scenario.scenario.windows)
+            or any(window["stable_evidence"] is None for window in report.windows)
+            or not report.matches_bound(spec.scenario)
+            or sample.master_manual_power != 30
+            or sample.slave_manual_power != 31
+        ):
+            return ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+        stable = report.windows[-1]["stable_evidence"]
+        for participant in ("master", "slave"):
+            actual = stable[participant]["fields"]
+            auto = getattr(sample, participant)
+            if (
+                actual.get("auto_mode") != auto.mode
+                or actual.get("auto_flow") != auto.flow
+                or actual.get("auto_frequency") != auto.frequency
+                or actual.get("reported_mode") != getattr(sample, f"{participant}_reported_mode")
+                or actual.get("reported_frequency")
+                != getattr(sample, f"{participant}_reported_frequency")
+            ):
+                return ScheduleFlowOutcome.UNEXPECTED_EFFECTIVE_STATE
+        return ScheduleFlowOutcome.SCENARIO_RESPONSES_OBSERVED
     if spec.is_wave_flow_plan:
         windows = sample.wave_flow_windows
         if (

@@ -3095,6 +3095,34 @@ async def test_normal_unwind_hands_exact_disarm_proof_to_role_close_before_resto
     assert role_store.record is None
 
 
+async def test_disarm_reports_exact_fields_without_error_or_identity_text(caplog):
+    import json
+    from types import SimpleNamespace
+
+    from jebao_flow.devices.schedule_flow_experiment import _report_disarm_state
+
+    state = SimpleNamespace(
+        online=True,
+        error="secret-error",
+        enabled=True,
+        power=31,
+        mode="secret-mode",
+        frequency=20,
+        linkage=LinkageRole.INDEPENDENT,
+        timer_enabled=True,
+    )
+    record = _disarm_record()
+    _report_disarm_state(record, "slave", 32, state)
+    row = json.loads(caplog.records[-1].getMessage())
+    assert row["fields"]["timer_enabled"] == {"expected": False, "actual": True, "matches": False}
+    assert row["fields"]["power"]["actual"] == 31
+    assert row["fields"]["power"]["expected"] == 32
+    assert row["fields"]["error_present"]["actual"] is True
+    assert "secret-error" not in caplog.text
+    assert "secret-mode" not in caplog.text
+    assert record.operation_id not in caplog.text
+
+
 async def test_disarm_attempts_both_devices_and_accepts_verified_ack_loss() -> None:
     events: list[str] = []
     slave = _DisarmDevice("slave", events=events, fail_write=True)

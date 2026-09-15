@@ -915,6 +915,149 @@ async def _fixed_sync_prepared():
     return controller, record, states, master, slave, store, samples
 
 
+async def _scenario_prepared(role="sync_slave"):
+    from jebao_flow.devices.native_scenario import load_scenario_suite
+    from jebao_flow.schedule_flow_experiment_cli import _fixed_spec
+
+    controller, old, states, master, slave, store, samples = await _wave_flow_prepared(role)
+    case = next(
+        case
+        for case in load_scenario_suite(Path("docs/native-scenarios/sync-async.json")).cases
+        if case.slave_role == role
+    )
+    anchor = old.snapshots[0].expectation.boundary_at - timedelta(minutes=10)
+    bound = case.bind(anchor)
+    flow = _fixed_spec(
+        operation_id="scenario",
+        qualification_operation_id=old.spec.qualification_operation_id,
+        master_device_id="master",
+        slave_device_id="slave",
+        boundary_time=bound.boundary_time,
+        scenario=bound,
+    )
+    snapshots = controller._snapshots_from_states(flow.role_observation_spec(), states)
+    record = old.model_copy(
+        update={
+            "operation_id": "scenario_roles",
+            "spec": flow.role_observation_spec(),
+            "snapshots": snapshots,
+        }
+    )
+    return controller, record, states, master, slave, store, samples
+
+
+@pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
+async def test_declarative_scenario_uses_actual_snapshot_and_record_role_contract(role):
+    controller, record, states, master, slave, store, _samples = await _scenario_prepared(role)
+    loaded = ScheduleLinkageRecord.model_validate_json(record.model_dump_json())
+    assert loaded == record
+    assert loaded.spec.scenario is not None
+    assert _controller(master, slave, store)._record_slave_role(loaded).value == role
+    assert master.commands == slave.commands == []
+    assert controller._scenario == record.spec.scenario
+    changed = dict(states)
+    changed["slave"] = changed["slave"].model_copy(update={"power": 32})
+    with pytest.raises(ScheduleLinkagePreflightError):
+        controller._snapshots_from_states(record.spec, changed)
+
+
+async def test_scenario_does_not_borrow_another_schedule_preflight():
+    controller, record, states, *_ = await _scenario_prepared()
+    data = record.spec.scenario.scenario.model_dump(mode="json")
+    data["slave"][2]["flow"] = 36
+    from jebao_flow.devices.native_scenario import NativeScenario
+
+    bound = NativeScenario.model_validate(data).bind(record.spec.scenario.anchor)
+    changed = record.spec.model_copy(update={"scenario": bound})
+    with pytest.raises(ScheduleLinkagePreflightError, match="시나리오"):
+        controller._snapshots_from_states(changed, states)
+
+
+@pytest.mark.parametrize("role", ("sync_slave", "async_slave"))
+@pytest.mark.parametrize("fault", (None, "different_flow", "raw_loss", "missing_clock"))
+async def test_scenario_monitor_emits_bound_actual_evidence_without_predicting_firmware(
+    monkeypatch, role, fault
+):
+    # 반환 tuple은 2026-09-14-native-sync-wave-flow.md의 보고 필드 구성이다.
+    # 합성 시각·역할 표식은 수집/분류 연결 시험만 하며 Async 펌웨어 답을 만들지 않는다.
+    controller, record, initial, master, slave, _store, samples = await _scenario_prepared(role)
+    virtual = master.virtual_time
+    virtual.value = 0
+    controller._observation_deadline = 1020
+    controller._fixed_capture_pair_ordinal = 0
+    bound = record.spec.scenario
+
+    async def acquire(_record):
+        now = virtual.monotonic()
+        ordinal = controller._fixed_capture_pair_ordinal + 1
+        controller._fixed_capture_pair_ordinal = ordinal
+        index = 0 if now < 600 else 1 if now < 900 else 2
+        clock = None if fault == "missing_clock" else bound.anchor + timedelta(seconds=now)
+        states, captures = {}, {}
+        for participant, state in initial.items():
+            is_master = participant == "master"
+            mode = (
+                ("sine", "constant", "constant")[index]
+                if is_master
+                else ("constant", "sine", "sine")[index]
+            )
+            flow = (35, 32, 32)[index] if is_master else (30, 40, 35)[index]
+            if fault == "different_flow" and not is_master:
+                flow = 36
+            reported_mode = ("sine", "constant", "constant")[index]
+            states[participant] = state.model_copy(
+                update={
+                    "observed_attributes": dict(state.observed_attributes)
+                    | {"AutoMode": mode, "AutoFlow": flow, "AutoFreq": 30 if mode == "sine" else 5},
+                    "mode": reported_mode,
+                    "frequency": 30 if reported_mode == "sine" else 5,
+                    "linkage": LinkageRole.MASTER if is_master else LinkageRole(role),
+                    "schedule": state.schedule.model_copy(update={"device_local_time": clock}),
+                }
+            )
+            status = bytearray(452)
+            status[11:443] = bound.image(participant)
+            capture = RawStateCapture(
+                f"accounting-{ordinal}-{participant}".encode(), 3 if is_master else 4, bytes(status)
+            )
+            captures[participant] = ScheduleLinkageRawCapture(
+                pair_ordinal=ordinal,
+                participant=participant,
+                state=states[participant],
+                capture=capture,
+                read_started_at=datetime.now(UTC),
+                read_completed_at=datetime.now(UTC),
+                monotonic_started_at=now,
+                monotonic_completed_at=now,
+            )
+        controller._latest_fixed_captures = captures
+        controller._raw_capture_persistence_failed = fault == "raw_loss"
+        return states, now
+
+    monkeypatch.setattr(controller, "_acquire_fixed_q2_monitor_pair", acquire)
+    stop, observed = await controller._monitor_scenario(record)
+    assert stop is ScheduleLinkageStopReason.EPOCH_COMPLETED
+    assert observed is (fault in {None, "different_flow"})
+    assert master.commands == slave.commands == []
+    report = controller.scenario_report
+    assert report.pair_count <= 104
+    assert report.bound_sha256 == bound.digest
+    assert report.response == (
+        "UNKNOWN" if fault == "missing_clock" else "FAIL" if fault == "different_flow" else "PASS"
+    )
+    if observed:
+        assert len(samples) == 1
+        assert samples[0].slave_linkage.value == role
+        assert samples[0].scenario_report == report
+        assert samples[0].slave.flow == (36 if fault == "different_flow" else 35)
+        assert (
+            samples[0].slave_frame_sha256
+            == report.windows[-1]["stable_evidence"]["slave"]["frame_sha256"]
+        )
+    else:
+        assert samples == []
+
+
 async def _wave_flow_prepared(role="sync_slave"):
     controller, old, states, master, slave, store, samples = await _fixed_sync_prepared()
     flow = ScheduleFlowExperimentSpec(
