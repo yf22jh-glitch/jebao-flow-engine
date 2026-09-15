@@ -4249,3 +4249,18 @@ detach/assist를 실행할 수 있고, 관찰 완료 발언만으로 원복 지�
 막지 않는다. frozen native6개·writer/schema9개·40receipt·공용 guard·timeout/retry는 불변이다.
 구체적 물리 위험이 관측되면 즉시 보고하며 사람이 중단 수단을 행사한다. 이전 first 앱OFF·
 Bar 앱이전값 복귀·원서비스 의무는 별도 유지하며 이 관찰로 배포나 원복 완료를 주장하지 않는다.
+
+### 2026-09-16 원복 뒤 기존 Sync→Async 관찰 단회 재개
+
+`270ed1d`에 앱 조작 관측과 제품6회차 자기 원복을 먼저 기록했다. 사용자는 공장 초기화 대신
+원복을 지시했고, 원복 완료 뒤 잠시 정지했다가 “일단 원래대러 async 시도해봐”, “그리고
+확인해봥”이라고 새로 지시했다. 이는 기존9860107 이미지·동일 Pro pair/plan의 staged9단계
+Sync→Async를 새 operation1회 실행해 관찰 보류하는 범위다. 직접 Async용 source/절차 변경과
+공장 초기화는 하지 않는다. 제품 계열 누적7회이며 좁은 질문으로 누적 횟수를 리셋하지 않는다.
+
+직전 source ROLLED_BACK·child VERIFIED/원432B/8controls exact 뒤 새 원본을 포착한다.
+기존 --await-operator-observation을 유지해 마지막 시도 뒤 자동 원복·재전송을 하지 않는다.
+사용자가 제안한 master 링크 해제→slave 보고 확인→master 링크 재설정은 이번 첫 결속과
+별도 단계이며 여기서 자동 실행하지 않는다. 첫 결속 결과와 원본 보고를 먼저 알린다.
+이 단계가 다시 ACK timeout이면 원인 규명이나 실패 해소로 세지 않는다. source/test·writer·
+schema9·40receipt·shared timeout/retry·frozen6은 전부 불변이며 새 배포·Bar write도0이다.
