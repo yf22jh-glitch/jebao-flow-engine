@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-15 앱 Async 조작 관측·명시 원복](2026-09-15-app-async-toggle-and-owned-restore.md) — 25pair에서 Sync 보고 유지, 사용자 화면 관찰 별도; 자기 원432B/8controls 복원, 새 결속0.
+
 - [2026-09-15 Async 사용자 관찰 대기](2026-09-15-product-async-operator-observation.md) — 누적6회, 마지막 전환9 send/8 ACK, 자동 원복0·사용자 지시 대기·배포 미완료.
 
 - [2026-09-15 제품 Async 단계별 활성화](2026-09-15-product-async-staged-activation.md) — 누적5회, 마지막 ACK timeout·새 직접 확인 창 report4/reply0, 자기 원복 exact·배포 미완료.
