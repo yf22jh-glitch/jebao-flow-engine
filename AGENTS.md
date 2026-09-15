@@ -4264,3 +4264,35 @@ Sync→Async를 새 operation1회 실행해 관찰 보류하는 범위다. 직�
 별도 단계이며 여기서 자동 실행하지 않는다. 첫 결속 결과와 원본 보고를 먼저 알린다.
 이 단계가 다시 ACK timeout이면 원인 규명이나 실패 해소로 세지 않는다. source/test·writer·
 schema9·40receipt·shared timeout/retry·frozen6은 전부 불변이며 새 배포·Bar write도0이다.
+
+## 2026-09-16 Pro 두 대의 사용자 일일 시간표와 선택적 master 링크 cycle
+
+`17beba0`에 일곱 번째 전환과 사용자 앱 master 해제/재설정 뒤 Async 직접 응답을 기록했다.
+사용자는 이 절차를 옵션으로 구현·빌드·테스트하고, 위 Pro를 master로 바꿔 제시한 16구간
+시간표로 실제 Async 운영하라고 명시했다. Bar는 후속 지시로 제외했다. 질문을 반복하지 않고
+선택 가능한 두 모드 중 circulation을 사용한다. 현재 보류 source는 먼저 기존 자기 원본으로
+복원하고 새 역할 배치의 independent baseline에서 새 operation을 시작한다. 공장 초기화는 없다.
+
+별도 정책 커밋 뒤 lifecycle·CLI·새 `local_control/wavemaker_master_cycle.py`·직접 tests·
+시간표 예시·문서를 수정한다. 기존 staged9와 원복6/지원5의 payload는 불변이다. 명시 옵션만
+마지막 Async 시도 후 실패에 연결된다. 별도 결정적 cycle id/kind로 master Linkage independent,
+master 두 scalar를 전량 내구화한 뒤 최대 한 번씩 전송한다. 기존 scalar qualification과 owned
+payload 동일성·신원·lease·journal/fsync를 재사용하며 slave Async를 재전송하지 않는다.
+
+cycle은 source 원본 context에 결속되지만 원 action의 UNCERTAIN/ACK/진단을 수정하지 않는다.
+해제 뒤 fresh reply에서 slave Async와 전체 image를 확인하고 재설정 뒤 역할/image를 관측한다.
+최종 report 수용 여부와 출처를 공개하고 상태 도달을 원 명령 전달 증명으로 승격하지 않는다.
+실패/취소는 자동 원복이나 새 id 반복 없이 보존·정지한다. cycle의 미완료도 자기 detach/assist를
+막지 않도록 정확히 그 attach에서 파생한 id만 허용하고 원복 완료 때 cycle의 복구 회계도 닫는다.
+동일 id 조회/완료 replay는 장비 무접촉이며 source 자체가 미완료이면 일반 전역 차단은 유지한다.
+
+writer/schema9·40receipt·공용 guard/protocol·frozen6은 수정하지 않는다. 새 fake 펌웨어 가설은
+넣지 않고 byte-copy/fault injection으로 계약을 시험한다. 위/아래 Flow 범위와 24시간 슬롯을
+사전 컴파일 대조하고 실제 전체 432B·역할과 현재 Auto 보고를 따로 보존한다. 누적 제품 질문은
+8회차로 기록하며 master 배치/시간표/cycle이 함께 바뀌므로 성공도 단일 원인 증명은 아니다.
+
+실제 적용 뒤 원복하지 않고 사용자 시간표를 유지한다. 별도 read-only 야간 collector를 배치해
+장비 시각·Auto·역할·raw frame·시각/출처를 영속 보존한다. 관측 실패는 기록하며 write로 보정하지
+않는다. 아침 대조는 보고된 Flow와 시간표의 비교이지 물리 유량 측정이 아니다. Bar·옛 앱 원복·
+중단된 원 서비스 복귀 의무를 이번 Pro 운영으로 완료 처리하지 않는다. 실패한 live 결과를
+커밋하기 전 source 변경 금지와 동일 payload 재전송 금지는 계속 적용한다.
