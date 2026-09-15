@@ -74,6 +74,7 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 
 | 파일 | 범위 | 요지 |
 |---|---|---|
+| [2026-09-15 수류모터 새 이미지·자격 준비 추가](2026-09-15-wavemaker-deployment-precheck.md#2026-09-15-0744-utc-추가--이미지-완료-실제-bar-준비-상태의-범위-경계) | source28d885c·새 이미지, 세 장비 reply 각2회, 장비 write0 | Bar classic91이 기존 qualification constant/≤45 조건과 달라 준비 범위 결정 전 정지; 새 자격/운영 배포 미완료 |
 | [2026-09-15 수류모터 배포 사전 대조](2026-09-15-wavemaker-deployment-precheck.md) | 운영 입력 read-only·장비 접촉0·서비스 변경0 | 구 schema 4 binding/6 제어 pair 확인, 새 구현 전환은 재자격 범위 결정 전 정지·배포 미완료 |
 | [2026-09-15 외부 시나리오 Async](2026-09-15-native-scenario-async.md) | 재빌드 없이 Async1회, raw96 pair 중 Sync 경유1·Async95, 원432B/control 사후2 pair exact | 입력/세 창 응답 PASS·192비교 불일치0, 종료 exit2·해제 실패 필드3개는 별도; 최종 앱/서비스 복귀 대기 |
 | [2026-09-15 외부 시나리오 Sync](2026-09-15-native-scenario-sync.md) | 동일 이미지·외부 JSON Sync1회, raw96 pair, 원432B/control 사후2 pair exact | 입력/세 창 응답 PASS, 종료 exit2·첫 composed disarm slave3조건 미일치 별도; Async0·최종 앱/서비스 복귀 대기 |
