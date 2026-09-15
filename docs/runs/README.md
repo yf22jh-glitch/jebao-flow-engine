@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-15 제품 Async 단계별 활성화](2026-09-15-product-async-staged-activation.md) — 누적5회, 마지막 ACK timeout·새 직접 확인 창 report4/reply0, 자기 원복 exact·배포 미완료.
+
 - [2026-09-15 제품 Async 연결 유지·직접 응답 확인](2026-09-15-product-async-reply-reconciliation.md) — 누적4회, ACK/직접reply timeout·소유 원복 exact, 배포 미완료.
 
 - [2026-09-15 제품 Async 역할 단독 전환](2026-09-15-product-async-role-only-stop.md) — Async ACK timeout, 변동값 gate 실패 아님.

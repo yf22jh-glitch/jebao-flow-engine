@@ -117,3 +117,18 @@ schema는 `81ee699d9a71d98a1caa8bc99ac1d9619d2959ba04f343335a31d27e8ac914f1`로 
 이번 실기는 제품 누적5회차이며 신규 operation1회다. 먼저 실장 수용과 자기 원복을 확인하고,
 그 뒤에만 기존6개 제어를 보존하는 새 운영 generation을 설치한다. 실패하면 자기 원복·증거·보고를
 먼저 닫는다. 추가 여섯 번째 전진, 동일 payload 재전송, 앱 reset을 자동으로 포함하지 않는다.
+
+## 후속 실기·독립 검토 보완
+
+[제품5회차 결과](runs/2026-09-15-product-async-staged-activation.md)는 마지막Async ACK timeout,
+새 직접 확인 창report4/reply0, 소유 원복exact다. 구현 검토 통과를 실장 수용으로 바꾸지 않는다.
+
+독립 검토자는 최종src/tests 동일bytes에서Ruff와targeted2파일71 PASS(19.15초),
+full1회2912 PASS/3 FAIL/경고2(96.86초)를 보고했다. 우리2910/5와 총계2915는 같으나,
+권한/umask2개는 그 환경에서 재현되지 않았다. 어느 결과도 전체PASS가 아니며 리뷰어는 실기에 접근하지 않았다.
+전체landing diff SHA는 `6e1ee237dd4fa15fb214e44df8ac1d89863fd4aac55a3e2359c27a217830896e`다.
+
+삭제 검토 보완: assert150→150, pytest.raises32→32라도 부정 분기 커버리지가 모두 보존된 것은 아니다.
+기존2개 부정 시험을staged 거부 기대값으로 옮겨, 옛source형상 거부와공용child첫slave외 거부의
+해당 부정 분기를 직접 덮는 시험이 없어졌다. 제품 guard 자체는 유지됐고 새false PASS는 확인되지 않았다.
+비차단 커버리지 손실로 기록하며 실기 결과 커밋 전에source/test를 수정해서 덮지 않는다.
