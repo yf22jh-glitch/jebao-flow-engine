@@ -89,3 +89,44 @@ DeviceState scalar에 넣은 오류가 있었고 원 stderr를 각각 보존했�
 여전히 별개다. 현재 TimerON을 원본 상태로 바꾸어 기록하지 않는다.
 이 구현 결과 커밋으로 `9f68f7b`의 source/test 예외는 소진·재동결된다. 실행은 같은 정책의
 최초 Sync1/Async1 범위에서 source/image·fresh baseline·입력·원복을 별도로 결속한다.
+
+## 실행 이미지와 최초 Sync 준비 — 구현 커밋 이후
+
+구현은 `a4fcd987f36313fd032e51e608c211954aee4c67`로 커밋되어 재동결됐다.
+별도 정적 검토는 staged +2191/-43·SHA
+`06a54b79bb28be372d7ac327a0cbde2f23370f407e01d008641c586eca538f5b`와 기존 함수 AST
+불변을 독립 대조했다. 검토자는 pytest를 재실행하지 않았으며 실행 로그는 작성자가 보존했다.
+
+최초 build 한 번이 성공했다. 이미지 `jebao-native-scenario:a4fcd98`, ID
+`edbbbdaaed5d92c0e5729b8f5f3e91842655b2c255006dc4611ac7b1262a5c58`.
+기존 exact base `ab6a33dbffe54432788d389164abebe295341d01d34625a228432253037f3de6`에
+해당 커밋 bundle만 적용했다. `--network none`은 RUN 단계 제한이며 메타데이터 네트워크
+전체의 차단이라고 부르지 않는다. 새 시나리오는 이미지 밖에서 읽기 전용 공급한다.
+
+이미지 source140파일과 로컬 커밋의 manifest SHA는
+`b5743fc2c8fae5305298201026a5d5bbb2c5a50031f79212da3daa4cdae62508`로 일치한다.
+schema `fa3203f127f81eca46b2242a039c019802c71c65598a00d5228bdaaedbd7d0d6` 불변이며,
+이는 새 qualification/실기 승인이라는 뜻이 아니다. 이미지 내부 두 case의 compile/role
+전달·전체432B를 검증했다. 검증 산출 digest:
+`3fc571a8d21ca179368ab1f43d6a97f2cd1c5e6f66d70cbf45427307f85cc360`.
+
+새 read-only baseline 두 pair에서 두 Pro 모두 online/ON/TimerON/independent,
+원432B exact를 확인했다(device-local 2026-09-15 10:44:30~10:45:00).
+second/master의 manual constant30/F32·Auto Sine50/F25, first/slave의 manual
+constant40/F34·Auto Sine70/F80이다. 이 Auto 값은 현재 시간대의 반환값이지 고정 원복 목표가
+아니다. baseline 요약 digest는
+`4f1850e706e38dde35ac479c31ae1d33461d7ff2447882e482c6dc3cd44fd20e`다.
+신규 빈 capture 디렉터리만 운영 UID100/GID101 소유로 생성했고 기존 root·receipt 권한은
+변경하지 않았다. 네 blocking 경로 부재·receipt18·원 서비스 동일 container의 stopped 유지.
+
+최초 Sync는 외부 `sync-wave-and-own-flow` case,
+SHA `bf176447d6e78610caecdba7494f35bbb8022f8117cbd5eb77602796ad942194`로 결속한다.
+정적 logical 정상 경로 회계는 Sync 전진10+보상12=22, Async는 Sync 경유 role1이 추가되어
+23이다. sentinel forward2/restore2 포함이며 실제 frame 수·성공 횟수를 뜻하지 않는다.
+skip·실패·보상 분기는 실제 기록에서 따로 계상한다. 새 wrapper는 O_EXCL 시작 기록 이후
+기존 preflight1/run1만 부른다. 자동 반복은 없고 첫 기술 실패/원복 미확인이 둘째를 막는다.
+wrapper digest `09f3d472a82424005a5a20d45fd7eb58a0a23f08a44efa23314c541a177c6510`은
+보존 식별이며 독립 검토자가 해당 private bytes를 검토했다는 뜻이 아니다.
+
+이 준비 시점의 새 native control/schedule/role write0. 각 run은 현재 TimerON snapshot을
+자기 원복 목표로 삼고, 이전 앱 전 TimerOFF/manual constant40/F34 의무는 별도 유지한다.
