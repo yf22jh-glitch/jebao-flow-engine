@@ -135,18 +135,36 @@ def compare_restore_readback(
     }
 
 
-def detach_sequence(snapshot: WavemakerRestoreSnapshot) -> tuple[dict[str, object], ...]:
+def detach_sequence(
+    snapshot: WavemakerRestoreSnapshot,
+    *,
+    preparation_flow: int = 30,
+    preparation_frequency: int = 20,
+) -> tuple[dict[str, object], ...]:
     """장비 한 대의 원복 순서. pair 전체 실행 순서나 전송 권한을 만들지 않는다.
 
-    앱 timer-off 명령은 SwitchON=True도 함께 쓴다. 원래 OFF인 장비에도 중간 ON 상태가
+    atomic safe 해제는 SwitchON=True도 함께 쓴다. 원래 OFF인 장비에도 중간 ON 상태가
     생기므로 실제 실행기의 운용 계획에서 공개해야 하며, 무출력 해제로 취급하면 안 된다.
     """
 
     if snapshot.target.product_key != LOCAL_WAVEMAKER_PRO_PRODUCT_KEY:
         raise ValueError("Bar의 timer 결합 명령은 미확정이므로 native 해제 순서를 만들 수 없습니다")
+    if type(preparation_flow) is not int or not 30 <= preparation_flow <= 100:
+        raise ValueError("준비 Flow는 30..100 정수여야 합니다")
+    if type(preparation_frequency) is not int or not 0 <= preparation_frequency <= 100:
+        raise ValueError("준비 주파수는 0..100 정수여야 합니다")
     stages = (
-        {"stage": "detach_timer", "function": "schedule_enable", "value": False},
-        {"stage": "detach_role", "function": "linkage_role", "value": "independent"},
+        {
+            "stage": "detach_atomic",
+            "expected": {
+                "SwitchON": True,
+                "TimerON": False,
+                "Linkage": "independent",
+                "Mode": "constant",
+                "Flow": preparation_flow,
+                "Frequency": preparation_frequency,
+            },
+        },
         {
             "stage": "verify_disarmed",
             "expected": {

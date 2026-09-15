@@ -15,11 +15,13 @@
 1. 현재 manifest의 서로 다른 Pro를 확인하고 필요한 control/schedule 자격을 검사한다.
    전체 장비 lease 안에서 연동 전 independent raw status와 프레임을 모두 보존한다.
    TimerOFF였더라도 432바이트 전체 시간표와 8개 제어값은 원본에 포함한다.
-2. slave 다음 master에 **한 frame**으로 independent/TimerOFF/전원 ON/constant·준비 Flow/Frequency·부가0을
+2. slave 다음 master에 **한 frame**으로 independent/TimerOFF/전원 ON/constant·준비 Flow/Frequency를
    설정한다. 원래 OFF 장비에도 중간 ON이 생기는 준비 동작이며 무출력으로 부르지 않는다.
    준비값은 JSON의 `preparation_flow`/`preparation_frequency`로 명시한다. 기본 30/20은 제품의
    최소 정상 Flow와 명시적 준비 주파수 선택이지 과거 단회 실기 승인의 승계가 아니다.
    두 역할에 같은 준비값을 사용하며 미리보기에 출력한다. 역할별 30/31 실험값은 승계하지 않는다.
+   급식·custom 저장값은 준비 중 건드리지 않는다. inactive FeedTime=0인 원본도 최종 복원에서
+   앱 입력 최솟값으로 정상화하지 않고 원 제어 bytes로 복원한다.
 3. independent·TimerOFF 반환값이 확인된 상태에서 master와 slave 시간표를 적재한다.
    master 전체 설정을 상속하고 slave 활성 슬롯 Flow만 달라진다.
 4. master 역할·TimerON, slave Sync 역할·TimerON을 설정한다. Async는 확인된 Sync 다음에

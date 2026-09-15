@@ -158,3 +158,9 @@ Claude의 정적 검토에서 입력 계약·Pro 실행 배선·기존 자격/�
 이번 1차 커밋은 구현한 선언/비교/독립 시간표 API 범위만 소진한다. native lifecycle와 HA 편집은
 미완료이며 journal 방향 계약 범위 결정이 남는다. `protocol/`, frozen native 6파일, 공용 guard,
 기존 HA/MQTT, 운영 서비스·장비·앱에는 변경이 없다. 이전 앱 OFF·서비스 복귀 의무도 열린 채다.
+
+## 후속 실행기 구현
+
+정책 `6ed4059` 이후 [native lifecycle 실행기](wavemaker-lifecycle-implementation.md)를 연결했다.
+위 미완료 표기는 1차 구현 시점의 범위이며 실제 결속·해제 API/CLI의 현재 상태는 후속 기록을 따른다.
+과거 실기 원인 미확정·실장 자격·배포·HA 편집 연결을 이 변경으로 완료 처리하지 않는다.

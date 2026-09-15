@@ -34,6 +34,7 @@ from jebao_flow.protocol.schedule_wire import (
     LOCAL_WAVEMAKER_PRO_SLOT_COUNT,
     LOCAL_WAVEMAKER_PRO_SLOT_SIZE,
 )
+from jebao_flow.protocol.session import RawStateCapture
 
 
 class LocalDeviceWriteError(RuntimeError):
@@ -46,6 +47,8 @@ class RawWriterSession(Protocol):
     async def authenticate(self) -> bytes: ...
 
     async def read_raw_state(self, *, accept_reports: bool = False) -> bytes: ...
+
+    async def read_raw_state_capture(self, *, accept_reports: bool = False) -> RawStateCapture: ...
 
     async def send_raw_control(self, control_payload: bytes) -> bytes: ...
 
@@ -200,6 +203,135 @@ class ConnectedDeviceWriter:
             self._connected = False
             raise
 
+    async def connect_and_capture(self, *, accept_reports: bool) -> RawStateCapture:
+        """Native lifecycle만 보고 프레임을 명시적으로 허용한다. 기존 읽기는 불변이다."""
+        if self._connected:
+            raise LocalDeviceWriteError("writer session is already connected")
+        try:
+            await self._session.connect()
+            await self._session.authenticate()
+            self._connected = True
+            return await self._session.read_raw_state_capture(accept_reports=accept_reports)
+        except BaseException:
+            self._session.quarantine()
+            self._connected = False
+            raise
+
+    async def capture_readback(
+        self,
+        lease: LocalControlSendPermit,
+        *,
+        accept_reports: bool,
+    ) -> RawStateCapture:
+        if not self._connected:
+            raise LocalDeviceWriteError("writer session is not connected")
+        lease.require_permitted()
+        try:
+            capture = await self._session.read_raw_state_capture(accept_reports=accept_reports)
+        except BaseException:
+            self._session.quarantine()
+            self._connected = False
+            raise
+        lease.require_permitted()
+        return capture
+
+    def prepare_native_controls(
+        self,
+        expected: Mapping[str, Any],
+        original_status: bytes,
+    ) -> PreparedDeviceWrite:
+        """한 원자적 제어 frame. 실행·원복 방향은 native journal 소유자만 결정한다."""
+        product = self.endpoint.target.product_key
+        allowed = {
+            "SwitchON",
+            "TimerON",
+            "Linkage",
+            "Mode",
+            "Flow",
+            "Frequency",
+            "FeedTime",
+            "Cust_Wav_Freq",
+        }
+        if (
+            product != LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
+            or not expected
+            or not set(expected) <= allowed
+        ):
+            raise ValueError("native controls require explicit Pro control fields")
+        schema = get_product_schema(product)
+        values = schema.decode_status(original_status)
+        baseline = {name: values[name] for name in expected}
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function="native_controls",
+            forward_payload=build_control_payload(schema, expected),
+            rollback_payload=build_control_payload(schema, baseline),
+            baseline_status=original_status,
+            expected_readback=_canonical_values(expected),
+            baseline_readback=_canonical_values(baseline),
+            verification_kind="scalar_fields",
+            no_change=baseline == expected,
+        )
+
+    def prepare_native_image(self, image: bytes, original_status: bytes) -> PreparedDeviceWrite:
+        product = self.endpoint.target.product_key
+        if product != LOCAL_WAVEMAKER_PRO_PRODUCT_KEY:
+            raise ValueError("native image write is Pro-only")
+        baseline = extract_current_pro_schedule_image(original_status)
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function="native_image",
+            forward_payload=build_exact_schedule_payload(product, image),
+            rollback_payload=build_exact_schedule_payload(product, baseline),
+            baseline_status=original_status,
+            expected_readback=image,
+            baseline_readback=baseline,
+            verification_kind="schedule_image",
+            no_change=image == baseline,
+        )
+
+    def prepare_native_restore_controls(self, original_status: bytes) -> PreparedDeviceWrite:
+        """자기 원본 제어 bytes 복원. inactive FeedTime=0도 앱 최솟값으로 정상화하지 않는다.
+
+        flags는 알려진 8개만 켠다. 원본 소유권·출력 범위는 lifecycle이 첫 write 전에 검사한다.
+        임의 새 제어값 입력을 받지 않는다.
+        """
+        if self.endpoint.target.product_key != LOCAL_WAVEMAKER_PRO_PRODUCT_KEY:
+            raise ValueError("native control restore is Pro-only")
+        schema = get_product_schema(self.endpoint.target.product_key)
+        values = schema.decode_status(original_status)
+        fields = (
+            "SwitchON",
+            "TimerON",
+            "Linkage",
+            "Mode",
+            "Flow",
+            "Frequency",
+            "FeedTime",
+            "Cust_Wav_Freq",
+        )
+        flags = bytearray(schema.attribute_flags_size)
+        for name in fields:
+            attribute = schema.by_name(name)
+            flags[attribute.id // 8] |= 1 << (attribute.id % 8)
+        payload = (
+            bytes([CONTROL_ACTION])
+            + bytes(reversed(flags))
+            + original_status[: schema.attribute_values_size]
+        )
+        expected = _canonical_values({name: values[name] for name in fields})
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function="native_controls",
+            forward_payload=payload,
+            rollback_payload=payload,
+            baseline_status=original_status,
+            expected_readback=expected,
+            baseline_readback=expected,
+            verification_kind="scalar_fields",
+            no_change=True,
+        )
+
     def prepare_scalar(
         self,
         intent: LocalControlIntent,
@@ -271,9 +403,7 @@ class ConnectedDeviceWriter:
             # Turning a pump off is already the safer terminal state. Recovery may classify a
             # fresh read as OFF or as the original baseline, but must never re-enable it merely
             # to recreate a less-safe pre-write state.
-            restore_on_recovery=not (
-                intent.function == "power" and intent.value is False
-            ),
+            restore_on_recovery=not (intent.function == "power" and intent.value is False),
         )
 
     def _prepare_wavemaker_schedule(
@@ -455,9 +585,7 @@ def build_exact_schedule_payload(product_key: str, image: bytes) -> bytes:
     if len(exact) != geometry.image_size:
         raise ValueError(f"schedule image must be exactly {geometry.image_size} bytes")
     changes = {
-        f"AutoTime{index:02d}": exact[
-            index * geometry.slot_size : (index + 1) * geometry.slot_size
-        ]
+        f"AutoTime{index:02d}": exact[index * geometry.slot_size : (index + 1) * geometry.slot_size]
         for index in range(48)
     }
     return build_control_payload(get_product_schema(product_key), changes)
@@ -546,11 +674,9 @@ def extract_current_schedule_image(product_key: str, status: bytes) -> bytes:
         raise ValueError("product does not have an audited 48-slot schedule geometry") from error
     exact = bytes(status)
     if len(exact) != geometry.raw_status_size:
-        raise ValueError(
-            f"schedule status must be exactly {geometry.raw_status_size} bytes"
-        )
+        raise ValueError(f"schedule status must be exactly {geometry.raw_status_size} bytes")
     end = geometry.status_offset + geometry.image_size
-    return exact[geometry.status_offset:end]
+    return exact[geometry.status_offset : end]
 
 
 def extract_current_pro_schedule_image(status: bytes) -> bytes:

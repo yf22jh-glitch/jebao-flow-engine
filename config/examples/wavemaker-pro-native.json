@@ -1,6 +1,8 @@
 {
   "mode": "sync",
   "master": "second_pro",
+  "preparation_flow": 30,
+  "preparation_frequency": 20,
   "schedule": {
     "family": "pro",
     "slots": [

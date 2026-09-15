@@ -146,6 +146,8 @@ class NativeWavemakerPlan(BaseModel):
     master: Member
     schedule: WavemakerSchedule
     slaves: tuple[NativeSlaveDefinition, ...] = Field(min_length=1)
+    preparation_flow: int = Field(default=30, ge=30, le=100, strict=True)
+    preparation_frequency: int = Field(default=20, ge=0, le=100, strict=True)
 
     @model_validator(mode="after")
     def validate_topology(self) -> Self:
@@ -184,6 +186,8 @@ class NativeWavemakerPlan(BaseModel):
         return {
             "mode": self.mode,
             "master": self.master,
+            "preparation_flow": self.preparation_flow,
+            "preparation_frequency": self.preparation_frequency,
             "schedule": self.schedule.model_dump(mode="json"),
             "slaves": [slave.model_dump(mode="json") for slave in self.slaves],
             "images": {

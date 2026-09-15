@@ -18,7 +18,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_serializer, model_validator
 
 from jebao_flow.hardware_safety import hardware_safety_root, validate_hardware_safety_root
 from jebao_flow.local_control.models import LocalDeviceBinding
@@ -26,6 +26,10 @@ from jebao_flow.local_control.models import LocalDeviceBinding
 
 class LocalControlJournalError(RuntimeError):
     """The private local-control write-ahead state is unsafe or inconsistent."""
+
+
+def native_detach_request_id(attach_request_id: str) -> str:
+    return "wm_detach_" + hashlib.sha256(attach_request_id.encode("ascii")).hexdigest()
 
 
 class ActionPhase(StrEnum):
@@ -65,6 +69,7 @@ class JournalAction(BaseModel):
     baseline_readback_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     verification_kind: str = Field(pattern=r"^(scalar_fields|schedule_image)$")
     restore_on_recovery: StrictBool = True
+    native_evidence_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     phase: ActionPhase = ActionPhase.PREPARED
     acknowledgement_sha256: str | None = Field(
         default=None,
@@ -81,6 +86,13 @@ class JournalAction(BaseModel):
             raise ValueError("only power actions may retain a safer forward state")
         return self
 
+    @model_serializer(mode="wrap")
+    def omit_native_default(self, handler):
+        value = handler(self)
+        if self.native_evidence_sha256 is None:
+            value.pop("native_evidence_sha256", None)
+        return value
+
 
 class LocalControlJournalRecord(BaseModel):
     """Current durable state for one idempotent request."""
@@ -95,6 +107,16 @@ class LocalControlJournalRecord(BaseModel):
     created_at: datetime
     updated_at: datetime
     actions: tuple[JournalAction, ...] = Field(min_length=1)
+    native_context_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    native_final_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_serializer(mode="wrap")
+    def omit_native_defaults(self, handler):
+        value = handler(self)
+        for name in ("native_context_sha256", "native_final_sha256"):
+            if getattr(self, name) is None:
+                value.pop(name, None)
+        return value
 
     @model_validator(mode="after")
     def validate_consistency(self) -> Self:
@@ -127,8 +149,7 @@ class LocalControlJournalRecord(BaseModel):
             if not any(action.phase is ActionPhase.SUPERSEDED for action in self.actions):
                 raise ValueError("superseded transaction contains no superseded action")
             if any(
-                action.phase is ActionPhase.SUPERSEDED
-                and action.acknowledgement_sha256 is not None
+                action.phase is ActionPhase.SUPERSEDED and action.acknowledgement_sha256 is not None
                 for action in self.actions
             ):
                 raise ValueError("superseded action cannot contain an acknowledgement")
@@ -243,6 +264,8 @@ class LocalControlJournalStore:
             raise LocalControlJournalError("journal replacement changed request identity")
         if replacement.intent_sha256 != expected.intent_sha256:
             raise LocalControlJournalError("journal replacement changed intent identity")
+        if replacement.native_context_sha256 != expected.native_context_sha256:
+            raise LocalControlJournalError("journal replacement changed native ownership")
         if replacement.revision != expected.revision + 1:
             raise LocalControlJournalError("journal replacement revision is not consecutive")
         current = self.load(expected.request_id)
@@ -269,6 +292,20 @@ class LocalControlJournalStore:
     def unfinished_records(self) -> tuple[LocalControlJournalRecord, ...]:
         """Return every non-terminal transaction after validating the operation directory."""
 
+        return tuple(
+            record
+            for record in self.records()
+            if record.phase
+            not in {
+                TransactionPhase.VERIFIED,
+                TransactionPhase.ROLLED_BACK,
+                TransactionPhase.SUPERSEDED,
+            }
+        )
+
+    def records(self) -> tuple[LocalControlJournalRecord, ...]:
+        """Terminal native attachments still own their baseline until dedicated detach."""
+
         records: list[LocalControlJournalRecord] = []
         for entry in sorted(self.operations.iterdir(), key=lambda item: item.name):
             if not entry.name.endswith(".json") or entry.name.startswith("."):
@@ -277,22 +314,13 @@ class LocalControlJournalStore:
             record = self.load(request_id)
             if record is None:
                 raise LocalControlJournalError("journal operation disappeared during inventory")
-            if record.phase not in {
-                TransactionPhase.VERIFIED,
-                TransactionPhase.ROLLED_BACK,
-                TransactionPhase.SUPERSEDED,
-            }:
-                records.append(record)
+            records.append(record)
         return tuple(records)
 
     def _record_path(self, request_id: str) -> Path:
-        if (
-            not 8 <= len(request_id) <= 128
-            or any(
-                character
-                not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
-                for character in request_id
-            )
+        if not 8 <= len(request_id) <= 128 or any(
+            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+            for character in request_id
         ):
             raise ValueError("journal request id is invalid")
         return self.operations / f"{request_id}.json"
@@ -306,6 +334,9 @@ class LocalControlJournalStore:
         _fsync_directory(self.root)
 
     def _require_referenced_blobs(self, record: LocalControlJournalRecord) -> None:
+        for digest in (record.native_context_sha256, record.native_final_sha256):
+            if digest is not None:
+                self.load_blob(digest)
         for action in record.actions:
             for digest in (
                 action.forward_payload_sha256,
@@ -317,13 +348,18 @@ class LocalControlJournalStore:
                 self.load_blob(digest)
             if action.acknowledgement_sha256 is not None:
                 self.load_blob(action.acknowledgement_sha256)
+            if action.native_evidence_sha256 is not None:
+                self.load_blob(action.native_evidence_sha256)
 
 
 def _canonical_record(record: LocalControlJournalRecord) -> bytes:
     payload = record.model_dump(mode="json")
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
-        "ascii"
-    ) + b"\n"
+    return (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+            "ascii"
+        )
+        + b"\n"
+    )
 
 
 def _write_new_private_file(path: Path, payload: bytes) -> None:

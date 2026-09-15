@@ -54,16 +54,17 @@ def test_snapshot_is_immutable_and_identity_cannot_be_substituted():
 def test_detach_orders_safe_controls_before_original_image_and_complete_readback():
     stages = detach_sequence(_snapshot())
     assert [stage["stage"] for stage in stages] == [
-        "detach_timer",
-        "detach_role",
+        "detach_atomic",
         "verify_disarmed",
         "restore_image",
         "restore_controls",
         "verify_complete",
     ]
-    assert stages[0]["function"] == "schedule_enable"
-    assert stages[0]["value"] is False
-    assert stages[1]["value"] == "independent"
-    assert stages[2]["expected"]["SwitchON"] is True
+    assert stages[0]["expected"]["TimerON"] is False
+    assert stages[0]["expected"]["Linkage"] == "independent"
+    assert stages[0]["expected"]["Mode"] == "constant"
+    assert stages[0]["expected"]["Flow"] == 30
+    assert stages[0]["expected"]["Frequency"] == 20
+    assert stages[1]["expected"]["SwitchON"] is True
     assert all(stage["logical_member"] == _binding().logical_member for stage in stages)
     assert stages[-2]["expected"] == _snapshot().controls

@@ -1,0 +1,671 @@
+"""journal 순서·단일 전송 계약 시험. 메모리 datapoint 복사는 펌웨어 가설이 아니다.
+
+수신 값을 그대로 저장하는 transport fixture는 오직 코드의 요청·보존·판정 경로를 검사한다.
+실제 Sync 전파, report 지연, 임펠러 응답은 모델링하지 않으며 PASS로 주장하지 않는다.
+"""
+
+import asyncio
+import json
+from datetime import timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from jebao_flow import local_control_cli
+from jebao_flow.config import RuntimeMode
+from jebao_flow.local_control.catalog import build_local_control_catalog
+from jebao_flow.local_control.coordinator import LocalControlCoordinator, LocalControlExecutionError
+from jebao_flow.local_control.install import current_protocol_schema_sha256
+from jebao_flow.local_control.journal import (
+    ActionPhase,
+    LocalControlJournalStore,
+    TransactionPhase,
+    native_detach_request_id,
+)
+from jebao_flow.local_control.models import InstallContentBindings
+from jebao_flow.local_control.resolver import ResolvedEndpoint
+from jebao_flow.local_control.wavemaker import NativeWavemakerPlan
+from jebao_flow.local_control.wavemaker_lifecycle import NativeWavemakerController
+from jebao_flow.protocol.control import _place_value
+from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
+from jebao_flow.protocol.session import RawStateCapture
+from tests.unit.test_local_control_coordinator import _binding, _lease, _qualification, _Resolver
+
+FUNCTIONS = (
+    "power",
+    "schedule_enable",
+    "linkage_role",
+    "manual_mode",
+    "manual_flow",
+    "manual_frequency",
+    "feeding_duration",
+    "custom_wave_frequency",
+    "schedule",
+)
+
+
+def _plan(mode="sync"):
+    return NativeWavemakerPlan.model_validate(
+        {
+            "mode": mode,
+            "master": "master",
+            "preparation_flow": 32,
+            "preparation_frequency": 21,
+            "schedule": {
+                "family": "pro",
+                "slots": [
+                    {
+                        "slot_index": 0,
+                        "start": "00:00",
+                        "end": "12:00",
+                        "mode": "sine",
+                        "flow": 35,
+                        "frequency": 30,
+                        "custom_frequency": 20,
+                    },
+                    {
+                        "slot_index": 7,
+                        "start": "12:00",
+                        "end": "23:59",
+                        "mode": "constant",
+                        "flow": 40,
+                    },
+                ],
+            },
+            "slaves": [
+                {
+                    "logical_member": "slave",
+                    "flows": [
+                        {"slot_index": 0, "flow": 40},
+                        {"slot_index": 7, "flow": 35},
+                    ],
+                }
+            ],
+        }
+    )
+
+
+def _put(raw, changes):
+    out = bytearray(raw)
+    for name, value in changes.items():
+        _place_value(SCHEMA, out, SCHEMA.by_name(name), value)
+    return bytes(out)
+
+
+def _initial(timer=False, flow=40):
+    raw = bytearray(SCHEMA.raw_status_size)
+    # 비활성 슬롯까지 임의의 원본 bytes. 복원에서 정규화하면 잡힌다.
+    raw[11:443] = bytes(range(216)) * 2
+    return _put(
+        bytes(raw),
+        {
+            "SwitchON": False,
+            "TimerON": timer,
+            "Linkage": "independent",
+            "Mode": "sine",
+            "Flow": flow,
+            "Frequency": 34,
+            "FeedTime": 12,
+            "Cust_Wav_Freq": 27,
+        },
+    )
+
+
+class MemoryTransport:
+    def __init__(self, address, rig):
+        self.address, self.rig = address, rig
+
+    async def connect(self):
+        pass
+
+    async def authenticate(self):
+        return b"synthetic-auth"
+
+    async def disconnect(self):
+        pass
+
+    def quarantine(self):
+        pass
+
+    async def read_raw_state_capture(self, *, accept_reports):
+        rig = self.rig
+        rig.reads.append((self.address, accept_reports))
+        if (
+            rig.reject_final_reply
+            and not accept_reports
+            and rig.sent
+            and rig.states == rig.originals
+        ):
+            raise TimeoutError("synthetic reply unavailable")
+        status = rig.states[self.address]
+        if rig.read_transform is not None:
+            status = rig.read_transform(self.address, status, accept_reports)
+        action = 4 if accept_reports else 3
+        return RawStateCapture(b"synthetic-wire" + bytes([action]) + status, action, status)
+
+    async def send_raw_control(self, payload):
+        rig = self.rig
+        # 전송 직전에 durable attempting과 모든 blob이 존재해야 한다.
+        matches = [
+            (r, a)
+            for r in rig.store.unfinished_records()
+            for a in r.actions
+            if a.phase is ActionPhase.FORWARD_ATTEMPTING
+            and rig.store.load_blob(a.forward_payload_sha256) == payload
+        ]
+        assert len(matches) == 1
+        record, action = matches[0]
+        assert record.native_context_sha256 is not None
+        assert action.native_evidence_sha256 is not None
+        rig.store._require_referenced_blobs(record)
+        flags = payload[1 : 1 + SCHEMA.attribute_flags_size][::-1]
+        values = payload[1 + SCHEMA.attribute_flags_size :]
+        padded = values + bytes(SCHEMA.raw_status_size - len(values))
+        decoded = SCHEMA.decode_status(padded)
+        changes = {
+            a.name: decoded[a.name]
+            for a in SCHEMA.attributes
+            if a.writable and flags[a.id // 8] & (1 << (a.id % 8))
+        }
+        rig.sent.append((self.address, changes, record.request_id, action.action_id, payload))
+        number = len(rig.sent)
+        if rig.before_send is not None:
+            rig.before_send(number, self.address, changes)
+        if number != rig.reject_send:
+            updated = bytearray(rig.states[self.address])
+            # 선택된 raw 필드만 복사한다. 원본 inactive zero도 입력값으로 재인코딩하지 않는다.
+            for name in changes:
+                position = SCHEMA.by_name(name).position
+                if position.unit.value == "byte":
+                    start = position.byte_offset
+                    updated[start : start + position.length] = padded[
+                        start : start + position.length
+                    ]
+                else:
+                    _place_value(SCHEMA, updated, SCHEMA.by_name(name), changes[name])
+            rig.states[self.address] = bytes(updated)
+        if number == rig.fail_ack:
+            raise TimeoutError("synthetic ACK loss after application")
+        if number == rig.cancel_ack:
+            raise asyncio.CancelledError()
+        return b"synthetic-ack"
+
+
+class Rig:
+    def __init__(self, tmp_path, *, qualified=True):
+        self.targets = (_binding("master", "a"), _binding("slave", "b"))
+        self.endpoints = tuple(
+            ResolvedEndpoint(t, t.logical_member, wifi_firmware_version="wifi-current")
+            for t in self.targets
+        )
+        self.states = {"master": _initial(True, 45), "slave": _initial(False, 40)}
+        self.originals = dict(self.states)
+        self.store = LocalControlJournalStore.for_test(tmp_path / "journal")
+        self.lease = _lease(tmp_path)
+        self.resolver = _Resolver(self.endpoints)
+        self.keys = frozenset(t.physical_identity_key for t in self.targets)
+        self.catalog = build_local_control_catalog(
+            tuple(_qualification(f) for f in FUNCTIONS) if qualified else (),
+            current_content=InstallContentBindings(
+                app_catalog_sha256="0" * 64,
+                protocol_schema_sha256=current_protocol_schema_sha256(),
+                template_sha256=("1" * 64,),
+            ),
+            _qualification_verifier_for_test=lambda _: self.keys,
+        )
+        self.sent, self.reads = [], []
+        self.fail_ack = self.cancel_ack = self.reject_send = None
+        self.reject_final_reply = False
+        self.before_send = None
+        self.read_transform = None
+
+    def controller(self):
+        return NativeWavemakerController(
+            catalog=self.catalog,
+            resolver=self.resolver,
+            journal=self.store,
+            lease=self.lease,
+            session_factory=lambda address: MemoryTransport(address, self),
+            qualification_verifier=lambda _: self.keys,
+        )
+
+    async def attach(self, mode="sync", request_id="attach_0001"):
+        return await self.controller().attach(
+            request_id=request_id, plan=_plan(mode), targets=self.targets
+        )
+
+    async def detach(self, targets=None):
+        return await self.controller().detach(
+            attachment_id="attach_0001", targets=targets or self.targets
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+async def test_both_roles_wire_journal_original_restore_and_cached_requests(tmp_path, mode):
+    rig = Rig(tmp_path)
+    result = await rig.attach(mode)
+    assert result["accepted"] and result["current_state_verified"]
+    assert all(d["complete"] for d in result["verification"]["devices"])
+    assert SCHEMA.decode_status(rig.states["slave"])["Linkage"] == mode + "_slave"
+    assert rig.states["master"][11:443] == _plan(mode).compile_images()["master"]
+    assert rig.states["slave"][11:443] == _plan(mode).compile_images()["slave"]
+    assert [s[0] for s in rig.sent[:2]] == ["slave", "master"]
+    assert all(s[1]["TimerON"] is False and s[1]["Linkage"] == "independent" for s in rig.sent[:2])
+    assert rig.sent[0][1]["Flow"] == 32 and rig.sent[0][1]["Frequency"] == 21
+    if mode == "async":
+        roles = [s[1]["Linkage"] for s in rig.sent if s[0] == "slave" and "Linkage" in s[1]]
+        assert roles == ["independent", "sync_slave", "async_slave"]
+    count = len(rig.sent)
+    cached = await rig.attach(mode)
+    assert cached["accepted"] and not cached["current_state_verified"]
+    assert len(rig.sent) == count
+    source = rig.store.load("attach_0001")
+    later_targets = tuple(
+        t.model_copy(update={"role_attested_at": t.role_attested_at + timedelta(hours=1)})
+        for t in rig.targets
+    )
+    restored = await rig.detach(later_targets)
+    assert restored["accepted"] and restored["current_state_verified"]
+    assert rig.states == rig.originals
+    assert all(
+        d["schedule_match"] and len(d["fields"]) == 8 for d in restored["verification"]["devices"]
+    )
+    assert rig.reads[-2:] == [("master", False), ("slave", False)]
+    assert rig.store.load("attach_0001") == source
+    count = len(rig.sent)
+    assert not (await rig.detach())["current_state_verified"]
+    assert len(rig.sent) == count
+    assert rig.store.unfinished_records() == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", range(1, 8))
+async def test_attach_ack_loss_at_each_async_write_restores_without_replaying_attach(
+    tmp_path, failure
+):
+    rig = Rig(tmp_path)
+    rig.fail_ack = failure
+    with pytest.raises(LocalControlExecutionError, match="자기 원본 복원 확인"):
+        await rig.attach("async")
+    assert rig.states == rig.originals
+    assert rig.store.load("attach_0001").phase is TransactionPhase.ROLLED_BACK
+    assert (
+        rig.store.load(native_detach_request_id("attach_0001")).phase is TransactionPhase.VERIFIED
+    )
+    keys = [(s[2], s[3]) for s in rig.sent]
+    assert len(keys) == len(set(keys))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", range(1, 7))
+async def test_detach_ack_loss_restart_verifies_attempt_without_duplicate_send(tmp_path, failure):
+    rig = Rig(tmp_path)
+    await rig.attach()
+    start = len(rig.sent)
+    rig.fail_ack = start + failure
+    with pytest.raises(TimeoutError):
+        await rig.detach()
+    uncertain = rig.store.load(native_detach_request_id("attach_0001"))
+    assert uncertain.phase is TransactionPhase.RECOVERY_REQUIRED
+    assert any(a.phase is ActionPhase.UNCERTAIN for a in uncertain.actions)
+    result = await rig.controller().recover_native(
+        request_id=uncertain.request_id, targets=rig.targets
+    )
+    assert result["accepted"]
+    assert rig.states == rig.originals
+    keys = [(s[2], s[3]) for s in rig.sent]
+    assert len(keys) == len(set(keys))
+    assert len(rig.sent) == start + 6
+
+
+@pytest.mark.asyncio
+async def test_failed_detach_mismatch_stops_no_repeat_and_retains_field_evidence(tmp_path):
+    rig = Rig(tmp_path)
+    await rig.attach()
+    rig.reject_send = len(rig.sent) + 1
+    with pytest.raises(LocalControlExecutionError, match="반환값 불일치"):
+        await rig.detach()
+    count = len(rig.sent)
+    with pytest.raises(LocalControlExecutionError, match="재전송"):
+        await rig.detach()
+    assert len(rig.sent) == count
+    record = rig.store.load(native_detach_request_id("attach_0001"))
+    evidence = json.loads(rig.store.load_blob(record.actions[0].native_evidence_sha256))
+    assert evidence["comparison"]["Linkage"]["actual"] == "sync_slave"
+    assert evidence["comparison"]["Linkage"]["expected"] == "independent"
+    assert evidence["match"] is False and evidence["previous"]
+
+
+@pytest.mark.asyncio
+async def test_final_reply_unavailable_keeps_partial_evidence_and_read_only_recovery(tmp_path):
+    rig = Rig(tmp_path)
+    await rig.attach()
+    rig.reject_final_reply = True
+    with pytest.raises(TimeoutError):
+        await rig.detach()
+    assert rig.states == rig.originals
+    record = rig.store.load(native_detach_request_id("attach_0001"))
+    assert record.phase is TransactionPhase.RECOVERY_REQUIRED
+    assert all(a.phase is ActionPhase.VERIFIED for a in record.actions)
+    count = len(rig.sent)
+    rig.reject_final_reply = False
+    result = await rig.detach()
+    assert result["accepted"] and len(rig.sent) == count
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_original_restore_then_preserves_cancellation(tmp_path):
+    rig = Rig(tmp_path)
+    rig.cancel_ack = 5
+    with pytest.raises(asyncio.CancelledError):
+        await rig.attach()
+    assert rig.states == rig.originals
+    assert (
+        rig.store.load(native_detach_request_id("attach_0001")).phase is TransactionPhase.VERIFIED
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_qualification_or_duplicate_identity_starts_no_write(tmp_path):
+    rig = Rig(tmp_path, qualified=False)
+    with pytest.raises(ValueError, match="자격"):
+        await rig.attach()
+    assert rig.sent == [] and rig.store.records() == ()
+    bad = rig.targets[1].model_copy(
+        update={"physical_identity_key": rig.targets[0].physical_identity_key}
+    )
+    with pytest.raises(ValueError, match="중복"):
+        await rig.controller().attach(
+            request_id="attach_0001", plan=_plan(), targets=(rig.targets[0], bad)
+        )
+    assert rig.sent == []
+
+
+@pytest.mark.asyncio
+async def test_owned_attachment_blocks_new_baseline_until_detached_and_old_detach_is_cached(
+    tmp_path,
+):
+    rig = Rig(tmp_path)
+    await rig.attach()
+    with pytest.raises(LocalControlExecutionError, match="이전 결속"):
+        await rig.attach(request_id="attach_0002")
+    await rig.detach()
+    await rig.attach(request_id="attach_0002")
+    count = len(rig.sent)
+    cached = await rig.detach()
+    assert not cached["current_state_verified"]
+    assert len(rig.sent) == count
+    assert SCHEMA.decode_status(rig.states["slave"])["Linkage"] == "sync_slave"
+
+
+@pytest.mark.asyncio
+async def test_generic_recovery_never_reverses_native_and_supplies_exact_detach_command(tmp_path):
+    rig = Rig(tmp_path)
+    await rig.attach()
+    count = len(rig.sent)
+    with pytest.raises(LocalControlExecutionError) as caught:
+        await LocalControlCoordinator.recover(rig.controller(), "attach_0001")
+    assert "recover-wavemaker --request-id attach_0001" in str(caught.value)
+    assert native_detach_request_id("attach_0001") in str(caught.value)
+    assert len(rig.sent) == count
+
+
+@pytest.mark.asyncio
+async def test_current_identity_and_context_immutable_before_detach(tmp_path):
+    rig = Rig(tmp_path)
+    await rig.attach()
+    count = len(rig.sent)
+    bad = rig.targets[1].model_copy(update={"physical_identity_key": "c" * 64})
+    with pytest.raises(ValueError, match="신원"):
+        await rig.detach((rig.targets[0], bad))
+    record = rig.store.load("attach_0001")
+    replacement = record.evolve().model_copy(
+        update={"native_context_sha256": rig.store.install_blob(b"{}")}
+    )
+    with pytest.raises(RuntimeError, match="ownership"):
+        rig.store.save(record, replacement)
+    assert len(rig.sent) == count
+
+
+@pytest.mark.parametrize("command", ["attach-wavemaker", "detach-wavemaker", "recover-wavemaker"])
+def test_native_cli_requires_explicit_write_and_routes_all_commands(command, monkeypatch, tmp_path):
+    parser = local_control_cli.build_parser()
+    common = [command, "--role-attested-by", "operator", "--manifest", str(tmp_path / "manifest")]
+    if command == "attach-wavemaker":
+        common += [
+            "--file",
+            str(tmp_path / "plan"),
+            "--qualifications",
+            str(tmp_path / "qualification"),
+            "--request-id",
+            "attach_0001",
+        ]
+    elif command == "detach-wavemaker":
+        common += ["--attachment-id", "attach_0001"]
+    else:
+        common += ["--request-id", "attach_0001"]
+    with pytest.raises(ValueError, match="write-enabled"):
+        local_control_cli._run(parser.parse_args(common))
+
+
+def test_native_cli_offline_status_does_not_require_config_or_hardware(monkeypatch, capsys):
+    monkeypatch.setattr(
+        local_control_cli, "_activate_current_hardware_safety_volume_identity", lambda: None
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "_native_coordinator",
+        lambda config, catalog: SimpleNamespace(
+            status=lambda request: {"request_id": request, "current_state_verified": False}
+        ),
+    )
+    assert (
+        local_control_cli._run(
+            local_control_cli.build_parser().parse_args(
+                ["wavemaker-status", "--request-id", "attach_0001"]
+            )
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["current_state_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_inactive_zero_options_restore_exact_without_normalization(tmp_path):
+    rig = Rig(tmp_path)
+    for name in rig.states:
+        raw = bytearray(rig.states[name])
+        raw[SCHEMA.by_name("FeedTime").position.byte_offset] = 0
+        raw[SCHEMA.by_name("Cust_Wav_Freq").position.byte_offset] = 0
+        rig.states[name] = bytes(raw)
+    rig.originals = dict(rig.states)
+    await rig.attach()
+    await rig.detach()
+    assert rig.states == rig.originals
+    for name in rig.states:
+        assert SCHEMA.decode_status(rig.states[name])["FeedTime"] == 0
+    assert all("FeedTime" not in s[1] for s in rig.sent[:2])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("SwitchON", True),
+        ("TimerON", False),
+        ("Mode", "constant"),
+        ("Flow", 46),
+        ("Frequency", 33),
+        ("FeedTime", 13),
+        ("Cust_Wav_Freq", 28),
+        ("Linkage", "master"),
+        ("image", None),
+    ],
+)
+async def test_final_each_control_and_full_image_mismatch_is_not_complete(tmp_path, field, value):
+    rig = Rig(tmp_path)
+    await rig.attach()
+
+    def transform(name, status, reports):
+        if rig.states == rig.originals and name == "master" and not reports:
+            if field == "image":
+                return status[:442] + bytes([status[442] ^ 1]) + status[443:]
+            return _put(status, {field: value})
+        return status
+
+    rig.read_transform = transform
+    with pytest.raises(LocalControlExecutionError, match="최종"):
+        await rig.detach()
+    report = rig.controller().status(native_detach_request_id("attach_0001"))
+    assert report["accepted"] is False
+    row = report["verification"]["devices"][0]
+    assert row["complete"] is False
+    if field == "image":
+        assert row["schedule_match"] is False
+    else:
+        assert row["fields"][field]["match"] is False
+
+
+@pytest.mark.asyncio
+async def test_image_precondition_recheck_failure_never_sends_image(tmp_path):
+    rig = Rig(tmp_path)
+    await rig.attach()
+    count = len(rig.sent)
+    rig.read_transform = lambda name, status, reports: (
+        _put(status, {"TimerON": True}) if not reports else status
+    )
+    with pytest.raises(LocalControlExecutionError, match="시간표 전송 전"):
+        await rig.detach()
+    assert len(rig.sent) == count + 2
+    assert all("AutoTime00" not in s[1] for s in rig.sent[count:])
+    record = rig.store.load(native_detach_request_id("attach_0001"))
+    assert record.actions[2].phase is ActionPhase.PREPARED
+
+
+@pytest.mark.asyncio
+async def test_crash_after_record_fsync_before_return_can_recover_without_attach_replay(
+    tmp_path, monkeypatch
+):
+    rig = Rig(tmp_path)
+    create = rig.store.create
+
+    def persist_then_fail(record):
+        create(record)
+        raise OSError("synthetic crash after fsync")
+
+    monkeypatch.setattr(rig.store, "create", persist_then_fail)
+    with pytest.raises(OSError):
+        await rig.attach()
+    assert rig.sent == [] and rig.store.load("attach_0001") is not None
+    monkeypatch.setattr(rig.store, "create", create)
+    result = await rig.controller().recover_native(request_id="attach_0001", targets=rig.targets)
+    assert result["accepted"] and rig.states == rig.originals
+    assert all(s[2] == native_detach_request_id("attach_0001") for s in rig.sent)
+
+
+@pytest.mark.parametrize("command", ["attach-wavemaker", "detach-wavemaker", "recover-wavemaker"])
+def test_native_cli_routes_config_targets_plan_and_returns_public_result(
+    tmp_path, monkeypatch, capsys, command
+):
+    targets = (_binding("master", "a"), _binding("slave", "b"))
+    calls = []
+
+    class Controller:
+        def targets_for(self, request_id):
+            return targets
+
+        async def attach(self, **kwargs):
+            calls.append(("attach", kwargs))
+            return {"accepted": True, "current_state_verified": True}
+
+        async def detach(self, **kwargs):
+            calls.append(("detach", kwargs))
+            return {"accepted": True, "current_state_verified": True}
+
+        async def recover_native(self, **kwargs):
+            calls.append(("recover", kwargs))
+            return {"accepted": True, "current_state_verified": True}
+
+    config = SimpleNamespace(
+        runtime=SimpleNamespace(mode=RuntimeMode.CONTROL, dry_run=False),
+        devices=[
+            SimpleNamespace(
+                id=t.logical_member, control=SimpleNamespace(allow_hardware_writes=True)
+            )
+            for t in targets
+        ],
+    )
+    monkeypatch.setattr(
+        local_control_cli, "_activate_current_hardware_safety_volume_identity", lambda: None
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "_prepare_current",
+        lambda args: SimpleNamespace(
+            config=config, manifest=SimpleNamespace(devices=targets, content=None)
+        ),
+    )
+    monkeypatch.setattr(local_control_cli, "load_current_qualifications", lambda path: ())
+    monkeypatch.setattr(local_control_cli, "_native_coordinator", lambda *args: Controller())
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(_plan().model_dump_json())
+    argv = [command, "--write-enabled", "--role-attested-by", "operator"]
+    if command == "attach-wavemaker":
+        argv += [
+            "--request-id",
+            "attach_0001",
+            "--file",
+            str(plan_file),
+            "--qualifications",
+            str(tmp_path / "qual"),
+        ]
+    else:
+        argv += [
+            "--attachment-id" if command == "detach-wavemaker" else "--request-id",
+            "attach_0001",
+        ]
+    assert local_control_cli.main(argv) == 0
+    assert calls[0][1]["targets"] == targets
+    assert calls[0][0] == command.split("-")[0]
+    assert json.loads(capsys.readouterr().out)["current_state_verified"] is True
+    config.runtime.dry_run = True
+    assert local_control_cli.main(argv) == 2
+    assert len(calls) == 1
+    config.runtime.dry_run = False
+    config.devices[1].control.allow_hardware_writes = False
+    assert local_control_cli.main(argv) == 2
+    assert len(calls) == 1
+
+
+def test_generic_native_recovery_hint_is_printed_without_raw_exception(monkeypatch, capsys):
+    from jebao_flow.local_control.coordinator import NativeRecoveryRequiredError
+
+    def fail(args):
+        raise NativeRecoveryRequiredError("attach_0001", None)
+
+    monkeypatch.setattr(local_control_cli, "_run", fail)
+    assert local_control_cli.main(["catalog"]) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result["next_command"] == "recover-wavemaker --request-id attach_0001"
+    assert result["detach_request_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_corrupt_context_still_directs_generic_recover_to_dedicated_path(
+    tmp_path, monkeypatch
+):
+    from jebao_flow.local_control.coordinator import NativeRecoveryRequiredError
+
+    rig = Rig(tmp_path)
+    await rig.attach()
+    record = rig.store.load("attach_0001")
+    load = rig.store.load_blob
+    monkeypatch.setattr(
+        rig.store,
+        "load_blob",
+        lambda digest: b"{}" if digest == record.native_context_sha256 else load(digest),
+    )
+    with pytest.raises(NativeRecoveryRequiredError) as caught:
+        await LocalControlCoordinator.recover(rig.controller(), "attach_0001")
+    assert caught.value.detach_id is None

@@ -53,6 +53,17 @@ class LocalControlExecutionError(RuntimeError):
     """A journalled transaction stopped before verified completion."""
 
 
+class NativeRecoveryRequiredError(LocalControlExecutionError):
+    """비밀 예외 문자열 대신 CLI에 노출할 검증된 요청 id와 복구 경로."""
+
+    def __init__(self, request_id: str, detach_id: str | None) -> None:
+        self.request_id, self.detach_id = request_id, detach_id
+        super().__init__(
+            f"native 역순 복구 금지: recover-wavemaker --request-id {request_id}; "
+            f"원본 해제 요청 id: {detach_id}"
+        )
+
+
 class EndpointResolver(Protocol):
     async def resolve(self, target) -> ResolvedEndpoint: ...
 
@@ -440,6 +451,22 @@ class LocalControlCoordinator:
         record = self._journal.load(request_id)
         if record is None:
             raise KeyError("local-control transaction does not exist")
+        if record.native_context_sha256 is not None:
+            from jebao_flow.local_control.journal import native_detach_request_id
+
+            detach_id = None
+            try:
+                context = json.loads(self._journal.load_blob(record.native_context_sha256))
+                owner = context["attach_request_id"]
+                # 손상된 blob의 임의 문자열을 운영자 출력으로 올리지 않는다.
+                if isinstance(owner, str) and 8 <= len(owner) <= 128 and all(
+                    character in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+                    for character in owner
+                ):
+                    detach_id = native_detach_request_id(owner)
+            except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+                pass
+            raise NativeRecoveryRequiredError(request_id, detach_id)
         if record.phase is TransactionPhase.VERIFIED:
             raise LocalControlExecutionError(
                 "verified transaction is terminal and does not require recovery"
@@ -743,6 +770,7 @@ class LocalControlCoordinator:
         request_id: str,
         intent_sha256: str,
         prepared: tuple[PreparedDeviceWrite, ...],
+        native_context_sha256: str | None = None,
     ) -> LocalControlJournalRecord:
         now = datetime.now(UTC)
         actions: list[JournalAction] = []
@@ -767,6 +795,7 @@ class LocalControlCoordinator:
             created_at=now,
             updated_at=now,
             actions=tuple(actions),
+            native_context_sha256=native_context_sha256,
         )
         self._journal.create(record)
         return record

@@ -22,7 +22,10 @@ from jebao_flow.local_control.compose import (
     stage_compose_inputs,
     validate_current_compose_inputs,
 )
-from jebao_flow.local_control.coordinator import LocalControlCoordinator
+from jebao_flow.local_control.coordinator import (
+    LocalControlCoordinator,
+    NativeRecoveryRequiredError,
+)
 from jebao_flow.local_control.dosing import (
     build_dosing_channel_schedule_preview,
     plan_average_interval_dosing,
@@ -94,6 +97,27 @@ def build_parser() -> argparse.ArgumentParser:
     schedule_apply.add_argument("--request-id", required=True)
     schedule_apply.add_argument("--qualifications", type=Path, required=True)
     schedule_apply.add_argument("--write-enabled", action="store_true")
+
+    for name, description in (
+        ("attach-wavemaker", "외부 JSON의 Pro Sync/Async를 결속하고 자기 원본을 보존합니다"),
+        ("detach-wavemaker", "자기 attach 원본으로 해제·시간표·제어값을 복원합니다"),
+        ("recover-wavemaker", "미완료 native 실행을 재결속 없이 자기 원본 방향으로 복구합니다"),
+    ):
+        native = subparsers.add_parser(name, help=description)
+        _add_install_arguments(native)
+        native.add_argument("--write-enabled", action="store_true")
+        if name == "attach-wavemaker":
+            native.add_argument("--file", type=Path, required=True)
+            native.add_argument("--qualifications", type=Path, required=True)
+            native.add_argument("--request-id", required=True)
+        elif name == "detach-wavemaker":
+            native.add_argument("--attachment-id", required=True)
+        else:
+            native.add_argument("--request-id", required=True)
+    native_status = subparsers.add_parser(
+        "wavemaker-status", help="장비 접근 없이 native 보존 기록을 봅니다"
+    )
+    native_status.add_argument("--request-id", required=True)
 
     dosing = subparsers.add_parser(
         "plan-dosing",
@@ -233,6 +257,13 @@ def _add_install_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command in {
+        "attach-wavemaker",
+        "detach-wavemaker",
+        "recover-wavemaker",
+        "wavemaker-status",
+    }:
+        return _run_wavemaker_native(args)
     if args.command == "plan-wavemaker":
         model = NativeWavemakerPlan if args.native else WavemakerSchedule
         plan = model.model_validate_json(args.file.read_bytes())
@@ -289,9 +320,7 @@ def _run(args: argparse.Namespace) -> int:
         )
         payload = plan.public_dict()
         if args.app_image_preview:
-            payload["app_image_preview"] = build_dosing_channel_schedule_preview(
-                plan
-            ).public_dict()
+            payload["app_image_preview"] = build_dosing_channel_schedule_preview(plan).public_dict()
         _print_json(payload)
         return 0
     if args.command == "plan-average-dosing":
@@ -326,9 +355,7 @@ def _run(args: argparse.Namespace) -> int:
         )
         hardware_safety_volume_id_file = current_service_path(
             args.hardware_safety_volume_id_file
-            or service_output.with_name(
-                f".{service_output.name}.hardware-safety-volume-id"
-            ),
+            or service_output.with_name(f".{service_output.name}.hardware-safety-volume-id"),
             description="hardware-safety volume identity file",
         )
         mqtt_password_file = None
@@ -368,9 +395,7 @@ def _run(args: argparse.Namespace) -> int:
         )
         payload = artifact.public_dict()
         payload["install_generation"] = prepared.manifest.generation
-        payload["template_binding_complete"] = bool(
-            prepared.manifest.content.template_sha256
-        )
+        payload["template_binding_complete"] = bool(prepared.manifest.content.template_sha256)
         _print_json(payload)
         return 0
     if args.command == "prepare-compose":
@@ -381,8 +406,7 @@ def _run(args: argparse.Namespace) -> int:
             description="local-control compose staging file",
         )
         bundle_root = current_service_path(
-            args.bundle_root
-            or compose_output.with_name(f".{compose_output.name}.inputs"),
+            args.bundle_root or compose_output.with_name(f".{compose_output.name}.inputs"),
             description="local-control compose bundle root",
         )
         mqtt_password = None
@@ -414,9 +438,7 @@ def _run(args: argparse.Namespace) -> int:
             qualifications=qualifications,
         )
         payload = artifact.public_dict()
-        payload["template_binding_complete"] = bool(
-            prepared.manifest.content.template_sha256
-        )
+        payload["template_binding_complete"] = bool(prepared.manifest.content.template_sha256)
         _print_json(payload)
         return 0
     if args.command == "recover":
@@ -567,10 +589,7 @@ def _prepare_current(args: argparse.Namespace) -> _PreparedCurrent:
         now=rederived_at,
     )
     current_role_binding = stable_role_binding_sha256(manifest)
-    if (
-        args.role_binding_sha256 is not None
-        and args.role_binding_sha256 != current_role_binding
-    ):
+    if args.role_binding_sha256 is not None and args.role_binding_sha256 != current_role_binding:
         raise ValueError("current stable role binding differs from the recorded attestation")
     replace_install_manifest(manifest_path, manifest)
     return _PreparedCurrent(
@@ -589,6 +608,86 @@ def _coordinator(config, catalog) -> LocalControlCoordinator:
         journal=LocalControlJournalStore(),
         lease=LocalControlLease(),
     )
+
+
+def _native_coordinator(config, catalog):
+    from jebao_flow.local_control.wavemaker_lifecycle import NativeWavemakerController
+
+    return NativeWavemakerController(
+        catalog=catalog,
+        resolver=_resolver(config) if config is not None else None,
+        journal=LocalControlJournalStore(),
+        lease=LocalControlLease(),
+    )
+
+
+def _run_wavemaker_native(args) -> int:
+    if args.command == "wavemaker-status":
+        _activate_current_hardware_safety_volume_identity()
+        result = _native_coordinator(None, build_local_control_catalog()).status(args.request_id)
+        _print_json(result)
+        return 0
+    if not args.write_enabled:
+        raise ValueError("native 실행에는 명시적인 --write-enabled가 필요합니다")
+    _activate_current_hardware_safety_volume_identity()
+    prepared = _prepare_current(args)
+    if prepared.config.runtime.mode is not RuntimeMode.CONTROL or prepared.config.runtime.dry_run:
+        raise ValueError("관측 전용 또는 dry-run에서는 native 명령을 전송하지 않습니다")
+    attach = args.command == "attach-wavemaker"
+    catalog = build_local_control_catalog(
+        load_current_qualifications(args.qualifications) if attach else (),
+        current_content=prepared.manifest.content,
+    )
+    controller = _native_coordinator(prepared.config, catalog)
+    if attach:
+        plan = NativeWavemakerPlan.model_validate_json(args.file.read_bytes())
+        names = (plan.master, *(s.logical_member for s in plan.slaves))
+    else:
+        request_id = args.attachment_id if args.command == "detach-wavemaker" else args.request_id
+        names = tuple(t.logical_member for t in controller.targets_for(request_id))
+    members = {item.logical_member: item for item in prepared.manifest.devices}
+    devices = {item.id: item for item in prepared.config.devices}
+    if any(
+        name not in members
+        or name not in devices
+        or not devices[name].control.allow_hardware_writes
+        for name in names
+    ):
+        raise ValueError("현재 native 대상이 없거나 장비 write 잠금 상태입니다")
+    targets = tuple(members[name] for name in names)
+    if attach:
+        task = controller.attach(request_id=args.request_id, plan=plan, targets=targets)
+    elif args.command == "detach-wavemaker":
+        task = controller.detach(attachment_id=args.attachment_id, targets=targets)
+    else:
+        task = controller.recover_native(request_id=args.request_id, targets=targets)
+    try:
+        result = asyncio.run(task)
+    except (OSError, RuntimeError, ValueError):
+        request_id = (
+            args.request_id if attach or args.command == "recover-wavemaker" else args.attachment_id
+        )
+        records = []
+        try:
+            source = controller.status(request_id)
+            records.append(source)
+            if source["detach_request_id"] != request_id:
+                try:
+                    records.append(controller.status(source["detach_request_id"]))
+                except KeyError:
+                    pass
+        except (KeyError, OSError, RuntimeError, ValueError):
+            pass
+        _print_json(
+            {
+                "error": "native_operation_unverified",
+                "records": records,
+                "next_command": f"recover-wavemaker --request-id {request_id}" if records else None,
+            }
+        )
+        return 2
+    _print_json(result)
+    return 0 if result["accepted"] else 2
 
 
 def _runtime_coordinator(config, catalog, *, write_enabled: bool):
@@ -638,8 +737,10 @@ def _current_hardware_safety_volume_id() -> str:
     """Read the current stable volume authority without exposing it in public output."""
 
     value = os.environ.get(HARDWARE_SAFETY_VOLUME_ID_ENV)
-    if value is None or len(value) != 32 or any(
-        character not in "0123456789abcdef" for character in value
+    if (
+        value is None
+        or len(value) != 32
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise ValueError("current hardware-safety volume identity is unavailable")
     return value
@@ -813,6 +914,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("jebao-flow-local: operator_interrupt", file=sys.stderr)
         return 130
+    except NativeRecoveryRequiredError as error:
+        _print_json(
+            {
+                "error": "native_reverse_recovery_prohibited",
+                "next_command": f"recover-wavemaker --request-id {error.request_id}",
+                "detach_request_id": error.detach_id,
+            }
+        )
+        return 2
     except (OSError, RuntimeError, ValueError):
         print("jebao-flow-local: current_operation_failed_closed", file=sys.stderr)
         return 2
