@@ -49,6 +49,7 @@ from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_MODES, LOCAL_WAVEMA
 
 _TERMINAL = {TransactionPhase.VERIFIED, TransactionPhase.ROLLED_BACK}
 _REPLY_WITHOUT_ACK = "native_async_reply_verified_delivery_unknown"
+_AWAIT_OPERATOR = "operator_requested_no_automatic_restore"
 
 
 def _json(value) -> bytes:
@@ -81,6 +82,7 @@ class NativeContext(BaseModel):
     originals: tuple[NativeOriginal, ...] = Field(min_length=2)
     assisted_record_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     activation_sequence: Literal["staged_roles_v1"] | None = None
+    await_operator_observation: Literal[True] | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_assistance(self, handler):
@@ -89,6 +91,8 @@ class NativeContext(BaseModel):
             result.pop("assisted_record_sha256", None)
         if self.activation_sequence is None:
             result.pop("activation_sequence", None)
+        if self.await_operator_observation is None:
+            result.pop("await_operator_observation", None)
         return result
 
 
@@ -124,14 +128,23 @@ class NativeWavemakerController(LocalControlCoordinator):
         request_id: str,
         plan: NativeWavemakerPlan,
         targets: tuple[LocalDeviceBinding, ...],
+        await_operator_observation: bool = False,
     ) -> dict[str, object]:
         self._validate_targets(plan, targets)
+        if type(await_operator_observation) is not bool or (
+            await_operator_observation and plan.mode != "async"
+        ):
+            raise ValueError("사용자 관찰 대기는 명시적인 Async 실행에만 허용됩니다")
+        observation_intent = (
+            {"await_operator_observation": True} if await_operator_observation else {}
+        )
         # 기존 request와 재생성된 attestation 시각은 다를 수 있다. 신원 4요소는 고정이다.
         intent = hashlib.sha256(
             _json(
                 {
                     "plan": plan.model_dump(mode="json"),
                     "targets": [self._stable(item) for item in targets],
+                    **observation_intent,
                 }
             )
         ).hexdigest()
@@ -141,6 +154,8 @@ class NativeWavemakerController(LocalControlCoordinator):
                 if previous.intent_sha256 != intent or self._context(previous).kind != "attach":
                     raise ValueError("같은 요청 id에 다른 결속 계획을 사용할 수 없습니다")
                 if previous.phase in _TERMINAL:
+                    return self._public(previous, current=False)
+                if self._awaiting_operator(previous, self._context(previous)):
                     return self._public(previous, current=False)
                 raise LocalControlExecutionError(
                     f"미완료 결속입니다: recover-wavemaker --request-id {request_id}"
@@ -169,11 +184,20 @@ class NativeWavemakerController(LocalControlCoordinator):
                 schema_sha256=current_protocol_schema_sha256(),
                 originals=tuple(originals),
                 activation_sequence=STAGED_ROLES,
+                await_operator_observation=True if await_operator_observation else None,
             )
             record = self._prepare(request_id, intent, context, endpoints)
             try:
                 return await self._advance(record, context, endpoints, permit)
             except BaseException as original_error:
+                current = self._required(request_id)
+                if self._awaiting_operator(current, context):
+                    # The operator explicitly owns the observation interval. Preserve the
+                    # failed action/ACK evidence; do not resend, detach, or start a timer.
+                    current = self._save_transaction_phase(
+                        current, TransactionPhase.RECOVERY_REQUIRED
+                    )
+                    return self._public(current, current=False)
                 # 복구는 caller 취소와 분리해 완료까지 기다린다. 성공 여부는 별도로 보존한다.
                 task = asyncio.create_task(self._detach_locked(record, context, endpoints, permit))
                 while not task.done():
@@ -192,6 +216,37 @@ class NativeWavemakerController(LocalControlCoordinator):
                 raise LocalControlExecutionError(
                     f"결속 실패, 자기 원본 복원 확인: {native_detach_request_id(request_id)}"
                 ) from None
+
+    def _awaiting_operator(self, record, context):
+        if (
+            context.await_operator_observation is not True
+            or context.kind != "attach"
+            or context.plan.mode != "async"
+            or context.activation_sequence != STAGED_ROLES
+            or record.phase is TransactionPhase.ROLLED_BACK
+            or len(record.actions) != 9
+            or any(
+                a.phase not in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
+                for a in record.actions[:8]
+            )
+            or record.actions[8].phase
+            not in {ActionPhase.UNCERTAIN, ActionPhase.FORWARD_ATTEMPTING, ActionPhase.VERIFIED}
+        ):
+            return False
+        # Reuse the exact owned plan comparison, not just the action count or last field.
+        actions = record.actions
+        if actions[8].phase is ActionPhase.FORWARD_ATTEMPTING:
+            # A crash at the send boundary also means unknown delivery, not permission
+            # to resend. This is a validation view; the stored phase stays untouched.
+            actions = (*actions[:8], actions[8].model_copy(update={"phase": ActionPhase.UNCERTAIN}))
+        validate_staged_assistance_source(
+            self,
+            record.model_copy(
+                update={"phase": TransactionPhase.RECOVERY_REQUIRED, "actions": actions}
+            ),
+            context,
+        )
+        return True
 
     async def detach(
         self,
@@ -775,7 +830,12 @@ class NativeWavemakerController(LocalControlCoordinator):
         except BaseException:
             record = self._save_transaction_phase(record, TransactionPhase.RECOVERY_REQUIRED)
             raise
-        record = self._save_transaction_phase(record, TransactionPhase.VERIFIED)
+        record = self._save_transaction_phase(
+            record,
+            TransactionPhase.RECOVERY_REQUIRED
+            if self._awaiting_operator(record, context)
+            else TransactionPhase.VERIFIED,
+        )
         return self._public(record, current=True)
 
     async def _read(self, endpoint, permit, *, reports):
@@ -1056,6 +1116,7 @@ class NativeWavemakerController(LocalControlCoordinator):
 
     def _public(self, record, *, current):
         context = self._context(record)
+        awaiting = self._awaiting_operator(record, context)
         final = (
             None
             if record.native_final_sha256 is None
@@ -1074,6 +1135,20 @@ class NativeWavemakerController(LocalControlCoordinator):
             "journal_sha256": self._journal.record_digest(record),
             "context_sha256": record.native_context_sha256,
             "verification": final,
+            **(
+                {
+                    "awaiting_operator_observation": True,
+                    "observation_reason": _AWAIT_OPERATOR,
+                    "automatic_restore": False,
+                    "restoration_complete": False,
+                    "next_action": "await_operator_instruction",
+                    "restore_command": (
+                        f"recover-wavemaker --request-id {context.attach_request_id}"
+                    ),
+                }
+                if awaiting
+                else {}
+            ),
             "actions": [
                 {
                     "action_id": a.action_id,

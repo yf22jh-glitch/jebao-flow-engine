@@ -111,6 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
             native.add_argument("--file", type=Path, required=True)
             native.add_argument("--qualifications", type=Path, required=True)
             native.add_argument("--request-id", required=True)
+            native.add_argument(
+                "--await-operator-observation",
+                action="store_true",
+                help="Async 최종 명령 시도 후 자동 원복 없이 사용자 지시를 기다립니다",
+            )
         elif name == "detach-wavemaker":
             native.add_argument("--attachment-id", required=True)
         else:
@@ -661,7 +666,12 @@ def _run_wavemaker_native(args) -> int:
         raise ValueError("현재 native 대상이 없거나 장비 write 잠금 상태입니다")
     targets = tuple(members[name] for name in names)
     if attach:
-        task = controller.attach(request_id=args.request_id, plan=plan, targets=targets)
+        observation = (
+            {"await_operator_observation": True} if args.await_operator_observation else {}
+        )
+        task = controller.attach(
+            request_id=args.request_id, plan=plan, targets=targets, **observation
+        )
     elif args.command == "detach-wavemaker":
         task = controller.detach(attachment_id=args.attachment_id, targets=targets)
     elif assist:
