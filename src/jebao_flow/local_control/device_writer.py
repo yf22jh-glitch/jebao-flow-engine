@@ -389,7 +389,23 @@ class ConnectedDeviceWriter:
                 expected["Linkage"] = "independent"
         baseline = {name: values[name] for name in expected}
         forward = build_control_payload(schema, expected)
-        rollback = build_control_payload(schema, baseline)
+        if (
+            intent.target.product_key == LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
+            and intent.function == "feeding_duration"
+            and baseline[field_name] == 0
+        ):
+            # 실제 원본의 inactive 0은 새 입력 0과 다르다. native 원본 복원과 같은
+            # raw-copy 계약이지만 이 scalar가 소유한 FeedTime flag 하나만 선택한다.
+            flags = bytearray(schema.attribute_flags_size)
+            attribute = schema.by_name(field_name)
+            flags[attribute.id // 8] |= 1 << (attribute.id % 8)
+            rollback = (
+                bytes([CONTROL_ACTION])
+                + bytes(reversed(flags))
+                + current_status[: schema.attribute_values_size]
+            )
+        else:
+            rollback = build_control_payload(schema, baseline)
         return PreparedDeviceWrite(
             target=self.endpoint,
             function=intent.function,

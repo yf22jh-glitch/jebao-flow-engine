@@ -46,6 +46,7 @@ jebao-flow-observe = "jebao_flow.operator_capture_cli:main"
 jebao-flow-local = "jebao_flow.local_control_cli:main"
 jebao-flow-local-qualify = "jebao_flow.local_control_qualification_cli:main"
 jebao-flow-local-power-qualify = "jebao_flow.local_control_power_qualification_cli:main"
+jebao-flow-local-pro-qualify = "jebao_flow.local_control_pro_qualification_cli:main"
 jebao-flow-local-recovery-drill = "jebao_flow.local_control_recovery_drill_cli:main"
 jebao-flow-local-qualification-set = "jebao_flow.local_control_qualification_set_cli:main"
 

@@ -5,6 +5,9 @@
 배포 준비에서 발견한 결손은 native 실행기 자체가 아니라 7종의 first-write 자격 발급 경로다.
 이 작업은 qualification 검사 우회나 synthetic receipt가 아니라 실제 ACK/raw 판정의 발급 연결이다.
 
+발급 연결의 소프트웨어 구현·검증 기록은 [구현 기록](wavemaker-qualification-implementation.md)이다.
+실장 qualification과 배포는 별도 단계이며 이 링크로 완료 처리하지 않는다.
+
 ## Pro 묶음 — 실제 scalar 명령 18개씩
 
 기존 epoch source로 현재 observer config·manifest·template·schema·물리 신원·firmware를 결속한다.
