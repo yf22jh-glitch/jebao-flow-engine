@@ -91,3 +91,38 @@ ACK 원 프레임이 없어 이 자료만으로 어느 통신 차이가 실패 �
 부수 로그 집계 v1은 모든 JSON에 level 키가 있다고 가정해 KeyError, v2는 stderr 전체가
 JSON 행이라고 가정해 JSONDecodeError로 실패했다. 원 stderr는 변경하지 않았고 도구 출력에
 실패를 남겼다. 최종 텍스트 검색만 사용했으며 이 집계 실패를 장비 오류나 gate 결과로 세지 않는다.
+
+## 2026-09-15 추가 — 보존 원복 프레임의 Async 보고 재발견
+
+장비 접근·새 전송 없이 source/assist의 보존 raw와 action evidence 체인을 재대조했다.
+이전 설명에서 원복 중 들어온 slave `async_slave` 보고를 놓쳤다. ACK 미수신·종료 실패는
+그대로지만, "Async 보고 자체가 없었다"로 확대할 수 없다. 아래 시각은 UTC 취득 완료다.
+
+| 단계 | 시각 | 보존 응답 |
+|---|---|---|
+| 마지막 Async ACK timeout | 12:14:13.415872 | ACK·after 없음 |
+| assist 준비, 아직 assist 전송0 | 12:15:32.252298 | slave action4 `sync_slave` |
+| assist action0 master 해제 AFTER | 12:15:33.793899 | master `independent` |
+| assist action1 slave BEFORE | 12:15:36.860663 | slave action4 `async_slave`, ON/TimerON/sine30/F30 |
+| slave schedule_enable=False AFTER | 12:15:39.932512 | `independent`/TimerOFF |
+
+결정적 slave BEFORE wire SHA는
+`3e58bfb6f76fde603650d432e9ecb9c437d5e881ea66c772dc98d3b0fa86735f`, status SHA는
+`828df5eb810d056129fc7d6b62376cafb086f0c1c6146388b354a5354adbcff4`다.
+기존 `evidence-async-role-only-restored-01`의 실제 target-bound action에서 원 wire/hash와
+codec 해석을 확인했다. 이 BEFORE까지 slave에 대한 assist 전송은0이며, assist는 Async를
+설정하는 단계가 없다. 단 master 해제는 이미 수행됐으므로 원 전송의 도달·전이 원인은 미확정이다.
+12:15:32 표본도 report라 79초 간격을 실제 내부 상태 유지의 증명으로 쓰지 않는다.
+
+앞선3필드 실행도 master independent AFTER→slave BEFORE async_slave라는 순서가 있었다.
+두 archive 대조 산출물 `async-diagnosis-two-assists-v1` SHA
+`6c9d8865c1a8563a6eb6957ddc6f5f491183e4191b3fdac7f978bc5fd4cc9c76`에 보존했다.
+명령 지연 반영·보고 지연/과거 보고·master 해제 영향은 분리되지 않았다. source delivery
+UNKNOWN과 원복 진단을 소급 변경하지 않는다. 물리 위상이나 정상 attach 완료 증명이 아니다.
+
+old builder와 new builder의 Linkage 단독 산출은 실제 보존 new payload 460B
+SHA `c02514f9291162f4b02a76df76188ddcb68d3099b289cdd97e4fd2dc21a3f2c7`와 각각 동일했다.
+이는 old 전송 wire 원본 대조는 아니다. 분석 v6 SHA는
+`8cac9693612d0ec4e6775009dcf1fea6a11e7c1a6540becbcbdff2afe74b2935`다.
+오프라인 분석 초기 import 경로2건·decode 인자1건을 정정했고 실패 stderr를 보존했다.
+보호 경로 권한 거부를 권한 완화 없이 동일 UID·RO mount로 처리했다. 실기 오류로 세지 않는다.

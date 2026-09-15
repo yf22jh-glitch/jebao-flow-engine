@@ -34,3 +34,15 @@ sync_slave/TimerON/sine/F30을 보고했다. 오래된 report 가능성을 배�
 대안2는 사용자 앱으로 원복 준비 상태를 만들고 기존 recover를 이어가는 것이다. park하면 시험
 image·역할 미확인·원복 미완료와 서비스 중단이 남는다. 재전송/초기화/timeout 변경은 어느 쪽에도 없다.
 사용자 최신 완료 지시에 따라 대안1의 좁은 정정을 별도 정책에 명시하며 Async 재시험은 추가하지 않는다.
+
+## 2026-09-15 추가 — 원복 당시 Async 보고 오프라인 확인
+
+기존 `evidence-async-assistance-01`을 장비 접근0으로 재대조했다. master independent AFTER
+12:02:43.754914Z 뒤, slave schedule_enable=False 전 BEFORE 12:02:45.994766Z에 action4
+`async_slave`/ON/TimerON/sine30/F30 보고가 있다. wire SHA
+`67f5673d45bf9c63faa90f91432fc425f6f869af0846afa65243bef595a79909`, status SHA
+`bec5839d71e74aaf31df472fb18545071f89750157c3689874ab47fe3aedfdb5`를 원 blob·codec으로 확인했다.
+slave 해제 AFTER 12:02:49.374139Z는 independent/TimerOFF다. 이 BEFORE까지 slave에 대한
+assist 전송0이며 assist에 Async 설정은 없다. 다만 master 해제 뒤의 report이므로 이전
+Async 명령 전달이나 내부 전이 시점은 여전히 UNKNOWN이다. ACK 부재·exit2는 소급 불변이다.
+동일 순서가 역할단독 실행에서도 보존됐다. [대조와 해석 한계](2026-09-15-product-async-role-only-stop.md#2026-09-15-추가--보존-원복-프레임의-async-보고-재발견)를 함께 본다.
