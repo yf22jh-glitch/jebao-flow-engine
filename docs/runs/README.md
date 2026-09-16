@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-16 Aquarium 자동 준비 사전 확인](2026-09-16-aquarium-preparation-precheck.md) — MQTT 출력60 확인·write0, 자동 준비/최초값 복귀 경로 및 active template 미확보; 구현 승인·실기 보류.
+
 - [2026-09-16 Bar timer·schedule HA 활성화](2026-09-16-bar-timer-ha-activation.md) — Pro16+Bar timer1·시간표API3, HA86/86·fresh6/6·기동write0·기록 불변; 원Random100 교체 전 Bar ON 차단.
 
 - [2026-09-16 Bar timer 지문에서 Pro 재자격](2026-09-16-pro-bar-timer-schema-renewal.md) — 기존9종42send/ACK·36receipt·원8controls/432B exact; 기존 Pro 서비스 복귀, 새 배포 별도.

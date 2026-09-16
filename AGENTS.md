@@ -4413,3 +4413,27 @@ producer를 사용한다. Bar 원 inactive Random100은 ON하지 않는다.
 승인된40/39·원384B 복원 범위를 유지하며, 성공한 기능만 별도 executable 승격·HA 배포한다.
 앞선 Bar manual_mode UNKNOWN을 새 id로 반복하지 않고 리턴·도징·새 Async는 포함하지 않는다.
 동결 하네스·protocol·상한·identity·single-send·journal·복구 guard 변경은 없다.
+
+### 2026-09-16 Aquarium 자동 저출력 준비·소유 원본 복귀 구현
+
+사용자는 Aquarium의 현재 출력60을 임시 변경해 시험하고 원복하는 물리효과를 승인했다.
+기존 producer는 저출력 사전 준비만 받으며 60→준비→원60 복귀 경로가 없다는 설명 뒤,
+"자동 준비·원복 기능부터 추가 구현"에 "ㅇㅇㅇ 진행해"라고 별도로 승인했다.
+
+허용 변경은 새 Aquarium 준비형 qualification 모듈, 기존 qualification CLI의 명시 옵션,
+직접 tests와 관련 문서다. 기존 scalar producer·45 시험상한·writer/encoder·schema 입력·
+공용 lease/journal/coordinator/자격 guard·동결 하네스는 변경하지 않는다. 원본은 첫 fresh raw에서
+소유하며 config/app 범위 안에서만 복구할 수 있다. 준비값은 원본 이하이면서 기존45 상한과
+config/app 범위를 모두 만족해야 한다. 원본60을 시험 baseline40으로 위장하지 않는다.
+
+기능별 한 transaction에 준비 speed40 → 시험값(speed39 또는 FeedTime1) → 시험 원복
+(speed40 또는 원FeedTime10) → 최초 speed60 복귀를 전량 내구화한다. 각 필드의 rollback은
+중간40이 아니라 최초 raw의 자기 원본이다. 전진 시험은 기존 저출력 envelope를 사용하고,
+상한보다 높은 값의 유일한 쓰기는 소유 원본 speed의 exact 복귀다. 전원/Timer/시간표/다른
+장비는 쓰지 않는다. 미확인 시 전진을 멈추고 기존 generic recovery로 원본만 복원한다.
+마지막 원본 복귀까지 VERIFIED가 된 경우에만 중간 두 시험 action의 receipt를 발급한다.
+동일 id 재조회는 장비 무접촉이고 다른 준비값/기능을 같은 id로 재사용하지 않는다.
+
+이번 단위는 구현·오프라인 검증이다. Aquarium 활성 template bytes와 product 귀속의 양성
+증거가 아직 없으므로 실기·자격 발급·배포는 하지 않는다. 기존 Pro/Bar 운영을 유지한다.
+다른 제품 template 대용, 자격 합성, 직접 sender 호출로 준비 검사를 우회하는 실행은 없다.
