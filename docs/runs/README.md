@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-16 Bar timer 지문에서 Pro 재자격](2026-09-16-pro-bar-timer-schema-renewal.md) — 기존9종42send/ACK·36receipt·원8controls/432B exact; 기존 Pro 서비스 복귀, 새 배포 별도.
+
 - [2026-09-16 Bar timer 자격](2026-09-16-bar-timer-qualification.md) — bounded40 ON/OFF 4send·2receipt, TimerOFF·원9controls/384B exact; HA 배포 별도.
 - [2026-09-16 Bar schedule 자격](2026-09-16-bar-schedule-qualification.md) — TimerOFF40/39 A/B 3send·2receipt, 원384B exact; wrapper 사후 오류와 정상 raw 보존 구분.
 
