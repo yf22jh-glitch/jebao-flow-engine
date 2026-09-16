@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-16 조회·미리보기 observer 배포](2026-09-16-observer-preview-deployment.md) — HA86/86·fresh6/6·미리보기 응답, 장비 설정 write0·기록 보존; 동시 관측 잠금 경합/표본누락1회 별도.
+
 - [2026-09-16 테스트 정정 후 배포 사전 대조](2026-09-16-test-fix-deployment-precheck.md) — Linux 전체3153 PASS; 최신40영수증의 schema 불일치·Pro 미완료 source 확인, 운영 전환 보류·장비 write0.
 
 - [2026-09-16 Pro 동작 로그 저장공간 이전](2026-09-16-pro-daily-log-storage-migration.md) — 원본5,665개 해시 대조·후속 RO 수집, 전환 공백83.453초·장비 write0, 미사용 이미지2개 백업 후 정리.

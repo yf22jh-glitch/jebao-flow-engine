@@ -57,3 +57,9 @@ schema 차이는 앞선 제품 기능 추가에서 생긴 것이다.
 
 새 runtime 활성화, 기존 서비스/collector 정지, 장비 command, 앱 조작, qualification 발급은
 모두 **0**이다. 소프트웨어 정정 완료와 운영 배포 완료는 별개다.
+
+## 후속
+
+위 보류 보고 뒤 사용자가 조회·미리보기 전용 배포를 수용했다.
+[별도 observer 배포 기록](2026-09-16-observer-preview-deployment.md)에 실행 결과를 추가한다.
+앞선 보류 시점의 사실과 제어용 schema 불일치·미완료 source 판정은 바꾸지 않는다.

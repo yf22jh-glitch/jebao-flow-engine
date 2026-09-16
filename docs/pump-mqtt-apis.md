@@ -1,5 +1,8 @@
 # 펌프 MQTT API — native lifecycle와 읽기 전용 미리보기
 
+후속 운영 연결: [2026-09-16 observer 배포](runs/2026-09-16-observer-preview-deployment.md).
+상태 조회·11개 preview topic만 활성화됐고 아래 native/apply 명령은 운영에 열리지 않았다.
+
 2026-09-16 소프트웨어 연결. HA 대시보드는 기존 MQTT publish action으로 이 계약을 사용할 수
 있다. 대시보드 설치·운영 배포·장비 자격 발급·실기 검증은 이 변경에 포함하지 않는다.
 실행기는 기존 `NativeWavemakerController`이며 새 펌웨어 동작이나 복구 알고리즘은 없다.
