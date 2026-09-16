@@ -123,6 +123,7 @@ _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
             # Attended source-matched ON/OFF and A/B/raw-restore runs, 2026-09-16.
             "schedule_enable",
             "schedule",
+            "device_clock_sync",
         }
     ),
     "0696a19599bc484f8e1866f5ccf4ee7e": frozenset(
@@ -146,6 +147,9 @@ _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
 }
 
 _ENGLISH_NAME_BY_PRODUCT_FUNCTION = {
+    ("1d8c63eaccac4205b92c84d77d5a08fb", "manual_mode"): "Manual Mode (Enters Independent Manual)",
+    ("1d8c63eaccac4205b92c84d77d5a08fb", "linkage_role"): "Linkage Role (App Mode Coupling)",
+    ("1d8c63eaccac4205b92c84d77d5a08fb", "pulse_or_tide"): "Cross-flow (On) Or Pulse (Off)",
     ("0696a19599bc484f8e1866f5ccf4ee7e", "schedule_enable"): "Schedule (Controls Power)",
     ("0696a19599bc484f8e1866f5ccf4ee7e", "manual_enable"): "Manual Operation (Controls Power)",
     (

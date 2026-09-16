@@ -3,7 +3,7 @@
 This module owns no alternate write primitive. It reuses the audited manual-flow producer's
 function-independent lease, resolution, journal transition, artifact machinery and safe first-write
 envelope, applying the same three-frame ``same -> step -> restore`` contract to Bar
-``manual_frequency``, ``manual_mode`` and encodable ``feeding_duration``. Each is a partial
+``manual_frequency`` and encodable ``feeding_duration``. Each is a partial
 write whose exact baseline is restored by the ordinary scalar rollback, so no receipt is emitted
 until the durable journal is terminal and the own baseline has been written back and verified.
 
@@ -11,9 +11,9 @@ It deliberately covers only the manual controls the app writes as single-field p
 device is Independent/TimerOFF/Constant, reusing the existing scalar restore contract. Absence of
 firmware side effects is NOT asserted here: these offline tests prove the software contract (single
 send, exact own-baseline restore, receipt-only-after-verified), not device acceptance or physical
-safety. Bar ``feed_switch``, ``pulse_or_tide``, ``linkage_role`` and
-whole-``schedule`` qualification are intentionally not produced here;
-``docs/bar-qualification-implementation.md`` records the exact restore-safety blocker for each.
+safety. The compatibility ``manual_mode`` entry delegates to the app-shaped compound producer,
+which also handles ``feed_switch``, ``pulse_or_tide`` and ``linkage_role``. Whole-schedule
+qualification has its own producer. Historical single-field mode assumptions are not reused.
 
 The DC/Aquarium subclasses reuse this journal with their real product state models. A FeedTime=0
 baseline is still rejected by the existing writer; it is never normalized to one for qualification.
@@ -199,6 +199,21 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
         self._spec = _spec(function)
 
     async def execute(self, operation_id: str) -> QualificationProductionResult:  # type: ignore[override]
+        if self._family == _BAR_FAMILY and self._spec.function == "manual_mode":
+            from jebao_flow.local_control.bar_app_qualification import (
+                BarAppControlQualificationProducer,
+            )
+
+            return await BarAppControlQualificationProducer(
+                function="manual_mode",
+                epoch_provider=self._epoch_provider,
+                resolver_factory=self._resolver_factory,
+                journal=self._journal,
+                lease=self._lease,
+                artifacts=self._artifacts,
+                writer_factory=self._writer_factory,
+                clock=self._clock,
+            ).execute(operation_id)
         _require_operation_id(operation_id)
         existing = self._journal.load(operation_id)
         if existing is not None:

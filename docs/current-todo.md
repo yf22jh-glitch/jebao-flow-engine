@@ -1,7 +1,7 @@
 # Jebao 현재 작업 To-do
 
 > 2026-09-16 등록 장비의 후속 구현은 [장비별 완료 체크리스트](device-completion-checklist.md)를
-> 사용한다. DC·Pro 소프트웨어 후보를 마치고 Bar를 진행하며, 아래 기록은 앞선 milestone
+> 사용한다. DC·Pro·Bar 소프트웨어 후보를 마치고 Aquarium을 순서대로 검토하며, 아래 기록은 앞선 milestone
 > 이력을 보존한다. 구현·오프라인 검증·실기 활성화를 같은 완료 표시로 섞지 않는다.
 
 마지막 갱신: 2026-09-14 16:25 KST

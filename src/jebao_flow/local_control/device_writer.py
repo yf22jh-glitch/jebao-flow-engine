@@ -16,6 +16,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from jebao_flow.config import AppConfig
+from jebao_flow.local_control.bar_controls import prepare_bar_control_command
 from jebao_flow.local_control.bar_timer import prepare_bar_timer_command
 from jebao_flow.local_control.catalog import internal_function_value
 from jebao_flow.local_control.dc_timer import DcTimerScreen, prepare_dc_timer_command
@@ -28,7 +29,7 @@ from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 from jebao_flow.protocol.control import CONTROL_ACTION, build_control_payload
 from jebao_flow.protocol.control_session import GizwitsSession
 from jebao_flow.protocol.profiles import get_product_schema
-from jebao_flow.protocol.schedule import DC_PUMP_PRO_PRODUCT_KEY
+from jebao_flow.protocol.schedule import DC_PUMP_PRO_PRODUCT_KEY, LOCAL_WAVEMAKER_PRODUCT_KEY
 from jebao_flow.protocol.schedule_wire import (
     LOCAL_WAVEMAKER_PRO_CONTROL_FLAGS_SIZE,
     LOCAL_WAVEMAKER_PRO_CONTROL_PAYLOAD_SIZE,
@@ -132,9 +133,7 @@ _SCALAR_FIELD_BY_PRODUCT: dict[str, dict[str, str]] = {
     "1d8c63eaccac4205b92c84d77d5a08fb": {
         "power": "SwitchON",
         "feed_switch": "FeedSwitch",
-        "pulse_or_tide": "PulseTide",
-        "linkage_role": "Linkage",
-        "manual_mode": "Mode",
+        # Mode/pulse/role use the compound app-command branch, never bare scalars.
         "manual_flow": "Flow",
         "manual_frequency": "Frequency",
         "feeding_duration": "FeedTime",
@@ -397,6 +396,12 @@ class ConnectedDeviceWriter:
             and intent.function == "schedule_enable"
         ):
             return self._prepare_bar_timer(intent, current_status)
+        if intent.target.product_key == LOCAL_WAVEMAKER_PRODUCT_KEY and intent.function in {
+            "manual_mode",
+            "pulse_or_tide",
+            "linkage_role",
+        }:
+            return self._prepare_bar_control(intent, current_status)
         product_fields = _SCALAR_FIELD_BY_PRODUCT.get(intent.target.product_key)
         if product_fields is None:
             raise LocalDeviceWriteError("product is not in the local-control encoder catalog")
@@ -490,14 +495,136 @@ class ConnectedDeviceWriter:
             restore_on_recovery=not (intent.function == "power" and intent.value is False),
         )
 
+    def _prepare_bar_control(
+        self, intent: LocalControlIntent, current_status: bytes
+    ) -> PreparedDeviceWrite:
+        schema = get_product_schema(intent.target.product_key)
+        values = schema.decode_status(current_status)
+        if intent.function == "linkage_role" and intent.value == "master" and values["TimerON"]:
+            return self._prepare_bar_master_program(intent, current_status, values)
+        command = prepare_bar_control_command(
+            intent.function,
+            internal_function_value(intent.target.product_key, intent.function, intent.value),
+            current=values,
+        )
+        expected = dict(command.fields)
+        baseline = {name: values[name] for name in expected}
+        minimum, maximum = self._control_flow_bounds or self._bar_timer_flow_bounds or (30, 100)
+        if not minimum <= expected["Flow"] <= maximum:
+            raise LocalDeviceWriteError(
+                f"Bar manual flow {expected['Flow']} exceeds {minimum}..{maximum}"
+            )
+        if baseline.get("TimerON") is True:
+            self._require_bar_running_bounds(values, current_status)
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function=intent.function,
+            forward_payload=build_control_payload(schema, expected),
+            rollback_payload=build_control_payload(schema, baseline),
+            baseline_status=bytes(current_status),
+            expected_readback=_canonical_values(expected),
+            baseline_readback=_canonical_values(baseline),
+            verification_kind="scalar_fields",
+            no_change=expected == baseline,
+        )
+
+    def _prepare_bar_master_program(
+        self, intent: LocalControlIntent, raw: bytes, values: Mapping[str, Any]
+    ) -> PreparedDeviceWrite:
+        if self._bar_timer_local_time is None:
+            raise LocalDeviceWriteError("Bar master program requires configured local time")
+        local_time = self._bar_timer_local_time()
+        if local_time.tzinfo is None or local_time.utcoffset() is None:
+            raise ValueError("Bar program local time must be timezone-aware")
+        minimum, maximum = self._control_flow_bounds or self._bar_timer_flow_bounds or (30, 100)
+        command = prepare_bar_timer_command(
+            True,
+            values,
+            schedule_image=extract_current_schedule_image(LOCAL_WAVEMAKER_PRODUCT_KEY, raw),
+            local_minute=local_time.hour * 60 + local_time.minute,
+            minimum_flow=minimum,
+            maximum_flow=maximum,
+            linked_master=True,
+        )
+        self._require_bar_running_bounds(values, raw)
+        expected = dict(command.persistent_readback)
+        baseline = {name: values[name] for name in expected}
+        schema = get_product_schema(LOCAL_WAVEMAKER_PRODUCT_KEY)
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function=intent.function,
+            forward_payload=build_control_payload(schema, command.fields),
+            rollback_payload=build_control_payload(schema, baseline),
+            baseline_status=bytes(raw),
+            expected_readback=_canonical_values(expected),
+            baseline_readback=_canonical_values(baseline),
+            verification_kind="scalar_fields",
+            no_change=expected == baseline,
+        )
+
+    def _require_bar_running_bounds(self, values: Mapping[str, Any], raw: bytes) -> None:
+        minimum, maximum = self._control_flow_bounds or self._bar_timer_flow_bounds or (30, 100)
+        # Validate the running program that an owned TimerON rollback can restore.
+        # Time/Auto are not compared with historical values; only output bounds apply.
+        prepare_bar_timer_command(
+            True,
+            values,
+            schedule_image=extract_current_schedule_image(LOCAL_WAVEMAKER_PRODUCT_KEY, raw),
+            local_minute=0,
+            minimum_flow=minimum,
+            maximum_flow=maximum,
+        )
+        if values["AutoMode"] in {"classic", "sine", "random", "constant"} and not (
+            minimum <= values["AutoFlow"] <= maximum
+        ):
+            raise LocalDeviceWriteError("Bar active recovery flow is outside output bounds")
+
+    def prepare_bar_restore_controls(
+        self, original_status: bytes, *, fields: tuple[str, ...]
+    ) -> PreparedDeviceWrite:
+        """Restore only operation-owned persistent Bar fields from captured raw bytes.
+
+        This is recovery authority, not an app command or a qualification receipt.
+        No seed, timestamp, invented value, or feeding elapsed counter is reconstructed.
+        """
+        if self.endpoint.target.product_key != LOCAL_WAVEMAKER_PRODUCT_KEY:
+            raise ValueError("Bar owned restore requires the Bar product")
+        allowed = {"TimerON", "Flow", "Frequency", "Mode", "PulseTide", "Linkage", "FeedSwitch"}
+        if not fields or len(set(fields)) != len(fields) or not set(fields) <= allowed:
+            raise ValueError("Bar owned restore fields are invalid")
+        schema = get_product_schema(LOCAL_WAVEMAKER_PRODUCT_KEY)
+        values = schema.decode_status(original_status)
+        if "Flow" in fields:
+            minimum, maximum = self._control_flow_bounds or self._bar_timer_flow_bounds or (30, 100)
+            if not minimum <= values["Flow"] <= maximum:
+                raise LocalDeviceWriteError("Bar owned restore flow is outside output bounds")
+        if "TimerON" in fields and values["TimerON"]:
+            self._require_bar_running_bounds(values, original_status)
+        owned = {name: values[name] for name in fields}
+        payload = build_control_payload(schema, owned)
+        expected = _canonical_values(owned)
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function="bar_owned_controls",
+            forward_payload=payload,
+            rollback_payload=payload,
+            baseline_status=bytes(original_status),
+            expected_readback=expected,
+            baseline_readback=expected,
+            verification_kind="scalar_fields",
+            # original_status is recovery authority, not a current equality observation.
+            no_change=False,
+        )
+
     def _prepare_clock(
         self, intent: LocalControlIntent, current_status: bytes
     ) -> PreparedDeviceWrite:
         if intent.target.product_key not in {
             DC_PUMP_PRO_PRODUCT_KEY,
             LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+            LOCAL_WAVEMAKER_PRODUCT_KEY,
         }:
-            raise LocalDeviceWriteError("clock execution is currently scoped to Pro/DC pumps")
+            raise LocalDeviceWriteError("clock execution is currently scoped to Pro/Bar/DC pumps")
         if intent.value is not None or self._device_local_time is None:
             raise ValueError("clock sync uses the configured local time, with no implicit payload")
         local_time = self._device_local_time()
@@ -592,8 +719,6 @@ class ConnectedDeviceWriter:
             raise ValueError("Bar timer local time must be timezone-aware")
         schema = get_product_schema(intent.target.product_key)
         values = schema.decode_status(current_status)
-        if values["Linkage"] != "independent":
-            raise LocalDeviceWriteError("Bar timer control requires independent ownership")
         minimum, maximum = self._bar_timer_flow_bounds
         if not minimum <= values["Flow"] <= maximum:
             raise LocalDeviceWriteError("Bar timer manual recovery flow is outside output bounds")
@@ -652,7 +777,8 @@ class ConnectedDeviceWriter:
             raise ValueError("시간표 가족과 실제 대상 장비가 다릅니다")
         values = get_product_schema(intent.target.product_key).decode_status(current_status)
         is_dc = intent.target.product_key == DC_PUMP_PRO_PRODUCT_KEY
-        if not is_dc and (
+        is_bar = intent.target.product_key == LOCAL_WAVEMAKER_PRODUCT_KEY
+        if not (is_dc or is_bar) and (
             values["TimerON"]
             or (isinstance(schedule, WavemakerSchedule) and values["Linkage"] != "independent")
         ):
@@ -665,6 +791,20 @@ class ConnectedDeviceWriter:
             self._require_dc_image_bounds(desired)
             if values["TimerON"] and values["SwitchON"]:
                 self._require_dc_image_bounds(baseline)
+        if is_bar:
+            # The Bar app saves a full image without a prior TimerOFF/role write.
+            # Its subsequent program activation is a separate explicit command.
+            minimum, maximum = self._control_flow_bounds or self._bar_timer_flow_bounds or (30, 100)
+            prepare_bar_timer_command(
+                True,
+                values,
+                schedule_image=desired,
+                local_minute=0,
+                minimum_flow=minimum,
+                maximum_flow=maximum,
+            )
+            if values["TimerON"] and values["SwitchON"]:
+                self._require_bar_running_bounds(values, current_status)
         return PreparedDeviceWrite(
             target=self.endpoint,
             function="schedule",

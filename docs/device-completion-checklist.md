@@ -58,12 +58,26 @@ DC 소프트웨어 변경은 `f9c74ff`로 보존했다. Pro는 기존 native Syn
 차이, 확장 의미 판정의 두 대안·park 영향·재개 조건을 기록했다. 실기와 운영 활성화는 아직
 체크하지 않는다.
 
+## Bar — 앱 기능 11종, 소프트웨어·배포 후보 준비 완료
+
+Pro 후보를 보존한 뒤 Bar만 진행했다. 프로그램 master의 잘못된 gap 인자와 실제 펌프 간
+연동 의미는 [Bar 구현·후보 기록](bar-app-control-release.md)에 별도 한계로 남겼다.
+
+- [x] Bar 시각 writer/producer 연결, Pro/DC/Bar clock 관련 직접 회귀 52 PASS.
+- [x] Bar feed switch / PulseTide / Linkage의 활성 앱 handler 형식과 복원 범위 대조.
+- [x] 위 3기능 및 compound mode 자격 producer·CLI·기존 scalar 경로 통합, 직접 40 PASS.
+- [x] Bar 앱 11기능 exact 집합·실물별 HA 10 control + schedule API 1 검증.
+  compound 명령·시간표·HA 관련 묶음 122 PASS. 전체 회귀와 자격 producer 완료는 별도다.
+- [x] Mac 전체 3605 PASS / Linux 전용 1 SKIP, Linux 전체 3606 PASS(194.66초).
+- [x] 별도 image·Bar 한 대만 허용한 비활성 11-job 입력·fresh manifest 준비.
+  image 내 schema 일치, 예상 영수증 22장/실제 발급 0, 기존 운영 입력 불변 확인.
+- [x] Bar 앱 11기능의 송신·자격 경로·HA 연결·오프라인 검증·배포 후보 준비.
+- [ ] Bar 새 실기 수용·전체 기능 활성화. 이번 단계의 장비 write·운영 교체는 0.
+
 ## 이후 장비 — 앞 장비를 닫은 뒤 시작
 
-현재 진행 장비는 **Bar 수류모터**다. Pro 후보 source는 고정하며 다음 작업을 섞지 않는다.
+다음 대상은 **Aquarium 메인 리턴**이다. 완료한 DC/Pro/Bar 후보를 보존하고 한 기종씩 진행한다.
 
-- [ ] Bar: 기존 시간표+timer 완료 경로 보존; power/flow/mode/frequency/feed-duration
-  활성화, feed switch/PulseTide/Linkage 자격, 시계 실행 누락 검토.
 - [ ] Aquarium 메인 리턴: 마지막 리턴 순서로 timer/feeding/transport/clock/schedule
   경로 검토, 기존 power/speed/feeding-duration 준비형 통합; 실기도 제외하지 않음.
 - [ ] 도징: 기존 사용자 요구(일일량·횟수·분할·평균 interval)를 유지하면서 실제 channel,

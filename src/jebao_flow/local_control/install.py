@@ -106,6 +106,7 @@ def current_protocol_schema_sha256() -> str:
             str(schedule_path.with_name("schema.py")),
             str(local_control_path / "device_writer.py"),
             str(local_control_path / "bar_timer.py"),
+            str(local_control_path / "bar_controls.py"),
             str(local_control_path / "dc_timer.py"),
             str(local_control_path / "device_clock.py"),
             str(local_control_path / "schedule.py"),

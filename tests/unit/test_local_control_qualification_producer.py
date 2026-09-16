@@ -98,12 +98,7 @@ def _bar_status(
     mode_code: int = 3,
 ) -> bytes:
     raw = bytearray(LOCAL_WAVEMAKER.raw_status_size)
-    state_bits = (
-        int(enabled)
-        | (int(timer_enabled) << 3)
-        | (mode_code << 5)
-        | (linkage_code << 7)
-    )
+    state_bits = int(enabled) | (int(timer_enabled) << 3) | (mode_code << 5) | (linkage_code << 7)
     raw[:2] = state_bits.to_bytes(2, "big")
     raw[2] = flow
     return bytes(raw)
@@ -372,20 +367,22 @@ def test_family_profiles_preserve_pro_probes_and_use_the_bar_timer_decoder(monke
         bar_state.linkage,
         bar_state.flow,
     ) == (True, False, "constant", "independent", 40)
-    assert calls == [
-        ("power", True),
-        ("linkage_role", "independent"),
-        ("manual_mode", "constant"),
-        ("manual_flow", 30),
-    ]
+    # Compound Bar mode/role commands are not needed to decode the current state.
+    assert calls == [("manual_flow", 30)]
 
 
-@pytest.mark.parametrize("product,status_factory", [
-    (LOCAL_WAVEMAKER.product_key, _bar_status), (DC_PUMP_PRO.product_key, _dc_status),
-])
+@pytest.mark.parametrize(
+    "product,status_factory",
+    [
+        (LOCAL_WAVEMAKER.product_key, _bar_status),
+        (DC_PUMP_PRO.product_key, _dc_status),
+    ],
+)
 @pytest.mark.asyncio
 async def test_product_success_uses_the_existing_three_action_contract(
-    tmp_path: Path, product, status_factory,
+    tmp_path: Path,
+    product,
+    status_factory,
 ) -> None:
     target = _binding(product_key=product)
     epoch = _epoch(target=target, maximum=100)
@@ -838,12 +835,18 @@ async def test_step_active_crash_requires_exact_recovery_without_receipts(tmp_pa
     assert not tuple((tmp_path / "receipts").iterdir())
 
 
-@pytest.mark.parametrize("product,status_factory", [
-    (LOCAL_WAVEMAKER.product_key, _bar_status), (DC_PUMP_PRO.product_key, _dc_status),
-])
+@pytest.mark.parametrize(
+    "product,status_factory",
+    [
+        (LOCAL_WAVEMAKER.product_key, _bar_status),
+        (DC_PUMP_PRO.product_key, _dc_status),
+    ],
+)
 @pytest.mark.asyncio
 async def test_product_step_crash_uses_the_same_exact_recovery_contract(
-    tmp_path: Path, product, status_factory,
+    tmp_path: Path,
+    product,
+    status_factory,
 ) -> None:
     target = _binding(product_key=product)
     epoch = _epoch(target=target, maximum=100)

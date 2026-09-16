@@ -33,7 +33,11 @@ from jebao_flow.local_control.qualification_producer import (
     _phase_request_id,
     _require_operation_id,
 )
-from jebao_flow.protocol.schedule import DC_PUMP_PRO_PRODUCT_KEY, LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
+from jebao_flow.protocol.schedule import (
+    DC_PUMP_PRO_PRODUCT_KEY,
+    LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+    LOCAL_WAVEMAKER_PRODUCT_KEY,
+)
 
 _OBSERVED = "clock_evidence_"
 
@@ -255,3 +259,7 @@ class DcClockQualificationProducer(_ClockQualificationProducer):
 
 class ProClockQualificationProducer(_ClockQualificationProducer):
     _product_key = LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
+
+
+class BarClockQualificationProducer(_ClockQualificationProducer):
+    _product_key = LOCAL_WAVEMAKER_PRODUCT_KEY

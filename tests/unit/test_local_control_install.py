@@ -195,7 +195,14 @@ def test_protocol_binding_changes_with_schedule_model_range_source(
 
 @pytest.mark.parametrize(
     "compiler",
-    ["wavemaker.py", "pump_preview.py", "bar_timer.py", "dc_timer.py", "device_clock.py"],
+    [
+        "wavemaker.py",
+        "pump_preview.py",
+        "bar_timer.py",
+        "bar_controls.py",
+        "dc_timer.py",
+        "device_clock.py",
+    ],
 )
 def test_schema_binding_changes_with_writer_delegated_compiler(tmp_path, monkeypatch, compiler):
     monkeypatch.setattr(install, "__file__", str(tmp_path / "install.py"))
@@ -205,6 +212,7 @@ def test_schema_binding_changes_with_writer_delegated_compiler(tmp_path, monkeyp
         "wavemaker.py",
         "pump_preview.py",
         "bar_timer.py",
+        "bar_controls.py",
         "dc_timer.py",
         "device_clock.py",
     ):

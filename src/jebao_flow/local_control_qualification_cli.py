@@ -72,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
             "manual_enable",
             "device_clock_sync",
             "slave_common_flow",
+            "feed_switch",
+            "pulse_or_tide",
+            "linkage_role",
         ),
         default="manual_flow",
         help="frequency/mode: Bar/DC; feeding: Bar/DC/Aquarium; speed: Aquarium; common flow: Pro",
@@ -252,20 +255,23 @@ def _run(args: argparse.Namespace) -> int:
             )
         elif args.function == "device_clock_sync":
             from jebao_flow.local_control.clock_qualification import (
+                BarClockQualificationProducer,
                 DcClockQualificationProducer,
                 ProClockQualificationProducer,
             )
             from jebao_flow.protocol.schedule import (
                 DC_PUMP_PRO_PRODUCT_KEY,
                 LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+                LOCAL_WAVEMAKER_PRODUCT_KEY,
             )
 
             producer_class = {
                 DC_PUMP_PRO_PRODUCT_KEY: DcClockQualificationProducer,
                 LOCAL_WAVEMAKER_PRO_PRODUCT_KEY: ProClockQualificationProducer,
+                LOCAL_WAVEMAKER_PRODUCT_KEY: BarClockQualificationProducer,
             }.get(epoch_source().target.product_key)
             if producer_class is None:
-                raise ValueError("clock qualification is currently scoped to Pro/DC pumps")
+                raise ValueError("clock qualification is currently scoped to Pro/Bar/DC pumps")
             producer = producer_class(
                 writer_factory=configured_writer_factory(load_current_private_config(args.config)),
                 **producer_arguments,
@@ -316,6 +322,26 @@ def _run(args: argparse.Namespace) -> int:
                         preparation_speed=args.preparation_speed,
                     )
                 )
+                _print_json(result.public_dict())
+                return 0
+            if descriptor.family == "local_wavemaker" and args.function in {
+                "manual_mode",
+                "feed_switch",
+                "pulse_or_tide",
+                "linkage_role",
+            }:
+                from jebao_flow.local_control.bar_app_qualification import (
+                    BarAppControlQualificationProducer,
+                )
+
+                producer = BarAppControlQualificationProducer(
+                    function=args.function,
+                    writer_factory=configured_writer_factory(
+                        load_current_private_config(args.config)
+                    ),
+                    **producer_arguments,
+                )
+                result = asyncio.run(producer.execute(args.operation_id))
                 _print_json(result.public_dict())
                 return 0
             scalar_producer = {

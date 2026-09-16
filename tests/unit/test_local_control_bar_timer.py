@@ -9,7 +9,7 @@ def _image(*rows: tuple[int, ...]) -> bytes:
     return b"".join(bytes(row) for row in rows) + b"\xee" * (384 - len(rows) * 8)
 
 
-def _plan(enabled=True, *, image=None, minute=600, current=None):
+def _plan(enabled=True, *, image=None, minute=600, current=None, linked_master=False):
     return prepare_bar_timer_command(
         enabled,
         current or {"Flow": 40, "Mode": "constant", "Frequency": 80, "PulseTide": True},
@@ -17,17 +17,25 @@ def _plan(enabled=True, *, image=None, minute=600, current=None):
         local_minute=minute,
         minimum_flow=30,
         maximum_flow=45,
+        linked_master=linked_master,
     )
 
 
 def test_on_uses_schedule_not_stale_auto_and_never_changes_power():
     command = _plan(current={"AutoFlow": 100, "AutoMode": "random"})
     assert command.fields == {
-        "TimerON": True, "FeedSwitch": False, "Linkage": "independent",
-        "AutoMode": "constant", "AutoFlow": 40, "AutoFreq": 0, "AutoPulseTide": False,
+        "TimerON": True,
+        "FeedSwitch": False,
+        "Linkage": "independent",
+        "AutoMode": "constant",
+        "AutoFlow": 40,
+        "AutoFreq": 0,
+        "AutoPulseTide": False,
     }
     assert command.persistent_readback == {
-        "TimerON": True, "FeedSwitch": False, "Linkage": "independent",
+        "TimerON": True,
+        "FeedSwitch": False,
+        "Linkage": "independent",
     }
     assert command.selected_slot == 0
     assert "SwitchON" not in command.fields
@@ -35,8 +43,12 @@ def test_on_uses_schedule_not_stale_auto_and_never_changes_power():
 
 def test_off_copies_fresh_manual_values_and_classic_pulse_only():
     assert _plan(False).fields == {
-        "TimerON": False, "Flow": 40, "Mode": "constant", "Frequency": 80,
-        "PulseTide": False, "Linkage": "independent",
+        "TimerON": False,
+        "Flow": 40,
+        "Mode": "constant",
+        "Frequency": 80,
+        "PulseTide": False,
+        "Linkage": "independent",
     }
     current = {"Flow": 39, "Mode": "classic", "Frequency": 50, "PulseTide": True}
     command = _plan(False, current=current)
@@ -87,3 +99,39 @@ def test_invalid_clock_input_is_not_invented(minute):
 def test_incomplete_image_is_not_used_for_on():
     with pytest.raises(ValueError, match="384-byte"):
         _plan(image=b"short")
+
+
+def test_master_program_save_has_a_distinct_linkage_and_exact_seed_shape():
+    command = _plan(linked_master=True)
+    assert command.fields == {
+        "TimerON": True,
+        "FeedSwitch": False,
+        "Linkage": "master",
+        "AutoMode": "constant",
+        "AutoFlow": 40,
+        "AutoFreq": 0,
+        "AutoPulseTide": False,
+    }
+    assert command.persistent_readback == {
+        "TimerON": True,
+        "FeedSwitch": False,
+        "Linkage": "master",
+    }
+
+
+def test_master_program_no_slot_branch_does_not_invent_other_auto_keys():
+    command = _plan(linked_master=True, image=b"\xee" * 384)
+    assert command.fields == {
+        "TimerON": True,
+        "FeedSwitch": False,
+        "Linkage": "master",
+        "AutoMode": "stopped",
+    }
+
+
+def test_master_gap_negative_mode_is_not_normalized_into_tab_switch_semantics():
+    with pytest.raises(ValueError, match="AutoMode=-1"):
+        _plan(linked_master=True, image=_image((1, 0, 2, 0, 4, 40, 0, 0)), minute=180)
+    assert (
+        _plan(image=_image((1, 0, 2, 0, 4, 40, 0, 0)), minute=180).fields["AutoMode"] == "stopped"
+    )

@@ -290,9 +290,10 @@ async def test_manual_mode_success_restores_constant_baseline(tmp_path: Path) ->
         function="manual_mode",
         target=target,
         sessions=[
-            _Session([baseline, baseline], sent),
+            _Session([baseline], sent),  # capture/preparation closes before any app frame
             _Session([baseline, step], sent),
             _Session([step, baseline], sent),
+            _Session([baseline, baseline], sent),
         ],
     )
 
@@ -300,8 +301,11 @@ async def test_manual_mode_success_restores_constant_baseline(tmp_path: Path) ->
 
     assert result.phase is TransactionPhase.VERIFIED
     assert result.physical_write_count == 3
-    assert sent[0] == sent[2]
-    assert sent[1] != sent[0]
+    # The compatibility entry now delegates to two real app mode commands followed
+    # by a separately identified owned-control restore (not a third app receipt).
+    assert sent[1] == sent[2]
+    assert sent[0] != sent[1]
+    assert journal.load("qualification_bar_mode").actions[-1].function == "bar_owned_controls"
     binding = _loaded_binding(tmp_path)
     assert binding.function == "manual_mode"
     assert qualified_physical_identity_keys(
@@ -509,8 +513,11 @@ async def test_step_readback_fault_is_recovery_required_and_emits_no_receipt(
     assert record.phase is TransactionPhase.RECOVERY_REQUIRED
     assert record.actions[1].phase is ActionPhase.UNCERTAIN
     assert not tuple((tmp_path / "receipts").iterdir())
-    events = [json.loads(entry.message) for entry in caplog.records
-              if '"event":"local_control_action_failure"' in entry.message]
+    events = [
+        json.loads(entry.message)
+        for entry in caplog.records
+        if '"event":"local_control_action_failure"' in entry.message
+    ]
     assert len(events) == 1
     assert events[0]["action_index"] == 1
     assert events[0]["exception_chain"][0]["type"].endswith("LocalDeviceWriteError")
@@ -525,7 +532,9 @@ async def test_readback_mismatch_logs_actual_values_without_a_new_admission_gate
     baseline = _bar_status(frequency=20)
     sent = []
     producer, journal, *_ = _producer(
-        tmp_path, function="manual_frequency", target=_binding(),
+        tmp_path,
+        function="manual_frequency",
+        target=_binding(),
         sessions=[_Session([baseline, baseline], sent), _Session([baseline, baseline], sent)],
     )
     with pytest.raises(QualificationProductionError, match="readback did not match"):

@@ -292,18 +292,43 @@ LOCAL_WAVEMAKER_APP = AppProductCatalog(
             ),
         ),
         AppFunction("feed_switch", AppFunctionKind.BOOLEAN, ("FeedSwitch",)),
-        AppFunction("pulse_or_tide", AppFunctionKind.BOOLEAN, ("PulseTide",)),
+        AppFunction(
+            "pulse_or_tide",
+            AppFunctionKind.BOOLEAN,
+            ("PulseTide", "Flow", "Frequency"),
+            caveat="classic parameter editor copies fresh Flow and Frequency",
+        ),
         AppFunction(
             "linkage_role",
             AppFunctionKind.ENUM,
-            ("Linkage",),
+            (
+                "Linkage",
+                "TimerON",
+                "Mode",
+                "Flow",
+                "Frequency",
+                "PulseTide",
+                "FeedSwitch",
+                "AutoMode",
+                "AutoFlow",
+                "AutoFreq",
+                "AutoPulseTide",
+            ),
             ("independent", "master", "slave"),
+            caveat=(
+                "manual role actions include their app-coupled fields; master during a program "
+                "uses program-save seeds; independent does not write FeedSwitch"
+            ),
         ),
         AppFunction(
             "manual_mode",
             AppFunctionKind.ENUM,
-            ("Mode",),
+            ("Mode", "TimerON", "FeedSwitch", "Linkage", "PulseTide", "Frequency", "Flow"),
             ("classic", "sine", "random", "constant"),
+            caveat=(
+                "mode selection enters independent manual operation "
+                "and clears feeding and PulseTide"
+            ),
         ),
         AppFunction(
             "manual_flow", AppFunctionKind.INTEGER, ("Flow",), app_minimum=30, app_maximum=100

@@ -176,12 +176,9 @@ _MANUAL_FLOW_FAMILY_PROFILES = {
     ),
     "local_wavemaker": _ManualFlowFamilyProfile(
         family="local_wavemaker",
-        state_probes=(
-            ("power", True, ("SwitchON",)),
-            ("linkage_role", "independent", ("Linkage",)),
-            ("manual_mode", "constant", ("Mode",)),
-        ),
-        decoded_status_fields=("TimerON",),
+        # Read state directly; compound app commands are not read probes.
+        state_probes=(),
+        decoded_status_fields=("SwitchON", "TimerON", "Linkage", "Mode"),
         required_mode="constant",
         required_linkage="independent",
     ),

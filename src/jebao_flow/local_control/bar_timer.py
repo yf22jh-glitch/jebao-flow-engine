@@ -87,15 +87,20 @@ def prepare_bar_timer_command(
     local_minute: int,
     minimum_flow: int,
     maximum_flow: int,
+    linked_master: bool = False,
 ) -> BarTimerCommand:
     """Build the standalone app command, with caller-owned time and output limits.
 
-    No SwitchON field is written. ON uses the program tab (Linkage=independent),
-    not the linked-master editor's onProgramSave. OFF copies fresh manual settings.
+    No SwitchON field is written. Default ON uses the program tab (independent).
+    linked_master selects the distinct onProgramSave callback; its invalid gap
+    sentinel (-1) is not silently normalized into an invented command. OFF copies
+    fresh manual settings.
     No rollback payload is invented here: runtime integration must own that contract.
     """
     if type(enabled) is not bool:
         raise TypeError("Bar timer enable requires a boolean")
+    if type(linked_master) is not bool or linked_master and not enabled:
+        raise ValueError("linked master is an ON program-save command")
     if type(local_minute) is not int or not 0 <= local_minute < 1440:
         raise ValueError("Bar timer requires a configured local minute within the day")
     if (
@@ -130,7 +135,19 @@ def prepare_bar_timer_command(
         )
         if matches:
             selected = slot
-    persistent = {"TimerON": True, "FeedSwitch": False, "Linkage": "independent"}
+    persistent = {
+        "TimerON": True,
+        "FeedSwitch": False,
+        "Linkage": "master" if linked_master else "independent",
+    }
+    if linked_master and selected is None:
+        # onProgramSave's no-slot branch writes AutoMode only, unlike the tab switch.
+        return BarTimerCommand({**persistent, "AutoMode": "stopped"}, persistent, None)
+    if linked_master and selected.mode < 0:
+        raise ValueError(
+            "Bar linked program app emits AutoMode=-1 for this schedule gap; "
+            "the unsigned mode schema cannot encode that command"
+        )
     fields = {
         **persistent,
         "AutoMode": _MODES[max(0, selected.mode)] if selected else "stopped",

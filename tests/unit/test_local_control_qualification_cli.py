@@ -306,7 +306,6 @@ def test_bar_cli_without_opt_in_never_opens_runtime(function, monkeypatch, capsy
     "product,producer_name,function",
     [
         (LOCAL_WAVEMAKER.product_key, "BarScalarQualificationProducer", "manual_frequency"),
-        (LOCAL_WAVEMAKER.product_key, "BarScalarQualificationProducer", "manual_mode"),
         (LOCAL_WAVEMAKER.product_key, "BarScalarQualificationProducer", "feeding_duration"),
         (DC_PUMP_PRO.product_key, "DcScalarQualificationProducer", "manual_frequency"),
         (DC_PUMP_PRO.product_key, "DcScalarQualificationProducer", "manual_mode"),
@@ -747,11 +746,26 @@ def test_dc_image_cli_rejects_another_return_pump_family(tmp_path):
         cli._read_dc_image(path)
 
 
-@pytest.mark.parametrize("function", ["device_clock_sync", "slave_common_flow"])
-def test_pro_cli_routes_new_app_controls_without_dc_preparation(monkeypatch, function):
+@pytest.mark.parametrize(
+    ("function", "product"),
+    [
+        ("device_clock_sync", LOCAL_WAVEMAKER_PRO),
+        ("slave_common_flow", LOCAL_WAVEMAKER_PRO),
+        ("device_clock_sync", LOCAL_WAVEMAKER),
+        ("manual_mode", LOCAL_WAVEMAKER),
+        ("feed_switch", LOCAL_WAVEMAKER),
+        ("pulse_or_tide", LOCAL_WAVEMAKER),
+        ("linkage_role", LOCAL_WAVEMAKER),
+    ],
+)
+def test_new_app_controls_route_without_dc_preparation(monkeypatch, function, product):
     from types import SimpleNamespace
 
-    from jebao_flow.local_control import clock_qualification, pro_common_flow_qualification
+    from jebao_flow.local_control import (
+        bar_app_qualification,
+        clock_qualification,
+        pro_common_flow_qualification,
+    )
     from tests.unit.test_local_control_dc_prepared_qualification import _binding, _epoch
 
     calls = []
@@ -765,14 +779,20 @@ def test_pro_cli_routes_new_app_controls_without_dc_preparation(monkeypatch, fun
             return SimpleNamespace(public_dict=lambda: {"offline": True})
 
     module, name = (
-        (clock_qualification, "ProClockQualificationProducer")
+        (bar_app_qualification, "BarAppControlQualificationProducer")
+        if product is LOCAL_WAVEMAKER and function != "device_clock_sync"
+        else (clock_qualification, "BarClockQualificationProducer")
+        if product is LOCAL_WAVEMAKER
+        else (clock_qualification, "ProClockQualificationProducer")
         if function == "device_clock_sync"
         else (pro_common_flow_qualification, "ProCommonFlowQualificationProducer")
     )
     monkeypatch.setattr(module, name, Producer)
-    target = _binding().model_copy(update={"product_key": LOCAL_WAVEMAKER_PRO.product_key})
+    target = _binding().model_copy(update={"product_key": product.product_key})
     monkeypatch.setattr(cli, "CurrentQualificationEpochSource", lambda **_: lambda: _epoch(target))
-    monkeypatch.setattr(cli, "load_current_private_config", lambda _: _config())
+    monkeypatch.setattr(
+        cli, "load_current_private_config", lambda _: _config(product_key=product.product_key)
+    )
     factory = object()
     monkeypatch.setattr(cli, "configured_writer_factory", lambda _: factory)
     monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
