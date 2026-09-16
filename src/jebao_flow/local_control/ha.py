@@ -57,6 +57,7 @@ class HomeAssistantEntityDescriptor:
     native_maximum: int | None = None
     options: tuple[str, ...] = ()
     slot_index: int | None = None
+    schedule_request_topic: str | None = None
     instance_namespace: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
@@ -65,6 +66,10 @@ class HomeAssistantEntityDescriptor:
         _require_discovery_identity(self.unique_id, self.instance_namespace)
         if self.control_available != (self.command_topic is not None):
             raise ValueError("Home Assistant command topic must match control availability")
+        if self.schedule_request_topic is not None and (
+            self.function != "schedule" or self.platform is not HomeAssistantPlatform.SENSOR
+        ):
+            raise ValueError("schedule API belongs to the schedule diagnostic sensor")
         if self.platform is HomeAssistantPlatform.NUMBER:
             if self.native_minimum is None or self.native_maximum is None:
                 raise ValueError("Home Assistant number requires an explicit native range")
@@ -72,7 +77,7 @@ class HomeAssistantEntityDescriptor:
             raise ValueError("Home Assistant select requires explicit options")
 
     def public_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "platform": self.platform.value,
             "unique_id": self.unique_id,
             "name": self.name,
@@ -89,6 +94,9 @@ class HomeAssistantEntityDescriptor:
             "options": list(self.options),
             "slot_index": self.slot_index,
         }
+        if self.schedule_request_topic is not None:
+            payload["schedule_request_topic"] = self.schedule_request_topic
+        return payload
 
     def mqtt_discovery_payload(self) -> dict[str, object]:
         """Return a native MQTT-discovery payload without private device identifiers."""
@@ -754,6 +762,11 @@ def _project_device_function(
         device.physical_identity_key
     )
     platform = _platform_for(descriptor, control_available=control_available)
+    schedule_request_topic = (
+        f"{base}/request"
+        if control_available and descriptor.function == "schedule"
+        else None
+    )
     control_available = control_available and platform is not HomeAssistantPlatform.SENSOR
     return HomeAssistantEntityDescriptor(
         platform=platform,
@@ -774,6 +787,7 @@ def _project_device_function(
         native_minimum=descriptor.native_minimum,
         native_maximum=descriptor.native_maximum,
         options=descriptor.choices,
+        schedule_request_topic=schedule_request_topic,
         instance_namespace=instance_namespace,
     )
 

@@ -1,7 +1,8 @@
 """MQTT command contract for qualified local control and Home Assistant.
 
 Commands are consumed sequentially at MQTT QoS 0, retained or duplicate-marked commands are never
-executed, and request ids are created at the local runtime boundary. Endpoint addresses are still
+executed. Scalar request ids are created at the runtime boundary; whole-schedule requests carry
+caller-owned ids for durable replay detection. Endpoint addresses are still
 resolved afresh by the coordinator for every operation and never appear in this contract.
 """
 
@@ -41,6 +42,7 @@ from jebao_flow.local_control.models import (
 )
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan
 from jebao_flow.local_control.state import FreshDeviceState, FreshStatePoller
+from jebao_flow.local_control.wavemaker import WavemakerSchedule
 
 
 class LocalControlMqttError(RuntimeError):
@@ -143,6 +145,23 @@ class RoutedCommandResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RoutedSchedulePreview:
+    """Compiler output, never a claim about device state or permission to write."""
+
+    request_id: str
+    logical_member: str
+    schedule: WavemakerSchedule
+
+    def public_result(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "logical_member": self.logical_member,
+            "operation": "preview",
+            **self.schedule.preview(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RoutedGroupCommandResult:
     """One MQTT request id and the bounded group-service result it names."""
 
@@ -168,6 +187,12 @@ class _ScheduleRoute:
     slave_index: int
 
 
+@dataclass(frozen=True, slots=True)
+class _WavemakerScheduleRoute:
+    entity: HomeAssistantEntityDescriptor
+    target: LocalDeviceBinding
+
+
 class LocalControlMqttRouter:
     """Route only command topics that were actually projected as qualified controls."""
 
@@ -190,7 +215,7 @@ class LocalControlMqttRouter:
         ):
             raise ValueError("direct ownership and device writes require one shared operation lock")
         device_by_member = {device.logical_member: device for device in manifest.devices}
-        self._routes: dict[str, _ScalarRoute | _ScheduleRoute] = {}
+        self._routes: dict[str, _ScalarRoute | _ScheduleRoute | _WavemakerScheduleRoute] = {}
         plans_by_topic: dict[str, tuple[FreshMasterSchedulePlan, int]] = {}
         for plan in schedule_plans:
             for slave_index, slave in enumerate(plan.slaves):
@@ -205,6 +230,21 @@ class LocalControlMqttRouter:
                     plans_by_topic[topic] = (plan, slave_index)
 
         for entity in projection.entities:
+            if entity.schedule_request_topic is not None:
+                target = device_by_member.get(entity.logical_member)
+                if target is None:
+                    raise ValueError("schedule API is not in the current install manifest")
+                descriptor = catalog.find(target.product_key, "schedule")
+                if (
+                    projection.control_surface_diagnostic_reason is not None
+                    or not descriptor.control_exposed_for(target.physical_identity_key)
+                ):
+                    raise ValueError("unqualified device received a schedule request topic")
+                if entity.schedule_request_topic in self._routes:
+                    raise ValueError("local-control MQTT command topic is duplicated")
+                self._routes[entity.schedule_request_topic] = _WavemakerScheduleRoute(
+                    entity, target
+                )
             if entity.command_topic is None:
                 continue
             if entity.command_topic in self._routes:
@@ -234,13 +274,17 @@ class LocalControlMqttRouter:
     def command_topics(self) -> tuple[str, ...]:
         return tuple(sorted(self._routes))
 
-    async def handle(self, topic: str, payload: bytes | str) -> RoutedCommandResult:
+    async def handle(
+        self, topic: str, payload: bytes | str
+    ) -> RoutedCommandResult | RoutedSchedulePreview:
         if self._operation_lock is None:
             return await self._handle(topic, payload)
         async with self._operation_lock:
             return await self._handle(topic, payload)
 
-    async def _handle(self, topic: str, payload: bytes | str) -> RoutedCommandResult:
+    async def _handle(
+        self, topic: str, payload: bytes | str
+    ) -> RoutedCommandResult | RoutedSchedulePreview:
         coordinator = self._coordinator
         if coordinator is None:
             raise LocalControlMqttError("read-only MQTT runtime has no command executor")
@@ -250,6 +294,8 @@ class LocalControlMqttRouter:
             raise LocalControlMqttError(
                 "MQTT topic is not a published qualified control"
             ) from error
+        if isinstance(route, _WavemakerScheduleRoute):
+            return await self._handle_wavemaker_schedule(route, payload, coordinator)
         value = _parse_entity_value(route.entity, payload)
         logical_member = (
             route.target.logical_member
@@ -308,6 +354,35 @@ class LocalControlMqttRouter:
             result=result,
             ownership=ownership,
         )
+
+    async def _handle_wavemaker_schedule(
+        self,
+        route: _WavemakerScheduleRoute,
+        payload: bytes | str,
+        coordinator: LocalControlCoordinator,
+    ) -> RoutedCommandResult | RoutedSchedulePreview:
+        operation, intent, schedule = _parse_wavemaker_request(route.target, payload)
+        if operation == "preview":
+            return RoutedSchedulePreview(intent.request_id, route.target.logical_member, schedule)
+
+        # Existing ids must be reconciled by the coordinator before touching group ownership.
+        # It returns terminal history without sending, or rejects conflicting/unfinished ids.
+        ownership = None
+        if (
+            coordinator.request_has_no_durable_state(intent.request_id)
+            and self._ownership_service is not None
+        ):
+            ownership = await self._ownership_service.claim_direct_ownership(
+                route.target.logical_member,
+                power_on_requested=False,
+            )
+            if not ownership.allowed:
+                if ownership.diagnostic_reason is None:
+                    raise LocalControlMqttError("rejected ownership requires a diagnostic reason")
+                raise LocalControlCommandConflictError(ownership.diagnostic_reason)
+        result = await coordinator.execute(intent)
+        # Even VERIFIED may be historical replay. Never turn the supplied image into live state.
+        return RoutedCommandResult(intent.request_id, None, None, result, ownership)
 
 
 class LocalControlGroupCommandRouter:
@@ -523,6 +598,11 @@ class LocalControlMqttAdapter:
                             "control_available": False,
                             "function": entity.function,
                             "diagnostic_reason": entity.diagnostic_reason,
+                            **(
+                                {"schedule_request_topic": entity.schedule_request_topic}
+                                if entity.schedule_request_topic is not None
+                                else {}
+                            ),
                         }
                     ),
                     qos=1,
@@ -777,6 +857,8 @@ class LocalControlMqttAdapter:
                 qos=1,
                 retain=False,
             )
+            if isinstance(routed, RoutedSchedulePreview):
+                continue
             if (
                 routed.result.accepted
                 and routed.state_topic is not None
@@ -813,9 +895,26 @@ class LocalControlMqttAdapter:
             )
             return
         for publication in result.publications:
+            payload = publication.payload
+            schedule_entity = next(
+                (
+                    entity
+                    for entity in self._projection.entities
+                    if entity.state_topic == publication.topic
+                    and entity.schedule_request_topic is not None
+                ),
+                None,
+            )
+            if schedule_entity is not None:
+                payload = _canonical_json(
+                    {
+                        **json.loads(payload),
+                        "schedule_request_topic": schedule_entity.schedule_request_topic,
+                    }
+                )
             await client.publish(
                 publication.topic,
-                publication.payload,
+                payload,
                 qos=1,
                 retain=True,
             )
@@ -828,6 +927,54 @@ class LocalControlMqttAdapter:
             qos=1,
             retain=False,
         )
+
+
+def _parse_wavemaker_request(
+    target: LocalDeviceBinding,
+    payload: bytes | str,
+) -> tuple[str, LocalControlIntent, WavemakerSchedule]:
+    """Validate the whole message before ownership changes or any device I/O."""
+
+    try:
+        text = payload.decode("ascii") if isinstance(payload, bytes) else payload
+    except UnicodeDecodeError as error:
+        raise LocalControlMqttError("schedule request must be ASCII JSON") from error
+    if not text.isascii() or len(text) > 32768:
+        raise LocalControlMqttError("schedule request must be bounded ASCII JSON")
+
+    def unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise LocalControlMqttError("schedule request contains duplicate JSON fields")
+            result[key] = value
+        return result
+
+    try:
+        envelope = json.loads(text, object_pairs_hook=unique_fields)
+    except (ValueError, RecursionError) as error:
+        raise LocalControlMqttError("schedule request must be valid JSON") from error
+    if not isinstance(envelope, dict) or set(envelope) != {"operation", "request_id", "schedule"}:
+        raise LocalControlMqttError("schedule request requires operation, request_id and schedule")
+    operation = envelope["operation"]
+    if operation not in ("preview", "apply"):
+        raise LocalControlMqttError("schedule operation must be preview or apply")
+    try:
+        schedule = WavemakerSchedule.model_validate(envelope["schedule"])
+        schedule.compile_image()
+        intent = LocalControlIntent(
+            request_id=envelope["request_id"],
+            target=target,
+            function="schedule",
+            value=schedule.model_dump(mode="json"),
+        )
+    except ValueError as error:
+        raise LocalControlMqttError(
+            "schedule request violates the declared schedule contract"
+        ) from error
+    if schedule.product_key != target.product_key:
+        raise LocalControlMqttError("schedule family does not match the bound device")
+    return operation, intent, schedule
 
 
 def _parse_entity_value(

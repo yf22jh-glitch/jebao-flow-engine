@@ -164,3 +164,11 @@ Claude의 정적 검토에서 입력 계약·Pro 실행 배선·기존 자격/�
 정책 `6ed4059` 이후 [native lifecycle 실행기](wavemaker-lifecycle-implementation.md)를 연결했다.
 위 미완료 표기는 1차 구현 시점의 범위이며 실제 결속·해제 API/CLI의 현재 상태는 후속 기록을 따른다.
 과거 실기 원인 미확정·실장 자격·배포·HA 편집 연결을 이 변경으로 완료 처리하지 않는다.
+
+## 2026-09-16 전체 시간표 MQTT 연결
+
+기존 compiler/coordinator에 [미리보기·전체 교체·삭제 MQTT 계약](wavemaker-mqtt-schedule.md)을
+연결했다. 새 시간표 실행기를 만들지 않으며, 장비별 qualification·원본 journal·no-resend·
+미완료 거래 차단은 그대로다. HA Schedule sensor에 qualified 요청 주소만 추가하고 현재 시간표는
+fresh read로만 출판한다. 시각적인 슬롯 편집기와 native lifecycle MQTT는 아직 미완료다.
+이번 변경은 소프트웨어/오프라인 검증만이며 장비·앱·운영 서비스 조작과 배포는 하지 않았다.

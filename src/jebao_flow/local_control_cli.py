@@ -856,15 +856,17 @@ def _schedule_plans(manifest, config, explicit: tuple[str, ...]):
 
 
 def _require_live_opt_in(args, config, projection) -> None:
-    if projection.public_dict()["control_count"] == 0:
+    controlled_members = {
+        entity.logical_member
+        for entity in projection.entities
+        if entity.control_available or entity.schedule_request_topic is not None
+    }
+    if not controlled_members:
         return
     if not args.write_enabled:
         raise ValueError("qualified controls require the current --write-enabled invocation")
     if config.runtime.dry_run:
         raise ValueError("current private config still has runtime.dry_run enabled")
-    controlled_members = {
-        entity.logical_member for entity in projection.entities if entity.control_available
-    }
     blocked = {
         device.id
         for device in config.devices
