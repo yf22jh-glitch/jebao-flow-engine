@@ -239,6 +239,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 
 | 질문 | 판정 |
 |---|---|
+| 새0cb schema 자격으로 Bar timer·schedule과 기존 Pro 제어를 HA에 배포했는가 | **PASS — 조작17·시간표API3**, 새40receipt/20pair·HA86/86·fresh6/6·기동write0·기록 불변. Bar 원Random100은 상한50으로 ON 거부되며 실제 운영 시간표 재적용은 별도. [2026-09-16 활성화](runs/2026-09-16-bar-timer-ha-activation.md) |
 | 새 자격으로 두 Pro의 HA 실제 제어 표면을 배포했는가 | **PASS — Pro scalar16·시간표2/native API**, HA86/86·fresh6/6·기동 추가write0. 다른4장비·Async 재결속은 별도. [2026-09-16 활성화](runs/2026-09-16-pro-ha-control-activation.md) |
 | 새3e6 schema에서 두 Pro9기능의 실장 자격을 갱신했는가 | **PASS —18pair/36receipt·자기 원복 exact**, 다른 장비와 새 native 결속은 별도. [2026-09-16 자격](runs/2026-09-16-pro-control-qualification.md) |
 | HA 제어 전 Pro 일일 source의 자기 원본을 복원했는가 | **PASS — 소유 원복·미완료0**, 새 자격/제어 배포는 별도. [2026-09-16 원복](runs/2026-09-16-ha-control-owned-pro-restored.md) |

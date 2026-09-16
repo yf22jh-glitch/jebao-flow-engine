@@ -2,11 +2,14 @@
 
 Status: planner/writer, four-action qualifier and CLI implemented. The attended bounded Bar
 timer and schedule runs passed and issued current receipts; executable promotion now permits
-only receipt-qualified physical devices. **HA deployment is still pending.** The running Pro
-generation is unchanged. Return pumps and dosing are out of scope.
+only receipt-qualified physical devices. **HA deployment is complete:** Bar timer switch and
+schedule API are exposed alongside the renewed Pro controls. The preserved Random100 schedule
+is refused by the Bar30..50 bounds; apply an explicitly selected bounded plan before enabling it.
+Return pumps and dosing are out of scope.
 See the [timer run](runs/2026-09-16-bar-timer-qualification.md),
 [schedule run](runs/2026-09-16-bar-schedule-qualification.md), and
-[Pro renewal](runs/2026-09-16-pro-bar-timer-schema-renewal.md).
+[Pro renewal](runs/2026-09-16-pro-bar-timer-schema-renewal.md), and
+[HA activation](runs/2026-09-16-bar-timer-ha-activation.md).
 
 ## App evidence
 
@@ -56,12 +59,12 @@ The writer requires explicit timezone-aware local time and per-device bounds. Th
 binds them from the private instance timezone/device limits; container UTC is never silently used.
 The planner is included in the protocol-schema fingerprint along with the writer. The app catalog
 also now declares the actual Auto* command fields. Existing receipts cannot be reused under either
-changed content binding; the running old image continues using its original matching bindings.
+changed content binding; deployment moved the new image and its renewed receipts together.
 
-Do not replace the running image with this generation before source-matched qualifications are
-ready: old-generation receipts, including the active Pro receipts, cannot authorize writes in
-the new generation. Keep the current Pro service on its matching source/config/receipts while
-attended renewal is awaiting approval. A source commit is not a control deployment.
+For future content changes, do not replace a running image before source-matched qualifications
+are ready: old-generation receipts cannot authorize writes in a new generation. Keep the current
+service on its matching source/config/receipts while attended renewal awaits approval.
+This deployment completed renewal first; a source commit alone is not a control deployment.
 
 ## Attended qualification and activation boundary
 
@@ -81,7 +84,7 @@ FeedSwitch while the normal app OFF command does not restore it.
 
 The qualification CLI uses `run --function schedule_enable --trial-flow 40` with the existing
 private current-config/manifest/template/output arguments and explicit `--write-enabled`.
-There is no timer command available through HA until the new qualified generation is deployed.
+The deployed qualified generation exposes the HA timer command only for the qualified Bar identity.
 All four forward actions are journaled before the
 first send; the acknowledged-but-unverified ON test confirms receipt0 and OFF-before-image recovery.
 
