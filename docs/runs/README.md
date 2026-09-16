@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-16 Pro HA 제어 활성화](2026-09-16-pro-ha-control-activation.md) — Pro 조작16·시간표2/native API, HA86/86·fresh6/6·기동 추가write0; 나머지4장비 제어·Async 재결속은 별도.
+
 - [2026-09-16 새 schema Pro9기능 자격](2026-09-16-pro-control-qualification.md) — 실제42 send/42 ACK·원복 exact, 두Pro18pair/36receipt; HA 기동은 별도.
 
 - [2026-09-16 HA 제어 전 Pro 소유 원복](2026-09-16-ha-control-owned-pro-restored.md) — 원432B/8controls 직접reply exact, source 종결·미완료0; 새 자격/제어 배포 별도.
