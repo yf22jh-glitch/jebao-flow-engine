@@ -1,5 +1,8 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-16 Bar timer 자격](2026-09-16-bar-timer-qualification.md) — bounded40 ON/OFF 4send·2receipt, TimerOFF·원9controls/384B exact; HA 배포 별도.
+- [2026-09-16 Bar schedule 자격](2026-09-16-bar-schedule-qualification.md) — TimerOFF40/39 A/B 3send·2receipt, 원384B exact; wrapper 사후 오류와 정상 raw 보존 구분.
+
 - [2026-09-16 Bar 모드 자격 중단·자기 복구](2026-09-16-bar-qualification-mode-stop.md) — flow/frequency4receipt, 모드 ACK 뒤 검증 UNKNOWN·원본9controls/384B exact, Pro 서비스 복귀·Bar 배포 대기.
 
 - [2026-09-16 나머지 제어 읽기 전용 사전 확인](2026-09-16-remaining-control-readonly-precheck.md) — MQTT 구독만 수행; Bar/리턴 준비·리턴 전원 실패 후 수동 재가동 필요, 도징 실행기 부재. 추가write/서비스변경0.

@@ -257,7 +257,8 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | Sync 공통 시간표에서 Flow만 다른 세 슬롯이 각각 보고됐는가 | **사용자 기능 수용 기준 PASS — 정확한 입력·동작 반환값 확인 완료 / 전체 시험 정상 종료는 아님** — full432B master97/97·slave97/97 exact, master35→32→38/slave30→40→35 응답. 물리 계측은 수용 조건이 아니며 미실시. windows0·1/충돌1 자동 미달과 exit2/disarm 증명 실패·근본 원인 UNKNOWN은 별개 유지. 원432B/controls 사후2 pair exact, 앱 최종OFF·서비스 복귀 대기. [실행 기록](runs/2026-09-15-native-sync-master-template-flow-only.md) |
 | 최소 write-free read-only collector가 실기 검증됐는가 | PASS — 18/18 pair, 36/36 explicit reply, offline verify PASS |
 | 세 수류모터를 같은 증거 기준으로 read-only 수집할 수 있는가 | **NOT IMPLEMENTED** — 현재 collector와 predicate는 두 Pro 전용이며 가산적 v3가 필요 |
-| 바형 수류모터에 승인된 exact restore 수단이 있는가 | **NOT IMPLEMENTED / WRITE PROHIBITED** — 384-byte schedule snapshot·restore 부재 |
+| 바형 수류모터에 승인된 exact restore 수단이 있는가 | **CONFIRMED — 자기 소유 원본의 TimerOFF·independent 단회 범위 (2026-09-16)** — full-image A/B 뒤 원384B byte-exact 복원 및 원9controls 직접reply 대조. 일반 standalone 복구·모든 조건의 수용은 미주장. [실행 기록](runs/2026-09-16-bar-schedule-qualification.md) |
+| Bar standalone timer ON/OFF와 소유 원본 복원이 성립하는가 | **CONFIRMED — bounded Constant40 단회 (2026-09-16)** — 4send/4ACK·timer receipt2장, TimerOFF·원9controls/384B exact. Auto* 잔여값은 복원 대상 아님, 물리 출력 계측·HA 배포는 별도. [실행 기록](runs/2026-09-16-bar-timer-qualification.md) |
 | 출력·주파수의 장비 유효 endpoint와 step이 검증됐는가 | **UNKNOWN / ENDPOINT WRITE PROHIBITED** — schema 범위와 실제 안전 범위를 동일시하지 않음 |
 | read-only 관측만으로 전체 native mode와 accepted 범위를 확정할 수 있는가 | **NO / OUT OF READ-ONLY SCOPE** — 현재 값·기존 slot 관측과 전체 열거·허용 범위를 구분 |
 | Pro `AutoFeedTime=0`과 profile `1..60` 선언이 정합한가 | **UNKNOWN** — 36/36 raw에서 0, write admission 범위는 별도 승인 없이 완화 금지 |
