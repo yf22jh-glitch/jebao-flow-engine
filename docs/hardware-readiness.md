@@ -267,7 +267,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | (Q2-slotflow) 같은 Mode·경계에서 slave가 자기 슬롯별 `Flow 35→47`을 적용하는가 | **UNKNOWN / 앱-sequence 단회 실행 소진 (2026-09-02)** — 앱과 같은 Sync 단계에서 master·sync-slave 지정, 양쪽 `TimerON`, 장비별 temporary schedule image 보존과 bounded active state를 확인했지만 runtime schedule 소유권은 판별하지 못했고 inactive manual `Mode/Frequency` drift gate가 ASYNC write 전에 중단; [실행 기록](runs/2026-09-02-q2-slotflow-appseq-sync-gate-ced43a9.md) 참조 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |
-| 리턴·도징 actuator가 실기 검증됐는가 | NOT IN CURRENT TEST SCOPE |
+| 리턴·도징 actuator가 실기 검증됐는가 | **미완료 / 활성화 준비 대기** — 리턴 저출력 준비·power 실패 후 수동 재가동 권한이 필요하며 도징 투여 실행기는 아직 없다. [2026-09-16 읽기 전용 확인](runs/2026-09-16-remaining-control-readonly-precheck.md) |
 | 앱 없는 Wi-Fi provisioning과 control-mode reconnect restore가 준비됐는가 | NOT IMPLEMENTED |
 | software-independent Constant31에서 첫 Pro direct32 override 유지와 member resume이 확인됐는가 | **PASS — 이 세 binding의 TimerOFF·bounded 각3 fresh cycle 범위 (2026-09-14)**; record4·Flow2·power0, [실행 기록](runs/2026-09-14-local-group-override-resume-commissioning.md). 다른 조건·경합·M4 전체 완료는 미주장 |
 | software-independent all31에서 group OFF 뒤 OFF-state Flow30→ON과 세 후속 cycle을 완료했는가 | **FAIL — 이 세 binding의 승인된 단회 범위 (2026-09-14)**; OFF rev10 완료, ON 중 Bar Flow UNCERTAIN/rev14로 중단. recovery write4·rev25와 앱 복원·prior 복귀 확인. 원 예외는 UNKNOWN으로 park; [실행 기록](runs/2026-09-14-m4-group-power-commissioning.md). firmware 일반 판정이나 M4 전체 완료는 미주장 |
