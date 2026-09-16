@@ -4318,3 +4318,20 @@ detach 자식 부재를 읽기 전용으로 확인했다. 에이전트는 현재
 이번 첫 복구에는 리턴/Bar/도징 write나 새 Async 재결속을 포함하지 않는다. 후속 Async와
 시간표 재적용은 보존 계획으로 별도 기록하며, 재결속 미완료가 다시 제어를 막을 수 있다는
 기존 계약을 숨기거나 완화하지 않는다. frozen6·protocol·공용 guard·writer 변경은 없다.
+
+### 2026-09-16 소유 복구 후 Pro 제어 자격 갱신
+
+`2b72726`에 자기 원복·직접reply exact·미완료0을 먼저 기록했다. 사용자의 HA 실제 조작 및
+이후 Async/시간표 적용 요청을 잇는 다음 단위는 **두 Pro의 기존 고정9기능 producer 단회**다.
+출력39/40·준비F20·임시시간표·짧은 OFF/ON과 자기 원본 복원, 최대38전진+6원복 logical action
+범위를 실행 전에 공개한다. 다른 장비를 자격 대상으로 넣지 않는다.
+
+이미 전체 Linux3153 tests를 통과한 d792897 제품 source/image와 새3e6 schema를 그대로 사용한다.
+별도 OBSERVER qualification config/manifest와 새 후보 출력 경로를 만들고 기존 운영 config 및
+40영수증은 보존한다. source/child 최종 증거와 자기 원본 복원이 완료된 경우에만 새36receipt를
+발급한다. 실패 시 전진을 반복하지 않고 기존 소유 복구·원본·raw 증거를 우선한다. 새schema에
+유효한 자격이 없는 경우 옛receipt로 새image의 보조 명령을 통과시키지 않는다.
+
+이번 단위에는 새 Sync/Async 결속, 리턴·Bar·도징 write, endpoint 시험, schema/guard 완화가 없다.
+qualification과 제어용 runtime 모드는 별도 입력으로 분리하며, 운영 배포는 새 자격 검증 후
+해당 Pro 기능만 열린 generation을 사용한다. 원 Async 전달UNKNOWN은 계속 보존한다.
