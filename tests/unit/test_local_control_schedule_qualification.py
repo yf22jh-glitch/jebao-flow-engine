@@ -85,7 +85,7 @@ def _fixture(tmp_path, family, sessions, *, reset=False):
 
 
 @pytest.mark.parametrize("family", ["bar", "dc_pro", "aquarium"])
-async def test_schedule_a_b_restore_preserves_opaque_original_and_never_promotes_runtime(
+async def test_schedule_a_b_restore_preserves_opaque_original_and_respects_runtime_promotion(
     tmp_path,
     family,
 ):
@@ -127,7 +127,10 @@ async def test_schedule_a_b_restore_preserves_opaque_original_and_never_promotes
         ),
     )
     descriptor = catalog.find(schema.product_key, "schedule")
-    assert descriptor.stage.value == "qualified" and not descriptor.control_exposed
+    assert descriptor.stage.value == "qualified"
+    # Only Bar has live promotion evidence: 2026-09-16-bar-schedule-qualification.md.
+    # Producer receipts alone must not promote the remaining pump families.
+    assert descriptor.control_exposed is (family == "bar")
     replay = await producer.execute("schedule_qualify_01")
     assert replay.physical_write_count == 0 and resolver.calls == 3 and len(sent) == 3
     changed = json.loads(json.dumps(_plans(family)[1]))
