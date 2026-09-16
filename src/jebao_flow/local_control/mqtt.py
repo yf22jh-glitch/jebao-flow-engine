@@ -240,7 +240,8 @@ class LocalControlMqttRouter:
             str, tuple[HomeAssistantEntityDescriptor, LocalDeviceBinding]
         ] = {}
         if self._native_topic is not None and (
-            native_controller is None or operation_lock is None
+            native_controller is None
+            or operation_lock is None
             or projection.control_surface_diagnostic_reason is not None
         ):
             raise ValueError("native MQTT requires a write runtime and shared operation lock")
@@ -266,7 +267,8 @@ class LocalControlMqttRouter:
         for entity in projection.entities:
             if entity.preview_request_topic is not None:
                 self._preview_routes[entity.preview_request_topic] = (
-                    entity, device_by_member[entity.logical_member]
+                    entity,
+                    device_by_member[entity.logical_member],
                 )
             if entity.schedule_request_topic is not None:
                 target = device_by_member.get(entity.logical_member)
@@ -354,8 +356,12 @@ class LocalControlMqttRouter:
         )
         power_on_requested = (
             isinstance(route, _ScalarRoute)
-            and route.entity.function == "power"
             and value is True
+            and (
+                route.entity.function == "power"
+                or route.target.product_key == "0696a19599bc484f8e1866f5ccf4ee7e"
+                and route.entity.function in {"schedule_enable", "manual_enable"}
+            )
         )
         ownership = (
             None
@@ -392,10 +398,7 @@ class LocalControlMqttRouter:
             )
         if self._ownership_service is not None and power_on_requested and result.accepted:
             await self._ownership_service.note_verified_direct_power_on(logical_member)
-        elif (
-            ownership is not None
-            and ownership.diagnostic_reason == GROUP_FORCED_OFF_WILL_REVERT
-        ):
+        elif ownership is not None and ownership.diagnostic_reason == GROUP_FORCED_OFF_WILL_REVERT:
             ownership = replace(ownership, diagnostic_reason=None)
         return RoutedCommandResult(
             request_id=request_id,
@@ -454,9 +457,15 @@ class LocalControlMqttRouter:
                 raise LocalControlMqttError("native plan requires two current Pro members")
             targets = tuple(self._devices[name] for name in names)
             if operation == "preview":
-                return RoutedNativeResult(request_id, operation, {
-                    **plan.preview(), "hardware_write": False, "device_acceptance": "unverified",
-                })
+                return RoutedNativeResult(
+                    request_id,
+                    operation,
+                    {
+                        **plan.preview(),
+                        "hardware_write": False,
+                        "device_acceptance": "unverified",
+                    },
+                )
             if controller.request_has_no_durable_state(request_id):
                 if not set(names) <= self._native_attach_members:
                     raise LocalControlMqttError(
@@ -465,7 +474,8 @@ class LocalControlMqttRouter:
                 for name in names:
                     if self._ownership_service is not None:
                         decision = await self._ownership_service.claim_direct_ownership(
-                            name, power_on_requested=False,
+                            name,
+                            power_on_requested=False,
                         )
                         if not decision.allowed:
                             raise LocalControlCommandConflictError(
@@ -480,7 +490,9 @@ class LocalControlMqttRouter:
         try:
             if operation == "attach":
                 result = await controller.attach(
-                    request_id=request_id, plan=plan, targets=targets,
+                    request_id=request_id,
+                    plan=plan,
+                    targets=targets,
                     await_operator_observation=request.get("await_operator_observation", False),
                     master_cycle_on_async_failure=request.get(
                         "master_cycle_on_async_failure", False
@@ -523,9 +535,9 @@ class LocalControlMqttRouter:
     def _handle_preview(self, topic: str, payload: bytes | str) -> RoutedNativeResult:
         entity, target = self._preview_routes[topic]
         request = _parse_bounded_json(payload)
-        field = {
-            "device_clock_sync": "local_time", "channel_schedule": "plan"
-        }.get(entity.function, "schedule")
+        field = {"device_clock_sync": "local_time", "channel_schedule": "plan"}.get(
+            entity.function, "schedule"
+        )
         if not isinstance(request, dict) or set(request) != {"request_id", field}:
             raise LocalControlMqttError("preview requires request_id and its declared input")
         try:
@@ -541,7 +553,8 @@ class LocalControlMqttRouter:
                 if not isinstance(value, dict):
                     raise ValueError("schedule must be an object")
                 model = (
-                    WavemakerSchedule if value.get("family") in {"pro", "bar"}
+                    WavemakerSchedule
+                    if value.get("family") in {"pro", "bar"}
                     else ReturnPumpSchedule
                 )
                 plan = model.model_validate(value)
@@ -568,9 +581,7 @@ class LocalControlGroupCommandRouter:
             if entity.command_topic in self._switch_routes:
                 raise ValueError("group MQTT command topic is duplicated")
             self._switch_routes[entity.command_topic] = entity
-        self._resume_routes: dict[
-            str, GroupMemberResumeHomeAssistantEntityDescriptor
-        ] = {}
+        self._resume_routes: dict[str, GroupMemberResumeHomeAssistantEntityDescriptor] = {}
         for entity in projection.group_resume_entities:
             if (
                 entity.command_topic in self._switch_routes
@@ -580,8 +591,7 @@ class LocalControlGroupCommandRouter:
             self._resume_routes[entity.command_topic] = entity
         projected_groups = {entity.group_id for entity in self._switch_routes.values()}
         projected_members = {
-            (entity.group_id, entity.logical_member)
-            for entity in self._resume_routes.values()
+            (entity.group_id, entity.logical_member) for entity in self._resume_routes.values()
         }
         self._inventory_consistent = (
             projected_groups == set(service.qualified_group_ids)
@@ -606,9 +616,7 @@ class LocalControlGroupCommandRouter:
         switch = self._switch_routes.get(topic)
         resume = self._resume_routes.get(topic)
         if switch is None and resume is None:
-            raise LocalControlGroupCommandError(
-                "group_command_topic_not_published"
-            )
+            raise LocalControlGroupCommandError("group_command_topic_not_published")
         requested_on: bool | None = None
         if switch is not None:
             requested_on = _parse_group_switch_value(payload)
@@ -620,11 +628,11 @@ class LocalControlGroupCommandRouter:
             if switch is not None:
                 if requested_on is None:
                     raise AssertionError("group switch parsing must produce a boolean")
-                result: GroupCommandResult | GroupMemberResumeResult = (
-                    await self._service.apply_group_switch(
-                        switch.group_id,
-                        requested_on,
-                    )
+                result: (
+                    GroupCommandResult | GroupMemberResumeResult
+                ) = await self._service.apply_group_switch(
+                    switch.group_id,
+                    requested_on,
                 )
             else:
                 if resume is None:
@@ -673,9 +681,7 @@ class LocalControlMqttAdapter:
                 *projection.group_resume_entities,
             )
         }
-        routed_group_topics = (
-            set() if group_router is None else set(group_router.command_topics)
-        )
+        routed_group_topics = set() if group_router is None else set(group_router.command_topics)
         if projected_group_topics != routed_group_topics:
             raise ValueError("projected group command topics require one group router")
         if set(router.command_topics) & routed_group_topics:
@@ -768,7 +774,8 @@ class LocalControlMqttAdapter:
                             "diagnostic_reason": entity.diagnostic_reason,
                             **(
                                 {"preview_request_topic": entity.preview_request_topic}
-                                if entity.preview_request_topic is not None else {}
+                                if entity.preview_request_topic is not None
+                                else {}
                             ),
                             **(
                                 {"native_wavemaker_api": self._projection.native_wavemaker_api}
@@ -891,18 +898,12 @@ class LocalControlMqttAdapter:
         outputs = group_service.group_output_states()
         by_group = {output.group_id: output for output in outputs}
         expected = {entity.group_id for entity in self._projection.group_entities}
-        expected_controls = {
-            entity.group_id for entity in self._projection.group_control_entities
-        }
+        expected_controls = {entity.group_id for entity in self._projection.group_control_entities}
         expected_resume_groups = {
             entity.group_id for entity in self._projection.group_resume_entities
         }
-        qualified_outputs = {
-            output.group_id for output in outputs if output.command_qualified
-        }
-        router_consistent = (
-            self._group_router is None or self._group_router.inventory_consistent
-        )
+        qualified_outputs = {output.group_id for output in outputs if output.command_qualified}
+        router_consistent = self._group_router is None or self._group_router.inventory_consistent
         if (
             len(by_group) != len(outputs)
             or set(by_group) != expected
@@ -1030,8 +1031,7 @@ class LocalControlMqttAdapter:
                 await self._publish_group_status(client)
                 continue
             await client.publish(
-                f"{self._projection.topic_prefix}/local/requests/"
-                f"{routed.request_id}/result",
+                f"{self._projection.topic_prefix}/local/requests/{routed.request_id}/result",
                 _canonical_json(routed.public_result()),
                 qos=1,
                 retain=False,
@@ -1078,24 +1078,32 @@ class LocalControlMqttAdapter:
             return
         for publication in result.publications:
             payload = publication.payload
-            preview_entity = next((
-                entity for entity in self._projection.entities
-                if entity.state_topic == publication.topic
-                and entity.preview_request_topic is not None
-            ), None)
+            preview_entity = next(
+                (
+                    entity
+                    for entity in self._projection.entities
+                    if entity.state_topic == publication.topic
+                    and entity.preview_request_topic is not None
+                ),
+                None,
+            )
             if preview_entity is not None:
-                payload = _canonical_json({
-                    **json.loads(payload),
-                    "preview_request_topic": preview_entity.preview_request_topic,
-                })
+                payload = _canonical_json(
+                    {
+                        **json.loads(payload),
+                        "preview_request_topic": preview_entity.preview_request_topic,
+                    }
+                )
             if (
                 result.logical_member in self._projection.native_wavemaker_members
                 and publication.topic.endswith("/functions/schedule/state")
             ):
-                payload = _canonical_json({
-                    **json.loads(payload),
-                    "native_wavemaker_api": self._projection.native_wavemaker_api,
-                })
+                payload = _canonical_json(
+                    {
+                        **json.loads(payload),
+                        "native_wavemaker_api": self._projection.native_wavemaker_api,
+                    }
+                )
             schedule_entity = next(
                 (
                     entity
@@ -1197,8 +1205,11 @@ def _parse_wavemaker_request(
         value = envelope["schedule"]
         if not isinstance(value, dict):
             raise ValueError("schedule must be a declared product object")
-        model = (ReturnPumpSchedule if value.get("family") in {"dc_pro", "aquarium"}
-                 else WavemakerSchedule)
+        model = (
+            ReturnPumpSchedule
+            if value.get("family") in {"dc_pro", "aquarium"}
+            else WavemakerSchedule
+        )
         schedule = model.model_validate(value)
         schedule.compile_image()
         intent = LocalControlIntent(

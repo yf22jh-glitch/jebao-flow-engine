@@ -13,10 +13,11 @@ import json
 import os
 import secrets
 import stat
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_serializer, model_validator
 
@@ -67,7 +68,8 @@ class JournalAction(BaseModel):
     baseline_status_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     expected_readback_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     baseline_readback_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    verification_kind: str = Field(pattern=r"^(scalar_fields|schedule_image)$")
+    verification_kind: str = Field(pattern=r"^(scalar_fields|schedule_image|device_clock)$")
+    recovery_policy: Literal["restore_baseline", "observe_clock"] = "restore_baseline"
     restore_on_recovery: StrictBool = True
     native_evidence_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     phase: ActionPhase = ActionPhase.PREPARED
@@ -82,6 +84,10 @@ class JournalAction(BaseModel):
 
     @model_validator(mode="after")
     def validate_recovery_policy(self) -> Self:
+        if (self.recovery_policy == "observe_clock") != (self.verification_kind == "device_clock"):
+            raise ValueError("clock recovery is observation-only")
+        if self.recovery_policy == "observe_clock" and self.function != "device_clock_sync":
+            raise ValueError("clock recovery policy requires a clock action")
         if not self.restore_on_recovery and self.function != "power":
             raise ValueError("only power actions may retain a safer forward state")
         return self
@@ -91,6 +97,8 @@ class JournalAction(BaseModel):
         value = handler(self)
         if self.native_evidence_sha256 is None:
             value.pop("native_evidence_sha256", None)
+        if self.recovery_policy == "restore_baseline":
+            value.pop("recovery_policy", None)
         return value
 
 
@@ -109,6 +117,8 @@ class LocalControlJournalRecord(BaseModel):
     actions: tuple[JournalAction, ...] = Field(min_length=1)
     native_context_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     native_final_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    recovery_order: tuple[int, ...] | None = None
+    recovery_prerequisites: tuple[int, ...] = ()
 
     @model_serializer(mode="wrap")
     def omit_native_defaults(self, handler):
@@ -116,6 +126,10 @@ class LocalControlJournalRecord(BaseModel):
         for name in ("native_context_sha256", "native_final_sha256"):
             if getattr(self, name) is None:
                 value.pop(name, None)
+        if self.recovery_order is None:
+            value.pop("recovery_order", None)
+        if not self.recovery_prerequisites:
+            value.pop("recovery_prerequisites", None)
         return value
 
     @model_validator(mode="after")
@@ -125,6 +139,28 @@ class LocalControlJournalRecord(BaseModel):
         action_ids = [action.action_id for action in self.actions]
         if len(action_ids) != len(set(action_ids)):
             raise ValueError("journal action ids must be unique")
+        clocks = [action.recovery_policy == "observe_clock" for action in self.actions]
+        if any(clocks) and (
+            not all(clocks)
+            or self.native_context_sha256 is not None
+            or self.recovery_order is not None
+        ):
+            raise ValueError("clock operations cannot mix with baseline-restoring actions")
+        if self.recovery_order is not None:
+            if sorted(self.recovery_order) != list(range(len(self.actions))):
+                raise ValueError("recovery order must contain every action exactly once")
+            if self.native_context_sha256 is not None:
+                raise ValueError("native recovery cannot use a generic recovery order")
+        if self.recovery_prerequisites:
+            if self.recovery_order is None or (
+                self.recovery_order[: len(self.recovery_prerequisites)]
+                != self.recovery_prerequisites
+            ):
+                raise ValueError("recovery prerequisites must lead the explicit recovery order")
+            if any(
+                not self.actions[index].restore_on_recovery for index in self.recovery_prerequisites
+            ):
+                raise ValueError("recovery prerequisite must restore its owned baseline")
         if self.phase is TransactionPhase.VERIFIED and any(
             action.phase not in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
             for action in self.actions
@@ -266,6 +302,11 @@ class LocalControlJournalStore:
             raise LocalControlJournalError("journal replacement changed intent identity")
         if replacement.native_context_sha256 != expected.native_context_sha256:
             raise LocalControlJournalError("journal replacement changed native ownership")
+        if (replacement.recovery_order, replacement.recovery_prerequisites) != (
+            expected.recovery_order,
+            expected.recovery_prerequisites,
+        ):
+            raise LocalControlJournalError("journal replacement changed recovery ownership order")
         if replacement.revision != expected.revision + 1:
             raise LocalControlJournalError("journal replacement revision is not consecutive")
         current = self.load(expected.request_id)
@@ -301,6 +342,25 @@ class LocalControlJournalStore:
                 TransactionPhase.ROLLED_BACK,
                 TransactionPhase.SUPERSEDED,
             }
+        )
+
+    def unfinished_for(
+        self, physical_identity_keys: Iterable[str]
+    ) -> tuple[LocalControlJournalRecord, ...]:
+        """Find overlapping recovery ownership, not unrelated devices' history.
+
+        Completed records never gate a new command. An unfinished operation matters only
+        when it owns one of the physical devices about to be changed.
+        """
+
+        keys = frozenset(physical_identity_keys)
+        return tuple(
+            record
+            for record in self.unfinished_records()
+            # A clock command has no restorative writes to conflict with pump control.
+            # Its request id still prevents replay; its uncertain outcome stays visible.
+            if any(action.recovery_policy != "observe_clock" for action in record.actions)
+            if any(action.target.physical_identity_key in keys for action in record.actions)
         )
 
     def records(self) -> tuple[LocalControlJournalRecord, ...]:

@@ -1,5 +1,8 @@
 # Jebao 현재 작업 To-do
 
+> 2026-09-16 등록 장비의 후속 구현은 [장비별 완료 체크리스트](device-completion-checklist.md)를
+> 사용한다. DC 한 대를 먼저 끝내며, 아래 기록은 앞선 milestone 이력을 보존한다.
+
 마지막 갱신: 2026-09-14 16:25 KST
 
 > 이 파일은 진행에 따라 갱신하는 운영 체크리스트이며 `docs/runs/`의 append-only 실기 기록이

@@ -274,8 +274,17 @@ LOCAL_WAVEMAKER_APP = AppProductCatalog(
             "schedule_enable",
             AppFunctionKind.BOOLEAN,
             (
-                "TimerON", "Flow", "Frequency", "Mode", "PulseTide", "Linkage", "FeedSwitch",
-                "AutoMode", "AutoFlow", "AutoFreq", "AutoPulseTide",
+                "TimerON",
+                "Flow",
+                "Frequency",
+                "Mode",
+                "PulseTide",
+                "Linkage",
+                "FeedSwitch",
+                "AutoMode",
+                "AutoFlow",
+                "AutoFreq",
+                "AutoPulseTide",
             ),
             caveat=(
                 "standalone ON seeds Auto fields from the app-local current schedule slot; "
@@ -351,8 +360,15 @@ DC_PUMP_PRO_APP = AppProductCatalog(
             "schedule_enable",
             AppFunctionKind.BOOLEAN,
             ("TimerON", "SwitchON"),
-            confidence=CapabilityConfidence.ACCEPTED_CAPTURE_REQUIRED,
-            caveat="two audited app screens use conflicting SwitchON coupling",
+            caveat="Schedule screen writes TimerON and SwitchON together with the requested value",
+        ),
+        AppFunction(
+            "manual_enable",
+            AppFunctionKind.BOOLEAN,
+            ("TimerON", "SwitchON"),
+            caveat=(
+                "Manual screen writes SwitchON with the requested manual state and inverse TimerON"
+            ),
         ),
         AppFunction(
             "manual_mode",
@@ -392,7 +408,9 @@ DC_PUMP_PRO_APP = AppProductCatalog(
             ),
             count=48,
             item_size=8,
-            caveat="schedule mode codes 1 and 2 conflict across vendor declarations",
+            caveat=(
+                "active dcPro template writes modes constant=0, pulse=1, sine=2, random=3, feed=4"
+            ),
         ),
         AppFunction(
             "current_schedule_state",
@@ -562,6 +580,7 @@ def declared_app_integer_range(product_key: str, function_name: str) -> tuple[in
     ):
         raise ValueError("app function does not declare a complete integer range")
     return function.app_minimum, function.app_maximum
+
 
 APP_SHELL_FUNCTIONS = (
     AppFunction("device_discovery_and_binding", AppFunctionKind.DEVICE_LIFECYCLE),

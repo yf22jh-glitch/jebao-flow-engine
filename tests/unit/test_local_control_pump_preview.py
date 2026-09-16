@@ -54,9 +54,16 @@ def test_dc_schedule_preview_preserves_geometry_and_known_mode_mapping(mode, cod
     assert plan.preview()["wire_send_available"] is False
 
 
-@pytest.mark.parametrize("mode", ["pulse", "sine", "unverified_1", "unverified_2"])
+@pytest.mark.parametrize("mode,code", [("pulse", 1), ("sine", 2)])
+def test_dc_active_template_mode_codes_are_encoded_without_changing_vendor_decoder(mode, code):
+    # dcPro bc20fe3b... active-template Te/Pe and ScheduleDetail save mapping.
+    plan = ReturnPumpSchedule(family="dc_pro", slots=[_slot(mode=mode, flow=35, frequency=20)])
+    assert plan.compile_image()[24:32] == bytes([6, 0, 12, 0, code, 35, 20, 0])
+
+
+@pytest.mark.parametrize("mode", ["unverified_1", "unverified_2"])
 def test_dc_schedule_never_invents_ambiguous_mode_meanings(mode):
-    with pytest.raises(ValueError, match="unverified"):
+    with pytest.raises(ValueError, match="audited app enum"):
         ReturnPumpSchedule(family="dc_pro", slots=[_slot(mode=mode, flow=35)])
 
 

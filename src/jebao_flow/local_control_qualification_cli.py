@@ -69,6 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
             "schedule",
             "schedule_reset",
             "schedule_enable",
+            "manual_enable",
+            "device_clock_sync",
         ),
         default="manual_flow",
         help="frequency/mode: Bar/DC; feeding: Bar/DC/Aquarium; speed: Aquarium; schedule: A/B",
@@ -79,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--preparation-speed",
         type=int,
         help="Aquarium speed/feed-duration only: lower for the trial, then restore owned original",
+    )
+    run.add_argument(
+        "--preparation-flow",
+        type=int,
+        help="DC scalar/timer/schedule: prepare low output and restore the owned original",
     )
     run.add_argument("--schedule-a", type=Path, help="first Bar/DC/Aquarium schedule JSON")
     run.add_argument("--schedule-b", type=Path, help="distinct second schedule JSON")
@@ -131,16 +138,42 @@ def _run(args: argparse.Namespace) -> int:
     if args.config is None:
         raise ValueError("current qualification config is required")
     if args.command == "run":
-        if (args.function == "manual_flow") != (args.downward_step is not None):
+        if args.preparation_flow is not None and args.function not in {
+            "manual_flow",
+            "manual_mode",
+            "manual_frequency",
+            "feeding_duration",
+            "schedule_enable",
+            "manual_enable",
+            "schedule",
+            "schedule_reset",
+        }:
+            raise ValueError(
+                "preparation-flow is only valid for DC scalar/timer/schedule functions"
+            )
+        if args.preparation_flow is not None and args.preparation_speed is not None:
+            raise ValueError("choose one product-specific preparation option")
+        if args.preparation_flow is not None and args.downward_step is not None:
+            raise ValueError("prepared DC qualification chooses its own one-step trial")
+        if args.preparation_flow is None and (args.function == "manual_flow") != (
+            args.downward_step is not None
+        ):
             raise ValueError("downward-step is required only for manual_flow")
-        if (args.function == "schedule_enable") != (args.trial_flow is not None):
+        if (args.function == "schedule_enable" and args.preparation_flow is None) != (
+            args.trial_flow is not None
+        ):
             raise ValueError("trial-flow is required only for Bar schedule_enable")
+        if args.function == "manual_enable" and args.preparation_flow is None:
+            raise ValueError("manual_enable requires DC preparation-flow")
         if args.preparation_speed is not None and args.function not in {
             "motor_speed",
             "feeding_duration",
         }:
             raise ValueError("preparation-speed is only valid for Aquarium speed/feed-duration")
-        if args.function in {"schedule", "schedule_reset"}:
+        if args.function == "schedule_reset" and args.preparation_flow is not None:
+            if args.schedule_a is None or args.schedule_b is not None:
+                raise ValueError("prepared DC reset requires one populated schedule-a image")
+        elif args.function in {"schedule", "schedule_reset"}:
             if args.schedule_a is None or args.schedule_b is None:
                 raise ValueError("schedule qualification requires both explicit A/B images")
         elif args.schedule_a is not None or args.schedule_b is not None:
@@ -176,7 +209,55 @@ def _run(args: argparse.Namespace) -> int:
             lease=LocalControlLease(),
             artifacts=QualificationArtifactStore(args.qualification_output),
         )
-        if args.function == "manual_flow":
+        if args.preparation_flow is not None:
+            from jebao_flow.local_control.dc_prepared_qualification import (
+                DcPreparedScalarQualificationProducer,
+            )
+            from jebao_flow.local_control.dc_program_qualification import (
+                DcProgramQualificationProducer,
+            )
+            from jebao_flow.protocol.schedule import DC_PUMP_PRO_PRODUCT_KEY
+
+            if epoch_source().target.product_key != DC_PUMP_PRO_PRODUCT_KEY:
+                raise ValueError("preparation-flow is only valid for the DC Pump Pro")
+            program = args.function in {
+                "schedule_enable",
+                "manual_enable",
+                "schedule",
+                "schedule_reset",
+            }
+            producer_class = (
+                DcProgramQualificationProducer if program else DcPreparedScalarQualificationProducer
+            )
+            image_arguments = (
+                {
+                    "schedule_a": _read_dc_image(args.schedule_a),
+                    "schedule_b": _read_dc_image(args.schedule_b),
+                }
+                if program
+                else {}
+            )
+            producer = producer_class(
+                function=args.function,
+                writer_factory=configured_writer_factory(load_current_private_config(args.config)),
+                **image_arguments,
+                **producer_arguments,
+            )
+            result = asyncio.run(
+                producer.execute(
+                    args.operation_id,
+                    preparation_flow=args.preparation_flow,
+                )
+            )
+        elif args.function == "device_clock_sync":
+            from jebao_flow.local_control.clock_qualification import DcClockQualificationProducer
+
+            producer = DcClockQualificationProducer(
+                writer_factory=configured_writer_factory(load_current_private_config(args.config)),
+                **producer_arguments,
+            )
+            result = asyncio.run(producer.execute(args.operation_id))
+        elif args.function == "manual_flow":
             producer = ManualFlowQualificationProducer(**producer_arguments)
             result = asyncio.run(
                 producer.execute(args.operation_id, downward_step=args.downward_step)
@@ -254,6 +335,18 @@ def _read_schedule_plan(path: Path) -> object:
     if len(payload) > 65536:
         raise ValueError("schedule input exceeds the bounded request size")
     return json.loads(payload)
+
+
+def _read_dc_image(path: Path | None) -> bytes | None:
+    if path is None:
+        return None
+    from jebao_flow.local_control.pump_preview import ReturnPumpSchedule
+    from jebao_flow.protocol.schedule import DC_PUMP_PRO_PRODUCT_KEY
+
+    schedule = ReturnPumpSchedule.model_validate(_read_schedule_plan(path))
+    if schedule.product_key != DC_PUMP_PRO_PRODUCT_KEY:
+        raise ValueError("DC qualification cannot use another product's schedule")
+    return schedule.compile_image()
 
 
 def _resolver(config_path: Path) -> CurrentEndpointResolver:

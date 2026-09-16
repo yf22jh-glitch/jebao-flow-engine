@@ -11,13 +11,15 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from jebao_flow.config import AppConfig
 from jebao_flow.local_control.bar_timer import prepare_bar_timer_command
 from jebao_flow.local_control.catalog import internal_function_value
+from jebao_flow.local_control.dc_timer import DcTimerScreen, prepare_dc_timer_command
+from jebao_flow.local_control.device_clock import clock_expectation, clock_readback_matches
 from jebao_flow.local_control.lease import LocalControlSendPermit
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.resolver import ResolvedEndpoint
@@ -26,6 +28,7 @@ from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 from jebao_flow.protocol.control import CONTROL_ACTION, build_control_payload
 from jebao_flow.protocol.control_session import GizwitsSession
 from jebao_flow.protocol.profiles import get_product_schema
+from jebao_flow.protocol.schedule import DC_PUMP_PRO_PRODUCT_KEY
 from jebao_flow.protocol.schedule_wire import (
     LOCAL_WAVEMAKER_PRO_CONTROL_FLAGS_SIZE,
     LOCAL_WAVEMAKER_PRO_CONTROL_PAYLOAD_SIZE,
@@ -76,6 +79,8 @@ def configured_writer_factory(
             endpoint,
             bar_timer_local_time=lambda: datetime.now(timezone),
             bar_timer_flow_bounds=(bounds.min_power, bounds.max_power),
+            control_flow_bounds=(bounds.min_power, bounds.max_power),
+            device_local_time=lambda: datetime.now(timezone),
         )
 
     return create
@@ -168,14 +173,21 @@ class PreparedDeviceWrite:
     verification_kind: str
     no_change: bool
     restore_on_recovery: bool = True
+    recovery_policy: str = "restore_baseline"
 
     def __post_init__(self) -> None:
         if not self.forward_payload or self.forward_payload[0] != CONTROL_ACTION:
             raise ValueError("forward payload must be one control action")
         if not self.rollback_payload or self.rollback_payload[0] != CONTROL_ACTION:
             raise ValueError("rollback payload must be one control action")
-        if self.verification_kind not in {"scalar_fields", "schedule_image"}:
+        if self.verification_kind not in {"scalar_fields", "schedule_image", "device_clock"}:
             raise ValueError("prepared write verification kind is unsupported")
+        if self.recovery_policy not in {"restore_baseline", "observe_clock"}:
+            raise ValueError("unsupported recovery policy")
+        if (self.recovery_policy == "observe_clock") != (self.verification_kind == "device_clock"):
+            raise ValueError("clock writes permit observation-only recovery")
+        if self.verification_kind == "device_clock" and self.function != "device_clock_sync":
+            raise ValueError("clock verification belongs only to clock setting")
         if type(self.restore_on_recovery) is not bool:
             raise TypeError("prepared write recovery policy must be boolean")
         power_field = _SCALAR_FIELD_BY_PRODUCT.get(
@@ -208,6 +220,8 @@ class ConnectedDeviceWriter:
         session_factory: SessionFactory = GizwitsSession,
         bar_timer_local_time: Callable[[], datetime] | None = None,
         bar_timer_flow_bounds: tuple[int, int] | None = None,
+        control_flow_bounds: tuple[int, int] | None = None,
+        device_local_time: Callable[[], datetime] | None = None,
     ) -> None:
         self.endpoint = endpoint
         self._session = session_factory(endpoint.address)
@@ -215,6 +229,8 @@ class ConnectedDeviceWriter:
         self._attempted_payloads: set[str] = set()
         self._bar_timer_local_time = bar_timer_local_time
         self._bar_timer_flow_bounds = bar_timer_flow_bounds
+        self._control_flow_bounds = control_flow_bounds
+        self._device_local_time = device_local_time
 
     async def connect_and_read(self) -> bytes:
         if self._connected:
@@ -369,6 +385,13 @@ class ConnectedDeviceWriter:
             return self._prepare_wavemaker_schedule(intent, current_status)
         if intent.function == "schedule_reset":
             return self._prepare_schedule_reset(intent, current_status)
+        if intent.function == "device_clock_sync":
+            return self._prepare_clock(intent, current_status)
+        if intent.target.product_key == DC_PUMP_PRO_PRODUCT_KEY and intent.function in {
+            "schedule_enable",
+            "manual_enable",
+        }:
+            return self._prepare_dc_timer(intent, current_status)
         if (
             intent.target.product_key == "1d8c63eaccac4205b92c84d77d5a08fb"
             and intent.function == "schedule_enable"
@@ -397,9 +420,22 @@ class ConnectedDeviceWriter:
                     "Flow/speed control must stay inside the declared "
                     f"{minimum}..{maximum} app range"
                 )
+            if self._control_flow_bounds is not None:
+                lower, upper = self._control_flow_bounds
+                if not lower <= intent.value <= upper:
+                    raise LocalDeviceWriteError(
+                        f"requested output {intent.value} exceeds configured {lower}..{upper}"
+                    )
 
         schema = get_product_schema(intent.target.product_key)
         values = schema.decode_status(current_status)
+        if (
+            intent.target.product_key == DC_PUMP_PRO_PRODUCT_KEY
+            and intent.function == "power"
+            and intent.value is True
+            and self._control_flow_bounds is not None
+        ):
+            self._require_dc_output_bounds(values, timer_enabled=values["TimerON"])
         internal_value = internal_function_value(
             intent.target.product_key,
             intent.function,
@@ -453,6 +489,93 @@ class ConnectedDeviceWriter:
             # to recreate a less-safe pre-write state.
             restore_on_recovery=not (intent.function == "power" and intent.value is False),
         )
+
+    def _prepare_clock(
+        self, intent: LocalControlIntent, current_status: bytes
+    ) -> PreparedDeviceWrite:
+        if intent.target.product_key != DC_PUMP_PRO_PRODUCT_KEY:
+            raise LocalDeviceWriteError("clock execution is currently scoped to DC Pump Pro")
+        if intent.value is not None or self._device_local_time is None:
+            raise ValueError("clock sync uses the configured local time, with no implicit payload")
+        local_time = self._device_local_time()
+        evidence = clock_expectation(local_time, datetime.now(UTC))
+        payload = build_device_clock_payload(intent.target.product_key, local_time)
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function=intent.function,
+            forward_payload=payload,
+            # Storage compatibility only, not authority to resend this timestamp.
+            # observe_clock recovery never enters the rollback sender.
+            rollback_payload=payload,
+            baseline_status=bytes(current_status),
+            expected_readback=evidence,
+            baseline_readback=evidence,
+            verification_kind="device_clock",
+            recovery_policy="observe_clock",
+            no_change=False,
+        )
+
+    def _prepare_dc_timer(
+        self, intent: LocalControlIntent, current_status: bytes
+    ) -> PreparedDeviceWrite:
+        if type(intent.value) is not bool:
+            raise TypeError("DC operation control requires true or false")
+        screen = (
+            DcTimerScreen.SCHEDULE if intent.function == "schedule_enable" else DcTimerScreen.MANUAL
+        )
+        command = prepare_dc_timer_command(
+            screen=screen,
+            desired_timer_enabled=(
+                intent.value if screen is DcTimerScreen.SCHEDULE else not intent.value
+            ),
+        )
+        schema = get_product_schema(intent.target.product_key)
+        values = schema.decode_status(current_status)
+        expected = dict(command.fields)
+        baseline = {name: values[name] for name in expected}
+        if expected != baseline:
+            # Bounds concern outputs that this command or its owned recovery can enable.
+            # No Mode/Auto/clock equality, fixed initial value, or toggle-only admission.
+            for state in (expected, baseline):
+                if state["SwitchON"]:
+                    self._require_dc_output_bounds(values, timer_enabled=state["TimerON"])
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function=intent.function,
+            forward_payload=build_control_payload(schema, expected),
+            rollback_payload=build_control_payload(schema, baseline),
+            baseline_status=bytes(current_status),
+            expected_readback=_canonical_values(expected),
+            baseline_readback=_canonical_values(baseline),
+            verification_kind="scalar_fields",
+            no_change=expected == baseline,
+        )
+
+    def _require_dc_output_bounds(self, values: Mapping[str, Any], *, timer_enabled: bool) -> None:
+        if self._control_flow_bounds is None:
+            raise LocalDeviceWriteError("DC operation control requires configured output bounds")
+        minimum, maximum = self._control_flow_bounds
+        if timer_enabled:
+            image = b"".join(values[f"AutoTime{index:02d}"] for index in range(48))
+            self._require_dc_image_bounds(image)
+        elif not minimum <= values["Flow"] <= maximum:
+            raise LocalDeviceWriteError(
+                f"DC manual flow {values['Flow']} exceeds {minimum}..{maximum}"
+            )
+
+    def _require_dc_image_bounds(self, image: bytes) -> None:
+        minimum, maximum = self._control_flow_bounds or declared_app_integer_range(
+            DC_PUMP_PRO_PRODUCT_KEY, "manual_flow"
+        )
+        for index in range(48):
+            slot = image[index * 8 : (index + 1) * 8]
+            # Audited app exclusions; no historical Auto or clock equality.
+            if slot == b"\xee" * 8 or not any(slot[:4]) or slot[4] == 4:
+                continue
+            if not minimum <= slot[5] <= maximum:
+                raise LocalDeviceWriteError(
+                    f"DC schedule slot {index} flow {slot[5]} exceeds {minimum}..{maximum}"
+                )
 
     def _prepare_bar_timer(
         self, intent: LocalControlIntent, current_status: bytes
@@ -516,18 +639,29 @@ class ConnectedDeviceWriter:
 
         if not isinstance(intent.value, dict):
             raise ValueError("schedule must be a declared product object")
-        model = (ReturnPumpSchedule if intent.value.get("family") in {"dc_pro", "aquarium"}
-                 else WavemakerSchedule)
+        model = (
+            ReturnPumpSchedule
+            if intent.value.get("family") in {"dc_pro", "aquarium"}
+            else WavemakerSchedule
+        )
         schedule = model.model_validate(intent.value)
         if schedule.product_key != intent.target.product_key:
             raise ValueError("시간표 가족과 실제 대상 장비가 다릅니다")
         values = get_product_schema(intent.target.product_key).decode_status(current_status)
-        if values["TimerON"] or (
-            isinstance(schedule, WavemakerSchedule) and values["Linkage"] != "independent"
+        is_dc = intent.target.product_key == DC_PUMP_PRO_PRODUCT_KEY
+        if not is_dc and (
+            values["TimerON"]
+            or (isinstance(schedule, WavemakerSchedule) and values["Linkage"] != "independent")
         ):
             raise LocalDeviceWriteError("시간표 교체는 독립 상태·TimerOFF에서만 준비합니다")
         baseline = extract_current_schedule_image(intent.target.product_key, current_status)
         desired = schedule.compile_image()
+        if is_dc:
+            # dcPro ScheduleDetail saves slots without turning the timer off. Validate
+            # outputs that can run, rather than imposing a manual-mode prerequisite.
+            self._require_dc_image_bounds(desired)
+            if values["TimerON"] and values["SwitchON"]:
+                self._require_dc_image_bounds(baseline)
         return PreparedDeviceWrite(
             target=self.endpoint,
             function="schedule",
@@ -552,6 +686,10 @@ class ConnectedDeviceWriter:
         baseline = extract_current_schedule_image(intent.target.product_key, current_status)
         geometry = _SCHEDULE_GEOMETRY_BY_PRODUCT[intent.target.product_key]
         desired = bytes([0xEE]) * geometry.image_size
+        if intent.target.product_key == DC_PUMP_PRO_PRODUCT_KEY:
+            values = get_product_schema(intent.target.product_key).decode_status(current_status)
+            if values["TimerON"] and values["SwitchON"]:
+                self._require_dc_image_bounds(baseline)
         return PreparedDeviceWrite(
             target=self.endpoint,
             function="schedule_reset",
@@ -639,11 +777,17 @@ def verify_prepared_readback(prepared: PreparedDeviceWrite, status: bytes) -> bo
         )
     schema = get_product_schema(prepared.target.target.product_key)
     decoded = schema.decode_status(status)
+    if prepared.verification_kind == "device_clock":
+        return clock_readback_matches(
+            prepared.expected_readback, decoded, observed_at=datetime.now(UTC)
+        )
     expected = json.loads(prepared.expected_readback.decode("ascii"))
     return all(decoded.get(name) == value for name, value in expected.items())
 
 
 def verify_prepared_baseline(prepared: PreparedDeviceWrite, status: bytes) -> bool:
+    if prepared.verification_kind == "device_clock":
+        raise LocalDeviceWriteError("clock settings have no historical baseline to restore")
     if prepared.verification_kind == "schedule_image":
         return (
             extract_current_schedule_image(prepared.target.target.product_key, status)

@@ -222,9 +222,7 @@ class LocalControlStateProjector:
             )
             if observed is not None:
                 diagnostic["observed"] = observed
-            publications.append(
-                StatePublication(entity.state_topic, _canonical_json(diagnostic))
-            )
+            publications.append(StatePublication(entity.state_topic, _canonical_json(diagnostic)))
         try:
             power_descriptor = self._catalog.find(target.product_key, "power")
         except KeyError:
@@ -282,8 +280,7 @@ class FreshStatePoller:
                 observations = await self._resolver.observe_many(self._targets)
         except Exception:
             return tuple(
-                _unavailable(target, "current_discovery_unavailable")
-                for target in self._targets
+                _unavailable(target, "current_discovery_unavailable") for target in self._targets
             )
         if not _observations_keep_exact_bindings(observations, self._targets):
             return tuple(
@@ -401,6 +398,14 @@ def _primary_observed_value(
     descriptor: LocalFunctionDescriptor,
     decoded: Mapping[str, object],
 ) -> object | None:
+    if descriptor.product_key == "0696a19599bc484f8e1866f5ccf4ee7e" and descriptor.function in {
+        "schedule_enable",
+        "manual_enable",
+    }:
+        timer, power = decoded.get("TimerON"), decoded.get("SwitchON")
+        if type(timer) is not bool or type(power) is not bool:
+            return None
+        return power and (timer if descriptor.function == "schedule_enable" else not timer)
     for field in descriptor.fields:
         if field in decoded:
             return decoded[field]

@@ -12,7 +12,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 
 from jebao_flow.hardware_safety import qualification_directory
 from jebao_flow.local_control.models import QualificationBinding
@@ -29,7 +37,7 @@ class QualificationStoreError(RuntimeError):
 
 
 class LocalControlQualificationReceipt(BaseModel):
-    """One preserved control intent with both ACK and exact device readback evidence."""
+    """One control intent with ACK and function-specific readback evidence."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -49,9 +57,19 @@ class LocalControlQualificationReceipt(BaseModel):
     readback_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     completed_at: datetime
     outcome: Literal["acknowledged_and_verified"] = "acknowledged_and_verified"
+    verification_kind: Literal["exact_readback", "advancing_clock"] = "exact_readback"
+
+    @model_serializer(mode="wrap")
+    def omit_legacy_default(self, handler):
+        value = handler(self)
+        if self.verification_kind == "exact_readback":
+            value.pop("verification_kind", None)
+        return value
 
     @model_validator(mode="after")
     def validate_public_evidence(self) -> Self:
+        if (self.verification_kind == "advancing_clock") != (self.function == "device_clock_sync"):
+            raise ValueError("clock receipts must declare advancing-clock evidence")
         if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
             raise ValueError("qualification receipt completion time must be timezone-aware")
         for value in (self.app_version, self.firmware_version):
@@ -188,12 +206,15 @@ def qualified_physical_identity_keys(
 
 
 def qualification_receipt_bytes(receipt: LocalControlQualificationReceipt) -> bytes:
-    return json.dumps(
-        receipt.model_dump(mode="json"),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("ascii") + b"\n"
+    return (
+        json.dumps(
+            receipt.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+        + b"\n"
+    )
 
 
 def _read_receipt(path: Path) -> bytes:

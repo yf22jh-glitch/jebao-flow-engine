@@ -907,7 +907,7 @@ async def test_assistance_requires_exact_stalled_shape_and_current_qualification
 
 
 @pytest.mark.asyncio
-async def test_assistance_rejects_unrelated_unfinished_record(tmp_path):
+async def test_assistance_rejects_other_operation_on_the_same_physical_devices(tmp_path):
     rig = Rig(tmp_path)
     child = await _stalled_detach(rig)
     unrelated = child.model_copy(
@@ -919,7 +919,7 @@ async def test_assistance_rejects_unrelated_unfinished_record(tmp_path):
     )
     rig.store.create(unrelated)
     count, reads = len(rig.sent), len(rig.reads)
-    with pytest.raises(LocalControlExecutionError, match="다른 local-control"):
+    with pytest.raises(LocalControlExecutionError, match="이 장비의 미완료 변경"):
         await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
     assert (len(rig.sent), len(rig.reads)) == (count, reads)
 

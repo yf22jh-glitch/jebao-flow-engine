@@ -217,7 +217,7 @@ class BarTimerQualificationProducer(ManualFlowQualificationProducer):
         record: LocalControlJournalRecord | None = None
         writes = 0
         with self._lease.acquire((epoch.target.physical_identity_key,)) as permit:
-            self._require_no_other_unfinished(operation_id)
+            self._require_no_other_unfinished(operation_id, target=epoch.target)
             if self._journal.load(operation_id) is not None:
                 raise QualificationProductionError("bar timer qualification appeared concurrently")
             self._require_epoch(epoch)

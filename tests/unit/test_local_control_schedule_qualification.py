@@ -128,9 +128,9 @@ async def test_schedule_a_b_restore_preserves_opaque_original_and_respects_runti
     )
     descriptor = catalog.find(schema.product_key, "schedule")
     assert descriptor.stage.value == "qualified"
-    # Only Bar has live promotion evidence: 2026-09-16-bar-schedule-qualification.md.
-    # Producer receipts alone must not promote the remaining pump families.
-    assert descriptor.control_exposed is (family == "bar")
+    # DC is implemented for the next qualified deployment; Aquarium is still preview-only.
+    # These fixture receipts test projection, not physical qualification or deployment.
+    assert descriptor.control_exposed is (family in {"bar", "dc_pro"})
     replay = await producer.execute("schedule_qualify_01")
     assert replay.physical_write_count == 0 and resolver.calls == 3 and len(sent) == 3
     changed = json.loads(json.dumps(_plans(family)[1]))
@@ -196,8 +196,8 @@ async def test_schedule_ack_fault_has_no_receipts_no_resend_and_recovers_own_raw
 
 def test_schedule_qualification_rejects_ambiguous_or_unsupported_images_before_io():
     _a, b = _plans("dc_pro")
-    with pytest.raises(ValueError, match="unverified"):
-        parse_qualification_schedule({**b, "slots": [{**b["slots"][0], "mode": "sine"}]})
+    with pytest.raises(ValueError, match="audited app enum"):
+        parse_qualification_schedule({**b, "slots": [{**b["slots"][0], "mode": "unknown"}]})
     with pytest.raises(ValueError, match="only Bar"):
         parse_qualification_schedule({"family": "pro", "slots": []})
 

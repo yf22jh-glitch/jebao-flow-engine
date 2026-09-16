@@ -113,7 +113,7 @@ class ScheduleQualificationProducer(ManualFlowQualificationProducer):
         record = None
         expected_firmware = None
         with self._lease.acquire((epoch.target.physical_identity_key,)) as permit:
-            self._require_no_other_unfinished(operation_id)
+            self._require_no_other_unfinished(operation_id, target=epoch.target)
             if self._journal.load(operation_id) is not None:
                 raise QualificationProductionError("schedule qualification appeared concurrently")
             for index in range(len(self._actions)):

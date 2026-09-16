@@ -626,3 +626,122 @@ def test_timer_cli_wires_explicit_trial_and_configured_writer(monkeypatch, capsy
     assert calls[0]["writer_factory"] is factory
     assert calls[1] == ("bar_timer_cli_01", 40)
     assert "offline_timer_wiring_test" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "function",
+    (
+        "manual_flow",
+        "manual_mode",
+        "manual_frequency",
+        "feeding_duration",
+        "schedule_enable",
+        "manual_enable",
+        "schedule",
+        "schedule_reset",
+        "device_clock_sync",
+    ),
+)
+def test_dc_cli_routes_each_function_with_only_its_required_inputs(tmp_path, monkeypatch, function):
+    import json
+    from types import SimpleNamespace
+
+    from jebao_flow.local_control import (
+        clock_qualification,
+        dc_prepared_qualification,
+        dc_program_qualification,
+    )
+    from tests.unit.test_local_control_dc_prepared_qualification import _binding, _epoch
+
+    calls = []
+
+    class Producer:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        async def execute(self, operation_id, **kwargs):
+            calls.append((operation_id, kwargs))
+            return SimpleNamespace(public_dict=lambda: {"offline": True})
+
+    program = function in {"schedule_enable", "manual_enable", "schedule", "schedule_reset"}
+    module, name = (
+        (clock_qualification, "DcClockQualificationProducer")
+        if function == "device_clock_sync"
+        else (dc_program_qualification, "DcProgramQualificationProducer")
+        if program
+        else (dc_prepared_qualification, "DcPreparedScalarQualificationProducer")
+    )
+    monkeypatch.setattr(module, name, Producer)
+    monkeypatch.setattr(
+        cli, "CurrentQualificationEpochSource", lambda **_: lambda: _epoch(_binding())
+    )
+    monkeypatch.setattr(
+        cli, "load_current_private_config", lambda _: _config(product_key=DC_PUMP_PRO.product_key)
+    )
+    factory = object()
+    monkeypatch.setattr(cli, "configured_writer_factory", lambda _: factory)
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
+    for item in ("LocalControlJournalStore", "LocalControlLease", "QualificationArtifactStore"):
+        monkeypatch.setattr(cli, item, lambda *args, **kwargs: object())
+    arguments = [
+        "run",
+        "--function",
+        function,
+        "--config",
+        "private.yaml",
+        "--target",
+        "dc",
+        "--operation-id",
+        "dc_cli_0001",
+        "--active-template-sha256",
+        "a" * 64,
+        "--template-root",
+        "template",
+        "--qualification-output",
+        "private.json",
+        "--write-enabled",
+    ]
+    if function != "device_clock_sync":
+        arguments.extend(["--preparation-flow", "40"])
+    if function in {"schedule", "schedule_reset"}:
+        for letter, flow in (("a", 40), ("b", 39)):
+            if letter == "b" and function == "schedule_reset":
+                continue
+            path = tmp_path / f"{letter}.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "family": "dc_pro",
+                        "slots": [
+                            {
+                                "slot_index": 0,
+                                "start": "00:00",
+                                "end": "24:00",
+                                "mode": "constant",
+                                "flow": flow,
+                            }
+                        ],
+                    }
+                )
+            )
+            arguments.extend([f"--schedule-{letter}", str(path)])
+    assert cli.main(arguments) == 0
+    assert calls[0]["writer_factory"] is factory
+    assert calls[1] == (
+        "dc_cli_0001",
+        {} if function == "device_clock_sync" else {"preparation_flow": 40},
+    )
+    if function in {"schedule", "schedule_reset"}:
+        assert len(calls[0]["schedule_a"]) == 384
+        assert calls[0]["schedule_a"][5] == 40
+        if function == "schedule_reset":
+            assert calls[0]["schedule_b"] is None
+
+
+def test_dc_image_cli_rejects_another_return_pump_family(tmp_path):
+    import json
+
+    path = tmp_path / "aquarium.json"
+    path.write_text(json.dumps({"family": "aquarium", "slots": []}))
+    with pytest.raises(ValueError, match="another product"):
+        cli._read_dc_image(path)

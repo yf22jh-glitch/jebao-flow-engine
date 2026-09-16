@@ -447,7 +447,7 @@ class ManualFlowQualificationProducer:
         record: LocalControlJournalRecord | None = None
         writes = 0
         with self._lease.acquire((epoch.target.physical_identity_key,)) as permit:
-            self._require_no_other_unfinished(operation_id)
+            self._require_no_other_unfinished(operation_id, target=epoch.target)
             if self._journal.load(operation_id) is not None:
                 raise QualificationProductionError("qualification operation appeared concurrently")
             self._require_epoch(epoch)
@@ -755,8 +755,19 @@ class ManualFlowQualificationProducer:
         try:
             values = get_product_schema(prepared.target.target.product_key).decode_status(status)
             fields = (
-                "SwitchON", "TimerON", "Linkage", "Mode", "Flow", "Frequency", "FeedTime",
-                "PulseTide", "FeedSwitch", "Motor_Speed", "AutoMode", "AutoFlow", "AutoFreq",
+                "SwitchON",
+                "TimerON",
+                "Linkage",
+                "Mode",
+                "Flow",
+                "Frequency",
+                "FeedTime",
+                "PulseTide",
+                "FeedSwitch",
+                "Motor_Speed",
+                "AutoMode",
+                "AutoFlow",
+                "AutoFreq",
             )
             observed = {name: values[name] for name in fields if name in values}
             evidence = {
@@ -973,10 +984,17 @@ class ManualFlowQualificationProducer:
         if self._epoch_provider() != expected:
             raise QualificationProductionError("qualification content epoch changed")
 
-    def _require_no_other_unfinished(self, operation_id: str) -> None:
-        if any(item.request_id != operation_id for item in self._journal.unfinished_records()):
+    def _require_no_other_unfinished(
+        self, operation_id: str, *, target: LocalDeviceBinding | None = None
+    ) -> None:
+        if target is None:
+            target = self._epoch_provider().target
+        if any(
+            item.request_id != operation_id
+            for item in self._journal.unfinished_for((target.physical_identity_key,))
+        ):
             raise QualificationProductionError(
-                "another local-control transaction requires recovery"
+                "this physical device has an unfinished change that requires recovery"
             )
 
     def _require_recovery(self, operation_id: str) -> None:
@@ -1077,9 +1095,7 @@ def _manual_flow_state(
         target.product_key,
         _FUNCTION,
     )
-    probes = profile.state_probes + (
-        ("manual_flow", encoder_minimum, ("Flow",)),
-    )
+    probes = profile.state_probes + (("manual_flow", encoder_minimum, ("Flow",)),)
     for index, (function, value, fields) in enumerate(probes):
         prepared = writer.prepare_scalar(
             LocalControlIntent(
@@ -1123,9 +1139,7 @@ def _manual_flow_family_profile(product_key: str) -> _ManualFlowFamilyProfile:
         manual_flow = catalog.find(product_key, _FUNCTION)
         profile = _MANUAL_FLOW_FAMILY_PROFILES[manual_flow.family]
     except KeyError as error:
-        raise QualificationProductionError(
-            "qualification target family is unsupported"
-        ) from error
+        raise QualificationProductionError("qualification target family is unsupported") from error
     if not manual_flow.encoding_available or manual_flow.fields != ("Flow",):
         raise QualificationProductionError("qualification manual-flow encoder is unavailable")
 

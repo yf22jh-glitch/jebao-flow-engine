@@ -1091,9 +1091,11 @@ class NativeWavemakerController(LocalControlCoordinator):
                 TransactionPhase.ROLLED_BACK,
                 TransactionPhase.SUPERSEDED,
             }:
-                raise LocalControlExecutionError(
-                    "다른 local-control 미완료 기록을 먼저 복구해야 합니다"
-                )
+                if keys.intersection(
+                    action.target.physical_identity_key for action in record.actions
+                ):
+                    raise LocalControlExecutionError("이 장비의 미완료 변경을 먼저 복구해야 합니다")
+                continue
             if record.native_context_sha256 is not None:
                 context = self._context(record)
                 if context.kind != "attach" or not keys.intersection(

@@ -159,7 +159,9 @@ class LocalControlCoordinator:
         self._require_current_qualification(descriptor, endpoint)
 
         with self._lease.acquire((intent.target.physical_identity_key,)) as active_lease:
-            self._require_no_other_unfinished(intent.request_id)
+            self._require_no_other_unfinished(
+                intent.request_id, (intent.target.physical_identity_key,)
+            )
             existing = self._existing_result(intent.request_id, intent_sha256)
             if existing is not None:
                 return existing
@@ -237,9 +239,7 @@ class LocalControlCoordinator:
             endpoint_by_key[key] = endpoint
         if set(endpoint_by_key) != set(batch_physical):
             raise ValueError("current batch endpoints do not match every action target")
-        batch_target_by_key = {
-            item.target.physical_identity_key: item.target for item in targets
-        }
+        batch_target_by_key = {item.target.physical_identity_key: item.target for item in targets}
         if any(
             endpoint_by_key[key].target != target for key, target in batch_target_by_key.items()
         ):
@@ -254,7 +254,7 @@ class LocalControlCoordinator:
                 self._require_current_qualification(descriptor, endpoint)
 
         with self._lease.acquire(lease_physical) as active_lease:
-            self._require_no_other_unfinished(request_id)
+            self._require_no_other_unfinished(request_id, lease_physical)
             existing = self._existing_result(request_id, intent_sha256)
             if existing is not None:
                 return existing
@@ -326,7 +326,7 @@ class LocalControlCoordinator:
 
         physical_keys = tuple(target.physical_identity_key for target in targets)
         with self._lease.acquire(physical_keys) as active_lease:
-            self._require_no_other_unfinished(request_id)
+            self._require_no_other_unfinished(request_id, physical_keys)
             existing = self._existing_result(request_id, intent_sha256)
             if existing is not None:
                 return existing
@@ -412,7 +412,9 @@ class LocalControlCoordinator:
         with self._lease.acquire(
             (master.physical_identity_key, slave.physical_identity_key)
         ) as active_lease:
-            self._require_no_other_unfinished(request_id)
+            self._require_no_other_unfinished(
+                request_id, (master.physical_identity_key, slave.physical_identity_key)
+            )
             existing = self._existing_result(request_id, intent_sha256)
             if existing is not None:
                 return existing
@@ -459,9 +461,14 @@ class LocalControlCoordinator:
                 context = json.loads(self._journal.load_blob(record.native_context_sha256))
                 owner = context["attach_request_id"]
                 # 손상된 blob의 임의 문자열을 운영자 출력으로 올리지 않는다.
-                if isinstance(owner, str) and 8 <= len(owner) <= 128 and all(
-                    character in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
-                    for character in owner
+                if (
+                    isinstance(owner, str)
+                    and 8 <= len(owner) <= 128
+                    and all(
+                        character
+                        in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+                        for character in owner
+                    )
                 ):
                     detach_id = native_detach_request_id(owner)
             except (OSError, RuntimeError, ValueError, TypeError, KeyError):
@@ -478,10 +485,12 @@ class LocalControlCoordinator:
         if record.phase is TransactionPhase.ROLLED_BACK:
             return self._result(record, physical_write_count=0)
 
+        if all(action.recovery_policy == "observe_clock" for action in record.actions):
+            return await self._observe_clock_recovery(record)
+
         unique_targets = tuple(
             {
-                action.target.physical_identity_key: action.target
-                for action in record.actions
+                action.target.physical_identity_key: action.target for action in record.actions
             }.values()
         )
         endpoints = await self._resolver.resolve_many(unique_targets)
@@ -491,15 +500,22 @@ class LocalControlCoordinator:
         keys = tuple(endpoint_by_key)
         writes = 0
         with self._lease.acquire(keys) as active_lease:
-            self._require_no_other_unfinished(request_id)
+            self._require_no_other_unfinished(request_id, keys)
             current_record = self._journal.load(request_id)
             if current_record != record:
                 raise LocalControlExecutionError("journal changed before recovery")
-            for index in reversed(range(len(record.actions))):
+            started = any(
+                action.phase not in {ActionPhase.PREPARED, ActionPhase.NO_CHANGE}
+                for action in record.actions
+            )
+            order = record.recovery_order or tuple(reversed(range(len(record.actions))))
+            for index in order:
                 action = record.actions[index]
                 if action.phase is ActionPhase.NO_CHANGE:
                     continue
-                if action.phase is ActionPhase.PREPARED:
+                if action.phase is ActionPhase.PREPARED and not (
+                    started and index in record.recovery_prerequisites
+                ):
                     record = self._save_action(
                         record,
                         index,
@@ -529,6 +545,23 @@ class LocalControlCoordinator:
                             diagnostic="baseline_already_present",
                         )
                         continue
+                    if action.phase in {
+                        ActionPhase.ROLLBACK_ATTEMPTING,
+                        ActionPhase.ROLLBACK_UNCERTAIN,
+                        ActionPhase.ROLLED_BACK,
+                    }:
+                        observed_digest = self._journal.install_blob(current_status)
+                        record = self._save_action(
+                            record,
+                            index,
+                            phase=action.phase,
+                            diagnostic="rollback_replay_refused." + observed_digest,
+                            transaction_phase=TransactionPhase.RECOVERY_REQUIRED,
+                        )
+                        raise LocalControlExecutionError(
+                            f"previous rollback is {action.phase.value}; current state differs; "
+                            f"it was not resent (status_sha256={observed_digest})"
+                        )
                     record = self._save_action(
                         record,
                         index,
@@ -579,6 +612,54 @@ class LocalControlCoordinator:
             record = self._save_transaction_phase(record, TransactionPhase.ROLLED_BACK)
             return self._result(record, physical_write_count=writes)
 
+    async def _observe_clock_recovery(self, record):
+        """Read-only reconciliation: no retry and no historical clock restoration."""
+        targets = tuple(
+            {
+                action.target.physical_identity_key: action.target for action in record.actions
+            }.values()
+        )
+        endpoints = await self._resolver.resolve_many(targets)
+        by_key = {endpoint.target.physical_identity_key: endpoint for endpoint in endpoints}
+        with self._lease.acquire(tuple(by_key)):
+            if self._journal.load(record.request_id) != record:
+                raise LocalControlExecutionError("clock operation changed before observation")
+            for index, action in enumerate(record.actions):
+                if action.phase is ActionPhase.PREPARED:
+                    record = self._save_action(
+                        record, index, phase=ActionPhase.NO_CHANGE, diagnostic="clock_never_sent"
+                    )
+                    continue
+                if action.phase is ActionPhase.NO_CHANGE:
+                    continue
+                endpoint = by_key[action.target.physical_identity_key]
+                writer = self._writer_factory(endpoint)
+                try:
+                    status = await writer.connect_and_read()
+                    prepared = self._forward_prepared(action, endpoint)
+                    if not verify_prepared_readback(prepared, status):
+                        digest = self._journal.install_blob(status)
+                        record = self._save_action(
+                            record,
+                            index,
+                            phase=ActionPhase.UNCERTAIN,
+                            diagnostic="clock_observed_" + digest,
+                            transaction_phase=TransactionPhase.RECOVERY_REQUIRED,
+                        )
+                        raise LocalControlExecutionError(
+                            "clock setting remains unverified; no clock command was resent"
+                        )
+                    record = self._save_action(
+                        record,
+                        index,
+                        phase=ActionPhase.VERIFIED,
+                        diagnostic="advancing_clock_observed",
+                    )
+                finally:
+                    await writer.close()
+            record = self._save_transaction_phase(record, TransactionPhase.VERIFIED)
+            return self._result(record, physical_write_count=0)
+
     async def _retain_safe_state_or_baseline(
         self,
         record: LocalControlJournalRecord,
@@ -594,9 +675,7 @@ class LocalControlCoordinator:
             current_status = await writer.connect_and_read()
             forward_is_present = verify_prepared_readback(prepared, current_status)
             baseline_is_present = (
-                False
-                if forward_is_present
-                else verify_prepared_baseline(prepared, current_status)
+                False if forward_is_present else verify_prepared_baseline(prepared, current_status)
             )
         except BaseException as error:
             self._save_action(
@@ -741,9 +820,7 @@ class LocalControlCoordinator:
                 "superseded transaction has an unresolved earlier action"
             )
         if any(action.phase is not ActionPhase.PREPARED for action in actions[current_index + 1 :]):
-            raise LocalControlExecutionError(
-                "superseded transaction has an advanced later action"
-            )
+            raise LocalControlExecutionError("superseded transaction has an advanced later action")
         for index in range(current_index, len(actions)):
             action = actions[index]
             actions[index] = JournalAction.model_validate(
@@ -787,6 +864,7 @@ class LocalControlCoordinator:
                     baseline_readback_sha256=self._journal.install_blob(item.baseline_readback),
                     verification_kind=item.verification_kind,
                     restore_on_recovery=item.restore_on_recovery,
+                    recovery_policy=item.recovery_policy,
                 )
             )
         record = LocalControlJournalRecord(
@@ -845,6 +923,8 @@ class LocalControlCoordinator:
         action: JournalAction,
         endpoint: ResolvedEndpoint,
     ) -> PreparedDeviceWrite:
+        if action.recovery_policy == "observe_clock":
+            raise LocalControlExecutionError("clock recovery never constructs a sendable rollback")
         rollback = self._journal.load_blob(action.rollback_payload_sha256)
         return PreparedDeviceWrite(
             target=endpoint,
@@ -876,6 +956,7 @@ class LocalControlCoordinator:
             verification_kind=action.verification_kind,
             no_change=False,
             restore_on_recovery=action.restore_on_recovery,
+            recovery_policy=action.recovery_policy,
         )
 
     def _existing_result(self, request_id: str, intent_sha256: str) -> LocalControlResult | None:
@@ -902,13 +983,13 @@ class LocalControlCoordinator:
 
         return self._journal.load(request_id) is None
 
-    def _require_no_other_unfinished(self, request_id: str) -> None:
+    def _require_no_other_unfinished(self, request_id: str, physical_keys) -> None:
         if any(
             record.request_id != request_id
-            for record in self._journal.unfinished_records()
+            for record in self._journal.unfinished_for(physical_keys)
         ):
             raise LocalControlExecutionError(
-                "another local-control transaction requires terminal recovery"
+                "this physical device has an unfinished change requiring terminal recovery"
             )
 
     def _require_current_qualification(

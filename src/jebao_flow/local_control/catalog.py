@@ -60,6 +60,8 @@ _ENCODABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
     "0696a19599bc484f8e1866f5ccf4ee7e": frozenset(
         {
             "power",
+            "schedule_enable",
+            "manual_enable",
             "manual_mode",
             "manual_flow",
             "manual_frequency",
@@ -125,11 +127,15 @@ _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
     "0696a19599bc484f8e1866f5ccf4ee7e": frozenset(
         {
             "power",
+            "schedule_enable",
+            "manual_enable",
             "manual_mode",
             "manual_flow",
             "manual_frequency",
             "feeding_duration",
             "schedule_reset",
+            "schedule",
+            "device_clock_sync",
         }
     ),
     "6a5c47b3ea364ecb841b47f5997a1775": frozenset(
@@ -139,6 +145,8 @@ _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
 }
 
 _ENGLISH_NAME_BY_PRODUCT_FUNCTION = {
+    ("0696a19599bc484f8e1866f5ccf4ee7e", "schedule_enable"): "Schedule (Controls Power)",
+    ("0696a19599bc484f8e1866f5ccf4ee7e", "manual_enable"): "Manual Operation (Controls Power)",
     (
         "50dbc92221fd4d33ae69a1fedd43b555",
         "schedule_enable",

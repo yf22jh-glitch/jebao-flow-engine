@@ -146,13 +146,9 @@ def test_template_identity_uses_current_content_not_path_or_mtime(
 
     before = hash_current_template_contents((tmp_path / "cache-a", tmp_path / "cache-b"))
     os.utime(first / "index.js", (1, 1))
-    after_mtime = hash_current_template_contents(
-        (tmp_path / "cache-a", tmp_path / "cache-b")
-    )
+    after_mtime = hash_current_template_contents((tmp_path / "cache-a", tmp_path / "cache-b"))
     (second / "index.js").write_bytes(b"new-current-content")
-    after_content = hash_current_template_contents(
-        (tmp_path / "cache-a", tmp_path / "cache-b")
-    )
+    after_content = hash_current_template_contents((tmp_path / "cache-a", tmp_path / "cache-b"))
 
     assert len(before) == 1
     assert after_mtime == before
@@ -197,11 +193,20 @@ def test_protocol_binding_changes_with_schedule_model_range_source(
     assert after != before
 
 
-@pytest.mark.parametrize("compiler", ["wavemaker.py", "pump_preview.py", "bar_timer.py"])
+@pytest.mark.parametrize(
+    "compiler",
+    ["wavemaker.py", "pump_preview.py", "bar_timer.py", "dc_timer.py", "device_clock.py"],
+)
 def test_schema_binding_changes_with_writer_delegated_compiler(tmp_path, monkeypatch, compiler):
     monkeypatch.setattr(install, "__file__", str(tmp_path / "install.py"))
     for name in (
-        "device_writer.py", "schedule.py", "wavemaker.py", "pump_preview.py", "bar_timer.py"
+        "device_writer.py",
+        "schedule.py",
+        "wavemaker.py",
+        "pump_preview.py",
+        "bar_timer.py",
+        "dc_timer.py",
+        "device_clock.py",
     ):
         (tmp_path / name).write_bytes(b"compiler-contract-v1")
     before = install.current_protocol_schema_sha256()

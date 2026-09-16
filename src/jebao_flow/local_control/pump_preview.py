@@ -42,8 +42,8 @@ class ReturnPumpSchedule(BaseModel):
             raise ValueError("return-pump slot indexes must be unique")
         for slot in self.slots:
             if self.family == "dc_pro":
-                if slot.mode not in {"constant", "random", "feed"}:
-                    raise ValueError("DC schedule codes 1/2 are unverified, not pulse/sine aliases")
+                if slot.mode not in {"constant", "pulse", "sine", "random", "feed"}:
+                    raise ValueError("DC schedule mode is not in the audited app enum")
                 if slot.speed is not None:
                     raise ValueError("DC schedules use flow, not Aquarium speed")
                 if slot.flow is None or not (
@@ -79,7 +79,9 @@ class ReturnPumpSchedule(BaseModel):
                 wire = bytes(
                     (
                         *times,
-                        {"constant": 0, "random": 3, "feed": 4}[slot.mode],
+                        # Active dcPro bc20fe3b template: Te/Pe and ScheduleDetail use
+                        # this same enum. This is app encoding, not firmware acceptance.
+                        {"constant": 0, "pulse": 1, "sine": 2, "random": 3, "feed": 4}[slot.mode],
                         slot.flow,
                         slot.frequency,
                         slot.feed_time,
@@ -112,7 +114,7 @@ class ReturnPumpSchedule(BaseModel):
                 if self.family == "dc_pro" and slot.start >= slot.end
             ],
             "unresolved": (
-                ["schedule_mode_codes_1_2", "feeding_accepted_range", "timer_coupling"]
+                ["feeding_accepted_range", "device_write_acceptance"]
                 if self.family == "dc_pro"
                 else ["feeding_zero_byte_behavior", "motor_accepted_range", "timer_coupling"]
             ),
