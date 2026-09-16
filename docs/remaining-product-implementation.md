@@ -120,6 +120,10 @@ jebao-flow-local-qualify run --function schedule_reset --schedule-a empty.json -
 동일한 요청 id·가족/실물 target 대조·coordinator·ownership 경로를 재사용한다. 이는 실행
 승격이 아니며 현재 unqualified DC/Aquarium의 request topic은 생성/구독되지 않는다.
 이 후속의 관련 회귀는 **139 passed**, 최종 전체는 **3141 passed, 같은 5 failed, 2 warnings**다.
+
+이후 사용자의 별도 수정 요청에 따른 반복 실패의 원인·정정·재검증은
+[다섯 테스트 실패 정정](test-baseline-resolution.md)에 기록한다. 위 숫자는 기능 추가 당시
+결과이며, 수정 후 전체 결과와 운영 배포 여부를 대체하지 않는다.
 schema digest는 위 값 그대로다. 같은 로그 디렉터리의 `router-final.log` SHA-256은
 `7ad06af330438401c02b028187374077332a2cc2456fc2a1684667ac0891d2d5`,
 `full-router-final.log`는

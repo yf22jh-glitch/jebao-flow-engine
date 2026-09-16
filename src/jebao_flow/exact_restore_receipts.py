@@ -721,7 +721,7 @@ class ExactRestoreReceiptArchive:
                     raise
                 except OSError as error:
                     raise ExactRestoreReceiptArchiveError(
-                        "cannot acquire exact-restore receipt archive claim"
+                        f"cannot acquire exact-restore receipt archive claim (errno={error.errno})"
                     ) from error
         finally:
             if locked and lock_descriptor >= 0:
@@ -873,12 +873,21 @@ class ExactRestoreReceiptArchive:
             raise ExactRestoreReceiptArchiveError("receipt archive root changed while in use")
 
     def _open_claim_file(self, root_descriptor: int) -> int:
-        flags = os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW
+        flags = os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
         descriptor = -1
         try:
-            descriptor = os.open(_LOCK_NAME, flags, 0o600, dir_fd=root_descriptor)
+            try:
+                # Concurrent non-exclusive O_CREAT opens can return ENOENT on macOS.
+                # Elect one creator; other contenders open the same existing inode.
+                descriptor = os.open(
+                    _LOCK_NAME, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=root_descriptor
+                )
+            except FileExistsError:
+                # Do not recreate a lock that disappeared after the exclusive open:
+                # that could split holders across different inodes.
+                descriptor = os.open(_LOCK_NAME, flags, dir_fd=root_descriptor)
             self._validate_named_file(
                 root_descriptor,
                 descriptor,

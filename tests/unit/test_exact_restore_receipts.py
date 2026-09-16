@@ -1,4 +1,5 @@
 import ast
+import errno
 import hashlib
 import json
 import os
@@ -635,6 +636,78 @@ def test_finalization_reload_confirmation_failure_cannot_precede_success(
     assert archive.confirm_operation_finalization(receipt)["receipt_sha256"] == (
         receipt.receipt_sha256
     )
+
+
+def test_claim_reuses_existing_inode_without_create_on_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _archive(_private_root(tmp_path))
+    with archive._claim():
+        identity = archive.lock_path.stat().st_ino
+    real_open = os.open
+    lock_flags: list[int] = []
+
+    def track_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if path == archive.lock_path.name:
+            lock_flags.append(flags)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", track_open)
+    with archive._claim():
+        assert archive.lock_path.stat().st_ino == identity
+    assert len(lock_flags) == 2
+    assert lock_flags[0] & os.O_CREAT and lock_flags[0] & os.O_EXCL
+    assert not lock_flags[1] & os.O_CREAT
+    assert all(flags & os.O_NOFOLLOW for flags in lock_flags)
+
+
+def test_claim_does_not_recreate_lock_disappearing_before_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = _archive(_private_root(tmp_path))
+    with archive._claim():
+        pass
+    real_open = os.open
+    lock_open_count = 0
+
+    def remove_before_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal lock_open_count
+        if path == archive.lock_path.name:
+            lock_open_count += 1
+            if not flags & os.O_CREAT:
+                archive.lock_path.unlink()
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", remove_before_open)
+    receipt = _receipt()
+    with pytest.raises(ExactRestoreReceiptArchiveError, match=f"errno={errno.ENOENT}"):
+        archive.persist_final_verified_receipt(receipt)
+    assert lock_open_count == 2
+    assert not archive.lock_path.exists()
+    assert not archive.path_for_receipt(receipt.receipt_sha256).exists()
+    assert not archive.path_for_operation_finalization(receipt.operation_id).exists()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode"])
+def test_existing_unsafe_claim_file_is_rejected(tmp_path: Path, unsafe_kind: str) -> None:
+    root = _private_root(tmp_path)
+    archive = _archive(root)
+    target = root / "untouched"
+    _write_private(target, b"unchanged")
+    if unsafe_kind == "symlink":
+        archive.lock_path.symlink_to(target)
+    else:
+        _write_private(archive.lock_path, b"")
+        archive.lock_path.chmod(0o644)
+    receipt = _receipt()
+
+    with pytest.raises(ExactRestoreReceiptArchiveError):
+        archive.persist_final_verified_receipt(receipt)
+    assert target.read_bytes() == b"unchanged"
+    assert not archive.path_for_receipt(receipt.receipt_sha256).exists()
+    assert not archive.path_for_operation_finalization(receipt.operation_id).exists()
 
 
 def test_concurrent_same_receipt_contenders_converge_to_same_exact_success(

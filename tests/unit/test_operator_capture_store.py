@@ -214,6 +214,7 @@ def test_verifier_rejects_tampered_complete_event(tmp_path: Path) -> None:
 def test_private_directory_mode_is_required(tmp_path: Path) -> None:
     root = tmp_path / "too-open"
     root.mkdir(mode=0o755)
+    root.chmod(0o755)  # Exercise unsafe metadata even when the process umask is 077.
 
     with pytest.raises(CaptureStoreError, match="mode 0700"):
         DurableCaptureSession(

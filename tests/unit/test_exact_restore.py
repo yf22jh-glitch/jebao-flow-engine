@@ -3080,18 +3080,34 @@ async def test_qualified_baseline_can_stage_and_complete_one_distinct_phase5_res
     assert replay_refusal.value.code is ExactRestoreErrorCode.AUTHORITY
 
 
-def test_public_boot_identity_and_suspend_inclusive_clock_are_controller_defaults(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_public_boot_identity_and_suspend_inclusive_clock_are_controller_defaults() -> None:
     parameters = inspect.signature(ExactRestoreController.__init__).parameters
     assert parameters["boot_identity"].default is system_boot_identity_sha256
     assert parameters["monotonic_clock"].default is system_boottime_ns
-    assert len(system_boot_identity_sha256()) == 64
-    assert system_boottime_ns() >= 0
 
-    monkeypatch.delattr(time, "CLOCK_BOOTTIME")
+
+def test_suspend_inclusive_clock_fails_closed_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(time, "CLOCK_BOOTTIME", raising=False)
     with pytest.raises(RuntimeError, match="suspend-inclusive"):
         system_boottime_ns()
+
+
+def test_boot_identity_fails_closed_when_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("injected missing boot identity")
+
+    monkeypatch.setattr(exact_restore_module, "open", unavailable, raising=False)
+    with pytest.raises(RuntimeError, match="boot identity is unavailable"):
+        system_boot_identity_sha256()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux boot ID and CLOCK_BOOTTIME")
+def test_linux_boot_identity_and_suspend_inclusive_clock() -> None:
+    assert len(system_boot_identity_sha256()) == 64
+    assert system_boot_identity_sha256() == system_boot_identity_sha256()
+    assert system_boottime_ns() >= 0
 
 
 def test_importing_exact_restore_does_not_load_frozen_async_harness_modules() -> None:

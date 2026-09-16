@@ -352,6 +352,7 @@ def test_missing_receipt_and_unsafe_output_metadata_fail_closed(tmp_path: Path) 
 
     unsafe_parent = tmp_path / "unsafe"
     unsafe_parent.mkdir(mode=0o755)
+    unsafe_parent.chmod(0o755)  # mkdir's requested mode is filtered by the process umask.
     with pytest.raises(QualificationSetMergeError, match="directory metadata"):
         QualificationSetMerger.for_test(root, unsafe_parent / "set.json")
 
