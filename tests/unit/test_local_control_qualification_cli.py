@@ -260,3 +260,50 @@ def test_cli_redacts_unexpected_operation_errors(monkeypatch, capsys) -> None:
     assert output.out == ""
     assert output.err == "jebao-flow-local-qualify: current_operation_failed_closed\n"
     assert private_value not in output.err
+
+
+@pytest.mark.parametrize("function", ["manual_frequency", "manual_mode"])
+def test_bar_cli_without_opt_in_never_opens_runtime(function, monkeypatch, capsys):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("no live or durable access before explicit opt-in")
+
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", forbidden)
+    monkeypatch.setattr(cli, "CurrentQualificationEpochSource", forbidden)
+    assert cli.main([
+        "run", "--function", function, "--config", "private.yaml",
+        "--target", "bar", "--operation-id", "bar_cli_0001",
+        "--active-template-sha256", "a" * 64,
+        "--qualification-output", "private.json",
+    ]) == 2
+    assert "current_operation_failed_closed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("function", ["manual_frequency", "manual_mode"])
+def test_bar_cli_delegates_to_product_producer(function, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    calls = []
+
+    class Producer:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        async def execute(self, operation_id):
+            calls.append(operation_id)
+            return SimpleNamespace(public_dict=lambda: {"offline_wiring_test": True})
+
+    monkeypatch.setattr(cli, "BarScalarQualificationProducer", Producer)
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
+    for name in ("CurrentQualificationEpochSource", "LocalControlJournalStore",
+                 "LocalControlLease", "QualificationArtifactStore"):
+        monkeypatch.setattr(cli, name, lambda *args, **kwargs: object())
+    assert cli.main([
+        "run", "--function", function, "--config", "private.yaml",
+        "--target", "bar", "--operation-id", "bar_cli_0001",
+        "--active-template-sha256", "a" * 64,
+        "--template-root", "private-template", "--qualification-output", "private.json",
+        "--write-enabled",
+    ]) == 0
+    assert calls[0]["function"] == function
+    assert calls[1] == "bar_cli_0001"
+    assert "offline_wiring_test" in capsys.readouterr().out

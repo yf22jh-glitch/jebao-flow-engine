@@ -88,6 +88,16 @@ def build_parser() -> argparse.ArgumentParser:
     wavemaker.add_argument("--file", type=Path, required=True)
     wavemaker.add_argument("--native", action="store_true", help="Pro Sync/Async 상속 계획")
 
+    return_pump = subparsers.add_parser(
+        "plan-return-pump", help="리턴펌프의 확인된 슬롯 형식을 장비 접근 없이 미리 봅니다"
+    )
+    return_pump.add_argument("--file", type=Path, required=True)
+    clock_preview = subparsers.add_parser(
+        "plan-device-clock", help="장비 시각 명령을 전송 없이 미리 봅니다"
+    )
+    clock_preview.add_argument("--product-key", required=True)
+    clock_preview.add_argument("--local-time", required=True, help="UTC offset 포함 ISO 시각")
+
     schedule_apply = subparsers.add_parser(
         "apply-wavemaker-schedule", help="자격이 있는 Pro의 독립·TimerOFF 시간표를 교체합니다"
     )
@@ -274,6 +284,16 @@ def _add_install_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "plan-return-pump":
+        from jebao_flow.local_control.pump_preview import ReturnPumpSchedule
+
+        _print_json(ReturnPumpSchedule.model_validate_json(args.file.read_bytes()).preview())
+        return 0
+    if args.command == "plan-device-clock":
+        from jebao_flow.local_control.pump_preview import preview_device_clock
+
+        _print_json(preview_device_clock(args.product_key, datetime.fromisoformat(args.local_time)))
+        return 0
     if args.command in {
         "attach-wavemaker",
         "detach-wavemaker",
@@ -492,6 +512,8 @@ def _run(args: argparse.Namespace) -> int:
             schedule_plans=schedule_plans,
             groups=prepared.config.groups,
             control_surface_enabled=control_surface_enabled,
+            native_lifecycle_enabled=runtime_write_enabled,
+            preview_requests_enabled=True,
         )
         if args.command == "ha-schema":
             _print_json(projection.public_dict())
@@ -518,6 +540,10 @@ def _run(args: argparse.Namespace) -> int:
             coordinator=coordinator,
             operation_lock=operation_lock,
             ownership_service=group_service,
+            native_controller=(
+                _native_coordinator(prepared.config, catalog)
+                if projection.native_request_topic is not None else None
+            ),
         )
         group_router = (
             LocalControlGroupCommandRouter(
@@ -861,6 +887,7 @@ def _require_live_opt_in(args, config, projection) -> None:
         for entity in projection.entities
         if entity.control_available or entity.schedule_request_topic is not None
     }
+    controlled_members.update(projection.native_wavemaker_members)
     if not controlled_members:
         return
     if not args.write_enabled:

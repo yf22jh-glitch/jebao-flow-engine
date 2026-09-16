@@ -2,7 +2,8 @@
 
 2026-09-16 소프트웨어 연결. 기존 `WavemakerSchedule` compiler와
 `LocalControlCoordinator.execute()`를 그대로 사용한다. 새 펌웨어 동작·실장 자격·운영 배포를
-주장하지 않으며, native Sync/Async lifecycle MQTT 연결과 시각적인 슬롯 편집기는 아직 별도다.
+주장하지 않는다. 후속 native Sync/Async lifecycle MQTT 연결과 미자격 장비의 읽기 전용
+preview는 [펌프 MQTT API](pump-mqtt-apis.md)에 정리했다. 시각적인 슬롯 편집기는 별도다.
 
 ## 노출 조건과 HA 표면
 
@@ -55,7 +56,8 @@ JSON 중복 key와 알 수 없는 필드는 거부한다. `request_id`는 기존
 `preview`는 compiler의 정규화된 slots, image 길이와 SHA-256을 반환한다. endpoint resolve,
 장비 접속·read/write, journal 생성, 그룹 소유권 변경은 없다. 결과는
 `hardware_write: false`, `device_acceptance: unverified`다. 현재 장비와의 diff나 실행 가능 여부를
-검증한 것이 아니다. observer/미자격 설치는 이 MQTT 경로가 없으며 기존 CLI preview를 사용한다.
+검증한 것이 아니다. observer/미자격 설치는 이 apply 가능한 `/request` 경로가 없으며 기존
+CLI 또는 후속 읽기 전용 `/preview` 경로를 사용한다.
 
 ## 적용·수정·삭제
 
@@ -146,6 +148,7 @@ Orca Agent Bridge로 Claude가 HA/MQTT를 읽기 전용 정적 검토한 결과 
 `group_supervisor.claim_manual_ownership()`에서 `power_on_requested=True`일 때만 결정에 담긴다.
 새 schedule 경로는 False를 전달하므로 현재 production 경로의 추가 clear 로직은 넣지 않았다.
 
-미완료: 시각적 슬롯 편집기, native attach/detach와 소유 복구의 HA/MQTT 연결,
-Bar 미자격 기능의 producer/복원 계약, Bar Timer 복합 명령·clock sync 실행 의미,
-현재 운영 미완료 source의 해결 및 배포. 이 API 추가로 전체 제품 완성을 선언하지 않는다.
+위 검증 당시 미완료였던 native HA/MQTT 연결과 일부 Bar producer의 후속 소프트웨어 구현은
+[남은 기능 작업 기록](wavemaker-remaining-functions.md)에 있다. 시각적 슬롯 편집기,
+Bar 나머지 자격·Timer 복합 명령·clock sync 실행 의미, 운영 미완료 source의 해결과 배포는
+여전히 별도다. 이 API 추가로 전체 제품 완성을 선언하지 않는다.

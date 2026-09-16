@@ -159,6 +159,7 @@ def _fresh_power(left: bool, right: bool | None):
 class _DirectRouter:
     def __init__(self, command_topics=()) -> None:
         self.command_topics = tuple(command_topics)
+        self.request_topics = self.command_topics
         self.calls = []
 
     async def handle(self, topic, payload):

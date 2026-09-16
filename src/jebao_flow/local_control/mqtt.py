@@ -12,6 +12,7 @@ import asyncio
 import json
 import secrets
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Protocol
 
 import aiomqtt
@@ -40,9 +41,11 @@ from jebao_flow.local_control.models import (
     LocalControlIntent,
     LocalDeviceBinding,
 )
+from jebao_flow.local_control.pump_preview import ReturnPumpSchedule, preview_device_clock
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan
 from jebao_flow.local_control.state import FreshDeviceState, FreshStatePoller
-from jebao_flow.local_control.wavemaker import WavemakerSchedule
+from jebao_flow.local_control.wavemaker import NativeWavemakerPlan, WavemakerSchedule
+from jebao_flow.local_control.wavemaker_lifecycle import NativeWavemakerController
 
 
 class LocalControlMqttError(RuntimeError):
@@ -162,6 +165,22 @@ class RoutedSchedulePreview:
 
 
 @dataclass(frozen=True, slots=True)
+class RoutedNativeResult:
+    request_id: str
+    operation: str
+    result: dict[str, object]
+    failed: bool = False
+
+    def public_result(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "operation": self.operation,
+            "status": "failed" if self.failed else "result",
+            "result": self.result,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RoutedGroupCommandResult:
     """One MQTT request id and the bounded group-service result it names."""
 
@@ -206,10 +225,24 @@ class LocalControlMqttRouter:
         coordinator: LocalControlCoordinator | None,
         operation_lock: asyncio.Lock | None = None,
         ownership_service: DirectControlOwnershipService | None = None,
+        native_controller: NativeWavemakerController | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._operation_lock = operation_lock
         self._ownership_service = ownership_service
+        self._native_controller = native_controller
+        self._native_topic = projection.native_request_topic
+        self._native_members = frozenset(projection.native_wavemaker_members)
+        self._native_attach_members = frozenset(projection.native_attach_members)
+        self._devices = {device.logical_member: device for device in manifest.devices}
+        self._preview_routes: dict[
+            str, tuple[HomeAssistantEntityDescriptor, LocalDeviceBinding]
+        ] = {}
+        if self._native_topic is not None and (
+            native_controller is None or operation_lock is None
+            or projection.control_surface_diagnostic_reason is not None
+        ):
+            raise ValueError("native MQTT requires a write runtime and shared operation lock")
         if ownership_service is not None and (
             operation_lock is None or ownership_service.operation_lock is not operation_lock
         ):
@@ -230,6 +263,10 @@ class LocalControlMqttRouter:
                     plans_by_topic[topic] = (plan, slave_index)
 
         for entity in projection.entities:
+            if entity.preview_request_topic is not None:
+                self._preview_routes[entity.preview_request_topic] = (
+                    entity, device_by_member[entity.logical_member]
+                )
             if entity.schedule_request_topic is not None:
                 target = device_by_member.get(entity.logical_member)
                 if target is None:
@@ -272,11 +309,19 @@ class LocalControlMqttRouter:
 
     @property
     def command_topics(self) -> tuple[str, ...]:
-        return tuple(sorted(self._routes))
+        topics = set(self._routes)
+        if self._native_topic is not None:
+            topics.add(self._native_topic)
+        return tuple(sorted(topics))
+
+    @property
+    def request_topics(self) -> tuple[str, ...]:
+        """All subscriptions, including write-free preview requests in observer mode."""
+        return tuple(sorted((*self.command_topics, *self._preview_routes)))
 
     async def handle(
         self, topic: str, payload: bytes | str
-    ) -> RoutedCommandResult | RoutedSchedulePreview:
+    ) -> RoutedCommandResult | RoutedSchedulePreview | RoutedNativeResult:
         if self._operation_lock is None:
             return await self._handle(topic, payload)
         async with self._operation_lock:
@@ -284,7 +329,11 @@ class LocalControlMqttRouter:
 
     async def _handle(
         self, topic: str, payload: bytes | str
-    ) -> RoutedCommandResult | RoutedSchedulePreview:
+    ) -> RoutedCommandResult | RoutedSchedulePreview | RoutedNativeResult:
+        if topic in self._preview_routes:
+            return self._handle_preview(topic, payload)
+        if self._native_topic is not None and topic == self._native_topic:
+            return await self._handle_native(payload)
         coordinator = self._coordinator
         if coordinator is None:
             raise LocalControlMqttError("read-only MQTT runtime has no command executor")
@@ -383,6 +432,120 @@ class LocalControlMqttRouter:
         result = await coordinator.execute(intent)
         # Even VERIFIED may be historical replay. Never turn the supplied image into live state.
         return RoutedCommandResult(intent.request_id, None, None, result, ownership)
+
+    async def _handle_native(self, payload: bytes | str) -> RoutedNativeResult:
+        controller = self._native_controller
+        if controller is None:
+            raise LocalControlMqttError("native controller is unavailable")
+        request = _parse_native_request(payload)
+        request_id, operation = request["request_id"], request["operation"]
+        record_id = request_id
+        if operation in {"preview", "attach"}:
+            plan = NativeWavemakerPlan.model_validate(request["plan"])
+            plan.compile_images()
+            if plan.mode != "async" and (
+                request.get("await_operator_observation", False)
+                or request.get("master_cycle_on_async_failure", False)
+            ):
+                raise LocalControlMqttError("observation and master cycle options require Async")
+            names = (plan.master, *(slave.logical_member for slave in plan.slaves))
+            if len(names) != 2 or not set(names) <= self._native_members:
+                raise LocalControlMqttError("native plan requires two current Pro members")
+            targets = tuple(self._devices[name] for name in names)
+            if operation == "preview":
+                return RoutedNativeResult(request_id, operation, {
+                    **plan.preview(), "hardware_write": False, "device_acceptance": "unverified",
+                })
+            if controller.request_has_no_durable_state(request_id):
+                if not set(names) <= self._native_attach_members:
+                    raise LocalControlMqttError(
+                        "native attach requires each member's current qualifications"
+                    )
+                for name in names:
+                    if self._ownership_service is not None:
+                        decision = await self._ownership_service.claim_direct_ownership(
+                            name, power_on_requested=False,
+                        )
+                        if not decision.allowed:
+                            raise LocalControlCommandConflictError(
+                                decision.diagnostic_reason or "native_ownership_rejected"
+                            )
+        else:
+            record_id = request["attachment_id" if operation == "detach" else "record_id"]
+            targets = self._native_targets_for(record_id)
+            if operation == "status":
+                return RoutedNativeResult(request_id, operation, controller.status(record_id))
+
+        try:
+            if operation == "attach":
+                result = await controller.attach(
+                    request_id=request_id, plan=plan, targets=targets,
+                    await_operator_observation=request.get("await_operator_observation", False),
+                    master_cycle_on_async_failure=request.get(
+                        "master_cycle_on_async_failure", False
+                    ),
+                )
+            elif operation == "detach":
+                result = await controller.detach(attachment_id=record_id, targets=targets)
+            elif operation == "assist_detach":
+                result = await controller.assist_detach(request_id=record_id, targets=targets)
+            elif operation == "cycle_master":
+                result = await controller.cycle_master(request_id=record_id, targets=targets)
+            else:
+                result = await controller.recover_native(request_id=record_id, targets=targets)
+        except (OSError, RuntimeError, ValueError):
+            # Keep the durable diagnostic, not an exception string or an optimistic success.
+            try:
+                self._native_targets_for(record_id)
+                result = controller.status(record_id)
+            except (KeyError, OSError, RuntimeError, ValueError):
+                result = {"diagnostic_reason": "native_operation_failed_no_readable_record"}
+            return RoutedNativeResult(request_id, operation, result, failed=True)
+        return RoutedNativeResult(request_id, operation, result)
+
+    def _native_targets_for(self, record_id: str) -> tuple[LocalDeviceBinding, ...]:
+        controller = self._native_controller
+        if controller is None:
+            raise LocalControlMqttError("native controller is unavailable")
+        saved = controller.targets_for(record_id)
+        if any(target.logical_member not in self._native_members for target in saved):
+            raise LocalControlMqttError("native record is outside the current Pro inventory")
+        targets = tuple(self._devices[target.logical_member] for target in saved)
+        if any(
+            (old.product_key, old.physical_identity_key, old.logical_role)
+            != (new.product_key, new.physical_identity_key, new.logical_role)
+            for old, new in zip(saved, targets, strict=True)
+        ):
+            raise LocalControlMqttError("native record does not match current stable bindings")
+        return targets
+
+    def _handle_preview(self, topic: str, payload: bytes | str) -> RoutedNativeResult:
+        entity, target = self._preview_routes[topic]
+        request = _parse_bounded_json(payload)
+        field = "local_time" if entity.function == "device_clock_sync" else "schedule"
+        if not isinstance(request, dict) or set(request) != {"request_id", field}:
+            raise LocalControlMqttError("preview requires request_id and its declared input")
+        try:
+            request_id = LocalControlIntent.validate_request_id(request["request_id"])
+            if field == "local_time":
+                result = preview_device_clock(
+                    target.product_key, datetime.fromisoformat(request["local_time"])
+                )
+            else:
+                value = request["schedule"]
+                if not isinstance(value, dict):
+                    raise ValueError("schedule must be an object")
+                model = (
+                    WavemakerSchedule if value.get("family") in {"pro", "bar"}
+                    else ReturnPumpSchedule
+                )
+                plan = model.model_validate(value)
+                if plan.product_key != target.product_key:
+                    raise ValueError("preview family differs from current product")
+                result = plan.preview()
+        except (TypeError, ValueError) as error:
+            raise LocalControlMqttError("preview violates the declared product contract") from error
+        return RoutedNativeResult(request_id, "preview", result)
 
 
 class LocalControlGroupCommandRouter:
@@ -576,7 +739,7 @@ class LocalControlMqttAdapter:
             for topic in self._projection.discovery_tombstone_topics():
                 await client.publish(topic, b"", qos=1, retain=True)
             group_topics = () if self._group_router is None else self._group_router.command_topics
-            for topic in (*self._router.command_topics, *group_topics):
+            for topic in (*self._router.request_topics, *group_topics):
                 # At-most-once command delivery is intentional: losing one command is safer than
                 # a broker replay applying an old value after a newer physical operation.
                 await client.subscribe(topic, qos=COMMAND_QOS)
@@ -598,6 +761,17 @@ class LocalControlMqttAdapter:
                             "control_available": False,
                             "function": entity.function,
                             "diagnostic_reason": entity.diagnostic_reason,
+                            **(
+                                {"preview_request_topic": entity.preview_request_topic}
+                                if entity.preview_request_topic is not None else {}
+                            ),
+                            **(
+                                {"native_wavemaker_api": self._projection.native_wavemaker_api}
+                                if entity.function == "schedule"
+                                and entity.logical_member
+                                in self._projection.native_wavemaker_members
+                                else {}
+                            ),
                             **(
                                 {"schedule_request_topic": entity.schedule_request_topic}
                                 if entity.schedule_request_topic is not None
@@ -857,6 +1031,9 @@ class LocalControlMqttAdapter:
                 qos=1,
                 retain=False,
             )
+            if isinstance(routed, RoutedNativeResult):
+                await self._publish_group_status(client)
+                continue
             if isinstance(routed, RoutedSchedulePreview):
                 continue
             if (
@@ -896,6 +1073,24 @@ class LocalControlMqttAdapter:
             return
         for publication in result.publications:
             payload = publication.payload
+            preview_entity = next((
+                entity for entity in self._projection.entities
+                if entity.state_topic == publication.topic
+                and entity.preview_request_topic is not None
+            ), None)
+            if preview_entity is not None:
+                payload = _canonical_json({
+                    **json.loads(payload),
+                    "preview_request_topic": preview_entity.preview_request_topic,
+                })
+            if (
+                result.logical_member in self._projection.native_wavemaker_members
+                and publication.topic.endswith("/functions/schedule/state")
+            ):
+                payload = _canonical_json({
+                    **json.loads(payload),
+                    "native_wavemaker_api": self._projection.native_wavemaker_api,
+                })
             schedule_entity = next(
                 (
                     entity
@@ -929,12 +1124,7 @@ class LocalControlMqttAdapter:
         )
 
 
-def _parse_wavemaker_request(
-    target: LocalDeviceBinding,
-    payload: bytes | str,
-) -> tuple[str, LocalControlIntent, WavemakerSchedule]:
-    """Validate the whole message before ownership changes or any device I/O."""
-
+def _parse_bounded_json(payload: bytes | str) -> object:
     try:
         text = payload.decode("ascii") if isinstance(payload, bytes) else payload
     except UnicodeDecodeError as error:
@@ -951,9 +1141,48 @@ def _parse_wavemaker_request(
         return result
 
     try:
-        envelope = json.loads(text, object_pairs_hook=unique_fields)
+        return json.loads(text, object_pairs_hook=unique_fields)
     except (ValueError, RecursionError) as error:
         raise LocalControlMqttError("schedule request must be valid JSON") from error
+
+
+def _parse_native_request(payload: bytes | str) -> dict:
+    request = _parse_bounded_json(payload)
+    if not isinstance(request, dict) or not {"request_id", "operation"} <= request.keys():
+        raise LocalControlMqttError("native request requires operation and request_id")
+    operation = request["operation"]
+    required = {"request_id", "operation"}
+    optional = set()
+    if operation in ("preview", "attach"):
+        required.add("plan")
+        if operation == "attach":
+            optional = {"await_operator_observation", "master_cycle_on_async_failure"}
+    elif operation == "detach":
+        required.add("attachment_id")
+    elif operation in ("status", "recover", "assist_detach", "cycle_master"):
+        required.add("record_id")
+    else:
+        raise LocalControlMqttError("unsupported native operation")
+    if not required <= request.keys() or request.keys() - required - optional:
+        raise LocalControlMqttError("native operation has missing or unexpected fields")
+    for field in ("request_id", "attachment_id", "record_id"):
+        if field in request:
+            try:
+                LocalControlIntent.validate_request_id(request[field])
+            except (TypeError, ValueError) as error:
+                raise LocalControlMqttError("native ids must be bounded ASCII tokens") from error
+    if any(type(request[field]) is not bool for field in optional if field in request):
+        raise LocalControlMqttError("native options must be booleans")
+    return request
+
+
+def _parse_wavemaker_request(
+    target: LocalDeviceBinding,
+    payload: bytes | str,
+) -> tuple[str, LocalControlIntent, WavemakerSchedule]:
+    """Validate the whole message before ownership changes or any device I/O."""
+
+    envelope = _parse_bounded_json(payload)
     if not isinstance(envelope, dict) or set(envelope) != {"operation", "request_id", "schedule"}:
         raise LocalControlMqttError("schedule request requires operation, request_id and schedule")
     operation = envelope["operation"]

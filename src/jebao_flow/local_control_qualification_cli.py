@@ -1,4 +1,4 @@
-"""Explicit operator CLI for one supported local-wavemaker manual-flow qualification."""
+"""Explicit operator CLI for supported local-wavemaker scalar qualifications."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from jebao_flow.hardware_safety import HARDWARE_SAFETY_VOLUME_ID_ENV
+from jebao_flow.local_control.bar_qualification import BarScalarQualificationProducer
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.compose import validate_current_compose_inputs
 from jebao_flow.local_control.coordinator import LocalControlCoordinator
@@ -40,12 +41,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser(
         "run",
-        help="run or offline-finalize one supported three-frame manual-flow qualification",
+        help="run or offline-finalize one supported three-frame scalar qualification",
     )
     _add_current_inputs(run)
     run.add_argument("--operation-id", required=True)
     run.add_argument("--target", required=True, help=argparse.SUPPRESS)
-    run.add_argument("--downward-step", type=int, required=True)
+    run.add_argument(
+        "--function", choices=("manual_flow", "manual_frequency", "manual_mode"),
+        default="manual_flow", help="frequency/mode qualification is Bar-only",
+    )
+    run.add_argument("--downward-step", type=int, help="required for manual_flow only")
     run.add_argument("--active-template-sha256", required=True)
     run.add_argument("--qualification-output", type=Path, required=True)
     run.add_argument(
@@ -94,6 +99,9 @@ def _run(args: argparse.Namespace) -> int:
         raise ValueError("qualification operation requires explicit write opt-in")
     if args.config is None:
         raise ValueError("current qualification config is required")
+    if args.command == "run":
+        if (args.function == "manual_flow") != (args.downward_step is not None):
+            raise ValueError("downward-step is required only for manual_flow")
     if args.compose_generation:
         validate_current_compose_inputs(args.compose_generation)
     _activate_current_hardware_safety_volume_identity()
@@ -113,14 +121,23 @@ def _run(args: argparse.Namespace) -> int:
             logical_member=args.target,
             active_template_sha256=args.active_template_sha256,
         )
-        producer = ManualFlowQualificationProducer(
+        producer_arguments = dict(
             epoch_provider=epoch_source,
             resolver_factory=lambda: _resolver(args.config),
             journal=LocalControlJournalStore(),
             lease=LocalControlLease(),
             artifacts=QualificationArtifactStore(args.qualification_output),
         )
-        result = asyncio.run(producer.execute(args.operation_id, downward_step=args.downward_step))
+        if args.function == "manual_flow":
+            producer = ManualFlowQualificationProducer(**producer_arguments)
+            result = asyncio.run(
+                producer.execute(args.operation_id, downward_step=args.downward_step)
+            )
+        else:
+            producer = BarScalarQualificationProducer(
+                function=args.function, **producer_arguments
+            )
+            result = asyncio.run(producer.execute(args.operation_id))
         _print_json(result.public_dict())
         return 0
 

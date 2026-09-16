@@ -18,10 +18,24 @@ from jebao_flow.local_control.group_command import group_control_qualification
 from jebao_flow.local_control.models import FreshInstallManifest, LocalDeviceBinding
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan
 from jebao_flow.operator_capture.app_catalog import AppFunctionKind
+from jebao_flow.protocol.schedule import (
+    AQUARIUM_PUMP_PRODUCT_KEY,
+    DC_PUMP_PRO_PRODUCT_KEY,
+    LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+    LOCAL_WAVEMAKER_PRODUCT_KEY,
+)
 
 _TOPIC_PREFIX_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\Z")
 _INSTANCE_NAMESPACE_RE = re.compile(r"instance_[0-9a-f]{64}\Z")
 _RUNTIME_MODE_OBSERVER_REASON = "runtime_mode_observer"
+NATIVE_WAVEMAKER_FUNCTIONS = (
+    "power", "schedule_enable", "linkage_role", "manual_mode", "manual_flow",
+    "manual_frequency", "feeding_duration", "custom_wave_frequency", "schedule",
+)
+_PREVIEW_PRODUCTS = {
+    LOCAL_WAVEMAKER_PRO_PRODUCT_KEY, LOCAL_WAVEMAKER_PRODUCT_KEY,
+    DC_PUMP_PRO_PRODUCT_KEY, AQUARIUM_PUMP_PRODUCT_KEY,
+}
 
 
 class HomeAssistantPlatform(StrEnum):
@@ -58,6 +72,7 @@ class HomeAssistantEntityDescriptor:
     options: tuple[str, ...] = ()
     slot_index: int | None = None
     schedule_request_topic: str | None = None
+    preview_request_topic: str | None = None
     instance_namespace: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
@@ -96,6 +111,8 @@ class HomeAssistantEntityDescriptor:
         }
         if self.schedule_request_topic is not None:
             payload["schedule_request_topic"] = self.schedule_request_topic
+        if self.preview_request_topic is not None:
+            payload["preview_request_topic"] = self.preview_request_topic
         return payload
 
     def mqtt_discovery_payload(self) -> dict[str, object]:
@@ -393,6 +410,8 @@ class HomeAssistantProjection:
     group_control_entities: tuple[GroupControlHomeAssistantEntityDescriptor, ...] = ()
     group_resume_entities: tuple[GroupMemberResumeHomeAssistantEntityDescriptor, ...] = ()
     control_surface_diagnostic_reason: str | None = None
+    native_wavemaker_members: tuple[str, ...] = ()
+    native_attach_members: tuple[str, ...] = ()
     _potential_discovery_identities: tuple[_DiscoveryIdentity, ...] = field(
         kw_only=True,
         repr=False,
@@ -470,6 +489,7 @@ class HomeAssistantProjection:
             "schema_version": 1,
             "language": "en",
             "control_surface_diagnostic_reason": self.control_surface_diagnostic_reason,
+            "native_wavemaker_api": self.native_wavemaker_api,
             "entity_count": len(self.entities),
             "control_count": sum(entity.control_available for entity in self.entities),
             "entities": [entity.public_dict() for entity in self.entities],
@@ -486,6 +506,26 @@ class HomeAssistantProjection:
         }
         _require_ascii(payload)
         return payload
+
+    @property
+    def native_request_topic(self) -> str | None:
+        if len(self.native_wavemaker_members) < 2:
+            return None
+        return f"{self.topic_prefix}/local/wavemakers/request"
+
+    @property
+    def native_wavemaker_api(self) -> dict[str, object] | None:
+        if self.native_request_topic is None:
+            return None
+        return {
+            "request_topic": self.native_request_topic,
+            "members": list(self.native_wavemaker_members),
+            "attach_qualified_members": list(self.native_attach_members),
+            "operations": [
+                "preview", "attach", "detach", "recover", "status",
+                "assist_detach", "cycle_master",
+            ],
+        }
 
     @property
     def global_availability_topic(self) -> str:
@@ -531,6 +571,8 @@ def project_home_assistant(
     schedule_plans: tuple[FreshMasterSchedulePlan, ...] = (),
     groups: tuple[GroupConfig, ...] = (),
     control_surface_enabled: bool = True,
+    native_lifecycle_enabled: bool = False,
+    preview_requests_enabled: bool = False,
 ) -> HomeAssistantProjection:
     """Project every registered device capability and qualified per-slot Flow control."""
 
@@ -561,6 +603,7 @@ def project_home_assistant(
                     topic_prefix,
                     instance_namespace=instance_namespace,
                     control_surface_enabled=control_surface_enabled,
+                    preview_requests_enabled=preview_requests_enabled,
                 )
             )
     for descriptor in (item for item in catalog.functions if item.product_key is None):
@@ -652,6 +695,22 @@ def project_home_assistant(
         discovery_prefix=discovery_prefix,
         topic_prefix=topic_prefix,
         entities=tuple(entities),
+        native_wavemaker_members=tuple(
+            device.logical_member for device in manifest.devices
+            if native_lifecycle_enabled and control_surface_enabled
+            and device.product_key == LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
+        ),
+        native_attach_members=tuple(
+            device.logical_member for device in manifest.devices
+            if native_lifecycle_enabled and control_surface_enabled
+            and device.product_key == LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
+            and all(
+                catalog.find(device.product_key, function).control_exposed_for(
+                    device.physical_identity_key
+                )
+                for function in NATIVE_WAVEMAKER_FUNCTIONS
+            )
+        ),
         group_entities=tuple(
             _project_group_output(
                 group,
@@ -756,6 +815,7 @@ def _project_device_function(
     *,
     instance_namespace: str,
     control_surface_enabled: bool,
+    preview_requests_enabled: bool = False,
 ) -> HomeAssistantEntityDescriptor:
     base = f"{topic_prefix}/local/devices/{device.logical_member}/functions/{descriptor.function}"
     control_available = control_surface_enabled and descriptor.control_exposed_for(
@@ -788,6 +848,12 @@ def _project_device_function(
         native_maximum=descriptor.native_maximum,
         options=descriptor.choices,
         schedule_request_topic=schedule_request_topic,
+        preview_request_topic=(
+            f"{base}/preview"
+            if preview_requests_enabled and device.product_key in _PREVIEW_PRODUCTS
+            and descriptor.function in {"schedule", "device_clock_sync"}
+            else None
+        ),
         instance_namespace=instance_namespace,
     )
 
