@@ -4359,3 +4359,18 @@ power 실패는 기존 OFF 복구 의미를 유지하며 원래 ON으로 자동 
 Bar timer/schedule/feed-switch/pulse-or-tide/linkage의 새 승격은 하지 않는다. 단순히 출력 범위를
 넓히거나 자격을 합성하지 않으며, 기존 group은 비무장 상태로 둔다. frozen native6·protocol·
 공유 guard·writer/schema·제품 source/test 변경0이다. 사용자가 이후 요청할 시간표 재적용은 별도다.
+
+#### Bar 시간표 적용 추가 요청
+
+첫 Bar write 전 사용자가 "스케쥴도 활성화 해야해"라고 추가했다. 위 단위에 기존
+ScheduleQualificationProducer의 Bar A/B 두384-byte image와 자기 원본 raw 복원3send를 추가한다.
+TimerOFF를 유지한 채 full-day Constant40과39를 시험하고, 원본은 임의 재해석 없이 정확히
+복원한다. scalar5종과 합쳐 정상 완주는18send/12receipt다. inactive 원본 image에 더 큰 값이
+있어도 이를 켜지 않으며 원본 복원을 임의로 낮춘 새 시간표로 바꾸지 않는다.
+
+실장 자격과 원본 복원 결과를 먼저 기록·커밋한 뒤 `local_control/catalog.py`의 Bar schedule
+executable과 직접 HA/MQTT/qualification tests·문서를 필요한 범위만 수정할 수 있다. 기존
+image compiler·writer·protocol·schema 계산식과 동결 하네스는 변경하지 않는다. 새 image의
+schema가 실제로 동일한지 확인하고 기존 Pro36+Bar12receipt를 검증 merger로 병합한다.
+이는 시간표 편집/적용 API이며, shape가 미확정인 Bar TimerON을 단순 bool로 발명하는
+권한이 아니다. 자동 운전 ON 경로의 남은 제한과 실제 시간표 재적용을 구분해 보고한다.
