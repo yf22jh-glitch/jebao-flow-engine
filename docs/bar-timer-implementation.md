@@ -37,6 +37,12 @@ or replayed. A later slot can change Auto* without converting a successful timer
 a failure. Conversely, flag verification does not prove that firmware accepted the seed or that
 physical flow matches a request.
 
+The generic ON request is a state-setting operation, not a reseed command. When its persistent
+fields already match (TimerON=true, FeedSwitch=false, Linkage=independent), it is a no-change
+operation and sends no frame. A generic VERIFIED result establishes the persistent fields only,
+not acceptance of the Auto* seed or measured physical output. The attended qualifier separately
+checks the reported running output range; that check still is not a physical-output measurement.
+
 Every runnable schedule slot is checked against configured output bounds, including future slots.
 The fresh manual output must also fit those bounds because restoring TimerOFF exposes it.
 If the original timer is ON, the current active running AutoFlow and the schedule must fit the
@@ -48,6 +54,11 @@ binds them from the private instance timezone/device limits; container UTC is ne
 The planner is included in the protocol-schema fingerprint along with the writer. The app catalog
 also now declares the actual Auto* command fields. Existing receipts cannot be reused under either
 changed content binding; the running old image continues using its original matching bindings.
+
+Do not replace the running image with this generation before source-matched qualifications are
+ready: old-generation receipts, including the active Pro receipts, cannot authorize writes in
+the new generation. Keep the current Pro service on its matching source/config/receipts while
+attended renewal is awaiting approval. A source commit is not a control deployment.
 
 ## Hardware activation still required
 
