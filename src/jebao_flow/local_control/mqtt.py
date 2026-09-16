@@ -20,6 +20,7 @@ import aiomqtt
 from jebao_flow.config import MqttConfig
 from jebao_flow.local_control.catalog import LocalControlCatalog
 from jebao_flow.local_control.coordinator import LocalControlCoordinator, LocalControlResult
+from jebao_flow.local_control.dosing_preview import preview_dosing_plan
 from jebao_flow.local_control.group_service import (
     GROUP_FORCED_OFF_WILL_REVERT,
     DirectControlOwnershipDecision,
@@ -522,12 +523,16 @@ class LocalControlMqttRouter:
     def _handle_preview(self, topic: str, payload: bytes | str) -> RoutedNativeResult:
         entity, target = self._preview_routes[topic]
         request = _parse_bounded_json(payload)
-        field = "local_time" if entity.function == "device_clock_sync" else "schedule"
+        field = {
+            "device_clock_sync": "local_time", "channel_schedule": "plan"
+        }.get(entity.function, "schedule")
         if not isinstance(request, dict) or set(request) != {"request_id", field}:
             raise LocalControlMqttError("preview requires request_id and its declared input")
         try:
             request_id = LocalControlIntent.validate_request_id(request["request_id"])
-            if field == "local_time":
+            if field == "plan":
+                result = preview_dosing_plan(request["plan"])
+            elif field == "local_time":
                 result = preview_device_clock(
                     target.product_key, datetime.fromisoformat(request["local_time"])
                 )

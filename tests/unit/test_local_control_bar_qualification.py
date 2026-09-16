@@ -372,6 +372,33 @@ def test_unsupported_function_is_rejected_at_construction(tmp_path: Path) -> Non
         )
 
 
+@pytest.mark.parametrize("feed_time", [0, 10])
+async def test_bar_feeding_duration_requires_an_encodable_exact_baseline(tmp_path, feed_time):
+    original = bytearray(_bar_status())
+    original[4] = feed_time
+    baseline = bytes(original)
+    original[4] = 1
+    step = bytes(original)
+    sent = []
+    producer, journal, *_ = _producer(
+        tmp_path,
+        function="feeding_duration",
+        target=_binding(),
+        sessions=[
+            _Session([baseline, baseline], sent),
+            _Session([baseline, step], sent),
+            _Session([step, baseline], sent),
+        ],
+    )
+    if feed_time == 0:
+        with pytest.raises(ValueError):
+            await producer.execute("bar_feed_duration")
+        assert not sent and journal.load("bar_feed_duration") is None
+    else:
+        result = await producer.execute("bar_feed_duration")
+        assert result.receipt_count == 2 and sent[0] == sent[2] != sent[1]
+
+
 @pytest.mark.asyncio
 async def test_non_bar_target_is_rejected_before_any_write(tmp_path: Path) -> None:
     target = _binding(product_key=LOCAL_WAVEMAKER_PRO.product_key, marker="b")

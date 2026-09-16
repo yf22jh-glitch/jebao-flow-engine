@@ -142,3 +142,54 @@ qualified 기능은 유지하고 나머지는 진단·미리보기까지만 제�
 Clock은 (1) maintainer가 진행 시각의 허용 오차·readback·실패 후 처리 계약을 결정한 뒤 구현하거나,
 (2) 계속 미리보기로 두고 앱에서 시각을 관리할 수 있다. 현재는 후자에 해당하며 clock apply는 없다.
 도징은 보존된 요구를 유지하되 추가 조건과 interval의 실제 의미를 확인하기 전 live write를 열지 않는다.
+
+## 도징 계획 API 추가
+
+`channel_schedule` 진단의 `preview_request_topic`에 다음 요청을 보낸다. 경로는
+`<prefix>/local/devices/<logical_member>/functions/channel_schedule/preview`이며 observer 모드에서도
+사용할 수 있다. 별도 화면이나 HA custom integration은 없다. 결과 topic은 위 공통 규칙을 따른다.
+
+```json
+{
+  "request_id": "dosing_plan_0001",
+  "plan": {
+    "method": "daily",
+    "channel": 1,
+    "daily_amount": "13",
+    "dose_count": 4,
+    "first_dose_minute": 90,
+    "amount_step": "1"
+  }
+}
+```
+
+네 번의 합계를 정확히 13으로 유지하고 하루에 고르게 분산한다. 양은 정수 또는 bounded decimal
+문자열만 받으며 JSON 실수·지수 표기는 받지 않는다. 명시한 `amount_step: "0.5"`의 소수 계획은
+유지하되, 소수 dose를 integer mL로 반올림하거나 이미지로 내보내지 않는다.
+
+```json
+{
+  "request_id": "dosing_average_0001",
+  "plan": {
+    "method": "average_interval",
+    "channel": 2,
+    "target_daily_average": "0.5",
+    "dose_count": 1,
+    "first_dose_minute": 90
+  }
+}
+```
+
+위는 2일마다 1 mL라는 **로컬 계획**이다. 이 모드의 `dose_count`는 매일이 아니라 투여일의
+횟수다. 3회면 정확한 평균을 유지하는 가장 짧은 간격인 6일에 1 mL씩 3회다. 30일 이내에
+정수 dose로 표현할 수 없으면 거부하며 기약 없는 반올림은 하지 않는다.
+
+결과에는 개별 시간·양, 계획 digest, 가능한 경우 96-byte 채널 이미지의 크기/digest가 있다.
+항상 `hardware_write=false`, `wire_send_available=false`, `calendar_schedule_installed=false`이며
+physical unit와 장비 interval 의미는 unknown이다. power/manual dose/timer/calibration/apply
+명령은 이 API에 없다. 실제 장비 상태로 계획 값을 낙관적으로 발행하지 않는다.
+
+후속 구현·현재 보류 목록은 [남은 제품 구현](remaining-product-implementation.md)을 따른다.
+Aquarium 속도 writer 및 compiler 지문 결속이 추가돼 새 버전의 schema digest가 바뀐다.
+앞 절의 기존 qualified 기능 보존은 구 운영 버전에 관한 설명이며, 새 버전에 예전 자격이
+자동 승계된다는 뜻이 아니다. 이번에는 배포하지 않았다.

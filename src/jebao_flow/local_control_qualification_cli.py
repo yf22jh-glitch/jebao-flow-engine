@@ -11,6 +11,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from jebao_flow.hardware_safety import HARDWARE_SAFETY_VOLUME_ID_ENV
+from jebao_flow.local_control.aquarium_power_qualification import aquarium_power_target_validator
+from jebao_flow.local_control.aquarium_qualification import AquariumScalarQualificationProducer
 from jebao_flow.local_control.bar_qualification import BarScalarQualificationProducer
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.compose import validate_current_compose_inputs
@@ -25,6 +27,10 @@ from jebao_flow.local_control.qualification_producer import (
     QualificationArtifactStore,
 )
 from jebao_flow.local_control.resolver import CurrentEndpointResolver
+from jebao_flow.local_control.schedule_qualification import (
+    ScheduleQualificationProducer,
+    ScheduleResetQualificationProducer,
+)
 from jebao_flow.local_control.service import (
     HARDWARE_SAFETY_VOLUME_ID_FILE_ENV,
     read_current_hardware_safety_volume_id,
@@ -42,23 +48,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser(
         "run",
-        help="run or offline-finalize one supported three-frame scalar qualification",
+        help="run or offline-finalize one supported qualification operation",
     )
     _add_current_inputs(run)
     run.add_argument("--operation-id", required=True)
     run.add_argument("--target", required=True, help=argparse.SUPPRESS)
     run.add_argument(
         "--function",
-        choices=("manual_flow", "manual_frequency", "manual_mode", "feeding_duration"),
-        default="manual_flow", help="frequency/mode: Bar/DC Pro; feeding duration: DC Pro only",
+        choices=(
+            "manual_flow",
+            "manual_frequency",
+            "manual_mode",
+            "feeding_duration",
+            "motor_speed",
+            "schedule",
+            "schedule_reset",
+        ),
+        default="manual_flow",
+        help="frequency/mode: Bar/DC; feeding: Bar/DC/Aquarium; speed: Aquarium; schedule: A/B",
     )
     run.add_argument("--downward-step", type=int, help="required for manual_flow only")
+    run.add_argument("--schedule-a", type=Path, help="first Bar/DC/Aquarium schedule JSON")
+    run.add_argument("--schedule-b", type=Path, help="distinct second schedule JSON")
     run.add_argument("--active-template-sha256", required=True)
     run.add_argument("--qualification-output", type=Path, required=True)
     run.add_argument(
         "--write-enabled",
         action="store_true",
-        help="explicitly opt in to the separately approved three-frame operation",
+        help="explicitly opt in to the separately approved qualification operation",
     )
 
     recover = subparsers.add_parser(
@@ -104,6 +121,11 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "run":
         if (args.function == "manual_flow") != (args.downward_step is not None):
             raise ValueError("downward-step is required only for manual_flow")
+        if args.function in {"schedule", "schedule_reset"}:
+            if args.schedule_a is None or args.schedule_b is None:
+                raise ValueError("schedule qualification requires both explicit A/B images")
+        elif args.schedule_a is not None or args.schedule_b is not None:
+            raise ValueError("schedule images are only valid for schedule qualification")
     if args.compose_generation:
         validate_current_compose_inputs(args.compose_generation)
     _activate_current_hardware_safety_volume_identity()
@@ -122,6 +144,11 @@ def _run(args: argparse.Namespace) -> int:
             template_roots=template_roots,
             logical_member=args.target,
             active_template_sha256=args.active_template_sha256,
+            **(
+                {"target_validator": _validate_scalar_target}
+                if args.function != "manual_flow"
+                else {}
+            ),
         )
         producer_arguments = dict(
             epoch_provider=epoch_source,
@@ -135,16 +162,26 @@ def _run(args: argparse.Namespace) -> int:
             result = asyncio.run(
                 producer.execute(args.operation_id, downward_step=args.downward_step)
             )
+        elif args.function in {"schedule", "schedule_reset"}:
+            producer_class = (
+                ScheduleResetQualificationProducer
+                if args.function == "schedule_reset"
+                else ScheduleQualificationProducer
+            )
+            producer = producer_class(
+                schedule_a=_read_schedule_plan(args.schedule_a),
+                schedule_b=_read_schedule_plan(args.schedule_b),
+                **producer_arguments,
+            )
+            result = asyncio.run(producer.execute(args.operation_id))
         else:
             target = epoch_source().target
             descriptor = build_local_control_catalog().find(target.product_key, args.function)
-            scalar_producer = (
-                DcScalarQualificationProducer if descriptor.family == "dc_pump_pro"
-                else BarScalarQualificationProducer
-            )
-            producer = scalar_producer(
-                function=args.function, **producer_arguments
-            )
+            scalar_producer = {
+                "dc_pump_pro": DcScalarQualificationProducer,
+                "aquarium_pump": AquariumScalarQualificationProducer,
+            }.get(descriptor.family, BarScalarQualificationProducer)
+            producer = scalar_producer(function=args.function, **producer_arguments)
             result = asyncio.run(producer.execute(args.operation_id))
         _print_json(result.public_dict())
         return 0
@@ -161,6 +198,23 @@ def _run(args: argparse.Namespace) -> int:
         _print_json(result.public_dict())
         return 0
     raise AssertionError("unhandled qualification command")
+
+
+def _validate_scalar_target(product_key: str) -> object:
+    from jebao_flow.local_control.qualification_producer import _manual_flow_family_profile
+    from jebao_flow.protocol.schedule import AQUARIUM_PUMP_PRODUCT_KEY
+
+    if product_key == AQUARIUM_PUMP_PRODUCT_KEY:
+        return aquarium_power_target_validator(product_key)
+    return _manual_flow_family_profile(product_key)
+
+
+def _read_schedule_plan(path: Path) -> object:
+    with path.open("rb") as stream:
+        payload = stream.read(65537)
+    if len(payload) > 65536:
+        raise ValueError("schedule input exceeds the bounded request size")
+    return json.loads(payload)
 
 
 def _resolver(config_path: Path) -> CurrentEndpointResolver:

@@ -123,13 +123,14 @@ _SCALAR_FIELD_BY_PRODUCT: dict[str, dict[str, str]] = {
     "6a5c47b3ea364ecb841b47f5997a1775": {
         "power": "SwitchON",
         "feed_switch": "FeedSwitch",
+        "motor_speed": "Motor_Speed",
         "feeding_duration": "FeedTime",
     },
     # Dosing control remains unavailable because its product schema intentionally has
     # control_supported=False and no accepted write evidence exists.
     "5b3c136fd4b74f3fb2a366a254c76c9a": {},
 }
-_FLOW_FUNCTIONS = frozenset({"manual_flow", "slave_common_flow"})
+_FLOW_FUNCTIONS = frozenset({"manual_flow", "slave_common_flow", "motor_speed"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,14 +357,15 @@ class ConnectedDeviceWriter:
             raise AssertionError("current Auto* status must never become a scalar write target")
         if intent.function in _FLOW_FUNCTIONS:
             if isinstance(intent.value, bool) or not isinstance(intent.value, int):
-                raise TypeError("Flow control requires an integer")
+                raise TypeError("Flow/speed control requires an integer")
             minimum, maximum = declared_app_integer_range(
                 intent.target.product_key,
                 intent.function,
             )
             if not minimum <= intent.value <= maximum:
                 raise ValueError(
-                    f"Flow control must stay inside the declared {minimum}..{maximum} app range"
+                    "Flow/speed control must stay inside the declared "
+                    f"{minimum}..{maximum} app range"
                 )
 
         schema = get_product_schema(intent.target.product_key)
@@ -427,13 +429,20 @@ class ConnectedDeviceWriter:
         intent: LocalControlIntent,
         current_status: bytes,
     ) -> PreparedDeviceWrite:
+        from jebao_flow.local_control.pump_preview import ReturnPumpSchedule
         from jebao_flow.local_control.wavemaker import WavemakerSchedule
 
-        schedule = WavemakerSchedule.model_validate(intent.value)
+        if not isinstance(intent.value, dict):
+            raise ValueError("schedule must be a declared product object")
+        model = (ReturnPumpSchedule if intent.value.get("family") in {"dc_pro", "aquarium"}
+                 else WavemakerSchedule)
+        schedule = model.model_validate(intent.value)
         if schedule.product_key != intent.target.product_key:
             raise ValueError("시간표 가족과 실제 대상 장비가 다릅니다")
         values = get_product_schema(intent.target.product_key).decode_status(current_status)
-        if values["TimerON"] or values["Linkage"] != "independent":
+        if values["TimerON"] or (
+            isinstance(schedule, WavemakerSchedule) and values["Linkage"] != "independent"
+        ):
             raise LocalDeviceWriteError("시간표 교체는 독립 상태·TimerOFF에서만 준비합니다")
         baseline = extract_current_schedule_image(intent.target.product_key, current_status)
         desired = schedule.compile_image()

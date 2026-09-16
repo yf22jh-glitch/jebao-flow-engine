@@ -106,6 +106,8 @@ def current_protocol_schema_sha256() -> str:
             str(schedule_path.with_name("schema.py")),
             str(local_control_path / "device_writer.py"),
             str(local_control_path / "schedule.py"),
+            str(local_control_path / "wavemaker.py"),
+            str(local_control_path / "pump_preview.py"),
             schedule_model.__file__,
         )
     )

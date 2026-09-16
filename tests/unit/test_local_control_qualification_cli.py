@@ -272,29 +272,55 @@ def test_cli_redacts_unexpected_operation_errors(monkeypatch, capsys) -> None:
     assert private_value not in output.err
 
 
-@pytest.mark.parametrize("function", ["manual_frequency", "manual_mode"])
+@pytest.mark.parametrize("function", ["manual_frequency", "manual_mode", "motor_speed", "schedule"])
 def test_bar_cli_without_opt_in_never_opens_runtime(function, monkeypatch, capsys):
     def forbidden(*args, **kwargs):
         raise AssertionError("no live or durable access before explicit opt-in")
 
     monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", forbidden)
     monkeypatch.setattr(cli, "CurrentQualificationEpochSource", forbidden)
-    assert cli.main([
-        "run", "--function", function, "--config", "private.yaml",
-        "--target", "bar", "--operation-id", "bar_cli_0001",
-        "--active-template-sha256", "a" * 64,
-        "--qualification-output", "private.json",
-    ]) == 2
+    assert (
+        cli.main(
+            [
+                "run",
+                "--function",
+                function,
+                "--config",
+                "private.yaml",
+                "--target",
+                "bar",
+                "--operation-id",
+                "bar_cli_0001",
+                "--active-template-sha256",
+                "a" * 64,
+                "--qualification-output",
+                "private.json",
+            ]
+        )
+        == 2
+    )
     assert "current_operation_failed_closed" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("product,producer_name", [
-    (LOCAL_WAVEMAKER.product_key, "BarScalarQualificationProducer"),
-    (DC_PUMP_PRO.product_key, "DcScalarQualificationProducer"),
-])
-@pytest.mark.parametrize("function", ["manual_frequency", "manual_mode"])
+@pytest.mark.parametrize(
+    "product,producer_name,function",
+    [
+        (LOCAL_WAVEMAKER.product_key, "BarScalarQualificationProducer", "manual_frequency"),
+        (LOCAL_WAVEMAKER.product_key, "BarScalarQualificationProducer", "manual_mode"),
+        (LOCAL_WAVEMAKER.product_key, "BarScalarQualificationProducer", "feeding_duration"),
+        (DC_PUMP_PRO.product_key, "DcScalarQualificationProducer", "manual_frequency"),
+        (DC_PUMP_PRO.product_key, "DcScalarQualificationProducer", "manual_mode"),
+        (DC_PUMP_PRO.product_key, "DcScalarQualificationProducer", "feeding_duration"),
+        (AQUARIUM_PUMP.product_key, "AquariumScalarQualificationProducer", "motor_speed"),
+        (AQUARIUM_PUMP.product_key, "AquariumScalarQualificationProducer", "feeding_duration"),
+    ],
+)
 def test_scalar_cli_delegates_to_product_producer(
-    function, product, producer_name, monkeypatch, capsys,
+    function,
+    product,
+    producer_name,
+    monkeypatch,
+    capsys,
 ):
     from types import SimpleNamespace
 
@@ -309,19 +335,130 @@ def test_scalar_cli_delegates_to_product_producer(
             return SimpleNamespace(public_dict=lambda: {"offline_wiring_test": True})
 
     monkeypatch.setattr(cli, producer_name, Producer)
-    monkeypatch.setattr(cli, "CurrentQualificationEpochSource", lambda **kwargs: (
-        lambda: SimpleNamespace(target=SimpleNamespace(product_key=product))
-    ))
+    monkeypatch.setattr(
+        cli,
+        "CurrentQualificationEpochSource",
+        lambda **kwargs: lambda: SimpleNamespace(target=SimpleNamespace(product_key=product)),
+    )
     monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
     for name in ("LocalControlJournalStore", "LocalControlLease", "QualificationArtifactStore"):
         monkeypatch.setattr(cli, name, lambda *args, **kwargs: object())
-    assert cli.main([
-        "run", "--function", function, "--config", "private.yaml",
-        "--target", "bar", "--operation-id", "bar_cli_0001",
-        "--active-template-sha256", "a" * 64,
-        "--template-root", "private-template", "--qualification-output", "private.json",
-        "--write-enabled",
-    ]) == 0
+    assert (
+        cli.main(
+            [
+                "run",
+                "--function",
+                function,
+                "--config",
+                "private.yaml",
+                "--target",
+                "bar",
+                "--operation-id",
+                "bar_cli_0001",
+                "--active-template-sha256",
+                "a" * 64,
+                "--template-root",
+                "private-template",
+                "--qualification-output",
+                "private.json",
+                "--write-enabled",
+            ]
+        )
+        == 0
+    )
     assert calls[0]["function"] == function
     assert calls[1] == "bar_cli_0001"
     assert "offline_wiring_test" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "function,producer_name",
+    [
+        ("schedule", "ScheduleQualificationProducer"),
+        ("schedule_reset", "ScheduleResetQualificationProducer"),
+    ],
+)
+def test_schedule_cli_passes_explicit_a_b_and_existing_guarded_inputs(
+    tmp_path, monkeypatch, capsys, function, producer_name
+):
+    import json
+    from types import SimpleNamespace
+
+    calls = []
+    a, b = {"family": "bar", "slots": []}, {"family": "bar", "slots": [{"fixture": True}]}
+    path_a, path_b = tmp_path / "a.json", tmp_path / "b.json"
+    path_a.write_text(json.dumps(a))
+    path_b.write_text(json.dumps(b))
+
+    class Producer:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        async def execute(self, operation_id):
+            calls.append(operation_id)
+            return SimpleNamespace(public_dict=lambda: {"offline_wiring_test": True})
+
+    monkeypatch.setattr(cli, producer_name, Producer)
+    monkeypatch.setattr(cli, "CurrentQualificationEpochSource", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
+    for name in ("LocalControlJournalStore", "LocalControlLease", "QualificationArtifactStore"):
+        monkeypatch.setattr(cli, name, lambda *args, **kwargs: object())
+    assert (
+        cli.main(
+            [
+                "run",
+                "--function",
+                function,
+                "--config",
+                "private.yaml",
+                "--target",
+                "pump",
+                "--operation-id",
+                "schedule_cli_01",
+                "--active-template-sha256",
+                "a" * 64,
+                "--template-root",
+                "private-template",
+                "--qualification-output",
+                "private.json",
+                "--schedule-a",
+                str(path_a),
+                "--schedule-b",
+                str(path_b),
+                "--write-enabled",
+            ]
+        )
+        == 0
+    )
+    assert calls[0]["schedule_a"] == a and calls[0]["schedule_b"] == b
+    assert calls[1] == "schedule_cli_01"
+    assert "offline_wiring_test" in capsys.readouterr().out
+
+
+def test_schedule_cli_never_guesses_missing_trial_images(monkeypatch, capsys):
+    def forbidden():
+        raise AssertionError("missing input must be rejected before runtime preparation")
+
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", forbidden)
+    assert (
+        cli.main(
+            [
+                "run",
+                "--function",
+                "schedule",
+                "--config",
+                "private.yaml",
+                "--target",
+                "pump",
+                "--operation-id",
+                "schedule_cli_bad",
+                "--active-template-sha256",
+                "a" * 64,
+                "--qualification-output",
+                "private.json",
+                "--write-enabled",
+            ]
+        )
+        == 2
+    )
+    assert "current_operation_failed_closed" in capsys.readouterr().err

@@ -72,6 +72,7 @@ _ENCODABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
         {
             "power",
             "feed_switch",
+            "motor_speed",
             "feeding_duration",
             "schedule",
             "device_clock_sync",
@@ -128,7 +129,7 @@ _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
         }
     ),
     "6a5c47b3ea364ecb841b47f5997a1775": frozenset(
-        {"power", "feed_switch", "feeding_duration"}
+        {"power", "feed_switch", "motor_speed", "feeding_duration"}
     ),
     "5b3c136fd4b74f3fb2a366a254c76c9a": frozenset(),
 }

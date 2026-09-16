@@ -107,3 +107,8 @@ Codex가 물은 "기존 scaffold를 DC scalar 및 Aquarium known power/feed_swit
 후속 [리턴모터 구현](return-pump-implementation.md)에서 DC profile과 DC scalar subclass,
 Aquarium의 별도 power state/intent를 추가했다. 위 목록은 최초 조사 당시의 공백이며,
 새 구현도 실장 자격 발급이나 미확정 timer/transport 동작의 확정은 아니다.
+
+다음 [전체 남은 기능 구현](remaining-product-implementation.md)에서는 baseline FeedTime 1..60에
+한정한 Bar feeding_duration과 별도 schedule A/B/원본-raw-restore producer를 추가했다.
+앞서 기록한 0 baseline·미확정 bool/linkage 복구의 제한과 실제 장비 수용 미확정은 유지한다.
+384B producer의 오프라인 구현은 Bar schedule executable 승격이나 실장 자격 발급이 아니다.

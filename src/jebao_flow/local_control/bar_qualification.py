@@ -2,8 +2,8 @@
 
 This module owns no alternate write primitive. It reuses the audited manual-flow producer's
 function-independent lease, resolution, journal transition, artifact machinery and safe first-write
-envelope, applying the same three-frame ``same -> step -> restore`` contract to two additional Bar
-manual-control scalars: ``manual_frequency`` and ``manual_mode``. Each is a single-field partial
+envelope, applying the same three-frame ``same -> step -> restore`` contract to Bar
+``manual_frequency``, ``manual_mode`` and encodable ``feeding_duration``. Each is a partial
 write whose exact baseline is restored by the ordinary scalar rollback, so no receipt is emitted
 until the durable journal is terminal and the own baseline has been written back and verified.
 
@@ -11,13 +11,12 @@ It deliberately covers only the manual controls the app writes as single-field p
 device is Independent/TimerOFF/Constant, reusing the existing scalar restore contract. Absence of
 firmware side effects is NOT asserted here: these offline tests prove the software contract (single
 send, exact own-baseline restore, receipt-only-after-verified), not device acceptance or physical
-safety. Bar ``feed_switch``, ``pulse_or_tide``, ``linkage_role``, ``feeding_duration`` and
+safety. Bar ``feed_switch``, ``pulse_or_tide``, ``linkage_role`` and
 whole-``schedule`` qualification are intentionally not produced here;
 ``docs/bar-qualification-implementation.md`` records the exact restore-safety blocker for each.
 
-The DC subclass reuses this scalar journal implementation with an explicitly different product
-family and additionally permits feeding_duration when the existing writer can encode its baseline.
-The Bar class's own accepted functions remain the two listed above.
+The DC/Aquarium subclasses reuse this journal with their real product state models. A FeedTime=0
+baseline is still rejected by the existing writer; it is never normalized to one for qualification.
 """
 
 from __future__ import annotations
@@ -73,6 +72,7 @@ _SUPPORTED = {
     "manual_frequency": "Frequency",
     "manual_mode": "Mode",
     "feeding_duration": "FeedTime",
+    "motor_speed": "Motor_Speed",
 }
 
 
@@ -188,7 +188,8 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
     """Execute or offline-finalize one Bar manual-control ``same/step/restore`` qualification."""
 
     _family = _BAR_FAMILY
-    _functions = frozenset({"manual_frequency", "manual_mode"})
+    _functions = frozenset({"manual_frequency", "manual_mode", "feeding_duration"})
+    _intent_class = BarScalarQualificationIntent
 
     def __init__(self, *, function: str, **kwargs: object) -> None:
         if function not in self._functions:
@@ -220,7 +221,7 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
                 endpoint, firmware_version = await self._resolve(epoch, None)
                 writer = self._writer_factory(endpoint)
                 baseline_status = await writer.connect_and_read()
-                baseline_state = _manual_flow_state(writer, epoch.target, baseline_status)
+                baseline_state = self._read_scalar_state(writer, epoch.target, baseline_status)
                 self._require_state_envelope(epoch, baseline_state)
                 intent, prepared = self._prepare_bar_operation(
                     operation_id,
@@ -373,16 +374,14 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
             no_change=False,
             restore_on_recovery=True,
         )
-        intent = BarScalarQualificationIntent(
+        intent = self._intent_class(
             operation_id=operation_id,
             target=epoch.target,
             function=self._spec.function,  # type: ignore[arg-type]
             field=self._spec.field,
             baseline_value=baseline_value,
             trial_value=trial_value,
-            baseline_mode=baseline_state.mode,
-            baseline_linkage=baseline_state.linkage,
-            baseline_flow=baseline_state.flow,
+            **self._intent_baseline_fields(baseline_state),
             step_request_id=step_request_id,
             restore_request_id=restore_request_id,
             config_sha256=epoch.config_sha256,
@@ -398,6 +397,16 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
             created_at=self._now(),
         )
         return intent, (same, step, restore)
+
+    def _read_scalar_state(self, writer, target, status):
+        return _manual_flow_state(writer, target, status)
+
+    def _intent_baseline_fields(self, state):
+        return {
+            "baseline_mode": state.mode,
+            "baseline_linkage": state.linkage,
+            "baseline_flow": state.flow,
+        }
 
     def _create_bar_record(
         self,
@@ -491,7 +500,7 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
     def _load_bar_intent(self, record: LocalControlJournalRecord) -> BarScalarQualificationIntent:
         payload = self._journal.load_blob(record.intent_sha256)
         try:
-            intent = BarScalarQualificationIntent.model_validate_json(payload)
+            intent = self._intent_class.model_validate_json(payload)
         except ValueError as error:
             raise QualificationProductionError(
                 "bar qualification journal intent is invalid"
@@ -571,7 +580,7 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
         relaxed_mode = self._spec.function == "manual_mode" and phase == "step"
 
         def validate(status: bytes) -> None:
-            state = _manual_flow_state(writer, epoch.target, status)
+            state = self._read_scalar_state(writer, epoch.target, status)
             if relaxed_mode:
                 self._require_bar_mode_envelope(epoch, state)
             else:

@@ -152,8 +152,8 @@ class AquariumPowerQualificationProducer(PowerQualificationProducer):
     def _power_intent_bytes(self, intent) -> bytes:
         return aquarium_power_qualification_intent_bytes(intent)
 
+    @staticmethod
     def _read_baseline_power_state(
-        self,
         writer: ConnectedDeviceWriter,
         target: LocalDeviceBinding,
         status: bytes,
@@ -180,8 +180,8 @@ class AquariumPowerQualificationProducer(PowerQualificationProducer):
             raise QualificationProductionError("current aquarium state types are invalid")
         return AquariumPowerState(enabled, timer, speed, transport)
 
+    @staticmethod
     def _require_state_envelope(
-        self,
         epoch: QualificationEpoch,
         state: AquariumPowerState,
     ) -> None:

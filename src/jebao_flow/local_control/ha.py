@@ -17,7 +17,7 @@ from jebao_flow.local_control.catalog import LocalControlCatalog, LocalFunctionD
 from jebao_flow.local_control.group_command import group_control_qualification
 from jebao_flow.local_control.models import FreshInstallManifest, LocalDeviceBinding
 from jebao_flow.local_control.schedule import FreshMasterSchedulePlan
-from jebao_flow.operator_capture.app_catalog import AppFunctionKind
+from jebao_flow.operator_capture.app_catalog import DOSING_PUMP_APP, AppFunctionKind
 from jebao_flow.protocol.schedule import (
     AQUARIUM_PUMP_PRODUCT_KEY,
     DC_PUMP_PRO_PRODUCT_KEY,
@@ -850,8 +850,12 @@ def _project_device_function(
         schedule_request_topic=schedule_request_topic,
         preview_request_topic=(
             f"{base}/preview"
-            if preview_requests_enabled and device.product_key in _PREVIEW_PRODUCTS
-            and descriptor.function in {"schedule", "device_clock_sync"}
+            if preview_requests_enabled and (
+                device.product_key in _PREVIEW_PRODUCTS
+                and descriptor.function in {"schedule", "device_clock_sync"}
+                or device.product_key == DOSING_PUMP_APP.product_key
+                and descriptor.function == "channel_schedule"
+            )
             else None
         ),
         instance_namespace=instance_namespace,

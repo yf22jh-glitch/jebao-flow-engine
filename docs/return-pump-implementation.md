@@ -102,3 +102,10 @@ power CLI 연결, CLI 제품별 회귀, 현재 epoch validator 시험, lint·전
 
 장비 연결·실제 write·자격 발급·배포는 모두 0이다. 이 결과는 소프트웨어 연결 공백을 채운
 증거이며, 장비 수용·생물에 대한 안전성·전체 리턴모터 기능의 완료 근거가 아니다.
+
+## 후속 범위
+
+사용자가 Aquarium 속도 writer 변경과 자격 갱신 영향을 승인한 뒤
+[남은 제품 구현](remaining-product-implementation.md)으로 이어졌다. 그 후속 범위에는
+Aquarium 속도·조건부 급이시간, schedule/raw restore·reset 자격 producer와 도징 계획 API가
+포함된다. 이 문서의 "writer 불변/schema 유지"는 앞선 83037b1 범위의 기록이다.

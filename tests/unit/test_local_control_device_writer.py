@@ -148,6 +148,42 @@ def test_scalar_writer_uses_the_same_app_declared_flow_range() -> None:
         )
 
 
+@pytest.mark.parametrize("speed", [30, 35, 100])
+def test_aquarium_motor_speed_uses_existing_scalar_rollback_and_readback(speed):
+    target = _binding().model_copy(update={"product_key": AQUARIUM_PUMP.product_key})
+    writer = ConnectedDeviceWriter(
+        ResolvedEndpoint(target, "runtime-address"), session_factory=_Session
+    )
+    baseline = bytearray(AQUARIUM_PUMP.raw_status_size)
+    baseline[0] = 1
+    baseline[1] = 40
+    intent = LocalControlIntent(
+        request_id="aquarium_speed_01", target=target, function="motor_speed", value=speed
+    )
+    prepared = writer.prepare_scalar(intent, bytes(baseline))
+    assert prepared.forward_payload == build_control_payload(AQUARIUM_PUMP, {"Motor_Speed": speed})
+    assert prepared.rollback_payload == build_control_payload(AQUARIUM_PUMP, {"Motor_Speed": 40})
+    assert json.loads(prepared.expected_readback) == {"Motor_Speed": speed}
+    assert verify_prepared_readback(prepared, bytes(baseline)) is (speed == 40)
+    baseline[1] = speed
+    assert verify_prepared_readback(prepared, bytes(baseline))
+
+
+@pytest.mark.parametrize("speed", [0, 29, 101, True, 30.5])
+def test_aquarium_motor_speed_never_uses_vendor_zero_to_expand_app_range(speed):
+    target = _binding().model_copy(update={"product_key": AQUARIUM_PUMP.product_key})
+    writer = ConnectedDeviceWriter(
+        ResolvedEndpoint(target, "runtime-address"), session_factory=_Session
+    )
+    with pytest.raises((TypeError, ValueError)):
+        writer.prepare_scalar(
+            LocalControlIntent(
+                request_id="aquarium_speed_bad", target=target, function="motor_speed", value=speed
+            ),
+            bytes(AQUARIUM_PUMP.raw_status_size),
+        )
+
+
 @pytest.mark.asyncio
 async def test_scalar_target_does_not_gate_on_a_new_attestation_timestamp() -> None:
     session = _Session("runtime-address")

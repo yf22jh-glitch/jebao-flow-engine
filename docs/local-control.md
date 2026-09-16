@@ -908,6 +908,11 @@ For example, a `0.5 mL/day` target becomes a local plan of `1 mL` every `2` days
 interval picker as Days, but the vendor definition declares no unit and there is no accepted device
 write, so `interval_device_semantics` and `device_acceptance` remain `unknown`.
 
+The same plans are now available through the existing HA/MQTT diagnostic preview route; see
+[the dosing planning API](pump-mqtt-apis.md#도징-계획-api-추가). It accepts exact decimal amounts,
+returns the planned times and quantities, and never sends a dose, changes calibration, or installs
+a device timer. In average-interval mode the requested count applies to each dose day, not every day.
+
 The packet version recorded by product documents and the GAgent frame magic are different fields.
 The former is not used to replace protocol magic `0x00000003`.
 
