@@ -4335,3 +4335,27 @@ detach 자식 부재를 읽기 전용으로 확인했다. 에이전트는 현재
 이번 단위에는 새 Sync/Async 결속, 리턴·Bar·도징 write, endpoint 시험, schema/guard 완화가 없다.
 qualification과 제어용 runtime 모드는 별도 입력으로 분리하며, 운영 배포는 새 자격 검증 후
 해당 Pro 기능만 열린 generation을 사용한다. 원 Async 전달UNKNOWN은 계속 보존한다.
+
+### 2026-09-16 Bar 단독 자격 갱신·HA 활성화
+
+Pro 제어 배포와 나머지 장비 읽기 전용 확인을 기록한 뒤 사용자는 Bar의 OFF/ON을 허용하고
+"그것만 일단 진행하자"고 대상을 좁혔다. 이후 앱의 Classic/Constant 혼동을 정정하며
+Constant 준비 완료를 알렸다. 새 publication에서도 Bar ON/TimerOFF/independent/Constant·
+Flow40/F80/Feed10을 확인했다. 리턴 두 대·도징·새 Async·시간표 쓰기는 이번 범위가 아니다.
+
+기존 d792897 제품 이미지/3e6 schema의 producer만 사용해 Bar manual_flow(40→39→40),
+manual_frequency(80→5→80), manual_mode(Constant→Classic→Constant), feeding_duration(10→1→10),
+power(ON→OFF→ON)를 기능별 한 번 수행한다. 각 최초값 재전송을 포함해 정상 완주는15send이며,
+함수마다 자기 baseline 복원·terminal VERIFIED 확인 뒤에만 다음으로 간다. 실제 시작 시 원본은
+fresh capture에서 소유하며 과거 시각/Auto/슬롯 일치로 admission을 만들지 않는다.
+
+기존 Pro HA runtime은 경합 방지를 위해 시험 동안 중지하고 입력/volume을 보존한다. 각 실패는
+즉시 멈추고 같은 operation의 기존 자기 복구만 고려한다. 새 id 반복·미확인 명령 재전송은 없다.
+power 실패는 기존 OFF 복구 의미를 유지하며 원래 ON으로 자동 복원하지 않는다. 결과·원본과
+증거 등급을 먼저 기록하고, 성공한 새 Bar10receipt를 기존 Pro36receipt와 검증 merger로 병합해
+해당 세 장비만 조작 가능한 새 generation을 만든다. 배포 전 owned discovery를 실제 보존하고
+기동 write0·기록 불변·HA registry를 확인한다. 실패 시 보존한 Pro-only 서비스로 복귀한다.
+
+Bar timer/schedule/feed-switch/pulse-or-tide/linkage의 새 승격은 하지 않는다. 단순히 출력 범위를
+넓히거나 자격을 합성하지 않으며, 기존 group은 비무장 상태로 둔다. frozen native6·protocol·
+공유 guard·writer/schema·제품 source/test 변경0이다. 사용자가 이후 요청할 시간표 재적용은 별도다.
