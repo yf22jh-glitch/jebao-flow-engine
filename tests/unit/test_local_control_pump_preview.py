@@ -9,7 +9,11 @@ from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.device_writer import build_device_clock_payload
 from jebao_flow.local_control.ha import project_home_assistant
 from jebao_flow.local_control.models import FreshInstallManifest, InstallContentBindings
-from jebao_flow.local_control.mqtt import LocalControlMqttError, LocalControlMqttRouter
+from jebao_flow.local_control.mqtt import (
+    LocalControlMqttError,
+    LocalControlMqttRouter,
+    _parse_wavemaker_request,
+)
 from jebao_flow.local_control.pump_preview import ReturnPumpSchedule, preview_device_clock
 from jebao_flow.protocol.schedule import (
     AQUARIUM_PUMP_PRODUCT_KEY,
@@ -125,6 +129,39 @@ def test_clock_preview_reuses_exact_app_builder_without_timezone_or_restore_clai
 def test_clock_preview_requires_caller_timezone():
     with pytest.raises(ValueError, match="offset"):
         preview_device_clock(LOCAL_WAVEMAKER_PRO_PRODUCT_KEY, datetime(2026, 9, 16))
+
+
+@pytest.mark.parametrize(
+    "family,product",
+    [
+        ("dc_pro", DC_PUMP_PRO_PRODUCT_KEY),
+        ("aquarium", AQUARIUM_PUMP_PRODUCT_KEY),
+    ],
+)
+async def test_return_schedule_apply_parser_is_ready_but_unqualified_route_remains_closed(
+    family,
+    product,
+):
+    target = _binding("pump", "a").model_copy(update={"product_key": product})
+    payload = json.dumps(
+        {
+            "operation": "apply",
+            "request_id": "return_apply_0001",
+            "schedule": {"family": family, "slots": []},
+        }
+    )
+    operation, intent, plan = _parse_wavemaker_request(target, payload)
+    assert operation == "apply" and intent.target == target
+    assert isinstance(plan, ReturnPumpSchedule)
+    assert intent.value == plan.model_dump(mode="json")
+    router = _router(product)
+    request_topic = "jebao-flow/main/local/devices/pump/functions/schedule/request"
+    assert request_topic not in router.request_topics
+    with pytest.raises(LocalControlMqttError):
+        await router.handle(request_topic, payload)
+    other = target.model_copy(update={"product_key": LOCAL_WAVEMAKER_PRO_PRODUCT_KEY})
+    with pytest.raises(LocalControlMqttError, match="family"):
+        _parse_wavemaker_request(other, payload)
 
 
 def _router(product):

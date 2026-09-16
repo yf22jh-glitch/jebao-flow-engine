@@ -116,6 +116,15 @@ jebao-flow-local-qualify run --function schedule_reset --schedule-a empty.json -
   `full-final.log` SHA-256
   `deaf0d11a7cbc92b090ee16db58b7e700ef3a8ddf27686cba0700773264ebc6b`.
 
+최종 연결 점검에서 MQTT의 기존 schedule 요청 parser도 DC/Aquarium 모델을 읽도록 확장했다.
+동일한 요청 id·가족/실물 target 대조·coordinator·ownership 경로를 재사용한다. 이는 실행
+승격이 아니며 현재 unqualified DC/Aquarium의 request topic은 생성/구독되지 않는다.
+이 후속의 관련 회귀는 **139 passed**, 최종 전체는 **3141 passed, 같은 5 failed, 2 warnings**다.
+schema digest는 위 값 그대로다. 같은 로그 디렉터리의 `router-final.log` SHA-256은
+`7ad06af330438401c02b028187374077332a2cc2456fc2a1684667ac0891d2d5`,
+`full-router-final.log`는
+`f18461be0c39f766b0b300087d8e4ccb429602dfb8a635eae725d9d96f107826`이다.
+
 새 앱/펌웨어 증거를 수집한 것은 아니다. 설치 앱 bundle의 존재만 read-only 확인했으며,
 인증/SDK 로그·Keychain·장비/서버에는 접근하지 않았다. 앱 근거가 부족한 위 항목의 상태를
 그 확인만으로 올리지 않는다.

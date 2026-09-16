@@ -154,7 +154,7 @@ class RoutedSchedulePreview:
 
     request_id: str
     logical_member: str
-    schedule: WavemakerSchedule
+    schedule: WavemakerSchedule | ReturnPumpSchedule
 
     def public_result(self) -> dict[str, object]:
         return {
@@ -1184,7 +1184,7 @@ def _parse_native_request(payload: bytes | str) -> dict:
 def _parse_wavemaker_request(
     target: LocalDeviceBinding,
     payload: bytes | str,
-) -> tuple[str, LocalControlIntent, WavemakerSchedule]:
+) -> tuple[str, LocalControlIntent, WavemakerSchedule | ReturnPumpSchedule]:
     """Validate the whole message before ownership changes or any device I/O."""
 
     envelope = _parse_bounded_json(payload)
@@ -1194,7 +1194,12 @@ def _parse_wavemaker_request(
     if operation not in ("preview", "apply"):
         raise LocalControlMqttError("schedule operation must be preview or apply")
     try:
-        schedule = WavemakerSchedule.model_validate(envelope["schedule"])
+        value = envelope["schedule"]
+        if not isinstance(value, dict):
+            raise ValueError("schedule must be a declared product object")
+        model = (ReturnPumpSchedule if value.get("family") in {"dc_pro", "aquarium"}
+                 else WavemakerSchedule)
+        schedule = model.model_validate(value)
         schedule.compile_image()
         intent = LocalControlIntent(
             request_id=envelope["request_id"],
