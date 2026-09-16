@@ -239,6 +239,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 
 | 질문 | 판정 |
 |---|---|
+| HA 제어 전 Pro 일일 source의 자기 원본을 복원했는가 | **PASS — 소유 원복·미완료0**, 새 자격/제어 배포는 별도. [2026-09-16 원복](runs/2026-09-16-ha-control-owned-pro-restored.md) |
 | 새 조회·미리보기 전용 HA/MQTT generation을 배포했는가 | **PASS — observer 한정, 제어 활성화 아님**. [2026-09-16 배포·상태 수신·기록 보존·동시 관측 제한](runs/2026-09-16-observer-preview-deployment.md) |
 | 새 제품 이미지로 기존6개 제어와 native 자격을 보존해 배포했는가 | **배포 미완료 / HA·MQTT generation 미교체** — Pro 장비 설정 실반영은 아래 별도 질문에서 확인한다. 제품 누적8회, 기존 관찰02 자기 원복 뒤 위 master/아래 Async의 사용자16슬롯과 옵션 master cycle 적용. 현재 AutoFlow35/30·F70 일치,24h RO 로그 진행. 기존40receipt current, source 원Async 전달UNKNOWN·일반write 차단 유지. Bar write0·옛서비스 재기동0이며 기존 앱/서비스 의무 별도다. [일일 Async 적용](runs/2026-09-15-pro-daily-async-master-cycle.md), [직전 원복](runs/2026-09-15-before-daily-pro-owned-restored.md), [앱 보조 관측](runs/2026-09-15-async-master-link-app-rearm.md), [6회차 명시 원복](runs/2026-09-15-app-async-toggle-and-owned-restore.md), [6회차 보류](runs/2026-09-15-product-async-operator-observation.md), [Pro 자격](runs/2026-09-15-pro-qualification-app-range-pass.md), [Bar](runs/2026-09-15-bar-power-requalification.md), [4회차](runs/2026-09-15-product-async-reply-reconciliation.md), [5회차 원복·§7 대안](runs/2026-09-15-product-async-staged-activation.md) |
 | Pro 일일 시간표와 선택적 master cycle로 Async 상태에 도달하는가 | **이번 실반영 CONFIRMED / 하루 경계 관측 진행** — master independent 중 slave Async 직접reply, 재설정 뒤 master 직접reply·slave Async 보고와 양쪽432B 일치. 현재 야간 Sine35/30·F70 확인. 원 Async ACK/인과는 UNKNOWN이며 물리 유량 검증 아님. [실행·야간 로그](runs/2026-09-15-pro-daily-async-master-cycle.md) |
