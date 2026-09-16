@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import NoReturn
 
 from jebao_flow.hardware_safety import HARDWARE_SAFETY_VOLUME_ID_ENV
+from jebao_flow.local_control.aquarium_power_qualification import (
+    AquariumPowerQualificationProducer,
+    aquarium_power_target_validator,
+)
 from jebao_flow.local_control.compose import validate_current_compose_inputs
 from jebao_flow.local_control.install import load_current_private_config
 from jebao_flow.local_control.journal import LocalControlJournalStore
@@ -20,6 +24,7 @@ from jebao_flow.local_control.power_qualification_producer import PowerQualifica
 from jebao_flow.local_control.qualification_producer import (
     CurrentQualificationEpochSource,
     QualificationArtifactStore,
+    _manual_flow_family_profile,
 )
 from jebao_flow.local_control.resolver import CurrentEndpointResolver
 from jebao_flow.local_control.service import (
@@ -27,6 +32,7 @@ from jebao_flow.local_control.service import (
     read_current_hardware_safety_volume_id,
 )
 from jebao_flow.protocol.discovery import GizwitsDiscovery
+from jebao_flow.protocol.schedule import AQUARIUM_PUMP_PRODUCT_KEY
 
 _CONFIG_ENV = "JEBAO_FLOW_CONFIG"
 _MANIFEST_ENV = "JEBAO_FLOW_LOCAL_INSTALL_MANIFEST"
@@ -82,8 +88,14 @@ def _run(args: argparse.Namespace) -> int:
         template_roots=template_roots,
         logical_member=args.target,
         active_template_sha256=args.active_template_sha256,
+        target_validator=_validate_power_target,
     )
-    producer = PowerQualificationProducer(
+    target = epoch_source().target
+    producer_class = (
+        AquariumPowerQualificationProducer
+        if target.product_key == AQUARIUM_PUMP_PRODUCT_KEY else PowerQualificationProducer
+    )
+    producer = producer_class(
         epoch_provider=epoch_source,
         resolver_factory=lambda: _resolver(args.config),
         journal=LocalControlJournalStore(),
@@ -93,6 +105,12 @@ def _run(args: argparse.Namespace) -> int:
     result = asyncio.run(producer.execute(args.operation_id))
     _print_json(result.public_dict())
     return 0
+
+
+def _validate_power_target(product_key: str) -> object:
+    if product_key == AQUARIUM_PUMP_PRODUCT_KEY:
+        return aquarium_power_target_validator(product_key)
+    return _manual_flow_family_profile(product_key)
 
 
 def _resolver(config_path: Path) -> CurrentEndpointResolver:

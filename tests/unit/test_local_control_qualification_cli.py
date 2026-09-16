@@ -14,7 +14,12 @@ from jebao_flow.local_control.qualification_producer import (
     QualificationProductionError,
     _install_or_verify_private_file,
 )
-from jebao_flow.protocol.profiles import DC_PUMP_PRO, LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
+from jebao_flow.protocol.profiles import (
+    AQUARIUM_PUMP,
+    DC_PUMP_PRO,
+    LOCAL_WAVEMAKER,
+    LOCAL_WAVEMAKER_PRO,
+)
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
@@ -96,8 +101,13 @@ def test_current_epoch_accepts_the_product_scoped_bar_profile() -> None:
     assert epoch.max_power == 75
 
 
-def test_current_epoch_rejects_an_unsupported_manual_flow_family() -> None:
+def test_current_epoch_accepts_dc_without_inventing_a_linkage_role() -> None:
     source = _source(_config(product_key=DC_PUMP_PRO.product_key))
+    assert source().target.product_key == DC_PUMP_PRO.product_key
+
+
+def test_current_epoch_rejects_an_unsupported_manual_flow_family() -> None:
+    source = _source(_config(product_key=AQUARIUM_PUMP.product_key))
 
     with pytest.raises(QualificationProductionError, match="family is unsupported"):
         source()
@@ -278,8 +288,14 @@ def test_bar_cli_without_opt_in_never_opens_runtime(function, monkeypatch, capsy
     assert "current_operation_failed_closed" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("product,producer_name", [
+    (LOCAL_WAVEMAKER.product_key, "BarScalarQualificationProducer"),
+    (DC_PUMP_PRO.product_key, "DcScalarQualificationProducer"),
+])
 @pytest.mark.parametrize("function", ["manual_frequency", "manual_mode"])
-def test_bar_cli_delegates_to_product_producer(function, monkeypatch, capsys):
+def test_scalar_cli_delegates_to_product_producer(
+    function, product, producer_name, monkeypatch, capsys,
+):
     from types import SimpleNamespace
 
     calls = []
@@ -292,10 +308,12 @@ def test_bar_cli_delegates_to_product_producer(function, monkeypatch, capsys):
             calls.append(operation_id)
             return SimpleNamespace(public_dict=lambda: {"offline_wiring_test": True})
 
-    monkeypatch.setattr(cli, "BarScalarQualificationProducer", Producer)
+    monkeypatch.setattr(cli, producer_name, Producer)
+    monkeypatch.setattr(cli, "CurrentQualificationEpochSource", lambda **kwargs: (
+        lambda: SimpleNamespace(target=SimpleNamespace(product_key=product))
+    ))
     monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
-    for name in ("CurrentQualificationEpochSource", "LocalControlJournalStore",
-                 "LocalControlLease", "QualificationArtifactStore"):
+    for name in ("LocalControlJournalStore", "LocalControlLease", "QualificationArtifactStore"):
         monkeypatch.setattr(cli, name, lambda *args, **kwargs: object())
     assert cli.main([
         "run", "--function", function, "--config", "private.yaml",

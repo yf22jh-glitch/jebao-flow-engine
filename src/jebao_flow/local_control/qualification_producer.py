@@ -146,7 +146,7 @@ class ManualFlowState:
     enabled: bool
     timer_enabled: bool
     mode: str
-    linkage: str
+    linkage: str | None
     flow: int
 
 
@@ -156,7 +156,7 @@ class _ManualFlowFamilyProfile:
     state_probes: tuple[tuple[str, object, tuple[str, ...]], ...]
     decoded_status_fields: tuple[str, ...]
     required_mode: str
-    required_linkage: str
+    required_linkage: str | None
 
 
 _MANUAL_FLOW_FAMILY_PROFILES = {
@@ -181,6 +181,17 @@ _MANUAL_FLOW_FAMILY_PROFILES = {
         decoded_status_fields=("TimerON",),
         required_mode="constant",
         required_linkage="independent",
+    ),
+    "dc_pump_pro": _ManualFlowFamilyProfile(
+        family="dc_pump_pro",
+        state_probes=(
+            ("power", True, ("SwitchON",)),
+            ("manual_mode", "constant", ("Mode",)),
+        ),
+        decoded_status_fields=("TimerON",),
+        required_mode="constant",
+        # DC has no Linkage datapoint. None is absence, not an observed independent role.
+        required_linkage=None,
     ),
 }
 
@@ -246,6 +257,7 @@ class CurrentQualificationEpochSource:
         default=hash_current_template_contents,
         repr=False,
     )
+    target_validator: Callable[[str], object] | None = field(default=None, repr=False)
 
     def __call__(self) -> QualificationEpoch:
         config = self.config_loader(self.config_path)
@@ -296,7 +308,8 @@ class CurrentQualificationEpochSource:
         device = configured[0]
         if not device.enabled or device.product_key != target.product_key:
             raise QualificationProductionError("qualification target is not enabled and current")
-        _manual_flow_family_profile(target.product_key)
+        validator = self.target_validator or _manual_flow_family_profile
+        validator(target.product_key)
 
         return QualificationEpoch(
             target=target,
@@ -1039,13 +1052,13 @@ def _manual_flow_state(
     enabled = values["SwitchON"]
     timer = values["TimerON"]
     mode = values["Mode"]
-    linkage = values["Linkage"]
+    linkage = None if profile.required_linkage is None else values["Linkage"]
     flow = values["Flow"]
     if (
         type(enabled) is not bool
         or type(timer) is not bool
         or not isinstance(mode, str)
-        or not isinstance(linkage, str)
+        or (profile.required_linkage is not None and not isinstance(linkage, str))
         or isinstance(flow, bool)
         or not isinstance(flow, int)
     ):

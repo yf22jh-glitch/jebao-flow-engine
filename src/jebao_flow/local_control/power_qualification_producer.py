@@ -40,6 +40,7 @@ from jebao_flow.local_control.qualification_producer import (
     QualificationProductionResult,
     _canonical_json,
     _canonical_sha256,
+    _manual_flow_family_profile,
     _manual_flow_state,
     _phase_request_id,
     _require_operation_id,
@@ -86,7 +87,7 @@ class PowerQualificationIntent(BaseModel):
     safe_power: Literal[False] = False
     baseline_timer_enabled: Literal[False] = False
     baseline_mode: str = Field(min_length=1, max_length=128)
-    baseline_linkage: str = Field(min_length=1, max_length=128)
+    baseline_linkage: str | None = Field(min_length=1, max_length=128)
     baseline_flow: int
     off_request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,128}$")
     restore_request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,128}$")
@@ -114,7 +115,11 @@ class PowerQualificationIntent(BaseModel):
             raise ValueError("power qualification baseline flow is outside config limits")
         if self.baseline_flow > _SAFE_FIRST_WRITE_MAXIMUM:
             raise ValueError("power qualification baseline exceeds the first-write maximum")
-        if self.baseline_mode != "constant" or self.baseline_linkage != "independent":
+        profile = _manual_flow_family_profile(self.target.product_key)
+        if (
+            self.baseline_mode != profile.required_mode
+            or self.baseline_linkage != profile.required_linkage
+        ):
             raise ValueError("power qualification baseline ownership is invalid")
         for value in (self.app_version, self.firmware_version):
             if not value.isascii() or any(ord(character) < 0x20 for character in value):
@@ -123,7 +128,15 @@ class PowerQualificationIntent(BaseModel):
 
 
 class PowerQualificationProducer(ManualFlowQualificationProducer):
-    """Execute or offline-finalize one safer-OFF three-frame power qualification."""
+    """Execute or offline-finalize one safer-OFF three-frame power qualification.
+
+    The safer-OFF frame contract is family-independent: ``power_off`` keeps
+    ``restore_on_recovery=False`` so a failed operation converges to OFF and never re-ignites the
+    original ON. Subclasses may replace only the baseline state model and durable intent shape
+    through the hooks below; they must not weaken that OFF convergence.
+    """
+
+    _power_intent_class: type = PowerQualificationIntent
 
     async def execute(self, operation_id: str) -> QualificationProductionResult:
         _require_operation_id(operation_id)
@@ -150,7 +163,9 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
                 endpoint, firmware_version = await self._resolve(epoch, None)
                 writer = self._writer_factory(endpoint)
                 baseline_status = await writer.connect_and_read()
-                baseline_state = _manual_flow_state(writer, epoch.target, baseline_status)
+                baseline_state = self._read_baseline_power_state(
+                    writer, epoch.target, baseline_status
+                )
                 self._require_state_envelope(epoch, baseline_state)
                 intent, prepared = self._prepare_power_operation(
                     operation_id,
@@ -348,7 +363,42 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
             no_change=False,
             restore_on_recovery=True,
         )
-        intent = PowerQualificationIntent(
+        intent = self._build_power_intent(
+            operation_id=operation_id,
+            epoch=epoch,
+            baseline_state=baseline_state,
+            firmware_version=firmware_version,
+            off_request_id=off_request_id,
+            restore_request_id=restore_request_id,
+        )
+        return intent, (same_on, power_off, planned_on)
+
+    def _read_baseline_power_state(
+        self,
+        writer: ConnectedDeviceWriter,
+        target: LocalDeviceBinding,
+        status: bytes,
+    ) -> ManualFlowState:
+        """Read the baseline safety state. Subclasses supply their own family state model."""
+
+        return _manual_flow_state(writer, target, status)
+
+    def _power_intent_bytes(self, intent) -> bytes:
+        return power_qualification_intent_bytes(intent)
+
+    def _build_power_intent(
+        self,
+        *,
+        operation_id: str,
+        epoch: QualificationEpoch,
+        baseline_state: ManualFlowState,
+        firmware_version: str,
+        off_request_id: str,
+        restore_request_id: str,
+    ):
+        """Build the durable intent. Subclasses record their own real baseline fields."""
+
+        return PowerQualificationIntent(
             operation_id=operation_id,
             target=epoch.target,
             baseline_mode=baseline_state.mode,
@@ -368,14 +418,13 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
             firmware_version=firmware_version,
             created_at=self._now(),
         )
-        return intent, (same_on, power_off, planned_on)
 
     def _create_power_record(
         self,
         intent: PowerQualificationIntent,
         prepared: tuple[PreparedDeviceWrite, PreparedDeviceWrite, PreparedDeviceWrite],
     ) -> LocalControlJournalRecord:
-        intent_payload = power_qualification_intent_bytes(intent)
+        intent_payload = self._power_intent_bytes(intent)
         intent_sha256 = self._journal.install_blob(intent_payload)
         actions = tuple(
             JournalAction(
@@ -478,13 +527,13 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
     ) -> PowerQualificationIntent:
         payload = self._journal.load_blob(record.intent_sha256)
         try:
-            intent = PowerQualificationIntent.model_validate_json(payload)
+            intent = self._power_intent_class.model_validate_json(payload)
         except ValueError as error:
             raise QualificationProductionError(
                 "power qualification journal intent is invalid"
             ) from error
         if (
-            power_qualification_intent_bytes(intent) != payload
+            self._power_intent_bytes(intent) != payload
             or intent.operation_id != record.request_id
         ):
             raise QualificationProductionError(

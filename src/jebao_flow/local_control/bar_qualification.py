@@ -14,6 +14,10 @@ send, exact own-baseline restore, receipt-only-after-verified), not device accep
 safety. Bar ``feed_switch``, ``pulse_or_tide``, ``linkage_role``, ``feeding_duration`` and
 whole-``schedule`` qualification are intentionally not produced here;
 ``docs/bar-qualification-implementation.md`` records the exact restore-safety blocker for each.
+
+The DC subclass reuses this scalar journal implementation with an explicitly different product
+family and additionally permits feeding_duration when the existing writer can encode its baseline.
+The Bar class's own accepted functions remain the two listed above.
 """
 
 from __future__ import annotations
@@ -56,6 +60,7 @@ from jebao_flow.local_control.qualification_producer import (
     QualificationProductionResult,
     _canonical_json,
     _canonical_sha256,
+    _manual_flow_family_profile,
     _manual_flow_state,
     _phase_request_id,
     _require_operation_id,
@@ -67,6 +72,7 @@ _ACTION_IDS = ("same_value", "step_value", "planned_restore")
 _SUPPORTED = {
     "manual_frequency": "Frequency",
     "manual_mode": "Mode",
+    "feeding_duration": "FeedTime",
 }
 
 
@@ -89,12 +95,12 @@ def _spec(function: str) -> _BarScalarSpec:
         field = _SUPPORTED[function]
     except KeyError as error:
         raise QualificationProductionError(
-            "bar qualification supports only manual_frequency and manual_mode"
+            "scalar qualification function is unsupported"
         ) from error
     return _BarScalarSpec(
         function=function,
         field=field,
-        value_kind="integer" if function == "manual_frequency" else "enum",
+        value_kind="enum" if function == "manual_mode" else "integer",
     )
 
 
@@ -104,7 +110,7 @@ def _bar_manual_mode_choices(product_key: str) -> tuple[str, ...]:
         descriptor = catalog.find(product_key, "manual_mode")
     except KeyError as error:
         raise QualificationProductionError("bar manual mode is not in the app catalog") from error
-    if descriptor.family != _BAR_FAMILY or not descriptor.encoding_available:
+    if descriptor.family not in {_BAR_FAMILY, "dc_pump_pro"} or not descriptor.encoding_available:
         raise QualificationProductionError("bar manual mode encoder is unavailable")
     return descriptor.choices
 
@@ -117,12 +123,12 @@ class BarScalarQualificationIntent(BaseModel):
     schema_version: Literal[1] = 1
     operation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,128}$")
     target: LocalDeviceBinding = Field(repr=False)
-    function: Literal["manual_frequency", "manual_mode"]
+    function: Literal["manual_frequency", "manual_mode", "feeding_duration"]
     field: str = Field(min_length=1, max_length=64)
     baseline_value: int | str
     trial_value: int | str
     baseline_mode: str = Field(min_length=1, max_length=128)
-    baseline_linkage: str = Field(min_length=1, max_length=128)
+    baseline_linkage: str | None = Field(min_length=1, max_length=128)
     baseline_flow: int
     baseline_enabled: Literal[True] = True
     baseline_timer_enabled: Literal[False] = False
@@ -156,13 +162,17 @@ class BarScalarQualificationIntent(BaseModel):
             raise ValueError("bar qualification baseline flow is outside config limits")
         if self.baseline_flow > _SAFE_FIRST_WRITE_MAXIMUM:
             raise ValueError("bar qualification baseline exceeds the first-write maximum")
-        if self.baseline_mode != "constant" or self.baseline_linkage != "independent":
+        profile = _manual_flow_family_profile(self.target.product_key)
+        if (
+            self.baseline_mode != profile.required_mode
+            or self.baseline_linkage != profile.required_linkage
+        ):
             raise ValueError("bar qualification baseline ownership is invalid")
-        if self.function == "manual_frequency":
+        if self.function != "manual_mode":
             if not isinstance(self.baseline_value, int) or isinstance(self.baseline_value, bool):
-                raise ValueError("manual_frequency values must be integers")
+                raise ValueError("integer scalar values must be integers")
             if not isinstance(self.trial_value, int) or isinstance(self.trial_value, bool):
-                raise ValueError("manual_frequency values must be integers")
+                raise ValueError("integer scalar values must be integers")
         else:
             if not isinstance(self.baseline_value, str) or not isinstance(self.trial_value, str):
                 raise ValueError("manual_mode values must be app mode names")
@@ -177,7 +187,12 @@ class BarScalarQualificationIntent(BaseModel):
 class BarScalarQualificationProducer(ManualFlowQualificationProducer):
     """Execute or offline-finalize one Bar manual-control ``same/step/restore`` qualification."""
 
+    _family = _BAR_FAMILY
+    _functions = frozenset({"manual_frequency", "manual_mode"})
+
     def __init__(self, *, function: str, **kwargs: object) -> None:
+        if function not in self._functions:
+            raise QualificationProductionError("function is outside this product producer's scope")
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self._spec = _spec(function)
 
@@ -487,6 +502,7 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
             or intent.function != self._spec.function
         ):
             raise QualificationProductionError("bar qualification journal intent is not canonical")
+        self._require_bar_target(intent.target)
         return intent
 
     def _validate_bar_terminal_evidence(
@@ -564,13 +580,14 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
         return validate
 
     def _require_bar_mode_envelope(self, epoch: QualificationEpoch, state: ManualFlowState) -> None:
+        profile = _manual_flow_family_profile(epoch.target.product_key)
         encoder_minimum, encoder_maximum = declared_app_integer_range(
             epoch.target.product_key, "manual_flow"
         )
         if (
             state.enabled is not True
             or state.timer_enabled is not False
-            or state.linkage != "independent"
+            or state.linkage != profile.required_linkage
             or state.mode not in _bar_manual_mode_choices(epoch.target.product_key)
             or state.flow > _SAFE_FIRST_WRITE_MAXIMUM
             or not epoch.min_power <= state.flow <= epoch.max_power
@@ -589,14 +606,14 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
     ) -> int | str:
         if self._spec.function == "manual_mode":
             return state.mode
-        # Read the current Frequency through the existing writer edge without a new encoder:
-        # prepare a manual_frequency write and read its own captured baseline field.
-        minimum, _maximum = declared_app_integer_range(target.product_key, "manual_frequency")
+        # Inspect the selected scalar through the writer without sending or adding an encoder.
+        # In particular, an unencodable FeedTime=0 baseline cannot acquire restore authority.
+        minimum, _maximum = declared_app_integer_range(target.product_key, self._spec.function)
         probe = writer.prepare_scalar(
             LocalControlIntent(
-                request_id="inspect_frequency",
+                request_id="inspect_scalar",
                 target=target,
-                function="manual_frequency",
+                function=self._spec.function,
                 value=minimum,
             ),
             status,
@@ -604,13 +621,13 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
         try:
             decoded = json.loads(probe.baseline_readback)
         except (UnicodeDecodeError, ValueError) as error:
-            raise QualificationProductionError("current frequency state is invalid") from error
-        value = decoded.get("Frequency") if isinstance(decoded, dict) else None
+            raise QualificationProductionError("current scalar state is invalid") from error
+        value = decoded.get(self._spec.field) if isinstance(decoded, dict) else None
         if isinstance(value, bool) or not isinstance(value, int):
-            raise QualificationProductionError("current frequency state is invalid")
+            raise QualificationProductionError("current scalar state is invalid")
         if not minimum <= value <= _maximum:
             raise QualificationProductionError(
-                "current frequency is outside the app range for a first write"
+                "current scalar is outside the app range for a first write"
             )
         return value
 
@@ -620,9 +637,9 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
                 if choice != baseline:
                     return choice
             raise QualificationProductionError("bar manual mode has no distinct trial")
-        minimum, maximum = declared_app_integer_range(product_key, "manual_frequency")
+        minimum, maximum = declared_app_integer_range(product_key, self._spec.function)
         if minimum + 1 > maximum:
-            raise QualificationProductionError("frequency app range has no two distinct trials")
+            raise QualificationProductionError("scalar app range has no two distinct trials")
         return minimum + 1 if baseline == minimum else minimum
 
     def _require_bar_target(self, target: LocalDeviceBinding) -> None:
@@ -634,7 +651,7 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
                 "bar qualification target is not in the catalog"
             ) from error
         if (
-            descriptor.family != _BAR_FAMILY
+            descriptor.family != self._family
             or not descriptor.encoding_available
             or descriptor.fields != (self._spec.field,)
         ):

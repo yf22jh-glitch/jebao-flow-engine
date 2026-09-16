@@ -6,6 +6,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,7 @@ from jebao_flow.hardware_safety import HARDWARE_SAFETY_VOLUME_ID_ENV
 from jebao_flow.local_control.journal import TransactionPhase
 from jebao_flow.local_control.qualification_producer import QualificationProductionResult
 from jebao_flow.local_control.service import HARDWARE_SAFETY_VOLUME_ID_FILE_ENV
+from jebao_flow.protocol.profiles import AQUARIUM_PUMP, DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO
 
 
 def _args(tmp_path: Path, *, write_enabled: bool = True) -> argparse.Namespace:
@@ -30,14 +32,22 @@ def _args(tmp_path: Path, *, write_enabled: bool = True) -> argparse.Namespace:
     )
 
 
+@pytest.mark.parametrize("product_key,producer_name", [
+    (LOCAL_WAVEMAKER_PRO.product_key, "PowerQualificationProducer"),
+    (DC_PUMP_PRO.product_key, "PowerQualificationProducer"),
+    (AQUARIUM_PUMP.product_key, "AquariumPowerQualificationProducer"),
+])
 def test_run_builds_the_dedicated_power_producer_and_prints_only_public_result(
     tmp_path: Path,
     monkeypatch,
     capsys,
+    product_key,
+    producer_name,
 ) -> None:
     args = _args(tmp_path)
     calls: list[tuple[str, object]] = []
-    epoch = object()
+    def epoch():
+        return SimpleNamespace(target=SimpleNamespace(product_key=product_key))
     resolver = object()
     journal = object()
     lease = object()
@@ -79,7 +89,7 @@ def test_run_builds_the_dedicated_power_producer_and_prints_only_public_result(
     monkeypatch.setattr(cli, "LocalControlJournalStore", lambda: journal)
     monkeypatch.setattr(cli, "LocalControlLease", lambda: lease)
     monkeypatch.setattr(cli, "QualificationArtifactStore", lambda path: artifacts)
-    monkeypatch.setattr(cli, "PowerQualificationProducer", _Producer)
+    monkeypatch.setattr(cli, producer_name, _Producer)
 
     assert cli._run(args) == 0
 
@@ -108,6 +118,7 @@ def test_run_builds_the_dedicated_power_producer_and_prints_only_public_result(
         "template_roots": tuple(args.template_root),
         "logical_member": args.target,
         "active_template_sha256": args.active_template_sha256,
+        "target_validator": cli._validate_power_target,
     }
     producer_call = next(value for name, value in calls if name == "producer")
     assert producer_call["epoch_provider"] is epoch

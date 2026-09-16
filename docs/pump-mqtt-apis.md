@@ -131,7 +131,9 @@ native 예외는 바깥 `status: failed`와 보존 가능한 durable 진단을 �
 
 Bar 나머지 기능과 리턴모터의 현재 근거는 [앱 분석](capabilities/registered-device-app-analysis.md),
 [Bar producer 조사](bar-qualification-implementation.md)에 있다. encoder 존재는 수용 자격이 아니다.
-DC는 현재 qualification 공통 profile에 없고 Aquarium은 Mode/Linkage/Flow 전제와 맞지 않는다.
+위 조사 당시 DC는 qualification 공통 profile에 없었고 Aquarium은 Mode/Linkage/Flow 전제와
+맞지 않았다. 후속 [리턴모터 구현](return-pump-implementation.md)에서 DC scalar producer와
+Aquarium 전원의 별도 상태 모델을 추가했다. 실제 receipt 발급은 여전히 별도다.
 대안은 (1) 앱 정적 근거를 더 확보하고 제품별 원본 복원·producer 계약을 별도로 설계하거나,
 (2) 현장 승인을 받아 미확정 항목을 가르는 최소 앱 조작과 raw 관측을 수행하는 것이다.
 재개에는 해당 계약·근거와 실기 operation별 maintainer/on-site 승인이 필요하다. 그동안 기존

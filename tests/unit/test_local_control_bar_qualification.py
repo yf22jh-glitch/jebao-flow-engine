@@ -195,6 +195,7 @@ def _producer(
     target: LocalDeviceBinding,
     epoch: QualificationEpoch | None = None,
     resolver_fail_at: int | None = None,
+    producer_type=BarScalarQualificationProducer,
 ) -> tuple[
     BarScalarQualificationProducer,
     LocalControlJournalStore,
@@ -207,7 +208,7 @@ def _producer(
     endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
     resolver = _Resolver(endpoint, fail_at=resolver_fail_at)
     writer_factory = _WriterFactory(sessions)
-    producer = BarScalarQualificationProducer(
+    producer = producer_type(
         function=function,
         epoch_provider=lambda: epoch or _epoch(target=target),
         resolver_factory=lambda: resolver,
@@ -356,7 +357,7 @@ async def test_frequency_outside_app_range_sends_nothing(tmp_path: Path) -> None
 
 def test_unsupported_function_is_rejected_at_construction(tmp_path: Path) -> None:
     journal = LocalControlJournalStore.for_test(tmp_path / "journal")
-    with pytest.raises(QualificationProductionError, match="manual_frequency and manual_mode"):
+    with pytest.raises(QualificationProductionError, match="producer's scope"):
         BarScalarQualificationProducer(
             function="feed_switch",
             epoch_provider=lambda: _epoch(),

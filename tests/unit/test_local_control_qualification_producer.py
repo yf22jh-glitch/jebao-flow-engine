@@ -33,7 +33,7 @@ from jebao_flow.local_control.resolver import (
     CurrentEndpointResolutionError,
     ResolvedEndpoint,
 )
-from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
+from jebao_flow.protocol.profiles import DC_PUMP_PRO, LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=UTC)
 
@@ -105,6 +105,15 @@ def _bar_status(
         | (linkage_code << 7)
     )
     raw[:2] = state_bits.to_bytes(2, "big")
+    raw[2] = flow
+    return bytes(raw)
+
+
+def _dc_status(*, flow=40, enabled=True, timer_enabled=False, mode_code=0):
+    # Product schema layout only; this fixture does not model firmware state transitions.
+    raw = bytearray(DC_PUMP_PRO.raw_status_size)
+    raw[0] = int(enabled) | (int(timer_enabled) << 1)
+    raw[1] = mode_code
     raw[2] = flow
     return bytes(raw)
 
@@ -371,13 +380,18 @@ def test_family_profiles_preserve_pro_probes_and_use_the_bar_timer_decoder(monke
     ]
 
 
+@pytest.mark.parametrize("product,status_factory", [
+    (LOCAL_WAVEMAKER.product_key, _bar_status), (DC_PUMP_PRO.product_key, _dc_status),
+])
 @pytest.mark.asyncio
-async def test_bar_success_uses_the_existing_three_action_contract(tmp_path: Path) -> None:
-    target = _binding(product_key=LOCAL_WAVEMAKER.product_key)
+async def test_product_success_uses_the_existing_three_action_contract(
+    tmp_path: Path, product, status_factory,
+) -> None:
+    target = _binding(product_key=product)
     epoch = _epoch(target=target, maximum=100)
     endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
-    baseline = _bar_status(flow=40)
-    lower = _bar_status(flow=39)
+    baseline = status_factory(flow=40)
+    lower = status_factory(flow=39)
     sent: list[bytes] = []
     producer, journal, lease = _producer(
         tmp_path,
@@ -411,7 +425,7 @@ async def test_bar_success_uses_the_existing_three_action_contract(tmp_path: Pat
     )
     assert all(action.phase is ActionPhase.VERIFIED for action in record.actions)
     binding = _qualification_binding(tmp_path)
-    assert binding.product_key == LOCAL_WAVEMAKER.product_key
+    assert binding.product_key == product
     assert binding.function == "manual_flow"
     assert qualified_physical_identity_keys(
         binding,
@@ -824,13 +838,18 @@ async def test_step_active_crash_requires_exact_recovery_without_receipts(tmp_pa
     assert not tuple((tmp_path / "receipts").iterdir())
 
 
+@pytest.mark.parametrize("product,status_factory", [
+    (LOCAL_WAVEMAKER.product_key, _bar_status), (DC_PUMP_PRO.product_key, _dc_status),
+])
 @pytest.mark.asyncio
-async def test_bar_step_crash_uses_the_same_exact_recovery_contract(tmp_path: Path) -> None:
-    target = _binding(product_key=LOCAL_WAVEMAKER.product_key)
+async def test_product_step_crash_uses_the_same_exact_recovery_contract(
+    tmp_path: Path, product, status_factory,
+) -> None:
+    target = _binding(product_key=product)
     epoch = _epoch(target=target, maximum=100)
     endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
-    baseline = _bar_status(flow=40)
-    lower = _bar_status(flow=39)
+    baseline = status_factory(flow=40)
+    lower = status_factory(flow=39)
     sent: list[bytes] = []
     resolver = _Resolver(endpoint, fail_at=3)
     writer_factory = _WriterFactory(

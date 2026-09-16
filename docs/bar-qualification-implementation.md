@@ -103,3 +103,7 @@ Codex가 물은 "기존 scaffold를 DC scalar 및 Aquarium known power/feed_swit
 - DC schedule mode code 1·2와 두 timer coupling의 화면 귀속, Aquarium `feed0`/transport 방향은
   정적으로 UNKNOWN이라(`registered-device-app-analysis.md` §감사 후 남은 것) 소프트웨어만으로
   실행 승격 불가다.
+
+후속 [리턴모터 구현](return-pump-implementation.md)에서 DC profile과 DC scalar subclass,
+Aquarium의 별도 power state/intent를 추가했다. 위 목록은 최초 조사 당시의 공백이며,
+새 구현도 실장 자격 발급이나 미확정 timer/transport 동작의 확정은 아니다.

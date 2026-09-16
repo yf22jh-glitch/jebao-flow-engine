@@ -15,6 +15,7 @@ from jebao_flow.local_control.bar_qualification import BarScalarQualificationPro
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.compose import validate_current_compose_inputs
 from jebao_flow.local_control.coordinator import LocalControlCoordinator
+from jebao_flow.local_control.dc_qualification import DcScalarQualificationProducer
 from jebao_flow.local_control.install import load_current_private_config
 from jebao_flow.local_control.journal import LocalControlJournalStore
 from jebao_flow.local_control.lease import LocalControlLease
@@ -47,8 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--operation-id", required=True)
     run.add_argument("--target", required=True, help=argparse.SUPPRESS)
     run.add_argument(
-        "--function", choices=("manual_flow", "manual_frequency", "manual_mode"),
-        default="manual_flow", help="frequency/mode qualification is Bar-only",
+        "--function",
+        choices=("manual_flow", "manual_frequency", "manual_mode", "feeding_duration"),
+        default="manual_flow", help="frequency/mode: Bar/DC Pro; feeding duration: DC Pro only",
     )
     run.add_argument("--downward-step", type=int, help="required for manual_flow only")
     run.add_argument("--active-template-sha256", required=True)
@@ -134,7 +136,13 @@ def _run(args: argparse.Namespace) -> int:
                 producer.execute(args.operation_id, downward_step=args.downward_step)
             )
         else:
-            producer = BarScalarQualificationProducer(
+            target = epoch_source().target
+            descriptor = build_local_control_catalog().find(target.product_key, args.function)
+            scalar_producer = (
+                DcScalarQualificationProducer if descriptor.family == "dc_pump_pro"
+                else BarScalarQualificationProducer
+            )
+            producer = scalar_producer(
                 function=args.function, **producer_arguments
             )
             result = asyncio.run(producer.execute(args.operation_id))

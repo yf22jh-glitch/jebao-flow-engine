@@ -38,7 +38,8 @@ from jebao_flow.local_control.resolver import (
     CurrentEndpointResolutionError,
     ResolvedEndpoint,
 )
-from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
+from jebao_flow.protocol.profiles import DC_PUMP_PRO, LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
+from tests.unit.test_local_control_qualification_producer import _dc_status
 
 NOW = datetime(2026, 9, 13, 3, tzinfo=UTC)
 
@@ -287,6 +288,7 @@ def _qualification_binding(tmp_path: Path):
     (
         (LOCAL_WAVEMAKER_PRO.product_key, _pro_status),
         (LOCAL_WAVEMAKER.product_key, _bar_status),
+        (DC_PUMP_PRO.product_key, _dc_status),
     ),
 )
 @pytest.mark.asyncio
@@ -826,17 +828,19 @@ async def _make_pending_operation(
     operation_id: str,
     fault_phase: str,
     monkeypatch=None,
+    product_key=LOCAL_WAVEMAKER_PRO.product_key,
+    status_factory=_pro_status,
 ) -> tuple[
     LocalControlJournalStore,
     _Lease,
     ResolvedEndpoint,
     list[bytes],
 ]:
-    target = _binding()
+    target = _binding(product_key=product_key)
     epoch = _epoch(target=target)
     endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
-    on = _pro_status(enabled=True)
-    off = _pro_status(enabled=False)
+    on = status_factory(enabled=True)
+    off = status_factory(enabled=False)
     sent: list[bytes] = []
     if fault_phase == "same_on":
         sessions = [_Session([on], sent, send_error=TimeoutError("same ON fault"))]
@@ -885,6 +889,10 @@ async def _make_pending_operation(
     return journal, lease, endpoint, sent
 
 
+@pytest.mark.parametrize("product_key,status_factory", [
+    (LOCAL_WAVEMAKER_PRO.product_key, _pro_status),
+    (DC_PUMP_PRO.product_key, _dc_status),
+])
 @pytest.mark.parametrize(
     ("fault_phase", "current_enabled", "expected_recovery_writes"),
     (
@@ -904,6 +912,8 @@ async def test_every_nonterminal_fault_recovers_without_an_on_frame(
     fault_phase: str,
     current_enabled: bool,
     expected_recovery_writes: int,
+    product_key,
+    status_factory,
 ) -> None:
     operation_id = f"power_fault_{fault_phase}_{int(current_enabled)}"
     journal, lease, endpoint, forward_sent = await _make_pending_operation(
@@ -911,12 +921,14 @@ async def test_every_nonterminal_fault_recovers_without_an_on_frame(
         operation_id=operation_id,
         fault_phase=fault_phase,
         monkeypatch=monkeypatch,
+        product_key=product_key,
+        status_factory=status_factory,
     )
     pending = journal.load(operation_id)
     assert pending is not None
     off_payload = journal.load_blob(pending.actions[1].forward_payload_sha256)
-    current = _pro_status(enabled=current_enabled)
-    off = _pro_status(enabled=False)
+    current = status_factory(enabled=current_enabled)
+    off = status_factory(enabled=False)
     recovery_sent: list[bytes] = []
     if not current_enabled:
         active_actions = sum(
