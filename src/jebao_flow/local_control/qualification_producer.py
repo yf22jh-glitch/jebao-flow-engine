@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import stat
@@ -30,6 +31,7 @@ from jebao_flow.local_control.device_writer import (
     get_product_schema,
     verify_prepared_readback,
 )
+from jebao_flow.local_control.failure_diagnostics import failure_clock_ns, report_action_failure
 from jebao_flow.local_control.install import (
     build_fresh_install_manifest,
     current_protocol_schema_sha256,
@@ -68,6 +70,7 @@ _MAX_ARTIFACT_BYTES = 1024 * 1024
 _SAFE_FIRST_WRITE_MAXIMUM = 45
 _FUNCTION = "manual_flow"
 _ACTION_IDS = ("same_value", "lower_power", "planned_restore")
+_LOGGER = logging.getLogger(__name__)
 
 
 class QualificationProductionError(RuntimeError):
@@ -695,6 +698,8 @@ class ManualFlowQualificationProducer:
             phase=ActionPhase.FORWARD_ATTEMPTING,
             transaction_phase=TransactionPhase.EXECUTING,
         )
+        started_ns = failure_clock_ns()
+        readback: bytes | None = None
         try:
             acknowledgement = await writer.send_once(prepared.forward_payload, permit)
             acknowledgement_sha256 = self._journal.install_blob(acknowledgement)
@@ -714,7 +719,8 @@ class ManualFlowQualificationProducer:
                 phase=ActionPhase.VERIFIED,
                 acknowledgement_sha256=acknowledgement_sha256,
             )
-        except BaseException:
+        except BaseException as error:
+            failed_ns = failure_clock_ns()
             current = self._journal.load(record.request_id)
             if current is not None and current.phase not in {
                 TransactionPhase.VERIFIED,
@@ -722,7 +728,7 @@ class ManualFlowQualificationProducer:
                 TransactionPhase.SUPERSEDED,
             }:
                 try:
-                    self._save_action(
+                    current = self._save_action(
                         current,
                         index,
                         phase=ActionPhase.UNCERTAIN,
@@ -731,7 +737,52 @@ class ManualFlowQualificationProducer:
                     )
                 except Exception:
                     pass
+                report_action_failure(
+                    current, index, error, started_ns=started_ns, failed_ns=failed_ns
+                )
+                if readback is not None:
+                    self._report_failed_readback(current, index, prepared, readback)
             raise
+
+    def _report_failed_readback(
+        self,
+        record: LocalControlJournalRecord,
+        index: int,
+        prepared: PreparedDeviceWrite,
+        status: bytes,
+    ) -> None:
+        """Preserve actual decision values after uncertainty, without changing its outcome."""
+        try:
+            values = get_product_schema(prepared.target.target.product_key).decode_status(status)
+            fields = (
+                "SwitchON", "TimerON", "Linkage", "Mode", "Flow", "Frequency", "FeedTime",
+                "PulseTide", "FeedSwitch", "Motor_Speed", "AutoMode", "AutoFlow", "AutoFreq",
+            )
+            observed = {name: values[name] for name in fields if name in values}
+            evidence = {
+                "event": "local_qualification_failed_readback",
+                "request_sha256": hashlib.sha256(record.request_id.encode("ascii")).hexdigest(),
+                "action_index": index,
+                "function": prepared.function,
+                "expected": (
+                    json.loads(prepared.expected_readback)
+                    if prepared.verification_kind == "scalar_fields"
+                    else {"schedule_sha256": hashlib.sha256(prepared.expected_readback).hexdigest()}
+                ),
+                "observed_controls": observed,
+                "status_sha256": hashlib.sha256(status).hexdigest(),
+                "status_blob_preserved": False,
+            }
+            # This existing private blob store is content-addressed and fsynced. A failed
+            # observer must not suppress the original error or turn uncertainty into PASS.
+            try:
+                self._journal.install_blob(status)
+                evidence["status_blob_preserved"] = True
+            except BaseException:
+                pass
+            _LOGGER.error("%s", json.dumps(evidence, sort_keys=True, separators=(",", ":")))
+        except BaseException:
+            pass
 
     def _finalize(
         self,

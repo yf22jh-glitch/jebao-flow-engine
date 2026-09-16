@@ -462,3 +462,51 @@ def test_schedule_cli_never_guesses_missing_trial_images(monkeypatch, capsys):
         == 2
     )
     assert "current_operation_failed_closed" in capsys.readouterr().err
+
+
+def test_timer_cli_requires_explicit_trial_output_before_runtime_preparation(monkeypatch):
+    def forbidden():
+        raise AssertionError("missing timer input must be rejected before hardware preparation")
+
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", forbidden)
+    assert cli.main([
+        "run", "--function", "schedule_enable", "--config", "private.yaml",
+        "--target", "bar", "--operation-id", "bar_timer_cli_missing",
+        "--active-template-sha256", "a" * 64, "--qualification-output", "private.json",
+        "--write-enabled",
+    ]) == 2
+
+
+def test_timer_cli_wires_explicit_trial_and_configured_writer(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    calls = []
+    config = _config(product_key=LOCAL_WAVEMAKER.product_key)
+    factory = object()
+
+    class Producer:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        async def execute(self, operation_id, *, trial_flow):
+            calls.append((operation_id, trial_flow))
+            return SimpleNamespace(public_dict=lambda: {"offline_timer_wiring_test": True})
+
+    monkeypatch.setattr(cli, "BarTimerQualificationProducer", Producer)
+    monkeypatch.setattr(cli, "CurrentQualificationEpochSource", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "load_current_private_config", lambda path: config)
+    monkeypatch.setattr(
+        cli, "configured_writer_factory", lambda value: factory if value is config else None
+    )
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
+    for name in ("LocalControlJournalStore", "LocalControlLease", "QualificationArtifactStore"):
+        monkeypatch.setattr(cli, name, lambda *args, **kwargs: object())
+    assert cli.main([
+        "run", "--function", "schedule_enable", "--trial-flow", "40",
+        "--config", "private.yaml", "--target", "bar", "--operation-id", "bar_timer_cli_01",
+        "--active-template-sha256", "a" * 64, "--template-root", "private-template",
+        "--qualification-output", "private.json", "--write-enabled",
+    ]) == 0
+    assert calls[0]["writer_factory"] is factory
+    assert calls[1] == ("bar_timer_cli_01", 40)
+    assert "offline_timer_wiring_test" in capsys.readouterr().out

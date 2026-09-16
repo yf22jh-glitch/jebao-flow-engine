@@ -74,6 +74,21 @@ def test_catalog_covers_every_registered_product_and_app_shell_function() -> Non
     )
 
 
+def test_bar_timer_encoder_does_not_promote_hardware_control_before_qualification_run():
+    bar = "1d8c63eaccac4205b92c84d77d5a08fb"
+    descriptor = build_local_control_catalog().find(bar, "schedule_enable")
+    assert descriptor.encoding_available is True
+    assert descriptor.control_exposed is False
+    assert "AutoFlow" in descriptor.fields
+    # Even an offline fixture receipt is not an executable-promotion decision.
+    binding = _qualification("schedule_enable").model_copy(update={"product_key": bar})
+    descriptor = build_local_control_catalog(
+        (binding,), current_content=_content(),
+        _qualification_verifier_for_test=lambda _item: _verified_keys("5"),
+    ).find(bar, "schedule_enable")
+    assert descriptor.control_exposed is False
+
+
 def test_generator_qualification_is_consumed_once_and_exposes_only_that_control() -> None:
     catalog = build_local_control_catalog(
         (_qualification("manual_flow"),),

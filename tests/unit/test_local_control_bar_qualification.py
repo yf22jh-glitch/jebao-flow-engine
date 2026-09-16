@@ -7,6 +7,7 @@ receipts are emitted solely from a durably verified journal.
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -485,6 +486,7 @@ async def test_step_send_fault_is_recovery_required_and_emits_no_receipt(tmp_pat
 @pytest.mark.asyncio
 async def test_step_readback_fault_is_recovery_required_and_emits_no_receipt(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     target = _binding()
     baseline = _bar_status(frequency=20)
@@ -506,6 +508,36 @@ async def test_step_readback_fault_is_recovery_required_and_emits_no_receipt(
     assert record is not None
     assert record.phase is TransactionPhase.RECOVERY_REQUIRED
     assert record.actions[1].phase is ActionPhase.UNCERTAIN
+    assert not tuple((tmp_path / "receipts").iterdir())
+    events = [json.loads(entry.message) for entry in caplog.records
+              if '"event":"local_control_action_failure"' in entry.message]
+    assert len(events) == 1
+    assert events[0]["action_index"] == 1
+    assert events[0]["exception_chain"][0]["type"].endswith("LocalDeviceWriteError")
+    assert events[0]["diagnostic"] == "qualification_phase_uncertain"
+    assert "readback failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_readback_mismatch_logs_actual_values_without_a_new_admission_gate(tmp_path, caplog):
+    # Inject an unchanged response, not a firmware timing model. The existing exact
+    # verifier still fails; diagnostics now preserve the values it actually compared.
+    baseline = _bar_status(frequency=20)
+    sent = []
+    producer, journal, *_ = _producer(
+        tmp_path, function="manual_frequency", target=_binding(),
+        sessions=[_Session([baseline, baseline], sent), _Session([baseline, baseline], sent)],
+    )
+    with pytest.raises(QualificationProductionError, match="readback did not match"):
+        await producer.execute("bar_diagnostic_mismatch_01")
+    events = [json.loads(entry.message) for entry in caplog.records]
+    evidence = next(e for e in events if e["event"] == "local_qualification_failed_readback")
+    assert evidence["expected"] == {"Frequency": 5}
+    assert evidence["observed_controls"]["Frequency"] == 20
+    assert evidence["status_blob_preserved"] is True
+    assert journal.load_blob(evidence["status_sha256"]) == baseline
+    assert len(sent) == 2
+    assert journal.load("bar_diagnostic_mismatch_01").phase is TransactionPhase.RECOVERY_REQUIRED
     assert not tuple((tmp_path / "receipts").iterdir())
 
 

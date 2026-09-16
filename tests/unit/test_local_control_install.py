@@ -175,6 +175,7 @@ def test_protocol_binding_includes_the_actual_writer_and_composition_sources(
     resolved = {Path(path).resolve() for path in captured if path is not None}
     local_control_root = Path(install.__file__).resolve().parent
     assert local_control_root / "device_writer.py" in resolved
+    assert local_control_root / "bar_timer.py" in resolved
     assert local_control_root / "schedule.py" in resolved
     assert local_control_root / "wavemaker.py" in resolved
     assert local_control_root / "pump_preview.py" in resolved
@@ -196,10 +197,12 @@ def test_protocol_binding_changes_with_schedule_model_range_source(
     assert after != before
 
 
-@pytest.mark.parametrize("compiler", ["wavemaker.py", "pump_preview.py"])
+@pytest.mark.parametrize("compiler", ["wavemaker.py", "pump_preview.py", "bar_timer.py"])
 def test_schema_binding_changes_with_writer_delegated_compiler(tmp_path, monkeypatch, compiler):
     monkeypatch.setattr(install, "__file__", str(tmp_path / "install.py"))
-    for name in ("device_writer.py", "schedule.py", "wavemaker.py", "pump_preview.py"):
+    for name in (
+        "device_writer.py", "schedule.py", "wavemaker.py", "pump_preview.py", "bar_timer.py"
+    ):
         (tmp_path / name).write_bytes(b"compiler-contract-v1")
     before = install.current_protocol_schema_sha256()
     (tmp_path / compiler).write_bytes(b"compiler-contract-v2")

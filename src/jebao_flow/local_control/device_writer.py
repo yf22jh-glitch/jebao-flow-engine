@@ -13,7 +13,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
+from jebao_flow.config import AppConfig
+from jebao_flow.local_control.bar_timer import prepare_bar_timer_command
 from jebao_flow.local_control.catalog import internal_function_value
 from jebao_flow.local_control.lease import LocalControlSendPermit
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
@@ -58,6 +61,24 @@ class RawWriterSession(Protocol):
 
 
 SessionFactory = Callable[[str], RawWriterSession]
+
+
+def configured_writer_factory(
+    config: AppConfig,
+) -> Callable[[ResolvedEndpoint], ConnectedDeviceWriter]:
+    """Bind app-local timer time and per-device output limits from current private config."""
+    timezone = ZoneInfo(config.instance.timezone)
+    limits = {device.id: device.limits for device in config.devices}
+
+    def create(endpoint: ResolvedEndpoint) -> ConnectedDeviceWriter:
+        bounds = limits[endpoint.target.logical_member]
+        return ConnectedDeviceWriter(
+            endpoint,
+            bar_timer_local_time=lambda: datetime.now(timezone),
+            bar_timer_flow_bounds=(bounds.min_power, bounds.max_power),
+        )
+
+    return create
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,11 +206,15 @@ class ConnectedDeviceWriter:
         endpoint: ResolvedEndpoint,
         *,
         session_factory: SessionFactory = GizwitsSession,
+        bar_timer_local_time: Callable[[], datetime] | None = None,
+        bar_timer_flow_bounds: tuple[int, int] | None = None,
     ) -> None:
         self.endpoint = endpoint
         self._session = session_factory(endpoint.address)
         self._connected = False
         self._attempted_payloads: set[str] = set()
+        self._bar_timer_local_time = bar_timer_local_time
+        self._bar_timer_flow_bounds = bar_timer_flow_bounds
 
     async def connect_and_read(self) -> bytes:
         if self._connected:
@@ -344,6 +369,11 @@ class ConnectedDeviceWriter:
             return self._prepare_wavemaker_schedule(intent, current_status)
         if intent.function == "schedule_reset":
             return self._prepare_schedule_reset(intent, current_status)
+        if (
+            intent.target.product_key == "1d8c63eaccac4205b92c84d77d5a08fb"
+            and intent.function == "schedule_enable"
+        ):
+            return self._prepare_bar_timer(intent, current_status)
         product_fields = _SCALAR_FIELD_BY_PRODUCT.get(intent.target.product_key)
         if product_fields is None:
             raise LocalDeviceWriteError("product is not in the local-control encoder catalog")
@@ -422,6 +452,58 @@ class ConnectedDeviceWriter:
             # fresh read as OFF or as the original baseline, but must never re-enable it merely
             # to recreate a less-safe pre-write state.
             restore_on_recovery=not (intent.function == "power" and intent.value is False),
+        )
+
+    def _prepare_bar_timer(
+        self, intent: LocalControlIntent, current_status: bytes
+    ) -> PreparedDeviceWrite:
+        if self._bar_timer_local_time is None or self._bar_timer_flow_bounds is None:
+            raise LocalDeviceWriteError(
+                "Bar timer requires configured local time and output bounds"
+            )
+        local_time = self._bar_timer_local_time()
+        if local_time.tzinfo is None or local_time.utcoffset() is None:
+            raise ValueError("Bar timer local time must be timezone-aware")
+        schema = get_product_schema(intent.target.product_key)
+        values = schema.decode_status(current_status)
+        if values["Linkage"] != "independent":
+            raise LocalDeviceWriteError("Bar timer control requires independent ownership")
+        minimum, maximum = self._bar_timer_flow_bounds
+        if not minimum <= values["Flow"] <= maximum:
+            raise LocalDeviceWriteError("Bar timer manual recovery flow is outside output bounds")
+        image = extract_current_schedule_image(intent.target.product_key, current_status)
+        arguments = dict(
+            schedule_image=image,
+            local_minute=local_time.hour * 60 + local_time.minute,
+            minimum_flow=minimum,
+            maximum_flow=maximum,
+        )
+        command = prepare_bar_timer_command(intent.value, values, **arguments)
+        # A rollback that restores TimerON is authorized only inside the same output
+        # envelope, including future slots. This is a range check, not an Auto snapshot
+        # equality check. No claim that schedule bytes determine current Auto is made.
+        if values["TimerON"]:
+            prepare_bar_timer_command(True, values, **arguments)
+            if values["AutoMode"] in {"classic", "sine", "random", "constant"} and not (
+                minimum <= values["AutoFlow"] <= maximum
+            ):
+                raise LocalDeviceWriteError(
+                    "Bar timer active recovery flow is outside output bounds"
+                )
+        expected = dict(command.persistent_readback)
+        baseline = {name: values[name] for name in expected}
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function=intent.function,
+            forward_payload=build_control_payload(schema, command.fields),
+            # Auto* seeds are not owned persistent state. Neither restoration nor
+            # verification replays or compares them against a historical snapshot.
+            rollback_payload=build_control_payload(schema, baseline),
+            baseline_status=bytes(current_status),
+            expected_readback=_canonical_values(expected),
+            baseline_readback=_canonical_values(baseline),
+            verification_kind="scalar_fields",
+            no_change=expected == baseline,
         )
 
     def _prepare_wavemaker_schedule(

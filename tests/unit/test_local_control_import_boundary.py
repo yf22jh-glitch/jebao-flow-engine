@@ -299,7 +299,10 @@ def test_qualification_producer_schema_access_is_read_only_through_writer_edge()
     }
 
     assert "get_product_schema" in writer_imports
-    assert len(schema_calls) == 2
+    # A diagnostic may add another read-only decode. Protect the access boundary,
+    # not a snapshot of how many call sites happened to exist before it was added.
+    assert schema_calls
+    assert all(isinstance(parents[call], (ast.Attribute, ast.Assign)) for call in schema_calls)
     assert direct_members | named_members == {"attributes_by_name", "decode_status"}
 
 

@@ -26,6 +26,7 @@ from jebao_flow.local_control.coordinator import (
     LocalControlCoordinator,
     NativeRecoveryRequiredError,
 )
+from jebao_flow.local_control.device_writer import configured_writer_factory
 from jebao_flow.local_control.dosing import (
     build_dosing_channel_schedule_preview,
     plan_average_interval_dosing,
@@ -652,6 +653,7 @@ def _coordinator(config, catalog) -> LocalControlCoordinator:
         resolver=_resolver(config),
         journal=LocalControlJournalStore(),
         lease=LocalControlLease(),
+        writer_factory=configured_writer_factory(config),
     )
 
 

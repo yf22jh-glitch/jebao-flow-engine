@@ -45,6 +45,7 @@ _ENCODABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
     "1d8c63eaccac4205b92c84d77d5a08fb": frozenset(
         {
             "power",
+            "schedule_enable",
             "feed_switch",
             "pulse_or_tide",
             "linkage_role",

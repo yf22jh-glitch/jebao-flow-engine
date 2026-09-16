@@ -11,6 +11,7 @@ from jebao_flow.local_control.device_writer import (
     build_app_schedule_slot_payload,
     build_device_clock_payload,
     build_exact_schedule_payload,
+    configured_writer_factory,
     extract_current_schedule_image,
     verify_prepared_readback,
 )
@@ -87,6 +88,110 @@ def _status(*, flow: int = 40, schedule: bytes | None = None, flags: int = 0) ->
         start = LOCAL_WAVEMAKER_PRO_SCHEDULE_STATUS_OFFSET
         raw[start : start + len(schedule)] = schedule
     return bytes(raw)
+
+
+def _bar_timer_writer_and_status(*, timer=False, flow=40, auto_flow=100):
+    target = _binding().model_copy(update={"product_key": LOCAL_WAVEMAKER.product_key})
+    writer = ConnectedDeviceWriter(
+        ResolvedEndpoint(target, "runtime-address"), session_factory=_Session,
+        bar_timer_local_time=lambda: datetime(2026, 9, 16, 10, tzinfo=UTC),
+        bar_timer_flow_bounds=(30, 45),
+    )
+    current = bytearray(LOCAL_WAVEMAKER.raw_status_size)
+    current[:2] = (1 | (int(timer) << 3) | (3 << 5) | (4 << 9)).to_bytes(2, "big")
+    current[2:8] = bytes((flow, 80, 10, auto_flow, 0, 1))
+    current[8:16] = bytes((0, 0, 24, 0, 4, 40, 0, 0))
+    current[16:392] = b"\xee" * 376
+    return writer, target, current
+
+
+def test_bar_timer_seed_is_sent_but_not_replayed_or_verified_as_persistent_state():
+    writer, target, current = _bar_timer_writer_and_status()
+    prepared = writer.prepare_scalar(LocalControlIntent(
+        request_id="bar_timer_on_01", target=target, function="schedule_enable", value=True
+    ), bytes(current))
+    assert prepared.forward_payload == build_control_payload(LOCAL_WAVEMAKER, {
+        "TimerON": True, "FeedSwitch": False, "Linkage": "independent",
+        "AutoMode": "constant", "AutoFlow": 40, "AutoFreq": 0, "AutoPulseTide": False,
+    })
+    assert prepared.rollback_payload == build_control_payload(LOCAL_WAVEMAKER, {
+        "TimerON": False, "FeedSwitch": False, "Linkage": "independent",
+    })
+    assert prepared.restore_on_recovery is True
+    assert prepared.baseline_status == bytes(current)
+    assert prepared.no_change is False
+    assert not verify_prepared_readback(prepared, current)
+    current[1] |= 8  # TimerON in the 16-bit Bar bit group.
+    current[5] = 39  # A later active output is NOT an old seed equality gate.
+    assert verify_prepared_readback(prepared, current)
+    assert not any(key.startswith("Auto") for key in json.loads(prepared.expected_readback))
+
+
+def test_bar_timer_off_and_rollback_do_not_write_auto_or_power():
+    writer, target, current = _bar_timer_writer_and_status(timer=True, auto_flow=40)
+    prepared = writer.prepare_scalar(LocalControlIntent(
+        request_id="bar_timer_off_01", target=target, function="schedule_enable", value=False
+    ), bytes(current))
+    expected = {
+        "TimerON": False, "Flow": 40, "Frequency": 80, "Mode": "constant",
+        "PulseTide": False, "Linkage": "independent",
+    }
+    assert prepared.forward_payload == build_control_payload(LOCAL_WAVEMAKER, expected)
+    assert prepared.rollback_payload == build_control_payload(
+        LOCAL_WAVEMAKER, {**expected, "TimerON": True}
+    )
+    assert prepared.restore_on_recovery is True
+
+
+def test_bar_timer_never_uses_machine_timezone_or_unbounded_recovery_implicitly():
+    _, target, current = _bar_timer_writer_and_status()
+    writer = ConnectedDeviceWriter(
+        ResolvedEndpoint(target, "runtime-address"), session_factory=_Session
+    )
+    intent = LocalControlIntent(
+        request_id="bar_timer_context_01", target=target, function="schedule_enable", value=True
+    )
+    with pytest.raises(LocalDeviceWriteError, match="configured local time"):
+        writer.prepare_scalar(intent, current)
+    writer, _, current = _bar_timer_writer_and_status(flow=100)
+    with pytest.raises(LocalDeviceWriteError, match="manual recovery flow"):
+        writer.prepare_scalar(intent, current)
+    writer, _, current = _bar_timer_writer_and_status(timer=True, auto_flow=100)
+    with pytest.raises(LocalDeviceWriteError, match="active recovery flow"):
+        writer.prepare_scalar(intent.model_copy(update={"value": False}), current)
+
+
+def test_configured_writer_uses_instance_timezone_and_target_limits(monkeypatch):
+    from jebao_flow.config import AppConfig
+    from jebao_flow.local_control import device_writer
+
+    config = AppConfig.model_validate({
+        "instance": {"id": "test", "name": "Test", "timezone": "Asia/Seoul"},
+        "mqtt": {"host": "broker.invalid", "topic_prefix": "test"},
+        "devices": [{
+            "id": "wavemaker_left", "name": "Bar", "type": "wavemaker",
+            "product_key": LOCAL_WAVEMAKER.product_key,
+            "limits": {"min_power": 30, "max_power": 45},
+        }],
+    })
+
+    class Clock:
+        @staticmethod
+        def now(timezone):
+            assert str(timezone) == "Asia/Seoul"
+            return datetime(2026, 9, 16, 0, 30, tzinfo=UTC).astimezone(timezone)
+
+    monkeypatch.setattr(device_writer, "datetime", Clock)
+    _, target, current = _bar_timer_writer_and_status()
+    current[8:24] = bytes((0, 0, 9, 0, 4, 40, 0, 0, 9, 0, 24, 0, 4, 39, 0, 0))
+    writer = configured_writer_factory(config)(ResolvedEndpoint(target, "runtime-address"))
+    prepared = writer.prepare_scalar(LocalControlIntent(
+        request_id="bar_timer_zone_01", target=target, function="schedule_enable", value=True,
+    ), current)
+    assert prepared.forward_payload == build_control_payload(LOCAL_WAVEMAKER, {
+        "TimerON": True, "FeedSwitch": False, "Linkage": "independent",
+        "AutoMode": "constant", "AutoFlow": 39, "AutoFreq": 0, "AutoPulseTide": False,
+    })
 
 
 @pytest.mark.asyncio

@@ -14,10 +14,12 @@ from jebao_flow.hardware_safety import HARDWARE_SAFETY_VOLUME_ID_ENV
 from jebao_flow.local_control.aquarium_power_qualification import aquarium_power_target_validator
 from jebao_flow.local_control.aquarium_qualification import AquariumScalarQualificationProducer
 from jebao_flow.local_control.bar_qualification import BarScalarQualificationProducer
+from jebao_flow.local_control.bar_timer_qualification import BarTimerQualificationProducer
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.compose import validate_current_compose_inputs
 from jebao_flow.local_control.coordinator import LocalControlCoordinator
 from jebao_flow.local_control.dc_qualification import DcScalarQualificationProducer
+from jebao_flow.local_control.device_writer import configured_writer_factory
 from jebao_flow.local_control.install import load_current_private_config
 from jebao_flow.local_control.journal import LocalControlJournalStore
 from jebao_flow.local_control.lease import LocalControlLease
@@ -63,11 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
             "motor_speed",
             "schedule",
             "schedule_reset",
+            "schedule_enable",
         ),
         default="manual_flow",
         help="frequency/mode: Bar/DC; feeding: Bar/DC/Aquarium; speed: Aquarium; schedule: A/B",
     )
     run.add_argument("--downward-step", type=int, help="required for manual_flow only")
+    run.add_argument("--trial-flow", type=int, help="required for Bar schedule_enable only")
     run.add_argument("--schedule-a", type=Path, help="first Bar/DC/Aquarium schedule JSON")
     run.add_argument("--schedule-b", type=Path, help="distinct second schedule JSON")
     run.add_argument("--active-template-sha256", required=True)
@@ -121,6 +125,8 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "run":
         if (args.function == "manual_flow") != (args.downward_step is not None):
             raise ValueError("downward-step is required only for manual_flow")
+        if (args.function == "schedule_enable") != (args.trial_flow is not None):
+            raise ValueError("trial-flow is required only for Bar schedule_enable")
         if args.function in {"schedule", "schedule_reset"}:
             if args.schedule_a is None or args.schedule_b is None:
                 raise ValueError("schedule qualification requires both explicit A/B images")
@@ -162,6 +168,12 @@ def _run(args: argparse.Namespace) -> int:
             result = asyncio.run(
                 producer.execute(args.operation_id, downward_step=args.downward_step)
             )
+        elif args.function == "schedule_enable":
+            producer = BarTimerQualificationProducer(
+                writer_factory=configured_writer_factory(load_current_private_config(args.config)),
+                **producer_arguments,
+            )
+            result = asyncio.run(producer.execute(args.operation_id, trial_flow=args.trial_flow))
         elif args.function in {"schedule", "schedule_reset"}:
             producer_class = (
                 ScheduleResetQualificationProducer

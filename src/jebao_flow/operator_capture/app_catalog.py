@@ -273,8 +273,14 @@ LOCAL_WAVEMAKER_APP = AppProductCatalog(
         AppFunction(
             "schedule_enable",
             AppFunctionKind.BOOLEAN,
-            ("TimerON", "Flow", "Frequency", "Mode", "PulseTide", "Linkage", "FeedSwitch"),
-            caveat="app command shape depends on the selected timer screen and current auto state",
+            (
+                "TimerON", "Flow", "Frequency", "Mode", "PulseTide", "Linkage", "FeedSwitch",
+                "AutoMode", "AutoFlow", "AutoFreq", "AutoPulseTide",
+            ),
+            caveat=(
+                "standalone ON seeds Auto fields from the app-local current schedule slot; "
+                "OFF copies fresh manual fields; neither command writes SwitchON"
+            ),
         ),
         AppFunction("feed_switch", AppFunctionKind.BOOLEAN, ("FeedSwitch",)),
         AppFunction("pulse_or_tide", AppFunctionKind.BOOLEAN, ("PulseTide",)),
