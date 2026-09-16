@@ -4396,3 +4396,20 @@ OFF는 fresh manual 제어값을 복사한다. Pro의 inverse SwitchON 명령을
 유지하기 위한 Pro 재자격 범위는 사용자에게 별도로 고지했다. 현장 승인 응답 전에는 새 실기와
 새 generation 활성화를 실행하지 않으며 기존 Pro 서비스는 보존된 버전으로 유지한다.
 리턴·도징·새 Async는 이번 범위에 추가하지 않는다.
+
+#### 2026-09-16 Bar 타이머 bounded 실기·Pro 자격 갱신 승인
+
+위 구현과 독립 검토 뒤 에이전트는 Bar 임시 Constant40 시간표→ON/OFF→TimerOFF 원384B 복원,
+그리고 지문 변경으로 필요한 두 Pro의 기존39/40·짧은 OFF/ON·임시시간표·자기 원본 복원을
+명시하고 현장 감시와 즉시 전원 차단 가능 여부를 함께 물었다. 사용자는 "ㅇㅇ 진행하자"고
+승인했다. 이 범위에서 새 source-matched image와 별도 OBSERVER 입력/manifest/후보 경로를
+준비하고 각 operation을 한 번만 수행한다. Bar는 새4-action timer producer, Pro는 기존9기능
+producer를 사용한다. Bar 원 inactive Random100은 ON하지 않는다.
+
+실기 중 기존 Pro 서비스를 정지해 동시 접근을 막고, 각 operation의 terminal·자기 원본 복원을
+확인한 뒤 다음으로 간다. 실패하면 전진을 멈추고 보존된 자기 복구만 수행하며 새 id 반복이나
+미확인 frame 재전송은 하지 않는다. 결과·raw/durable 증거를 먼저 기록·커밋한다. 새 자격이
+확인되기 전에는 기존 Pro 운영 generation을 교체하지 않는다. Bar schedule A/B 자격은 앞서
+승인된40/39·원384B 복원 범위를 유지하며, 성공한 기능만 별도 executable 승격·HA 배포한다.
+앞선 Bar manual_mode UNKNOWN을 새 id로 반복하지 않고 리턴·도징·새 Async는 포함하지 않는다.
+동결 하네스·protocol·상한·identity·single-send·journal·복구 guard 변경은 없다.
