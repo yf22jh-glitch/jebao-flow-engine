@@ -109,3 +109,10 @@ power CLI 연결, CLI 제품별 회귀, 현재 epoch validator 시험, lint·전
 [남은 제품 구현](remaining-product-implementation.md)으로 이어졌다. 그 후속 범위에는
 Aquarium 속도·조건부 급이시간, schedule/raw restore·reset 자격 producer와 도징 계획 API가
 포함된다. 이 문서의 "writer 불변/schema 유지"는 앞선 83037b1 범위의 기록이다.
+
+### 2026-09-16 자동 준비·최초값 복귀 후속
+
+현재 Aquarium60에서 저출력 시험과 원60 복귀를 자동으로 묶는 요청은
+[준비형 자격 구현](aquarium-prepared-qualification.md)으로 이어졌다. 명시 옵션의4-action
+operation을 추가했으며 기존3-action producer·45 시험상한과 writer/schema는 변경하지 않는다.
+실제 Aquarium template 결속이 미확보라 이번 후속도 실기·배포는0이다.

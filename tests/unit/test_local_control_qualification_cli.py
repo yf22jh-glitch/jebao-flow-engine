@@ -371,6 +371,88 @@ def test_scalar_cli_delegates_to_product_producer(
     assert "offline_wiring_test" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("function", ["motor_speed", "feeding_duration"])
+@pytest.mark.parametrize("product", [AQUARIUM_PUMP.product_key, LOCAL_WAVEMAKER.product_key])
+def test_prepared_aquarium_cli_is_explicit_and_product_scoped(function, product, monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+
+    class Producer:
+        def __init__(self, **kwargs):
+            calls.append(kwargs["function"])
+
+        async def execute(self, operation_id, *, preparation_speed):
+            calls.append((operation_id, preparation_speed))
+            return SimpleNamespace(public_dict=lambda: {"hardware_access": False})
+
+    monkeypatch.setattr(cli, "PreparedAquariumScalarQualificationProducer", Producer)
+    monkeypatch.setattr(
+        cli,
+        "CurrentQualificationEpochSource",
+        lambda **kwargs: lambda: SimpleNamespace(target=SimpleNamespace(product_key=product)),
+    )
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
+    for name in ("LocalControlJournalStore", "LocalControlLease", "QualificationArtifactStore"):
+        monkeypatch.setattr(cli, name, lambda *args, **kwargs: object())
+    args = [
+        "run",
+        "--function",
+        function,
+        "--config",
+        "private.yaml",
+        "--target",
+        "aquarium",
+        "--operation-id",
+        "prepared_cli_01",
+        "--active-template-sha256",
+        "a" * 64,
+        "--template-root",
+        "private-template",
+        "--qualification-output",
+        "private.json",
+        "--preparation-speed",
+        "40",
+    ]
+    assert cli.main(args) == 2 and calls == []
+    result = cli.main([*args, "--write-enabled"])
+    if product == AQUARIUM_PUMP.product_key:
+        assert result == 0 and calls == [function, ("prepared_cli_01", 40)]
+    else:
+        assert result == 2 and calls == []
+
+
+@pytest.mark.parametrize("function", ["manual_frequency", "manual_mode"])
+def test_preparation_speed_cannot_select_other_functions(function, monkeypatch):
+    def forbidden():
+        raise AssertionError("invalid option reached runtime activation")
+
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", forbidden)
+    with pytest.raises(ValueError, match="preparation-speed"):
+        cli._run(
+            cli.build_parser().parse_args(
+                [
+                    "run",
+                    "--function",
+                    function,
+                    "--config",
+                    "private.yaml",
+                    "--target",
+                    "aquarium",
+                    "--operation-id",
+                    "prepared_cli_01",
+                    "--active-template-sha256",
+                    "a" * 64,
+                    "--qualification-output",
+                    "private.json",
+                    "--preparation-speed",
+                    "40",
+                    "--write-enabled",
+                ]
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "function,producer_name",
     [
@@ -469,12 +551,27 @@ def test_timer_cli_requires_explicit_trial_output_before_runtime_preparation(mon
         raise AssertionError("missing timer input must be rejected before hardware preparation")
 
     monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", forbidden)
-    assert cli.main([
-        "run", "--function", "schedule_enable", "--config", "private.yaml",
-        "--target", "bar", "--operation-id", "bar_timer_cli_missing",
-        "--active-template-sha256", "a" * 64, "--qualification-output", "private.json",
-        "--write-enabled",
-    ]) == 2
+    assert (
+        cli.main(
+            [
+                "run",
+                "--function",
+                "schedule_enable",
+                "--config",
+                "private.yaml",
+                "--target",
+                "bar",
+                "--operation-id",
+                "bar_timer_cli_missing",
+                "--active-template-sha256",
+                "a" * 64,
+                "--qualification-output",
+                "private.json",
+                "--write-enabled",
+            ]
+        )
+        == 2
+    )
 
 
 def test_timer_cli_wires_explicit_trial_and_configured_writer(monkeypatch, capsys):
@@ -501,12 +598,31 @@ def test_timer_cli_wires_explicit_trial_and_configured_writer(monkeypatch, capsy
     monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
     for name in ("LocalControlJournalStore", "LocalControlLease", "QualificationArtifactStore"):
         monkeypatch.setattr(cli, name, lambda *args, **kwargs: object())
-    assert cli.main([
-        "run", "--function", "schedule_enable", "--trial-flow", "40",
-        "--config", "private.yaml", "--target", "bar", "--operation-id", "bar_timer_cli_01",
-        "--active-template-sha256", "a" * 64, "--template-root", "private-template",
-        "--qualification-output", "private.json", "--write-enabled",
-    ]) == 0
+    assert (
+        cli.main(
+            [
+                "run",
+                "--function",
+                "schedule_enable",
+                "--trial-flow",
+                "40",
+                "--config",
+                "private.yaml",
+                "--target",
+                "bar",
+                "--operation-id",
+                "bar_timer_cli_01",
+                "--active-template-sha256",
+                "a" * 64,
+                "--template-root",
+                "private-template",
+                "--qualification-output",
+                "private.json",
+                "--write-enabled",
+            ]
+        )
+        == 0
+    )
     assert calls[0]["writer_factory"] is factory
     assert calls[1] == ("bar_timer_cli_01", 40)
     assert "offline_timer_wiring_test" in capsys.readouterr().out

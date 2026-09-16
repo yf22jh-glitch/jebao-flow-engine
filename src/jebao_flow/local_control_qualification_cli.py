@@ -12,6 +12,9 @@ from pathlib import Path
 
 from jebao_flow.hardware_safety import HARDWARE_SAFETY_VOLUME_ID_ENV
 from jebao_flow.local_control.aquarium_power_qualification import aquarium_power_target_validator
+from jebao_flow.local_control.aquarium_prepared_qualification import (
+    PreparedAquariumScalarQualificationProducer,
+)
 from jebao_flow.local_control.aquarium_qualification import AquariumScalarQualificationProducer
 from jebao_flow.local_control.bar_qualification import BarScalarQualificationProducer
 from jebao_flow.local_control.bar_timer_qualification import BarTimerQualificationProducer
@@ -72,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--downward-step", type=int, help="required for manual_flow only")
     run.add_argument("--trial-flow", type=int, help="required for Bar schedule_enable only")
+    run.add_argument(
+        "--preparation-speed",
+        type=int,
+        help="Aquarium speed/feed-duration only: lower for the trial, then restore owned original",
+    )
     run.add_argument("--schedule-a", type=Path, help="first Bar/DC/Aquarium schedule JSON")
     run.add_argument("--schedule-b", type=Path, help="distinct second schedule JSON")
     run.add_argument("--active-template-sha256", required=True)
@@ -127,6 +135,11 @@ def _run(args: argparse.Namespace) -> int:
             raise ValueError("downward-step is required only for manual_flow")
         if (args.function == "schedule_enable") != (args.trial_flow is not None):
             raise ValueError("trial-flow is required only for Bar schedule_enable")
+        if args.preparation_speed is not None and args.function not in {
+            "motor_speed",
+            "feeding_duration",
+        }:
+            raise ValueError("preparation-speed is only valid for Aquarium speed/feed-duration")
         if args.function in {"schedule", "schedule_reset"}:
             if args.schedule_a is None or args.schedule_b is None:
                 raise ValueError("schedule qualification requires both explicit A/B images")
@@ -189,6 +202,20 @@ def _run(args: argparse.Namespace) -> int:
         else:
             target = epoch_source().target
             descriptor = build_local_control_catalog().find(target.product_key, args.function)
+            if args.preparation_speed is not None:
+                aquarium_power_target_validator(target.product_key)
+                producer = PreparedAquariumScalarQualificationProducer(
+                    function=args.function,
+                    **producer_arguments,
+                )
+                result = asyncio.run(
+                    producer.execute(
+                        args.operation_id,
+                        preparation_speed=args.preparation_speed,
+                    )
+                )
+                _print_json(result.public_dict())
+                return 0
             scalar_producer = {
                 "dc_pump_pro": DcScalarQualificationProducer,
                 "aquarium_pump": AquariumScalarQualificationProducer,
