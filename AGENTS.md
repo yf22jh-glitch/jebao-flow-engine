@@ -4374,3 +4374,25 @@ image compiler·writer·protocol·schema 계산식과 동결 하네스는 변경
 schema가 실제로 동일한지 확인하고 기존 Pro36+Bar12receipt를 검증 merger로 병합한다.
 이는 시간표 편집/적용 API이며, shape가 미확정인 Bar TimerON을 단순 bool로 발명하는
 권한이 아니다. 자동 운전 ON 경로의 남은 제한과 실제 시간표 재적용을 구분해 보고한다.
+
+#### Bar 타이머 ON/OFF 구현 추가 요청
+
+사용자가 "스케쥴 온하는것도 구현해서 같이 실기 활성화해"라고 범위를 추가했다. 직전 모드
+시험의 ACK 이후 검증 중단과 기존 generic 자기 복구 결과는 `3b8812b`에 먼저 기록했다.
+새 구현의 근거는 physical template binding `e609fa34…6329`의 `switchToProgram`과
+`switchToManual`이다. ON은 앱 로컬 시각의 시간표 슬롯에서 네 Auto* 초기값을 함께 보내고,
+OFF는 fresh manual 제어값을 복사한다. Pro의 inverse SwitchON 명령을 재사용하지 않는다.
+
+이 요청에 필요한 local-control writer·timer 준비/복구 계약·자격 producer·CLI·catalog와
+직접 tests·문서를 구현할 수 있다. 앱 선언의 실제 ON/OFF 필드 정정도 포함한다. 일반 Auto*
+직접 제어를 개방하지 않으며, 독립 Bar의 명시된 timer 명령만 별도 경로로 다룬다. 새 timer
+코드는 schema fingerprint에 포함하고 지문 변화로 기존 receipt가 무효가 되는 사실을
+숨기거나 hash 입력에서 제외하지 않는다. frozen native6와 protocol byte codec은 변경하지 않는다.
+변하는 시각·Auto 출력은 과거 snapshot 일치 gate나 성공 기준이 아니며 명령 준비 입력과
+진단으로만 사용한다. identity·출력 상한·single-send·journal·복구 권한은 유지한다.
+
+현재 inactive 원본은 Random100이므로 그대로 ON하지 않는다. 기존 원본을 보존한 bounded
+임시 시간표·ON/OFF·TimerOFF 뒤 자기 원본 복원의 실기 범위, 그리고 새 schema에서 Pro 제어를
+유지하기 위한 Pro 재자격 범위는 사용자에게 별도로 고지했다. 현장 승인 응답 전에는 새 실기와
+새 generation 활성화를 실행하지 않으며 기존 Pro 서비스는 보존된 버전으로 유지한다.
+리턴·도징·새 Async는 이번 범위에 추가하지 않는다.
