@@ -70,6 +70,51 @@ def _qualification(function: str) -> QualificationBinding:
     )
 
 
+@pytest.mark.parametrize("enabled", (False, True))
+def test_bar_timer_switch_and_schedule_request_require_qualified_identity(enabled):
+    bar = "1d8c63eaccac4205b92c84d77d5a08fb"
+    manifest = _manifest()
+    manifest = manifest.model_copy(
+        update={
+            "devices": tuple(
+                device.model_copy(update={"product_key": bar}) for device in manifest.devices
+            )
+        }
+    )
+    qualified, other = manifest.devices
+    catalog = build_local_control_catalog(
+        tuple(
+            _qualification(function).model_copy(update={"product_key": bar})
+            for function in ("schedule_enable", "schedule")
+        ),
+        current_content=manifest.content,
+        _qualification_verifier_for_test=lambda _item: frozenset({qualified.physical_identity_key}),
+    )
+    projection = project_home_assistant(
+        manifest,
+        catalog,
+        topic_prefix="jebao/test",
+        discovery_prefix="homeassistant",
+        control_surface_enabled=enabled,
+    )
+    for member, expected in ((qualified.logical_member, enabled), (other.logical_member, False)):
+        timer = next(
+            e
+            for e in projection.entities
+            if e.logical_member == member and e.function == "schedule_enable"
+        )
+        schedule = next(
+            e
+            for e in projection.entities
+            if e.logical_member == member and e.function == "schedule"
+        )
+        assert timer.control_available is expected
+        assert (timer.command_topic is not None) is expected
+        assert (schedule.schedule_request_topic is not None) is expected
+        if expected:
+            assert timer.platform is HomeAssistantPlatform.SWITCH
+
+
 _ProjectedEntity = (
     HomeAssistantEntityDescriptor
     | GroupHomeAssistantEntityDescriptor
@@ -229,9 +274,7 @@ def test_qualified_scalar_uses_app_declared_number_contract() -> None:
     assert flow.mqtt_discovery_payload()["qos"] == 0
     assert flow.mqtt_discovery_payload()["optimistic"] is False
     assert flow.mqtt_discovery_payload()["availability_mode"] == "all"
-    assert [
-        item["topic"] for item in flow.mqtt_discovery_payload()["availability"]
-    ] == [
+    assert [item["topic"] for item in flow.mqtt_discovery_payload()["availability"]] == [
         "jebao-flow/main/local/availability",
         "jebao-flow/main/local/devices/wavemaker_master/availability",
     ]
@@ -541,12 +584,8 @@ def test_owned_discovery_variants_partition_across_mode_and_qualification() -> N
         if entity.logical_member == "wavemaker_master" and entity.function == "manual_flow"
     )
     assert control_flow.unique_id == observer_flow.unique_id
-    number_topic = (
-        f"{control.discovery_prefix}/number/{control_flow.unique_id}/config"
-    )
-    sensor_topic = (
-        f"{control.discovery_prefix}/sensor/{control_flow.unique_id}/config"
-    )
+    number_topic = f"{control.discovery_prefix}/number/{control_flow.unique_id}/config"
+    sensor_topic = f"{control.discovery_prefix}/sensor/{control_flow.unique_id}/config"
     assert number_topic in control_current
     assert sensor_topic in control_tombstones
     assert sensor_topic in observer_current
@@ -555,9 +594,7 @@ def test_owned_discovery_variants_partition_across_mode_and_qualification() -> N
     slot = next(entity for entity in control.entities if entity.slot_index == 0)
     slot_topic = f"{control.discovery_prefix}/number/{slot.unique_id}/config"
     [group_control] = control.group_control_entities
-    group_control_topic = (
-        f"{control.discovery_prefix}/switch/{group_control.unique_id}/config"
-    )
+    group_control_topic = f"{control.discovery_prefix}/switch/{group_control.unique_id}/config"
     resume_topics = {
         f"{control.discovery_prefix}/button/{entity.unique_id}/config"
         for entity in control.group_resume_entities
@@ -571,14 +608,10 @@ def test_owned_discovery_variants_partition_across_mode_and_qualification() -> N
 
     [actual] = control.group_entities
     actual_topic = f"{control.discovery_prefix}/sensor/{actual.unique_id}/config"
-    system = next(
-        entity for entity in control.entities if entity.logical_member == "local_system"
-    )
+    system = next(entity for entity in control.entities if entity.logical_member == "local_system")
     system_topic = f"{control.discovery_prefix}/sensor/{system.unique_id}/config"
     assert {actual_topic, system_topic} <= control_current & observer_current
-    assert {actual_topic, system_topic}.isdisjoint(
-        control_tombstones | observer_tombstones
-    )
+    assert {actual_topic, system_topic}.isdisjoint(control_tombstones | observer_tombstones)
     assert not any(
         "/binary_sensor/" in topic
         for current, tombstones in partitions
@@ -589,9 +622,7 @@ def test_owned_discovery_variants_partition_across_mode_and_qualification() -> N
 def test_owned_discovery_tombstones_are_current_namespace_only_and_bounded() -> None:
     projection = _qualified_projection("jebao-flow/main")
     other = _qualified_projection("jebao-flow/other")
-    [namespace] = {
-        entity.instance_namespace for entity in _projected_entities(projection)
-    }
+    [namespace] = {entity.instance_namespace for entity in _projected_entities(projection)}
     current = {topic for topic, _payload in projection.discovery_records()}
     tombstones = set(projection.discovery_tombstone_topics())
     all_variants = current | tombstones
@@ -599,17 +630,11 @@ def test_owned_discovery_tombstones_are_current_namespace_only_and_bounded() -> 
     for topic in tombstones:
         relative = topic.removeprefix(f"{projection.discovery_prefix}/")
         platform, object_id, config = relative.split("/")
-        assert topic == (
-            f"{projection.discovery_prefix}/{platform}/{object_id}/{config}"
-        )
+        assert topic == (f"{projection.discovery_prefix}/{platform}/{object_id}/{config}")
         assert config == "config"
         assert object_id.count(namespace) == 1
-    assert all(
-        topic.startswith(f"{projection.discovery_prefix}/") for topic in tombstones
-    )
-    assert tombstones.isdisjoint(
-        topic for topic, _payload in other.discovery_records()
-    )
+    assert all(topic.startswith(f"{projection.discovery_prefix}/") for topic in tombstones)
+    assert tombstones.isdisjoint(topic for topic, _payload in other.discovery_records())
     assert tombstones.isdisjoint(other.discovery_tombstone_topics())
     runtime_topics = {
         projection.global_availability_topic,
@@ -652,17 +677,10 @@ def test_owned_discovery_tombstones_are_current_namespace_only_and_bounded() -> 
         for device in manifest.devices
         for descriptor in catalog.functions
     )
-    system_function_count = sum(
-        descriptor.product_key is None for descriptor in catalog.functions
-    )
+    system_function_count = sum(descriptor.product_key is None for descriptor in catalog.functions)
     group_member_count = 2
     upper_bound = (
-        (2 * device_function_count)
-        + system_function_count
-        + 48
-        + 1
-        + 1
-        + group_member_count
+        (2 * device_function_count) + system_function_count + 48 + 1 + 1 + group_member_count
     )
     assert len(all_variants) <= upper_bound
 
@@ -673,9 +691,9 @@ def test_owned_discovery_tombstones_are_current_namespace_only_and_bounded() -> 
         discovery_prefix="homeassistant",
         topic_prefix="jebao-flow/main",
     )
-    reduced_variants = {
-        topic for topic, _payload in reduced.discovery_records()
-    } | set(reduced.discovery_tombstone_topics())
+    reduced_variants = {topic for topic, _payload in reduced.discovery_records()} | set(
+        reduced.discovery_tombstone_topics()
+    )
     topology_entities = (
         *(entity for entity in projection.entities if entity.slot_index is not None),
         *projection.group_entities,
@@ -716,10 +734,7 @@ def test_device_variant_candidates_reuse_the_existing_platform_fold(
     )
 
     assert sorted(actual_calls) == expected_calls
-    assert not any(
-        "/binary_sensor/" in topic
-        for topic in projection.discovery_tombstone_topics()
-    )
+    assert not any("/binary_sensor/" in topic for topic in projection.discovery_tombstone_topics())
 
 
 def test_topic_prefix_namespaces_every_discovery_identity_family() -> None:
@@ -750,8 +765,7 @@ def test_topic_prefix_namespaces_every_discovery_identity_family() -> None:
             object_id = topic.rsplit("/", 2)[-2]
             identifier = _device_identifier(entity)
             assert topic == (
-                f"{projection.discovery_prefix}/{entity.platform.value}/"
-                f"{entity.unique_id}/config"
+                f"{projection.discovery_prefix}/{entity.platform.value}/{entity.unique_id}/config"
             )
             assert payload["unique_id"] == entity.unique_id == object_id
             assert entity.unique_id.count(namespace) == 1
@@ -763,17 +777,18 @@ def test_topic_prefix_namespaces_every_discovery_identity_family() -> None:
         identity_sets.append((discovery_topics, unique_ids, device_identifiers))
 
     left_sets, right_sets = identity_sets
-    assert all(left_values.isdisjoint(right_values) for left_values, right_values in zip(
-        left_sets,
-        right_sets,
-        strict=True,
-    ))
+    assert all(
+        left_values.isdisjoint(right_values)
+        for left_values, right_values in zip(
+            left_sets,
+            right_sets,
+            strict=True,
+        )
+    )
 
 
 def test_topic_prefix_namespace_is_golden_deterministic_and_discovery_prefix_independent() -> None:
-    expected = (
-        "instance_ce1ffb4517be8e9224bd3b7aa88921621397bc66eb679d38817a78f24bdb1e49"
-    )
+    expected = "instance_ce1ffb4517be8e9224bd3b7aa88921621397bc66eb679d38817a78f24bdb1e49"
     first = _qualified_projection("jebao-flow/main")
     repeated = _qualified_projection("jebao-flow/main")
     other_discovery = _qualified_projection(
@@ -786,17 +801,15 @@ def test_topic_prefix_namespace_is_golden_deterministic_and_discovery_prefix_ind
     assert {entity.instance_namespace for entity in _projected_entities(first)} == {expected}
     assert first.public_dict() == repeated.public_dict()
     assert first.discovery_records() == repeated.discovery_records()
-    assert {
-        entity.unique_id for entity in _projected_entities(first)
-    } == {entity.unique_id for entity in _projected_entities(other_discovery)}
-    assert {
-        _device_identifier(entity) for entity in _projected_entities(first)
-    } == {
+    assert {entity.unique_id for entity in _projected_entities(first)} == {
+        entity.unique_id for entity in _projected_entities(other_discovery)
+    }
+    assert {_device_identifier(entity) for entity in _projected_entities(first)} == {
         _device_identifier(entity) for entity in _projected_entities(other_discovery)
     }
-    assert {
-        topic for topic, _payload in first.discovery_records()
-    }.isdisjoint(topic for topic, _payload in other_discovery.discovery_records())
+    assert {topic for topic, _payload in first.discovery_records()}.isdisjoint(
+        topic for topic, _payload in other_discovery.discovery_records()
+    )
 
 
 def test_namespaced_devices_preserve_grouping_and_existing_runtime_topics() -> None:
@@ -805,13 +818,9 @@ def test_namespaced_devices_preserve_grouping_and_existing_runtime_topics() -> N
     namespace = next(iter(_projected_entities(projection))).instance_namespace
     device_identifiers: dict[str, set[str]] = {}
     for entity in projection.entities:
-        device_identifiers.setdefault(entity.logical_member, set()).add(
-            _device_identifier(entity)
-        )
+        device_identifiers.setdefault(entity.logical_member, set()).add(_device_identifier(entity))
     assert all(len(identifiers) == 1 for identifiers in device_identifiers.values())
-    assert device_identifiers["local_system"] == {
-        f"jebao_flow_local_{namespace}_local_system"
-    }
+    assert device_identifiers["local_system"] == {f"jebao_flow_local_{namespace}_local_system"}
 
     group_entities = (
         *projection.group_entities,
@@ -821,8 +830,7 @@ def test_namespaced_devices_preserve_grouping_and_existing_runtime_topics() -> N
     group_identifiers = {_device_identifier(entity) for entity in group_entities}
     assert group_identifiers == {f"jebao_flow_local_{namespace}_group_main_flow"}
     assert all(
-        _device_identifier(entity)
-        != next(iter(device_identifiers[entity.logical_member]))
+        _device_identifier(entity) != next(iter(device_identifiers[entity.logical_member]))
         for entity in projection.group_resume_entities
     )
 
@@ -846,12 +854,10 @@ def test_namespaced_devices_preserve_grouping_and_existing_runtime_topics() -> N
         f"{prefix}/local/devices/wavemaker_master/functions/manual_flow/set"
     )
     assert slot.state_topic == (
-        f"{prefix}/local/schedules/wavemaker_master_async/slaves/"
-        "wavemaker_slave/slots/0/flow/state"
+        f"{prefix}/local/schedules/wavemaker_master_async/slaves/wavemaker_slave/slots/0/flow/state"
     )
     assert slot.command_topic == (
-        f"{prefix}/local/schedules/wavemaker_master_async/slaves/"
-        "wavemaker_slave/slots/0/flow/set"
+        f"{prefix}/local/schedules/wavemaker_master_async/slaves/wavemaker_slave/slots/0/flow/set"
     )
     assert system.state_topic == f"{prefix}/local/system/functions/{system.function}/state"
     assert actual.state_topic == f"{prefix}/local/groups/main_flow/actual-output/state"
@@ -879,9 +885,9 @@ def test_instance_namespace_is_mode_independent_without_restoring_observer_contr
     [namespace] = {entity.instance_namespace for entity in control_entities}
 
     assert {entity.instance_namespace for entity in observer_entities} == {namespace}
-    assert {
-        _device_identifier(entity) for entity in observer_entities
-    } == {_device_identifier(entity) for entity in control_entities}
+    assert {_device_identifier(entity) for entity in observer_entities} == {
+        _device_identifier(entity) for entity in control_entities
+    }
 
     control_common = {
         (entity.logical_member, entity.function): (

@@ -74,19 +74,24 @@ def test_catalog_covers_every_registered_product_and_app_shell_function() -> Non
     )
 
 
-def test_bar_timer_encoder_does_not_promote_hardware_control_before_qualification_run():
+@pytest.mark.parametrize("function", ("schedule_enable", "schedule"))
+def test_bar_timer_and_schedule_require_current_physical_qualification(function):
     bar = "1d8c63eaccac4205b92c84d77d5a08fb"
-    descriptor = build_local_control_catalog().find(bar, "schedule_enable")
+    descriptor = build_local_control_catalog().find(bar, function)
     assert descriptor.encoding_available is True
     assert descriptor.control_exposed is False
-    assert "AutoFlow" in descriptor.fields
-    # Even an offline fixture receipt is not an executable-promotion decision.
-    binding = _qualification("schedule_enable").model_copy(update={"product_key": bar})
+    if function == "schedule_enable":
+        assert "AutoFlow" in descriptor.fields
+    # Hardware acceptance is recorded in the two 2026-09-16 Bar qualification runs.
+    # This fixture checks only software exposure and physical-identity scoping.
+    binding = _qualification(function).model_copy(update={"product_key": bar})
     descriptor = build_local_control_catalog(
-        (binding,), current_content=_content(),
+        (binding,),
+        current_content=_content(),
         _qualification_verifier_for_test=lambda _item: _verified_keys("5"),
-    ).find(bar, "schedule_enable")
-    assert descriptor.control_exposed is False
+    ).find(bar, function)
+    assert descriptor.control_exposed_for("5" * 64) is True
+    assert descriptor.control_exposed_for("6" * 64) is False
 
 
 def test_generator_qualification_is_consumed_once_and_exposes_only_that_control() -> None:
@@ -98,9 +103,7 @@ def test_generator_qualification_is_consumed_once_and_exposes_only_that_control(
 
     descriptor = catalog.validate_intent(_intent("manual_flow", 45))
     app_function = next(
-        function
-        for function in LOCAL_WAVEMAKER_PRO_APP.functions
-        if function.name == "manual_flow"
+        function for function in LOCAL_WAVEMAKER_PRO_APP.functions if function.name == "manual_flow"
     )
 
     assert descriptor.control_exposed is True
@@ -242,10 +245,13 @@ def test_qualification_must_bind_current_install_content() -> None:
         current_content=changed_catalog,
         _qualification_verifier_for_test=lambda _item: _verified_keys("5"),
     )
-    assert stale_catalog.find(
-        LOCAL_WAVEMAKER_PRO_APP.product_key,
-        "manual_flow",
-    ).control_exposed is False
+    assert (
+        stale_catalog.find(
+            LOCAL_WAVEMAKER_PRO_APP.product_key,
+            "manual_flow",
+        ).control_exposed
+        is False
+    )
     assert stale_catalog.ignored_qualification_count == 1
 
 

@@ -1,9 +1,12 @@
 # Bar timer: app-derived command contract
 
-Status: command planner/writer, four-action qualifier, and CLI implemented and offline-tested;
-**hardware acceptance,
-qualification, executable promotion, and deployment are not yet complete**.
-The current running Pro generation is unchanged. Return pumps and dosing are out of scope.
+Status: planner/writer, four-action qualifier and CLI implemented. The attended bounded Bar
+timer and schedule runs passed and issued current receipts; executable promotion now permits
+only receipt-qualified physical devices. **HA deployment is still pending.** The running Pro
+generation is unchanged. Return pumps and dosing are out of scope.
+See the [timer run](runs/2026-09-16-bar-timer-qualification.md),
+[schedule run](runs/2026-09-16-bar-schedule-qualification.md), and
+[Pro renewal](runs/2026-09-16-pro-bar-timer-schema-renewal.md).
 
 ## App evidence
 
@@ -60,10 +63,10 @@ ready: old-generation receipts, including the active Pro receipts, cannot author
 the new generation. Keep the current Pro service on its matching source/config/receipts while
 attended renewal is awaiting approval. A source commit is not a control deployment.
 
-## Hardware activation still required
+## Attended qualification and activation boundary
 
 The current inactive original schedule includes Random100. It must not be enabled under the
-bounded qualification authorization. The proposed attended qualification saves the original
+bounded qualification authorization. The completed attended qualification saved the original
 384 bytes, applies 48 contiguous half-hour Constant40 slots (no zero-row/gap ambiguity), sends
 ON and OFF once each, then restores the original bytes with TimerOFF. Its durable rollback must
 always use the operation's initial TimerOFF controls, including for the OFF action; it must never
@@ -78,14 +81,15 @@ FeedSwitch while the normal app OFF command does not restore it.
 
 The qualification CLI uses `run --function schedule_enable --trial-flow 40` with the existing
 private current-config/manifest/template/output arguments and explicit `--write-enabled`.
-There is no timer command available through HA until the attended qualification and separate
-executable promotion have actually completed. All four forward actions are journaled before the
+There is no timer command available through HA until the new qualified generation is deployed.
+All four forward actions are journaled before the
 first send; the acknowledged-but-unverified ON test confirms receipt0 and OFF-before-image recovery.
 
 Only ON/OFF may yield timer receipts; the temporary image setup/restore is not a schedule
 qualification. Failed/uncertain operations emit no receipts. ACK or a byte-copy test is not a
-physical-safety proof. New attended approval and source-matched hardware qualification remain
-required before exposure. Pro renewal is separately disclosed because the content bindings change.
+physical-safety proof. Source-matched hardware qualification is required before exposure; this
+bounded run issued timer2/schedule2 and renewed Pro36 receipts. Other physical devices remain
+unqualified. Pro renewal was separately approved because the content bindings changed.
 
 The preceding unrelated Bar manual-mode qualification stopped after ACK and was restored using
 the existing scalar recovery. Its cause remains UNKNOWN; the new code does not retry it or turn
@@ -103,4 +107,5 @@ CLOCK_BOOTTIME test on macOS). After the final diagnostic wording adjustment, th
 qualifier, catalog, import boundary, and qualification CLI tests passed again: 73 tests.
 The timer qualifier's 16 tests include an acknowledged ON followed by a failed readback,
 receipt suppression, and generic recovery that writes OFF before restoring the original image.
-These results establish software behavior only; they do not replace the pending attended run.
+These results establish software behavior only; the linked attended records provide the separate
+hardware evidence and its limits.

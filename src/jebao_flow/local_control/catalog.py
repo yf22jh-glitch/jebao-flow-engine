@@ -117,6 +117,9 @@ _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
             "manual_flow",
             "manual_frequency",
             "feeding_duration",
+            # Attended source-matched ON/OFF and A/B/raw-restore runs, 2026-09-16.
+            "schedule_enable",
+            "schedule",
         }
     ),
     "0696a19599bc484f8e1866f5ccf4ee7e": frozenset(
