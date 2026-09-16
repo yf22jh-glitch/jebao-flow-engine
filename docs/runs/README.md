@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-16 DC 읽기 전용 사전 확인](2026-09-16-dc-readonly-precheck.md) — MQTT 수동81/활성Auto60 구분·write0; 전체 기능 구현 재개, 메인 리턴은 제외가 아닌 후순위.
+
 - [2026-09-16 Aquarium 자동 준비 사전 확인](2026-09-16-aquarium-preparation-precheck.md) — MQTT 출력60 확인·write0, 자동 준비/최초값 복귀 경로 및 active template 미확보; 구현 승인·실기 보류.
 
 - [2026-09-16 Bar timer·schedule HA 활성화](2026-09-16-bar-timer-ha-activation.md) — Pro16+Bar timer1·시간표API3, HA86/86·fresh6/6·기동write0·기록 불변; 원Random100 교체 전 Bar ON 차단.

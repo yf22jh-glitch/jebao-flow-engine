@@ -4437,3 +4437,27 @@ config/app 범위를 모두 만족해야 한다. 원본60을 시험 baseline40�
 이번 단위는 구현·오프라인 검증이다. Aquarium 활성 template bytes와 product 귀속의 양성
 증거가 아직 없으므로 실기·자격 발급·배포는 하지 않는다. 기존 Pro/Bar 운영을 유지한다.
 다른 제품 template 대용, 자격 합성, 직접 sender 호출로 준비 검사를 우회하는 실행은 없다.
+
+### 2026-09-16 등록 장비의 남은 앱 기능 구현 재개
+
+사용자는 전체 누락 목록을 확인한 뒤 "전체다 구현해 죄다"라고 다시 요청했다. 기존 Pro
+Sync/Async와 Bar timer/schedule은 다시 만들지 않으며, 앱의 나머지 일반 동작을 제품 코드에
+연결한다. 메인 Aquarium 리턴은 **제외가 아니라 후순위**라는 사용자 정정을 적용한다.
+지금은 모든 제품의 소프트웨어 구현 범위이며 새 장비 전송·운영 교체는 실행하지 않는다.
+
+허용 범위는 `local_control/`의 제품별 명령/준비/복구/자격/HA·MQTT 연결, 해당 CLI,
+앱 카탈로그의 근거 있는 정정, 직접 tests·문서다. DC의 두 화면 timer 명령을 서로 다른
+동작으로 명시하고 Auto seed를 발명하지 않는다. 처음 소유한 제어값만 복원하며 저출력
+준비를 최초 원본으로 위장하지 않는다. 변하는 시각·Auto·과거 사용자 설정의 일치를
+새 admission/success gate로 삼지 않는다. 반환값 검증은 실제 보낸 명령의 소유 필드로 한정한다.
+
+identity·출력 한도/step·single-send·journal/fsync·복구 권한·현재 자격 결속은 유지한다.
+새 byte builder는 schema fingerprint에 포함하며 기존 receipt를 새 코드에 재사용하거나
+운영 서비스를 자격보다 먼저 교체하지 않는다. §1 native 여섯 파일/직접 tests·protocol·공용
+hardware guard는 이 요청만으로 해제하지 않는다. 도징 protocol/schema 변경의 별도 동결
+해제 여부를 질문했으며 답변 전에는 해당 파일과 실기 송신을 변경하지 않는다.
+
+시계 설정과 실제 투여처럼 과거 값으로 되돌릴 수 없는 동작을 일반 scalar exact rollback으로
+위장하지 않는다. 소프트웨어 완료·장비 수용·HA 활성화를 각각 보고하며 전용 화면이 없는
+것을 장비 기능 부재로 세거나, 미리보기를 실제 동작으로 보고하지 않는다. DC의 선행 구독
+결과는 `docs/runs/2026-09-16-dc-readonly-precheck.md`에 기록하고 source보다 먼저 커밋한다.
