@@ -74,12 +74,37 @@ Pro 후보를 보존한 뒤 Bar만 진행했다. 프로그램 master의 잘못�
 - [x] Bar 앱 11기능의 송신·자격 경로·HA 연결·오프라인 검증·배포 후보 준비.
 - [ ] Bar 새 실기 수용·전체 기능 활성화. 이번 단계의 장비 write·운영 교체는 0.
 
+## Aquarium 메인 리턴 — 일반 앱 7기능 후보 준비, 통신 인계는 별도 보류
+
+Bar 후보는 `dccb17d`로 보존했다. cached shuibeng 두 사본의 같은 명령 형식을 대조하되,
+실제 selected locator의 활성 template 바이트를 확보한 것으로 승격하지 않는다.
+
+- [x] 앱 compound payload 목록과 6-byte/48-slot geometry 대조.
+- [x] 앱 동봉 productConfig의 통신 Mode 선언 확인: 0=AP, 1=Wireless.
+  전용 cached UI에는 전환 handler가 없으며 네트워크 전환 수용 증거와는 별개다.
+- [x] 시각 writer/producer/CLI 연결, clock·CLI·preview 관련 108 PASS.
+- [x] 전원·속도·급이 시간: compound fresh-copy 및 기존 준비/복구 통합 직접 검증.
+- [x] timer ON/OFF: slot seed와 persistent 자기필드 복원, 시험 경로 연결.
+- [x] feeding ON/OFF: TimerOFF 동반 명령과 자기필드 복원, 급이 경과시간 제외 명시.
+  두 기능 producer 직접 32 PASS; ACK 뒤 실패·실제 coordinator 원복·ON 재전송 0 포함.
+- [x] transport: vendor-declared encoder 방향 검증. AP/Wireless 인계·복귀는 미구현으로
+  실행 표면에서 제외, [두 대안·재개 조건](aquarium-app-control-release.md)에 따라 park.
+- [x] 시간표 저장·편집·삭제: full image + TimerON일 때 별도 seed, 실제 coordinator 복구 검증.
+- [x] 8개 선언 중 실행 후보 7종의 exact 집합·HA 6 controls + schedule API 1 검증.
+- [x] CLI 시험 경로·전체 회귀 및 별도 비활성 배포 준비.
+  Mac 3759 PASS / Linux 전용 1 SKIP, Linux 3760 PASS, Ruff·diff 검사 통과.
+  활성 template 미확보이므로 observer/dry_run=true/쓰기 허용 0대, 7 jobs 실행 비활성.
+  [후보 image·schema·산출물 digest](aquarium-app-control-release.md)를 보존했으며 실기 준비 완료와 구분한다.
+- [ ] 활성 template 바이트 확보, 실기 수용·활성화. 현재 device write 0.
+
 ## 이후 장비 — 앞 장비를 닫은 뒤 시작
 
-다음 대상은 **Aquarium 메인 리턴**이다. 완료한 DC/Pro/Bar 후보를 보존하고 한 기종씩 진행한다.
+다음 대상은 **도징 — protocol/schema 수정 승인 대기**다. DC/Pro/Bar/Aquarium의 비활성
+소프트웨어 후보를 보존하고 한 기종씩 진행한다. 앞 후보의 바이트를 새 schema 입력과 혼용하지 않는다.
 
-- [ ] Aquarium 메인 리턴: 마지막 리턴 순서로 timer/feeding/transport/clock/schedule
-  경로 검토, 기존 power/speed/feeding-duration 준비형 통합; 실기도 제외하지 않음.
+- [x] Aquarium 메인 리턴 일반 7기능의 구현·오프라인 검증·비활성 후보 보존.
+  transport 인계·원복 및 활성 template 결속은 사유·두 대안·재개 조건을 기록해 보류했다.
+  실기는 제외가 아니라 아직 실행하지 않은 별도 단계다.
 - [ ] 도징: 기존 사용자 요구(일일량·횟수·분할·평균 interval)를 유지하면서 실제 channel,
   schedule/timer, interval, calibration 및 전원 송신 경로 구현. protocol/schema 동결
   예외 응답 대기. 실제 투여를 과거 값 복원으로 되돌렸다고 보고하지 않음.

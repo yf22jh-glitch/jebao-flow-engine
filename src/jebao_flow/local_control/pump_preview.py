@@ -148,6 +148,7 @@ def preview_device_clock(product_key: str, local_time: datetime) -> dict[str, ob
             "advancing_clock"
             if product_key
             in {
+                AQUARIUM_PUMP_PRODUCT_KEY,
                 DC_PUMP_PRO_PRODUCT_KEY,
                 LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
                 LOCAL_WAVEMAKER_PRODUCT_KEY,

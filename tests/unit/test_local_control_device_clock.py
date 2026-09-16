@@ -10,7 +10,13 @@ from jebao_flow.local_control.device_clock import clock_expectation, clock_readb
 from jebao_flow.local_control.device_writer import ConnectedDeviceWriter, build_device_clock_payload
 from jebao_flow.local_control.journal import ActionPhase, TransactionPhase
 from jebao_flow.local_control.models import LocalControlIntent
-from jebao_flow.protocol.profiles import DC_PUMP_PRO, LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
+from jebao_flow.protocol.profiles import (
+    AQUARIUM_PUMP,
+    DC_PUMP_PRO,
+    LOCAL_WAVEMAKER,
+    LOCAL_WAVEMAKER_PRO,
+)
+from tests.unit.test_local_control_aquarium_power import _aquarium_status
 from tests.unit.test_local_control_bar_qualification import _bar_status
 from tests.unit.test_local_control_qualification_producer import _status as _pro_status
 from tests.unit.test_local_control_recovery_order import _fixture
@@ -56,6 +62,8 @@ def _clock_record(tmp_path, schema=DC_PUMP_PRO):
         raw = _pro_status()
     elif schema is LOCAL_WAVEMAKER:
         raw = _bar_status()
+    elif schema is AQUARIUM_PUMP:
+        raw = _aquarium_status()
     prepared = writer.prepare_scalar(
         LocalControlIntent(
             request_id="clock_command_01",
@@ -74,7 +82,9 @@ def _clock_record(tmp_path, schema=DC_PUMP_PRO):
     return coordinator, store, changed, prepared, now
 
 
-@pytest.mark.parametrize("schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER])
+@pytest.mark.parametrize(
+    "schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER, AQUARIUM_PUMP]
+)
 def test_clock_command_uses_app_bytes_and_has_no_sendable_recovery(tmp_path, schema):
     coordinator, store, record, prepared, now = _clock_record(tmp_path, schema)
     assert prepared.forward_payload == build_device_clock_payload(
@@ -89,7 +99,9 @@ def test_clock_command_uses_app_bytes_and_has_no_sendable_recovery(tmp_path, sch
     assert json.loads(prepared.expected_readback)["local_time"] == now.isoformat()
 
 
-@pytest.mark.parametrize("schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER])
+@pytest.mark.parametrize(
+    "schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER, AQUARIUM_PUMP]
+)
 async def test_clock_recovery_is_observation_only_and_never_resends(tmp_path, schema):
     from tests.unit.test_local_control_coordinator import _Session, _SessionFactory
 

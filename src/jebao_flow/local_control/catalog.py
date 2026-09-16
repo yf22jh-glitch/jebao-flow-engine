@@ -74,6 +74,8 @@ _ENCODABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
     "6a5c47b3ea364ecb841b47f5997a1775": frozenset(
         {
             "power",
+            "schedule_enable",
+            "transport_mode",
             "feed_switch",
             "motor_speed",
             "feeding_duration",
@@ -141,12 +143,25 @@ _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
         }
     ),
     "6a5c47b3ea364ecb841b47f5997a1775": frozenset(
-        {"power", "feed_switch", "motor_speed", "feeding_duration"}
+        {
+            "power",
+            "feed_switch",
+            "motor_speed",
+            "feeding_duration",
+            "device_clock_sync",
+            "schedule",
+            "schedule_enable",
+            # Mode has a vendor-declared encoder, but no AP/Wireless handover/return
+            # implementation. A receipt must not silently expose that missing path.
+        }
     ),
     "5b3c136fd4b74f3fb2a366a254c76c9a": frozenset(),
 }
 
 _ENGLISH_NAME_BY_PRODUCT_FUNCTION = {
+    ("6a5c47b3ea364ecb841b47f5997a1775", "motor_speed"): "Motor Speed (Enters Manual)",
+    ("6a5c47b3ea364ecb841b47f5997a1775", "feed_switch"): "Feeding (Enters Manual)",
+    ("6a5c47b3ea364ecb841b47f5997a1775", "transport_mode"): "Transport Mode (May Disconnect)",
     ("1d8c63eaccac4205b92c84d77d5a08fb", "manual_mode"): "Manual Mode (Enters Independent Manual)",
     ("1d8c63eaccac4205b92c84d77d5a08fb", "linkage_role"): "Linkage Role (App Mode Coupling)",
     ("1d8c63eaccac4205b92c84d77d5a08fb", "pulse_or_tide"): "Cross-flow (On) Or Pulse (Off)",
@@ -439,6 +454,12 @@ def _english_name(function: str, product_key: str | None = None) -> str:
 def public_function_value(product_key: str, function: str, value: object) -> object:
     """Translate a stable internal enum identity only at the public presentation boundary."""
 
+    if (
+        product_key == "6a5c47b3ea364ecb841b47f5997a1775"
+        and function == "transport_mode"
+        and type(value) is bool
+    ):
+        return "wireless" if value else "ap"
     if not isinstance(value, str):
         return value
     return _PUBLIC_VALUE_BY_PRODUCT_FUNCTION.get((product_key, function, value), value)
@@ -447,6 +468,10 @@ def public_function_value(product_key: str, function: str, value: object) -> obj
 def internal_function_value(product_key: str, function: str, value: object) -> object:
     """Translate an English presentation value back to its durable protocol identity."""
 
+    if product_key == "6a5c47b3ea364ecb841b47f5997a1775" and function == "transport_mode":
+        if value not in ("ap", "wireless"):
+            raise ValueError("Aquarium transport mode requires ap or wireless")
+        return value == "wireless"
     if not isinstance(value, str):
         return value
     return _INTERNAL_VALUE_BY_PRODUCT_FUNCTION.get((product_key, function, value), value)

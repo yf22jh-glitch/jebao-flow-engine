@@ -186,9 +186,7 @@ class AquariumPowerQualificationProducer(PowerQualificationProducer):
         state: AquariumPowerState,
     ) -> None:
         if state.enabled is not True or state.timer_enabled is not False:
-            raise QualificationProductionError(
-                "current state is outside the first-write envelope"
-            )
+            raise QualificationProductionError("current state is outside the first-write envelope")
         try:
             _require_safe_motor_speed(
                 state.motor_speed,
@@ -239,15 +237,36 @@ class AquariumPowerQualificationProducer(PowerQualificationProducer):
         status: bytes,
         *,
         expected_enabled: bool,
+        will_enable: bool = False,
     ) -> None:
         state = self._read_baseline_power_state(writer, epoch.target, status)
-        if (
-            state.enabled is not expected_enabled
-            or state.timer_enabled is not intent.baseline_timer_enabled
-            or state.motor_speed != intent.baseline_motor_speed
-            or state.transport_mode is not intent.baseline_transport_mode
-        ):
-            raise QualificationProductionError("aquarium power qualification phase state changed")
+        if state.enabled is not expected_enabled:
+            raise QualificationProductionError("aquarium power readback differs from its command")
+        if not state.enabled and not will_enable:
+            return
+        # This operation owns SwitchON, not a historical transport/timer/speed value.
+        # Preserve the output envelope without turning those unrelated values into equality
+        # conditions. OFF readback owns no active output, but the fresh read immediately
+        # before planned ON must still bound the output that ON would activate.
+        # A timer uses AutoGears, while manual operation uses Motor_Speed.
+        decoded = get_product_schema(epoch.target.product_key).decode_status(status)
+        if state.timer_enabled:
+            if decoded["AutoMode"] != "auto":
+                return
+            output = decoded["AutoGears"]
+        else:
+            output = state.motor_speed
+        try:
+            _require_safe_motor_speed(
+                output,
+                minimum=epoch.min_power,
+                maximum=epoch.max_power,
+                product_key=epoch.target.product_key,
+            )
+        except ValueError as error:
+            raise QualificationProductionError(
+                "aquarium power phase output is outside its bounds"
+            ) from error
 
 
 __all__ = [

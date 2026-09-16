@@ -464,7 +464,7 @@ AQUARIUM_PUMP_APP = AppProductCatalog(
             "schedule_enable",
             AppFunctionKind.BOOLEAN,
             ("TimerON", "Motor_Speed", "FeedSwitch", "AutoGears", "AutoMode"),
-            caveat="app command shape depends on current mode and current auto state",
+            caveat="cached app ON seeds the current local-time slot; OFF copies manual speed",
         ),
         AppFunction(
             "transport_mode",
@@ -472,20 +472,27 @@ AQUARIUM_PUMP_APP = AppProductCatalog(
             ("Mode",),
             ("ap", "wireless"),
             confidence=CapabilityConfidence.ACCEPTED_CAPTURE_REQUIRED,
-            caveat="boolean-to-label direction requires an accepted capture",
+            caveat=(
+                "bundled productConfig declares false=AP, true=Wireless; cached dedicated UI "
+                "has no handler; network transition and accepted write remain unverified"
+            ),
         ),
-        AppFunction("feed_switch", AppFunctionKind.BOOLEAN, ("FeedSwitch",)),
+        AppFunction(
+            "feed_switch",
+            AppFunctionKind.BOOLEAN,
+            ("FeedSwitch", "TimerON", "FeedTime", "Motor_Speed"),
+        ),
         AppFunction(
             "motor_speed",
             AppFunctionKind.INTEGER,
-            ("Motor_Speed",),
+            ("Motor_Speed", "TimerON"),
             app_minimum=30,
             app_maximum=100,
         ),
         AppFunction(
             "feeding_duration",
             AppFunctionKind.INTEGER,
-            ("FeedTime",),
+            ("FeedTime", "FeedSwitch"),
             app_minimum=1,
             app_maximum=60,
         ),
@@ -497,7 +504,7 @@ AQUARIUM_PUMP_APP = AppProductCatalog(
             item_size=6,
             caveat=(
                 "app replaces all 48 slots and writes 0xee for unused positions; accepted zero "
-                "speed remains unverified"
+                "speed remains unverified; TimerON save has a separate slot-seed command"
             ),
         ),
         AppFunction(

@@ -81,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--downward-step", type=int, help="required for manual_flow only")
     run.add_argument("--trial-flow", type=int, help="required for Bar schedule_enable only")
+    run.add_argument("--trial-speed", type=int, help="required for Aquarium schedule_enable only")
     run.add_argument(
         "--preparation-speed",
         type=int,
@@ -163,10 +164,13 @@ def _run(args: argparse.Namespace) -> int:
             args.downward_step is not None
         ):
             raise ValueError("downward-step is required only for manual_flow")
-        if (args.function == "schedule_enable" and args.preparation_flow is None) != (
-            args.trial_flow is not None
-        ):
-            raise ValueError("trial-flow is required only for Bar schedule_enable")
+        if args.function == "schedule_enable" and args.preparation_flow is None:
+            if (args.trial_flow is None) == (args.trial_speed is None):
+                raise ValueError(
+                    "choose trial-flow for Bar or trial-speed for Aquarium schedule_enable"
+                )
+        elif args.trial_flow is not None or args.trial_speed is not None:
+            raise ValueError("trial-flow/trial-speed are only valid for schedule_enable")
         if args.function == "manual_enable" and args.preparation_flow is None:
             raise ValueError("manual_enable requires DC preparation-flow")
         if args.preparation_speed is not None and args.function not in {
@@ -255,23 +259,26 @@ def _run(args: argparse.Namespace) -> int:
             )
         elif args.function == "device_clock_sync":
             from jebao_flow.local_control.clock_qualification import (
+                AquariumClockQualificationProducer,
                 BarClockQualificationProducer,
                 DcClockQualificationProducer,
                 ProClockQualificationProducer,
             )
             from jebao_flow.protocol.schedule import (
+                AQUARIUM_PUMP_PRODUCT_KEY,
                 DC_PUMP_PRO_PRODUCT_KEY,
                 LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
                 LOCAL_WAVEMAKER_PRODUCT_KEY,
             )
 
             producer_class = {
+                AQUARIUM_PUMP_PRODUCT_KEY: AquariumClockQualificationProducer,
                 DC_PUMP_PRO_PRODUCT_KEY: DcClockQualificationProducer,
                 LOCAL_WAVEMAKER_PRO_PRODUCT_KEY: ProClockQualificationProducer,
                 LOCAL_WAVEMAKER_PRODUCT_KEY: BarClockQualificationProducer,
             }.get(epoch_source().target.product_key)
             if producer_class is None:
-                raise ValueError("clock qualification is currently scoped to Pro/Bar/DC pumps")
+                raise ValueError("clock qualification requires a supported schedule pump")
             producer = producer_class(
                 writer_factory=configured_writer_factory(load_current_private_config(args.config)),
                 **producer_arguments,
@@ -290,6 +297,33 @@ def _run(args: argparse.Namespace) -> int:
                 producer.execute(args.operation_id, downward_step=args.downward_step)
             )
         elif args.function == "schedule_enable":
+            target = epoch_source().target
+            from jebao_flow.protocol.schedule import (
+                AQUARIUM_PUMP_PRODUCT_KEY,
+                LOCAL_WAVEMAKER_PRODUCT_KEY,
+            )
+
+            if target.product_key == AQUARIUM_PUMP_PRODUCT_KEY:
+                if args.trial_speed is None:
+                    raise ValueError("Aquarium schedule_enable requires trial-speed")
+                from jebao_flow.local_control.aquarium_app_qualification import (
+                    AquariumAppQualificationProducer,
+                )
+
+                producer = AquariumAppQualificationProducer(
+                    function=args.function,
+                    writer_factory=configured_writer_factory(
+                        load_current_private_config(args.config)
+                    ),
+                    **producer_arguments,
+                )
+                result = asyncio.run(
+                    producer.execute(args.operation_id, trial_speed=args.trial_speed)
+                )
+                _print_json(result.public_dict())
+                return 0
+            if target.product_key != LOCAL_WAVEMAKER_PRODUCT_KEY or args.trial_flow is None:
+                raise ValueError("Bar schedule_enable requires its target and trial-flow")
             producer = BarTimerQualificationProducer(
                 writer_factory=configured_writer_factory(load_current_private_config(args.config)),
                 **producer_arguments,
@@ -322,6 +356,21 @@ def _run(args: argparse.Namespace) -> int:
                         preparation_speed=args.preparation_speed,
                     )
                 )
+                _print_json(result.public_dict())
+                return 0
+            if descriptor.family == "aquarium_pump" and args.function == "feed_switch":
+                from jebao_flow.local_control.aquarium_app_qualification import (
+                    AquariumAppQualificationProducer,
+                )
+
+                producer = AquariumAppQualificationProducer(
+                    function=args.function,
+                    writer_factory=configured_writer_factory(
+                        load_current_private_config(args.config)
+                    ),
+                    **producer_arguments,
+                )
+                result = asyncio.run(producer.execute(args.operation_id))
                 _print_json(result.public_dict())
                 return 0
             if descriptor.family == "local_wavemaker" and args.function in {

@@ -11,6 +11,7 @@ from typing import Protocol
 
 from jebao_flow.local_control.catalog import LocalControlCatalog, LocalFunctionDescriptor
 from jebao_flow.local_control.device_writer import (
+    AQUARIUM_PUMP_PRODUCT_KEY,
     ConnectedDeviceWriter,
     PreparedDeviceWrite,
     SessionFactory,
@@ -168,15 +169,20 @@ class LocalControlCoordinator:
             writer = self._writer_factory(endpoint)
             try:
                 current = await writer.connect_and_read()
-                prepared = writer.prepare_scalar(intent, current)
+                prepared = (
+                    writer.prepare_aquarium_schedule_save(intent, current)
+                    if intent.target.product_key == AQUARIUM_PUMP_PRODUCT_KEY
+                    and intent.function == "schedule"
+                    else (writer.prepare_scalar(intent, current),)
+                )
                 record = self._create_record(
                     request_id=intent.request_id,
                     intent_sha256=intent_sha256,
-                    prepared=(prepared,),
+                    prepared=prepared,
                 )
                 return await self._execute_prepared(
                     record,
-                    ((writer, prepared),),
+                    tuple((writer, item) for item in prepared),
                     active_lease,
                 )
             finally:
@@ -272,9 +278,14 @@ class LocalControlCoordinator:
                     key = item.target.physical_identity_key
                     writer = writers[key]
                     current = current_statuses[key]
-                    prepared_pairs.extend(
-                        (writer, writer.prepare_scalar(intent, current)) for intent in item.intents
-                    )
+                    for intent in item.intents:
+                        frames = (
+                            writer.prepare_aquarium_schedule_save(intent, current)
+                            if intent.target.product_key == AQUARIUM_PUMP_PRODUCT_KEY
+                            and intent.function == "schedule"
+                            else (writer.prepare_scalar(intent, current),)
+                        )
+                        prepared_pairs.extend((writer, frame) for frame in frames)
                 record = self._create_record(
                     request_id=request_id,
                     intent_sha256=intent_sha256,

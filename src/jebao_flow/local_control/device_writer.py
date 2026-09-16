@@ -16,6 +16,10 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from jebao_flow.config import AppConfig
+from jebao_flow.local_control.aquarium_controls import (
+    prepare_aquarium_control_command,
+    prepare_aquarium_schedule_seed,
+)
 from jebao_flow.local_control.bar_controls import prepare_bar_control_command
 from jebao_flow.local_control.bar_timer import prepare_bar_timer_command
 from jebao_flow.local_control.catalog import internal_function_value
@@ -29,7 +33,11 @@ from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 from jebao_flow.protocol.control import CONTROL_ACTION, build_control_payload
 from jebao_flow.protocol.control_session import GizwitsSession
 from jebao_flow.protocol.profiles import get_product_schema
-from jebao_flow.protocol.schedule import DC_PUMP_PRO_PRODUCT_KEY, LOCAL_WAVEMAKER_PRODUCT_KEY
+from jebao_flow.protocol.schedule import (
+    AQUARIUM_PUMP_PRODUCT_KEY,
+    DC_PUMP_PRO_PRODUCT_KEY,
+    LOCAL_WAVEMAKER_PRODUCT_KEY,
+)
 from jebao_flow.protocol.schedule_wire import (
     LOCAL_WAVEMAKER_PRO_CONTROL_FLAGS_SIZE,
     LOCAL_WAVEMAKER_PRO_CONTROL_PAYLOAD_SIZE,
@@ -147,9 +155,7 @@ _SCALAR_FIELD_BY_PRODUCT: dict[str, dict[str, str]] = {
     },
     "6a5c47b3ea364ecb841b47f5997a1775": {
         "power": "SwitchON",
-        "feed_switch": "FeedSwitch",
-        "motor_speed": "Motor_Speed",
-        "feeding_duration": "FeedTime",
+        "transport_mode": "Mode",
     },
     # Dosing control remains unavailable because its product schema intentionally has
     # control_supported=False and no accepted write evidence exists.
@@ -386,6 +392,13 @@ class ConnectedDeviceWriter:
             return self._prepare_schedule_reset(intent, current_status)
         if intent.function == "device_clock_sync":
             return self._prepare_clock(intent, current_status)
+        if intent.target.product_key == AQUARIUM_PUMP_PRODUCT_KEY and intent.function in {
+            "motor_speed",
+            "feed_switch",
+            "feeding_duration",
+            "schedule_enable",
+        }:
+            return self._prepare_aquarium_control(intent, current_status)
         if intent.target.product_key == DC_PUMP_PRO_PRODUCT_KEY and intent.function in {
             "schedule_enable",
             "manual_enable",
@@ -434,6 +447,11 @@ class ConnectedDeviceWriter:
 
         schema = get_product_schema(intent.target.product_key)
         values = schema.decode_status(current_status)
+        if intent.target.product_key == AQUARIUM_PUMP_PRODUCT_KEY:
+            if intent.function == "transport_mode" and intent.value not in {"ap", "wireless"}:
+                raise ValueError("Aquarium transport mode requires ap or wireless")
+            if intent.function == "power" and intent.value is True:
+                self._require_aquarium_output_bounds(values)
         if (
             intent.target.product_key == DC_PUMP_PRO_PRODUCT_KEY
             and intent.function == "power"
@@ -493,6 +511,153 @@ class ConnectedDeviceWriter:
             # fresh read as OFF or as the original baseline, but must never re-enable it merely
             # to recreate a less-safe pre-write state.
             restore_on_recovery=not (intent.function == "power" and intent.value is False),
+        )
+
+    def _aquarium_minute(self) -> int:
+        provider = self._device_local_time or self._bar_timer_local_time
+        if provider is None:
+            raise LocalDeviceWriteError("Aquarium timer requires configured local time")
+        local = provider()
+        if local.tzinfo is None or local.utcoffset() is None:
+            raise ValueError("Aquarium timer local time must be timezone-aware")
+        return local.hour * 60 + local.minute
+
+    def _require_aquarium_output_bounds(self, values: Mapping[str, Any]) -> None:
+        """Only output ranges, never equality with historical Auto/clock values."""
+        minimum, maximum = self._control_flow_bounds or (30, 100)
+        if values["TimerON"]:
+            image = b"".join(values[f"AutoTime{i:02d}"] for i in range(48))
+            prepare_aquarium_schedule_seed(
+                image, local_minute=0, minimum_speed=minimum, maximum_speed=maximum
+            )
+            if values["AutoMode"] != "auto":
+                return
+            speed = values["AutoGears"]
+        else:
+            speed = values["Motor_Speed"]
+        if not minimum <= speed <= maximum:
+            raise LocalDeviceWriteError(
+                f"Aquarium active output {speed} exceeds configured {minimum}..{maximum}"
+            )
+
+    def _prepare_aquarium_control(
+        self, intent: LocalControlIntent, current_status: bytes
+    ) -> PreparedDeviceWrite:
+        schema = get_product_schema(intent.target.product_key)
+        values = schema.decode_status(current_status)
+        minimum, maximum = self._control_flow_bounds or (30, 100)
+        command = prepare_aquarium_control_command(
+            intent.function,
+            intent.value,
+            values,
+            schedule_image=extract_current_schedule_image(
+                intent.target.product_key, current_status
+            ),
+            local_minute=self._aquarium_minute()
+            if intent.function == "schedule_enable" and intent.value
+            else None,
+            minimum_speed=minimum,
+            maximum_speed=maximum,
+        )
+        expected = dict(command.persistent_readback)
+        baseline = {name: values[name] for name in expected}
+        if "Motor_Speed" in expected or expected.get("TimerON") is False:
+            speed = expected.get("Motor_Speed", values["Motor_Speed"])
+            if not minimum <= speed <= maximum:
+                raise LocalDeviceWriteError(
+                    f"Aquarium manual output {speed} exceeds configured {minimum}..{maximum}"
+                )
+        # A command which owns the timer can reactivate either the original schedule
+        # or original manual output on recovery. Bound that output, not a past value.
+        if "TimerON" in expected and values["SwitchON"]:
+            self._require_aquarium_output_bounds(values)
+        forward = build_aquarium_app_payload(command.fields, current_status)
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function=intent.function,
+            forward_payload=forward,
+            rollback_payload=build_aquarium_app_payload(baseline, current_status),
+            baseline_status=bytes(current_status),
+            expected_readback=_canonical_values(expected),
+            baseline_readback=_canonical_values(baseline),
+            verification_kind="scalar_fields",
+            no_change=expected == baseline,
+        )
+
+    def prepare_aquarium_schedule_save(
+        self, intent: LocalControlIntent, current_status: bytes
+    ) -> tuple[PreparedDeviceWrite, ...]:
+        """Full image followed by the app's separate seed when the timer is on.
+
+        Both frames are journalled before sending. Seed verification proves the
+        saved image, not stable Auto values or physical circulation. Recovery owns
+        only the original image; it never replays a historical Auto seed.
+        """
+        if intent.target.product_key != AQUARIUM_PUMP_PRODUCT_KEY or intent.function != "schedule":
+            raise ValueError("Aquarium schedule save requires its schedule intent")
+        image = self.prepare_scalar(intent, current_status)
+        values = get_product_schema(intent.target.product_key).decode_status(current_status)
+        if image.no_change or not values["TimerON"]:
+            return (image,)
+        minimum, maximum = self._control_flow_bounds or (30, 100)
+        command = prepare_aquarium_schedule_seed(
+            image.expected_readback,
+            local_minute=self._aquarium_minute(),
+            minimum_speed=minimum,
+            maximum_speed=maximum,
+        )
+        seed = PreparedDeviceWrite(
+            target=self.endpoint,
+            function="schedule",
+            forward_payload=build_aquarium_app_payload(command.fields, current_status),
+            rollback_payload=image.rollback_payload,
+            baseline_status=bytes(current_status),
+            expected_readback=image.expected_readback,
+            baseline_readback=image.baseline_readback,
+            verification_kind="schedule_image",
+            no_change=False,
+        )
+        return image, seed
+
+    def prepare_aquarium_restore_controls(
+        self, original_status: bytes, owned_fields: tuple[str, ...]
+    ) -> PreparedDeviceWrite:
+        """Restore only persistent fields captured by this operation, never Auto/clock.
+
+        This is owned recovery authority, not an app command or receipt candidate.
+        The caller establishes output bounds and records the initial raw before use.
+        """
+        if self.endpoint.target.product_key != AQUARIUM_PUMP_PRODUCT_KEY:
+            raise ValueError("Aquarium owned restore requires its actual product")
+        allowed = {"TimerON", "FeedSwitch", "FeedTime", "Motor_Speed"}
+        if (
+            not owned_fields
+            or len(set(owned_fields)) != len(owned_fields)
+            or not set(owned_fields) <= allowed
+        ):
+            raise ValueError("Aquarium restore requires distinct owned persistent fields")
+        schema = get_product_schema(AQUARIUM_PUMP_PRODUCT_KEY)
+        values = schema.decode_status(original_status)
+        flags = bytearray(schema.attribute_flags_size)
+        for name in owned_fields:
+            attribute = schema.by_name(name)
+            flags[attribute.id // 8] |= 1 << (attribute.id % 8)
+        payload = (
+            bytes([CONTROL_ACTION])
+            + bytes(reversed(flags))
+            + original_status[: schema.attribute_values_size]
+        )
+        expected = _canonical_values({name: values[name] for name in owned_fields})
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function="aquarium_owned_controls",
+            forward_payload=payload,
+            rollback_payload=payload,
+            baseline_status=bytes(original_status),
+            expected_readback=expected,
+            baseline_readback=expected,
+            verification_kind="scalar_fields",
+            no_change=False,
         )
 
     def _prepare_bar_control(
@@ -620,11 +785,12 @@ class ConnectedDeviceWriter:
         self, intent: LocalControlIntent, current_status: bytes
     ) -> PreparedDeviceWrite:
         if intent.target.product_key not in {
+            AQUARIUM_PUMP_PRODUCT_KEY,
             DC_PUMP_PRO_PRODUCT_KEY,
             LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
             LOCAL_WAVEMAKER_PRODUCT_KEY,
         }:
-            raise LocalDeviceWriteError("clock execution is currently scoped to Pro/Bar/DC pumps")
+            raise LocalDeviceWriteError("clock execution requires a supported schedule pump")
         if intent.value is not None or self._device_local_time is None:
             raise ValueError("clock sync uses the configured local time, with no implicit payload")
         local_time = self._device_local_time()
@@ -778,13 +944,21 @@ class ConnectedDeviceWriter:
         values = get_product_schema(intent.target.product_key).decode_status(current_status)
         is_dc = intent.target.product_key == DC_PUMP_PRO_PRODUCT_KEY
         is_bar = intent.target.product_key == LOCAL_WAVEMAKER_PRODUCT_KEY
-        if not (is_dc or is_bar) and (
+        is_aquarium = intent.target.product_key == AQUARIUM_PUMP_PRODUCT_KEY
+        if not (is_dc or is_bar or is_aquarium) and (
             values["TimerON"]
             or (isinstance(schedule, WavemakerSchedule) and values["Linkage"] != "independent")
         ):
             raise LocalDeviceWriteError("시간표 교체는 독립 상태·TimerOFF에서만 준비합니다")
         baseline = extract_current_schedule_image(intent.target.product_key, current_status)
         desired = schedule.compile_image()
+        if is_aquarium:
+            minimum, maximum = self._control_flow_bounds or (30, 100)
+            prepare_aquarium_schedule_seed(
+                desired, local_minute=0, minimum_speed=minimum, maximum_speed=maximum
+            )
+            if values["TimerON"] and values["SwitchON"]:
+                self._require_aquarium_output_bounds(values)
         if is_dc:
             # dcPro ScheduleDetail saves slots without turning the timer off. Validate
             # outputs that can run, rather than imposing a manual-mode prerequisite.
@@ -1057,6 +1231,32 @@ def build_device_clock_payload(product_key: str, local_time: datetime) -> bytes:
         get_product_schema(product_key),
         {"YMDData": ymd, "HMSData": hms},
     )
+
+
+def build_aquarium_app_payload(fields: Mapping[str, Any], current_status: bytes) -> bytes:
+    """Encode app fields; preserve an owned inactive FeedTime=0 verbatim.
+
+    Zero is not a new feeding-time option. Only an unchanged zero from this raw
+    status may be copied, as the app's compound commands copy the current value.
+    """
+    schema = get_product_schema(AQUARIUM_PUMP_PRODUCT_KEY)
+    values = schema.decode_status(current_status)
+    copied_zero = (
+        type(fields.get("FeedTime")) is int and fields["FeedTime"] == values["FeedTime"] == 0
+    )
+    if not copied_zero:
+        return build_control_payload(schema, fields)
+    remaining = {name: value for name, value in fields.items() if name != "FeedTime"}
+    encoded = bytearray(
+        build_control_payload(schema, remaining)
+        if remaining
+        else bytes([CONTROL_ACTION])
+        + bytes(schema.attribute_flags_size + schema.attribute_values_size)
+    )
+    attribute = schema.by_name("FeedTime")
+    flag_offset = 1 + schema.attribute_flags_size - 1 - attribute.id // 8
+    encoded[flag_offset] |= 1 << (attribute.id % 8)
+    return bytes(encoded)
 
 
 def extract_current_schedule_image(product_key: str, status: bytes) -> bytes:

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from jebao_flow.local_control.clock_qualification import (
+    AquariumClockQualificationProducer,
     BarClockQualificationProducer,
     DcClockQualificationProducer,
     ProClockQualificationProducer,
@@ -20,7 +21,13 @@ from jebao_flow.local_control.qualification_producer import (
     QualificationProductionError,
 )
 from jebao_flow.local_control.resolver import ResolvedEndpoint
-from jebao_flow.protocol.profiles import DC_PUMP_PRO, LOCAL_WAVEMAKER, LOCAL_WAVEMAKER_PRO
+from jebao_flow.protocol.profiles import (
+    AQUARIUM_PUMP,
+    DC_PUMP_PRO,
+    LOCAL_WAVEMAKER,
+    LOCAL_WAVEMAKER_PRO,
+)
+from tests.unit.test_local_control_aquarium_power import _aquarium_status
 from tests.unit.test_local_control_bar_qualification import _bar_status
 from tests.unit.test_local_control_bar_timer_qualification import _Session
 from tests.unit.test_local_control_dc_prepared_qualification import (
@@ -35,6 +42,7 @@ from tests.unit.test_local_control_qualification_producer import _status as _pro
 
 def _baseline(schema):
     return {
+        AQUARIUM_PUMP.product_key: _aquarium_status,
         DC_PUMP_PRO.product_key: _dc_status,
         LOCAL_WAVEMAKER_PRO.product_key: _pro_status,
         LOCAL_WAVEMAKER.product_key: _bar_status,
@@ -70,6 +78,7 @@ def _producer(tmp_path, *, fail_read=False, schema=DC_PUMP_PRO):
         return writer
 
     producer_class = {
+        AQUARIUM_PUMP.product_key: AquariumClockQualificationProducer,
         DC_PUMP_PRO.product_key: DcClockQualificationProducer,
         LOCAL_WAVEMAKER_PRO.product_key: ProClockQualificationProducer,
         LOCAL_WAVEMAKER.product_key: BarClockQualificationProducer,
@@ -87,7 +96,9 @@ def _producer(tmp_path, *, fail_read=False, schema=DC_PUMP_PRO):
     return producer, journal, sent, writers
 
 
-@pytest.mark.parametrize("schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER])
+@pytest.mark.parametrize(
+    "schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER, AQUARIUM_PUMP]
+)
 async def test_clock_producer_refuses_the_other_product_before_resolution_or_write(
     tmp_path, schema
 ):
@@ -102,7 +113,9 @@ async def test_clock_producer_refuses_the_other_product_before_resolution_or_wri
     assert journal.load("wrong_clock_product") is None
 
 
-@pytest.mark.parametrize("schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER])
+@pytest.mark.parametrize(
+    "schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER, AQUARIUM_PUMP]
+)
 async def test_two_explicit_clock_commands_issue_only_clock_receipts_and_replay_has_no_io(
     tmp_path, schema
 ):
@@ -126,7 +139,9 @@ async def test_two_explicit_clock_commands_issue_only_clock_receipts_and_replay_
     assert replay.physical_write_count == 0 and len(writers) == len(sent) == 2
 
 
-@pytest.mark.parametrize("schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER])
+@pytest.mark.parametrize(
+    "schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER, AQUARIUM_PUMP]
+)
 async def test_clock_ack_with_failed_readback_is_uncertain_and_never_issues_receipts(
     tmp_path, schema
 ):
@@ -145,7 +160,9 @@ async def test_clock_ack_with_failed_readback_is_uncertain_and_never_issues_rece
     assert len(sent) == len(writers) == 1
 
 
-@pytest.mark.parametrize("schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER])
+@pytest.mark.parametrize(
+    "schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO, LOCAL_WAVEMAKER, AQUARIUM_PUMP]
+)
 async def test_clock_finalize_rechecks_preserved_raw_instead_of_trusting_verified_label(
     tmp_path, schema
 ):

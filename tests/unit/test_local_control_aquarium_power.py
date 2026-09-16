@@ -7,6 +7,7 @@ that a failed operation converges to OFF without ever re-igniting the original O
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -277,6 +278,90 @@ async def test_success_is_one_three_action_journal_and_two_standard_power_receip
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed", [{"transport": True}, {"motor_speed": 39}, {"timer_enabled": True}]
+)
+async def test_power_readback_does_not_require_unowned_historical_values(tmp_path, changed):
+    sent = []
+    original = _aquarium_status()
+    changed_on = _aquarium_status(**changed)
+    changed_off = _aquarium_status(enabled=False, **changed)
+    producer, journal, *_ = _producer(
+        tmp_path,
+        sessions=[
+            _Session([original, changed_on], sent),
+            _Session([changed_on, changed_off], sent),
+            _Session([changed_off, changed_on], sent),
+        ],
+    )
+
+    result = await producer.execute("aquarium_power_unowned")
+
+    assert result.receipt_count == 2 and result.phase is TransactionPhase.VERIFIED
+    record = journal.load("aquarium_power_unowned")
+    assert record is not None
+    for action in record.actions:
+        assert set(json.loads(journal.load_blob(action.expected_readback_sha256))) == {"SwitchON"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timer", [False, True])
+async def test_power_readback_still_bounds_the_current_output(tmp_path, timer):
+    sent = []
+    excessive = bytearray(_aquarium_status(timer_enabled=timer, auto_mode=1, motor_speed=46))
+    excessive[3] = 46
+    producer, journal, *_ = _producer(
+        tmp_path, sessions=[_Session([_aquarium_status(), bytes(excessive)], sent)]
+    )
+
+    with pytest.raises(QualificationProductionError, match="output is outside its bounds"):
+        await producer.execute("aquarium_power_output")
+
+    assert len(sent) == 1
+    assert journal.load("aquarium_power_output").phase is TransactionPhase.RECOVERY_REQUIRED
+    assert not tuple((tmp_path / "receipts").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_off_readback_checks_its_switch_not_an_inactive_output(tmp_path):
+    sent = []
+    on, off = _aquarium_status(), _aquarium_status(enabled=False)
+    producer, *_ = _producer(
+        tmp_path,
+        sessions=[
+            _Session([on, on], sent),
+            _Session([on, _aquarium_status(enabled=False, motor_speed=0)], sent),
+            _Session([off, on], sent),
+        ],
+    )
+    # Supplied raw frames test validation scope, not a claim that firmware reports zero.
+    result = await producer.execute("aquarium_power_off_output")
+    assert result.receipt_count == 2 and len(sent) == 3
+
+
+@pytest.mark.asyncio
+async def test_planned_on_still_checks_the_output_before_sending(tmp_path):
+    sent = []
+    on = _aquarium_status()
+    changed_off = _aquarium_status(enabled=False, motor_speed=81)
+    producer, journal, *_ = _producer(
+        tmp_path,
+        sessions=[
+            _Session([on, on], sent),
+            _Session([on, changed_off], sent),
+            _Session([changed_off], sent),
+        ],
+    )
+    with pytest.raises(QualificationProductionError, match="output is outside its bounds"):
+        await producer.execute("aquarium_power_before_on")
+    assert len(sent) == 2
+    record = journal.load("aquarium_power_before_on")
+    assert record.actions[1].phase is ActionPhase.VERIFIED
+    assert record.actions[2].phase is ActionPhase.PREPARED
+    assert not tuple((tmp_path / "receipts").iterdir())
+
+
+@pytest.mark.asyncio
 async def test_off_frame_keeps_safer_off_and_intent_records_only_real_fields(
     tmp_path: Path,
 ) -> None:
@@ -438,9 +523,12 @@ async def test_generic_recover_converges_to_off_and_never_reignites_the_original
         resolver=_Resolver(endpoint),  # type: ignore[arg-type]
         journal=journal,
         lease=lease,  # type: ignore[arg-type]
-        writer_factory=_WriterFactory([
-            _Session([off], recovery_sent), _Session([off], recovery_sent),
-        ]),
+        writer_factory=_WriterFactory(
+            [
+                _Session([off], recovery_sent),
+                _Session([off], recovery_sent),
+            ]
+        ),
     )
 
     recovered = await coordinator.recover("aquarium_power_crash")

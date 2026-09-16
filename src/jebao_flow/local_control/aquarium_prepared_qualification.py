@@ -13,6 +13,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, StrictInt, model_validator
 
+from jebao_flow.local_control.aquarium_controls import prepare_aquarium_control_command
 from jebao_flow.local_control.aquarium_power_qualification import _require_safe_motor_speed
 from jebao_flow.local_control.aquarium_qualification import (
     AquariumScalarQualificationIntent,
@@ -20,7 +21,7 @@ from jebao_flow.local_control.aquarium_qualification import (
 )
 from jebao_flow.local_control.bar_qualification import _bar_phase_intent, _bar_receipt
 from jebao_flow.local_control.device_writer import (
-    build_control_payload,
+    build_aquarium_app_payload,
     get_product_schema,
 )
 from jebao_flow.local_control.journal import (
@@ -331,11 +332,18 @@ class PreparedAquariumScalarQualificationProducer(AquariumScalarQualificationPro
                 raise QualificationProductionError(
                     "prepared qualification action evidence is incomplete"
                 )
-            field = "Motor_Speed" if phase.function == "motor_speed" else "FeedTime"
-            expected, baseline = {field: phase.value}, {field: original[field]}
+            command = prepare_aquarium_control_command(
+                phase.function,
+                phase.value,
+                original,
+                minimum_speed=trial.min_power,
+                maximum_speed=trial.max_power,
+            )
+            expected = dict(command.persistent_readback)
+            baseline = {name: original[name] for name in expected}
             for digest, payload in (
-                (action.forward_payload_sha256, build_control_payload(schema, expected)),
-                (action.rollback_payload_sha256, build_control_payload(schema, baseline)),
+                (action.forward_payload_sha256, build_aquarium_app_payload(command.fields, raw)),
+                (action.rollback_payload_sha256, build_aquarium_app_payload(baseline, raw)),
                 (action.expected_readback_sha256, _canonical_json(expected)),
                 (action.baseline_readback_sha256, _canonical_json(baseline)),
             ):

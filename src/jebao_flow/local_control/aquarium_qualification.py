@@ -1,7 +1,8 @@
 """Aquarium scalar qualification over the existing own-baseline three-frame journal.
 
-Only actual speed and transport fields are recorded. This is an offline-tested software contract,
-not evidence of accepted firmware ranges or absence of physical side effects.
+The fresh FeedSwitch copied by a duration command is owned along with FeedTime.
+The transport bit is recorded, not a condition on unrelated later changes. This is
+an offline software contract, not evidence of firmware acceptance or physical effects.
 """
 
 from datetime import datetime
@@ -9,12 +10,19 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
+from jebao_flow.local_control.aquarium_controls import prepare_aquarium_control_command
 from jebao_flow.local_control.aquarium_power_qualification import (
     AquariumPowerQualificationProducer,
     _require_safe_motor_speed,
 )
 from jebao_flow.local_control.bar_qualification import BarScalarQualificationProducer
+from jebao_flow.local_control.catalog import build_local_control_catalog
+from jebao_flow.local_control.device_writer import get_product_schema
 from jebao_flow.local_control.models import LocalDeviceBinding
+from jebao_flow.local_control.qualification_producer import (
+    QualificationProductionError,
+    _canonical_json,
+)
 from jebao_flow.operator_capture.app_catalog import declared_app_integer_range
 from jebao_flow.protocol.schedule import AQUARIUM_PUMP_PRODUCT_KEY
 
@@ -99,11 +107,31 @@ class AquariumScalarQualificationProducer(BarScalarQualificationProducer):
         AquariumPowerQualificationProducer._require_state_envelope
     )
 
+    def _require_bar_target(self, target):
+        if target.product_key != AQUARIUM_PUMP_PRODUCT_KEY:
+            raise QualificationProductionError("Aquarium qualification requires its actual product")
+        descriptor = build_local_control_catalog().find(target.product_key, self._spec.function)
+        if not descriptor.encoding_available or descriptor.fields[0] != self._spec.field:
+            raise QualificationProductionError(
+                "Aquarium qualification target encoder is unavailable"
+            )
+
     def _intent_baseline_fields(self, state):
         return {
             "baseline_motor_speed": state.motor_speed,
             "baseline_transport_mode": state.transport_mode,
         }
+
+    def _expected_phase_bytes(self, intent, value, baseline_raw):
+        current = get_product_schema(intent.target.product_key).decode_status(baseline_raw)
+        command = prepare_aquarium_control_command(
+            intent.function,
+            value,
+            current,
+            minimum_speed=intent.min_power,
+            maximum_speed=intent.max_power,
+        )
+        return _canonical_json(dict(command.persistent_readback))
 
     def _trial_value(self, product_key, baseline):
         if self._spec.function == "motor_speed":

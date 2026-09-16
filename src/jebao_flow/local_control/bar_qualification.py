@@ -561,20 +561,9 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
                         "bar qualification journal evidence is incomplete"
                     )
                 self._journal.load_blob(digest)
-        baseline_bytes = _canonical_json(
-            {
-                intent.field: internal_function_value(
-                    intent.target.product_key, intent.function, intent.baseline_value
-                )
-            }
-        )
-        trial_bytes = _canonical_json(
-            {
-                intent.field: internal_function_value(
-                    intent.target.product_key, intent.function, intent.trial_value
-                )
-            }
-        )
+        baseline_raw = self._journal.load_blob(record.actions[0].baseline_status_sha256)
+        baseline_bytes = self._expected_phase_bytes(intent, intent.baseline_value, baseline_raw)
+        trial_bytes = self._expected_phase_bytes(intent, intent.trial_value, baseline_raw)
         expected = (baseline_bytes, trial_bytes, baseline_bytes)
         expected_digests = tuple(hashlib.sha256(value).hexdigest() for value in expected)
         if tuple(action.expected_readback_sha256 for action in record.actions) != expected_digests:
@@ -593,6 +582,15 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
             or tuple(action.restore_on_recovery for action in record.actions) != (True, True, True)
         ):
             raise QualificationProductionError("bar qualification payload recovery mapping changed")
+
+    def _expected_phase_bytes(self, intent, value, baseline_raw):
+        return _canonical_json(
+            {
+                intent.field: internal_function_value(
+                    intent.target.product_key, intent.function, value
+                )
+            }
+        )
 
     def _readback_validator(
         self, epoch: QualificationEpoch, writer: ConnectedDeviceWriter, *, phase: str

@@ -149,7 +149,7 @@ def test_unmapped_or_status_only_app_functions_never_expose_hardware_control() -
     assert dosing_calibration_duration.encoding_available is False
     assert dosing_calibration_duration.kind.value == "status"
     assert dosing_calibration_duration.fields == ("time1",)
-    assert aquarium_transport.encoding_available is False
+    assert aquarium_transport.encoding_available is True
     assert aquarium_motor.encoding_available is True
     assert aquarium_motor.control_exposed is False
     assert (aquarium_motor.native_minimum, aquarium_motor.native_maximum) == (30, 100)

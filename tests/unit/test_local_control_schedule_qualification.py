@@ -130,7 +130,7 @@ async def test_schedule_a_b_restore_preserves_opaque_original_and_respects_runti
     assert descriptor.stage.value == "qualified"
     # DC is implemented for the next qualified deployment; Aquarium is still preview-only.
     # These fixture receipts test projection, not physical qualification or deployment.
-    assert descriptor.control_exposed is (family in {"bar", "dc_pro"})
+    assert descriptor.control_exposed is True
     replay = await producer.execute("schedule_qualify_01")
     assert replay.physical_write_count == 0 and resolver.calls == 3 and len(sent) == 3
     changed = json.loads(json.dumps(_plans(family)[1]))

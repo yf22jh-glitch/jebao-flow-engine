@@ -589,7 +589,13 @@ def test_timer_cli_wires_explicit_trial_and_configured_writer(monkeypatch, capsy
             return SimpleNamespace(public_dict=lambda: {"offline_timer_wiring_test": True})
 
     monkeypatch.setattr(cli, "BarTimerQualificationProducer", Producer)
-    monkeypatch.setattr(cli, "CurrentQualificationEpochSource", lambda **kwargs: object())
+    monkeypatch.setattr(
+        cli,
+        "CurrentQualificationEpochSource",
+        lambda **kwargs: (
+            lambda: SimpleNamespace(target=SimpleNamespace(product_key=LOCAL_WAVEMAKER.product_key))
+        ),
+    )
     monkeypatch.setattr(cli, "load_current_private_config", lambda path: config)
     monkeypatch.setattr(
         cli, "configured_writer_factory", lambda value: factory if value is config else None
@@ -737,6 +743,152 @@ def test_dc_cli_routes_each_function_with_only_its_required_inputs(tmp_path, mon
             assert calls[0]["schedule_b"] is None
 
 
+@pytest.mark.parametrize("function", ["feed_switch", "schedule_enable"])
+def test_aquarium_app_cli_passes_only_its_owned_trial_option(monkeypatch, function):
+    from types import SimpleNamespace
+
+    from jebao_flow.local_control import aquarium_app_qualification
+
+    calls = []
+    factory = object()
+
+    class Producer:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        async def execute(self, operation_id, **kwargs):
+            calls.append((operation_id, kwargs))
+            return SimpleNamespace(public_dict=lambda: {"offline": True})
+
+    monkeypatch.setattr(aquarium_app_qualification, "AquariumAppQualificationProducer", Producer)
+    monkeypatch.setattr(
+        cli,
+        "CurrentQualificationEpochSource",
+        lambda **_: (
+            lambda: SimpleNamespace(target=SimpleNamespace(product_key=AQUARIUM_PUMP.product_key))
+        ),
+    )
+    monkeypatch.setattr(
+        cli, "load_current_private_config", lambda _: _config(product_key=AQUARIUM_PUMP.product_key)
+    )
+    monkeypatch.setattr(cli, "configured_writer_factory", lambda _: factory)
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
+    for item in ("LocalControlJournalStore", "LocalControlLease", "QualificationArtifactStore"):
+        monkeypatch.setattr(cli, item, lambda *args, **kwargs: object())
+    arguments = [
+        "run",
+        "--function",
+        function,
+        "--config",
+        "private.yaml",
+        "--target",
+        "aquarium",
+        "--operation-id",
+        "aquarium_cli_01",
+        "--active-template-sha256",
+        "a" * 64,
+        "--template-root",
+        "template",
+        "--qualification-output",
+        "private.json",
+    ]
+    if function == "schedule_enable":
+        arguments.extend(["--trial-speed", "40"])
+    assert cli.main(arguments) == 2 and calls == []
+    assert cli.main([*arguments, "--write-enabled"]) == 0
+    assert calls[0]["function"] == function
+    assert calls[0]["writer_factory"] is factory
+    assert calls[1] == (
+        "aquarium_cli_01",
+        {"trial_speed": 40} if function == "schedule_enable" else {},
+    )
+
+
+@pytest.mark.parametrize(
+    ("function", "options"),
+    [
+        ("schedule_enable", ["--trial-flow", "40", "--trial-speed", "40"]),
+        ("feed_switch", ["--trial-speed", "40"]),
+        ("motor_speed", ["--trial-speed", "40"]),
+        ("schedule_enable", ["--preparation-flow", "40", "--trial-speed", "40"]),
+    ],
+)
+def test_trial_speed_is_not_a_generic_output_or_preparation_option(monkeypatch, function, options):
+    def forbidden():
+        raise AssertionError("invalid options reached runtime preparation")
+
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", forbidden)
+    args = cli.build_parser().parse_args(
+        [
+            "run",
+            "--function",
+            function,
+            "--config",
+            "private.yaml",
+            "--target",
+            "aquarium",
+            "--operation-id",
+            "aquarium_cli_01",
+            "--active-template-sha256",
+            "a" * 64,
+            "--qualification-output",
+            "private.json",
+            "--write-enabled",
+            *options,
+        ]
+    )
+    with pytest.raises(ValueError, match="trial-flow"):
+        cli._run(args)
+
+
+@pytest.mark.parametrize(
+    ("product", "option"),
+    [(AQUARIUM_PUMP, "--trial-flow"), (LOCAL_WAVEMAKER, "--trial-speed")],
+)
+def test_timer_cli_refuses_the_other_products_trial_option(monkeypatch, product, option):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        cli,
+        "CurrentQualificationEpochSource",
+        lambda **_: (
+            lambda: SimpleNamespace(target=SimpleNamespace(product_key=product.product_key))
+        ),
+    )
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
+    for item in ("LocalControlJournalStore", "LocalControlLease", "QualificationArtifactStore"):
+        monkeypatch.setattr(cli, item, lambda *args, **kwargs: object())
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("wrong product option must not construct a writer")
+
+    monkeypatch.setattr(cli, "configured_writer_factory", forbidden)
+    args = cli.build_parser().parse_args(
+        [
+            "run",
+            "--function",
+            "schedule_enable",
+            "--config",
+            "private.yaml",
+            "--target",
+            "pump",
+            "--operation-id",
+            "timer_cli_wrong_product",
+            "--active-template-sha256",
+            "a" * 64,
+            "--template-root",
+            "template",
+            "--qualification-output",
+            "private.json",
+            "--write-enabled",
+            option,
+            "40",
+        ]
+    )
+    with pytest.raises(ValueError, match="schedule_enable requires"):
+        cli._run(args)
+
+
 def test_dc_image_cli_rejects_another_return_pump_family(tmp_path):
     import json
 
@@ -752,6 +904,7 @@ def test_dc_image_cli_rejects_another_return_pump_family(tmp_path):
         ("device_clock_sync", LOCAL_WAVEMAKER_PRO),
         ("slave_common_flow", LOCAL_WAVEMAKER_PRO),
         ("device_clock_sync", LOCAL_WAVEMAKER),
+        ("device_clock_sync", AQUARIUM_PUMP),
         ("manual_mode", LOCAL_WAVEMAKER),
         ("feed_switch", LOCAL_WAVEMAKER),
         ("pulse_or_tide", LOCAL_WAVEMAKER),
@@ -783,6 +936,8 @@ def test_new_app_controls_route_without_dc_preparation(monkeypatch, function, pr
         if product is LOCAL_WAVEMAKER and function != "device_clock_sync"
         else (clock_qualification, "BarClockQualificationProducer")
         if product is LOCAL_WAVEMAKER
+        else (clock_qualification, "AquariumClockQualificationProducer")
+        if product is AQUARIUM_PUMP
         else (clock_qualification, "ProClockQualificationProducer")
         if function == "device_clock_sync"
         else (pro_common_flow_qualification, "ProCommonFlowQualificationProducer")

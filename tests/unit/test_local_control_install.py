@@ -200,6 +200,7 @@ def test_protocol_binding_changes_with_schedule_model_range_source(
         "pump_preview.py",
         "bar_timer.py",
         "bar_controls.py",
+        "aquarium_controls.py",
         "dc_timer.py",
         "device_clock.py",
     ],
@@ -213,6 +214,7 @@ def test_schema_binding_changes_with_writer_delegated_compiler(tmp_path, monkeyp
         "pump_preview.py",
         "bar_timer.py",
         "bar_controls.py",
+        "aquarium_controls.py",
         "dc_timer.py",
         "device_clock.py",
     ):

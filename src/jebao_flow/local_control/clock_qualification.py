@@ -34,6 +34,7 @@ from jebao_flow.local_control.qualification_producer import (
     _require_operation_id,
 )
 from jebao_flow.protocol.schedule import (
+    AQUARIUM_PUMP_PRODUCT_KEY,
     DC_PUMP_PRO_PRODUCT_KEY,
     LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
     LOCAL_WAVEMAKER_PRODUCT_KEY,
@@ -263,3 +264,7 @@ class ProClockQualificationProducer(_ClockQualificationProducer):
 
 class BarClockQualificationProducer(_ClockQualificationProducer):
     _product_key = LOCAL_WAVEMAKER_PRODUCT_KEY
+
+
+class AquariumClockQualificationProducer(_ClockQualificationProducer):
+    _product_key = AQUARIUM_PUMP_PRODUCT_KEY

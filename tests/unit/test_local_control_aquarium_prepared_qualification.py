@@ -76,7 +76,9 @@ async def test_preparation_and_original_restore_share_one_journal_and_only_two_r
         assert action.phase is ActionPhase.VERIFIED and action.acknowledgement_sha256 is not None
         baseline = json.loads(journal.load_blob(action.baseline_readback_sha256))
         assert baseline == (
-            {"Motor_Speed": 60} if action.function == "motor_speed" else {"FeedTime": 10}
+            {"Motor_Speed": 60}
+            if action.function == "motor_speed"
+            else {"FeedTime": 10, "FeedSwitch": False}
         )
         assert action.restore_on_recovery is True
     receipts = verify_qualification_receipts(
@@ -148,7 +150,7 @@ async def test_non_aquarium_is_refused_before_resolution(tmp_path):
         function="feeding_duration",
         target=_binding(product_key=LOCAL_WAVEMAKER.product_key),
     )
-    with pytest.raises(QualificationProductionError, match="target encoder"):
+    with pytest.raises(QualificationProductionError, match="actual product"):
         await producer.execute("wrong_product", preparation_speed=40)
     assert sent == [] and resolver.calls == 0 and journal.load("wrong_product") is None
 

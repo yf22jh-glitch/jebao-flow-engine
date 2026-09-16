@@ -58,19 +58,11 @@ def _boolean_scalar_readback(payload: bytes) -> tuple[str, bool]:
         raise QualificationProductionError(
             "power qualification scalar readback evidence changed"
         ) from exc
-    if (
-        type(decoded) is not dict
-        or len(decoded) != 1
-        or _canonical_json(decoded) != payload
-    ):
-        raise QualificationProductionError(
-            "power qualification scalar readback evidence changed"
-        )
+    if type(decoded) is not dict or len(decoded) != 1 or _canonical_json(decoded) != payload:
+        raise QualificationProductionError("power qualification scalar readback evidence changed")
     field, value = next(iter(decoded.items()))
     if not field or type(value) is not bool:
-        raise QualificationProductionError(
-            "power qualification scalar readback evidence changed"
-        )
+        raise QualificationProductionError("power qualification scalar readback evidence changed")
     return field, value
 
 
@@ -261,6 +253,7 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
                 writer,
                 status,
                 expected_enabled=expected_enabled_before,
+                will_enable=expected_enabled_after,
             )
             action = record.actions[action_index]
             prepared = self._prepared_from_action(action, endpoint)
@@ -532,10 +525,7 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
             raise QualificationProductionError(
                 "power qualification journal intent is invalid"
             ) from error
-        if (
-            self._power_intent_bytes(intent) != payload
-            or intent.operation_id != record.request_id
-        ):
+        if self._power_intent_bytes(intent) != payload or intent.operation_id != record.request_id:
             raise QualificationProductionError(
                 "power qualification journal intent is not canonical"
             )
@@ -557,9 +547,7 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
             or action.acknowledgement_sha256 is None
             for action in record.actions
         ):
-            raise QualificationProductionError(
-                "power qualification journal evidence is incomplete"
-            )
+            raise QualificationProductionError("power qualification journal evidence is incomplete")
         for action in record.actions:
             for digest in (
                 action.forward_payload_sha256,
@@ -595,15 +583,11 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
 
         same_on, power_off, planned_on = record.actions
         expected_readbacks = tuple(
-            _boolean_scalar_readback(
-                self._journal.load_blob(action.expected_readback_sha256)
-            )
+            _boolean_scalar_readback(self._journal.load_blob(action.expected_readback_sha256))
             for action in record.actions
         )
         baseline_readbacks = tuple(
-            _boolean_scalar_readback(
-                self._journal.load_blob(action.baseline_readback_sha256)
-            )
+            _boolean_scalar_readback(self._journal.load_blob(action.baseline_readback_sha256))
             for action in record.actions
         )
         if (
@@ -635,6 +619,7 @@ class PowerQualificationProducer(ManualFlowQualificationProducer):
         status: bytes,
         *,
         expected_enabled: bool,
+        will_enable: bool = False,
     ) -> None:
         state = _manual_flow_state(writer, epoch.target, status)
         if (
