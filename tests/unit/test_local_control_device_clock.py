@@ -1,6 +1,7 @@
 """Clock arithmetic and command ownership; no firmware simulation claims."""
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -9,6 +10,8 @@ from jebao_flow.local_control.device_clock import clock_expectation, clock_readb
 from jebao_flow.local_control.device_writer import ConnectedDeviceWriter, build_device_clock_payload
 from jebao_flow.local_control.journal import ActionPhase, TransactionPhase
 from jebao_flow.local_control.models import LocalControlIntent
+from jebao_flow.protocol.profiles import DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO
+from tests.unit.test_local_control_qualification_producer import _status as _pro_status
 from tests.unit.test_local_control_recovery_order import _fixture
 
 
@@ -40,13 +43,16 @@ def test_invalid_clock_readback_is_not_reported_as_verified():
     )
 
 
-def _clock_record(tmp_path):
+def _clock_record(tmp_path, schema=DC_PUMP_PRO):
     coordinator, store, old, _ = _fixture(tmp_path, [], started=False)
-    target = old.actions[0].target
-    endpoint = coordinator._resolver.endpoints[0]
+    target = old.actions[0].target.model_copy(update={"product_key": schema.product_key})
+    endpoint = replace(coordinator._resolver.endpoints[0], target=target)
+    coordinator._resolver.endpoints = (endpoint,)
     now = datetime.now(UTC).replace(microsecond=0)
     writer = ConnectedDeviceWriter(endpoint, device_local_time=lambda: now)
     raw = store.load_blob(old.actions[0].baseline_status_sha256)
+    if schema is LOCAL_WAVEMAKER_PRO:
+        raw = _pro_status()
     prepared = writer.prepare_scalar(
         LocalControlIntent(
             request_id="clock_command_01",
@@ -65,8 +71,9 @@ def _clock_record(tmp_path):
     return coordinator, store, changed, prepared, now
 
 
-def test_clock_command_uses_app_bytes_and_has_no_sendable_recovery(tmp_path):
-    coordinator, store, record, prepared, now = _clock_record(tmp_path)
+@pytest.mark.parametrize("schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO])
+def test_clock_command_uses_app_bytes_and_has_no_sendable_recovery(tmp_path, schema):
+    coordinator, store, record, prepared, now = _clock_record(tmp_path, schema)
     assert prepared.forward_payload == build_device_clock_payload(
         prepared.target.target.product_key, now
     )
@@ -79,14 +86,14 @@ def test_clock_command_uses_app_bytes_and_has_no_sendable_recovery(tmp_path):
     assert json.loads(prepared.expected_readback)["local_time"] == now.isoformat()
 
 
-async def test_clock_recovery_is_observation_only_and_never_resends(tmp_path):
-    from jebao_flow.protocol.profiles import DC_PUMP_PRO
+@pytest.mark.parametrize("schema", [DC_PUMP_PRO, LOCAL_WAVEMAKER_PRO])
+async def test_clock_recovery_is_observation_only_and_never_resends(tmp_path, schema):
     from tests.unit.test_local_control_coordinator import _Session, _SessionFactory
 
-    coordinator, store, record, prepared, now = _clock_record(tmp_path)
+    coordinator, store, record, prepared, now = _clock_record(tmp_path, schema)
     raw = bytearray(prepared.baseline_status)
     for name, value in _decoded(now).items():
-        offset = DC_PUMP_PRO.by_name(name).position.byte_offset
+        offset = schema.by_name(name).position.byte_offset
         raw[offset : offset + 4] = value
     session = _Session([bytes(raw)])
     factory = _SessionFactory({"test-address": [session]})

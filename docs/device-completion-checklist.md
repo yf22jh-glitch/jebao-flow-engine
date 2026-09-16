@@ -1,7 +1,8 @@
 # 등록 장비 완료 체크리스트
 
-2026-09-16 사용자 지시: 장비 여러 대를 동시에 진행하지 않는다. **DC 리턴 한 대**의 구현,
-검증, 배포 준비를 먼저 마친다. 메인 Aquarium 리턴은 제외가 아니라 후순위다.
+2026-09-16 사용자 지시: 장비 여러 대를 동시에 진행하지 않는다. **DC 리턴 → Pro → Bar →
+Aquarium 메인 리턴 → 도징** 순서로 구현·검증·배포 준비를 닫는다. 메인 리턴은 제외가 아니라
+후순위다.
 
 체크는 해당 단계의 증거가 있을 때만 한다. 미리보기는 송신 구현이 아니며, 오프라인 테스트는
 실기 수용 증거가 아니다. 현재 운영 Pro/Bar 배포는 이 작업에서 교체하지 않았다.
@@ -37,10 +38,30 @@ DC 구현·시험 상세와 배포 후보는 [DC 앱 기능 구현 및 배포 �
 준비·원복하는 wrapper는 없다**. 4개 scalar와 timer/schedule wrapper의 자동 준비와 혼동하지
 않는다. 정상 power 조작 자체는 TimerOFF/Flow45를 요구하지 않는다.
 
-## 다음 장비 — DC 소프트웨어·배포 후보 정리 후 한 대씩 진행
+## Pro — 앱 기능 12종, 별도 native 확장 의미는 분리
 
-- [ ] Pro: 기존 Sync/Async·9기능 보존 확인; 시계 실행, slave common/per-slot 자격 및
-  reset 활성화 누락 검토. native 동작 미확정 질문을 코드 완성과 혼동하지 않음.
+DC 소프트웨어 변경은 `f9c74ff`로 보존했다. Pro는 기존 native Sync/Async와 9종 경로를
+유지하면서 아래 누락의 구현·오프라인 검증·별도 배포 후보 준비를 마쳤다.
+
+- [x] schedule_reset: 기존 EE/populated/EE/자기 원본 복귀 producer·CLI 경로와 Pro 테스트 확인.
+- [x] device_clock_sync: Pro writer·자격 producer·CLI·HA button 연결 및 read-only 복구 검증.
+- [x] slave_common_flow: 기존 scalar 송신의 전용 자격·복구·UI 연결, ACK 뒤 실패 포함 26 PASS.
+- [x] slave_per_slot_flow_extension: 기존 compiler/full-image/coordinator/48개 슬롯 UI 확인.
+  앱 기능이 아니므로 일반 image 왕복을 확장 자격으로 바꾸지 않음. Q2 의미 검증은 아래 문서로 park.
+- [x] 앱 12기능 exact 집합·HA 11 control + schedule topic 1·실물 귀속 직접 테스트.
+- [x] 기존 native/시간표 관련 회귀 및 Mac 전체 3417 PASS / Linux 전용 1 SKIP.
+- [x] 별도 Pro 후보 image와 pair/기기별 비활성 입력·fresh manifest 준비, 실제 영수증 0.
+- [x] Pro 전체 기능 집합·기존 native 회귀·배포 후보 검증: Linux 3418 PASS / 0 FAIL.
+- [ ] 새 Pro 실기 수용·운영 활성화. 현재 운영을 바꾸지 않았으며 새 영수증 발급 0.
+
+[Pro 앱 기능 및 배포 후보](pro-app-control-release.md)에 기능별 경로, Q1/Q2와 wire 자격의
+차이, 확장 의미 판정의 두 대안·park 영향·재개 조건을 기록했다. 실기와 운영 활성화는 아직
+체크하지 않는다.
+
+## 이후 장비 — 앞 장비를 닫은 뒤 시작
+
+현재 진행 장비는 **Bar 수류모터**다. Pro 후보 source는 고정하며 다음 작업을 섞지 않는다.
+
 - [ ] Bar: 기존 시간표+timer 완료 경로 보존; power/flow/mode/frequency/feed-duration
   활성화, feed switch/PulseTide/Linkage 자격, 시계 실행 누락 검토.
 - [ ] Aquarium 메인 리턴: 마지막 리턴 순서로 timer/feeding/transport/clock/schedule

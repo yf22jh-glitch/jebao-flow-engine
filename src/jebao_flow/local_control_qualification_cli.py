@@ -71,9 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
             "schedule_enable",
             "manual_enable",
             "device_clock_sync",
+            "slave_common_flow",
         ),
         default="manual_flow",
-        help="frequency/mode: Bar/DC; feeding: Bar/DC/Aquarium; speed: Aquarium; schedule: A/B",
+        help="frequency/mode: Bar/DC; feeding: Bar/DC/Aquarium; speed: Aquarium; common flow: Pro",
     )
     run.add_argument("--downward-step", type=int, help="required for manual_flow only")
     run.add_argument("--trial-flow", type=int, help="required for Bar schedule_enable only")
@@ -87,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="DC scalar/timer/schedule: prepare low output and restore the owned original",
     )
-    run.add_argument("--schedule-a", type=Path, help="first Bar/DC/Aquarium schedule JSON")
+    run.add_argument("--schedule-a", type=Path, help="first Pro/Bar/DC/Aquarium schedule JSON")
     run.add_argument("--schedule-b", type=Path, help="distinct second schedule JSON")
     run.add_argument("--active-template-sha256", required=True)
     run.add_argument("--qualification-output", type=Path, required=True)
@@ -250,12 +251,32 @@ def _run(args: argparse.Namespace) -> int:
                 )
             )
         elif args.function == "device_clock_sync":
-            from jebao_flow.local_control.clock_qualification import DcClockQualificationProducer
+            from jebao_flow.local_control.clock_qualification import (
+                DcClockQualificationProducer,
+                ProClockQualificationProducer,
+            )
+            from jebao_flow.protocol.schedule import (
+                DC_PUMP_PRO_PRODUCT_KEY,
+                LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+            )
 
-            producer = DcClockQualificationProducer(
+            producer_class = {
+                DC_PUMP_PRO_PRODUCT_KEY: DcClockQualificationProducer,
+                LOCAL_WAVEMAKER_PRO_PRODUCT_KEY: ProClockQualificationProducer,
+            }.get(epoch_source().target.product_key)
+            if producer_class is None:
+                raise ValueError("clock qualification is currently scoped to Pro/DC pumps")
+            producer = producer_class(
                 writer_factory=configured_writer_factory(load_current_private_config(args.config)),
                 **producer_arguments,
             )
+            result = asyncio.run(producer.execute(args.operation_id))
+        elif args.function == "slave_common_flow":
+            from jebao_flow.local_control.pro_common_flow_qualification import (
+                ProCommonFlowQualificationProducer,
+            )
+
+            producer = ProCommonFlowQualificationProducer(**producer_arguments)
             result = asyncio.run(producer.execute(args.operation_id))
         elif args.function == "manual_flow":
             producer = ManualFlowQualificationProducer(**producer_arguments)

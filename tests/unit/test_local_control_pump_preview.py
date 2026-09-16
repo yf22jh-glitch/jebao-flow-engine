@@ -130,7 +130,11 @@ def test_clock_preview_reuses_exact_app_builder_without_timezone_or_restore_clai
     assert preview["timezone_encoded"] is False
     assert preview["restore_previous_clock"] is False
     assert preview["wire_send_available"] is False
-    assert preview["verification_contract"] == "not_defined"
+    assert preview["verification_contract"] == (
+        "advancing_clock"
+        if product in {DC_PUMP_PRO_PRODUCT_KEY, LOCAL_WAVEMAKER_PRO_PRODUCT_KEY}
+        else "not_defined"
+    )
 
 
 def test_clock_preview_requires_caller_timezone():

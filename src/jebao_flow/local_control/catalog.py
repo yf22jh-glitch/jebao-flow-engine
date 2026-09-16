@@ -105,6 +105,7 @@ _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
             "feeding_duration",
             "schedule",
             "schedule_reset",
+            "device_clock_sync",
             "slave_common_flow",
             "slave_per_slot_flow_extension",
         }
@@ -274,17 +275,13 @@ def build_local_control_catalog(
     *,
     current_content: InstallContentBindings | None = None,
     current_app_version: str = "3.4.18",
-    _qualification_verifier_for_test: Callable[
-        [QualificationBinding], frozenset[str]
-    ]
+    _qualification_verifier_for_test: Callable[[QualificationBinding], frozenset[str]]
     | None = None,
 ) -> LocalControlCatalog:
     qualification_items = tuple(qualifications)
     if qualification_items and current_content is None:
         raise ValueError("qualified controls require current install content bindings")
-    qualification_by_key = {
-        (item.product_key, item.function): item for item in qualification_items
-    }
+    qualification_by_key = {(item.product_key, item.function): item for item in qualification_items}
     if len(qualification_by_key) != len(qualification_items):
         raise ValueError("qualification bindings must be unique by product and function")
     qualified: dict[tuple[str, str], tuple[QualificationBinding, frozenset[str]]] = {}

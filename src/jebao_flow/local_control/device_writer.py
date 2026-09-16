@@ -493,8 +493,11 @@ class ConnectedDeviceWriter:
     def _prepare_clock(
         self, intent: LocalControlIntent, current_status: bytes
     ) -> PreparedDeviceWrite:
-        if intent.target.product_key != DC_PUMP_PRO_PRODUCT_KEY:
-            raise LocalDeviceWriteError("clock execution is currently scoped to DC Pump Pro")
+        if intent.target.product_key not in {
+            DC_PUMP_PRO_PRODUCT_KEY,
+            LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+        }:
+            raise LocalDeviceWriteError("clock execution is currently scoped to Pro/DC pumps")
         if intent.value is not None or self._device_local_time is None:
             raise ValueError("clock sync uses the configured local time, with no implicit payload")
         local_time = self._device_local_time()

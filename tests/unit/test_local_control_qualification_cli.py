@@ -745,3 +745,63 @@ def test_dc_image_cli_rejects_another_return_pump_family(tmp_path):
     path.write_text(json.dumps({"family": "aquarium", "slots": []}))
     with pytest.raises(ValueError, match="another product"):
         cli._read_dc_image(path)
+
+
+@pytest.mark.parametrize("function", ["device_clock_sync", "slave_common_flow"])
+def test_pro_cli_routes_new_app_controls_without_dc_preparation(monkeypatch, function):
+    from types import SimpleNamespace
+
+    from jebao_flow.local_control import clock_qualification, pro_common_flow_qualification
+    from tests.unit.test_local_control_dc_prepared_qualification import _binding, _epoch
+
+    calls = []
+
+    class Producer:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        async def execute(self, operation_id):
+            calls.append(operation_id)
+            return SimpleNamespace(public_dict=lambda: {"offline": True})
+
+    module, name = (
+        (clock_qualification, "ProClockQualificationProducer")
+        if function == "device_clock_sync"
+        else (pro_common_flow_qualification, "ProCommonFlowQualificationProducer")
+    )
+    monkeypatch.setattr(module, name, Producer)
+    target = _binding().model_copy(update={"product_key": LOCAL_WAVEMAKER_PRO.product_key})
+    monkeypatch.setattr(cli, "CurrentQualificationEpochSource", lambda **_: lambda: _epoch(target))
+    monkeypatch.setattr(cli, "load_current_private_config", lambda _: _config())
+    factory = object()
+    monkeypatch.setattr(cli, "configured_writer_factory", lambda _: factory)
+    monkeypatch.setattr(cli, "_activate_current_hardware_safety_volume_identity", lambda: None)
+    for item in ("LocalControlJournalStore", "LocalControlLease", "QualificationArtifactStore"):
+        monkeypatch.setattr(cli, item, lambda *args, **kwargs: object())
+    assert (
+        cli.main(
+            [
+                "run",
+                "--function",
+                function,
+                "--config",
+                "private.yaml",
+                "--target",
+                "pro",
+                "--operation-id",
+                "pro_cli_0001",
+                "--active-template-sha256",
+                "a" * 64,
+                "--template-root",
+                "template",
+                "--qualification-output",
+                "private.json",
+                "--write-enabled",
+            ]
+        )
+        == 0
+    )
+    assert calls[1] == "pro_cli_0001"
+    if function == "device_clock_sync":
+        assert calls[0]["writer_factory"] is factory
+    assert "preparation_flow" not in calls[0]

@@ -13,7 +13,11 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from jebao_flow.protocol.models import ScheduleEndTime, ScheduleStartTime
-from jebao_flow.protocol.schedule import AQUARIUM_PUMP_PRODUCT_KEY, DC_PUMP_PRO_PRODUCT_KEY
+from jebao_flow.protocol.schedule import (
+    AQUARIUM_PUMP_PRODUCT_KEY,
+    DC_PUMP_PRO_PRODUCT_KEY,
+    LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+)
 
 
 class ReturnPumpSlot(BaseModel):
@@ -139,6 +143,10 @@ def preview_device_clock(product_key: str, local_time: datetime) -> dict[str, ob
         "hardware_write": False,
         "wire_send_available": False,
         "device_acceptance": "unverified",
-        "verification_contract": "not_defined",
+        "verification_contract": (
+            "advancing_clock"
+            if product_key in {DC_PUMP_PRO_PRODUCT_KEY, LOCAL_WAVEMAKER_PRO_PRODUCT_KEY}
+            else "not_defined"
+        ),
         "restore_previous_clock": False,
     }

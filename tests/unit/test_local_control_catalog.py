@@ -188,7 +188,7 @@ def test_exact_pro_schedule_reset_is_exposed_only_after_device_receipts() -> Non
     assert descriptor.kind.value == "action"
 
 
-def test_clock_builder_does_not_claim_an_end_to_end_control_surface() -> None:
+def test_pro_clock_command_requires_its_own_current_qualification() -> None:
     catalog = build_local_control_catalog(
         (_qualification("device_clock_sync"),),
         current_content=_content(),
@@ -198,8 +198,12 @@ def test_clock_builder_does_not_claim_an_end_to_end_control_surface() -> None:
     descriptor = catalog.find(LOCAL_WAVEMAKER_PRO_APP.product_key, "device_clock_sync")
 
     assert descriptor.encoding_available is True
-    assert descriptor.control_exposed is False
-    assert descriptor.diagnostic_reason == "app writes YMD and zero-prefixed HMS in one command"
+    assert descriptor.control_exposed is True
+    assert descriptor.diagnostic_reason is None
+    assert catalog.validate_intent(_intent("device_clock_sync", None)) == descriptor
+    assert not build_local_control_catalog().find(
+        LOCAL_WAVEMAKER_PRO_APP.product_key, "device_clock_sync"
+    ).control_exposed
 
 
 @pytest.mark.parametrize("value", (29, 101, True, "45"))
@@ -255,7 +259,7 @@ def test_qualification_must_bind_current_install_content() -> None:
     assert stale_catalog.ignored_qualification_count == 1
 
 
-def test_pro_schedule_has_qualified_product_execution_and_clock_stays_diagnostic() -> None:
+def test_pro_schedule_and_clock_use_distinct_qualified_execution_paths() -> None:
     catalog = build_local_control_catalog(
         (_qualification("schedule"),),
         current_content=_content(),
@@ -277,9 +281,10 @@ def test_pro_schedule_has_qualified_product_execution_and_clock_stays_diagnostic
     clock = clock_catalog.find(LOCAL_WAVEMAKER_PRO_APP.product_key, "device_clock_sync")
     assert clock.encoding_available is True
     assert clock.stage.value == "qualified"
-    assert clock.control_exposed is False
-    with pytest.raises(ValueError, match="not qualified"):
-        clock_catalog.validate_intent(_intent("device_clock_sync", {}))
+    assert clock.control_exposed is True
+    assert clock_catalog.validate_intent(_intent("device_clock_sync", None)) == clock
+    # A clock receipt never qualifies the independent schedule path.
+    assert not clock_catalog.find(LOCAL_WAVEMAKER_PRO_APP.product_key, "schedule").control_exposed
 
 
 def test_unverified_receipt_strings_never_expose_a_control() -> None:

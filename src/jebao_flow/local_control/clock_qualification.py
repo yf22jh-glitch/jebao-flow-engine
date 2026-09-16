@@ -1,4 +1,4 @@
-"""Two explicit DC clock syncs with advancing-time evidence and no clock rollback.
+"""Two explicit app clock syncs with elapsed-time evidence and no clock rollback.
 
 Both requests use current configured local time. No pump control or historical clock
 value is restored. Offline tests do not establish hardware clock acceptance.
@@ -33,7 +33,7 @@ from jebao_flow.local_control.qualification_producer import (
     _phase_request_id,
     _require_operation_id,
 )
-from jebao_flow.protocol.schedule import DC_PUMP_PRO_PRODUCT_KEY
+from jebao_flow.protocol.schedule import DC_PUMP_PRO_PRODUCT_KEY, LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
 
 _OBSERVED = "clock_evidence_"
 
@@ -45,15 +45,17 @@ class ClockQualificationIntent(BaseModel):
     firmware_version: str
 
 
-class DcClockQualificationProducer(ManualFlowQualificationProducer):
+class _ClockQualificationProducer(ManualFlowQualificationProducer):
+    _product_key: str
+
     async def execute(self, operation_id):
         _require_operation_id(operation_id)
         existing = self._journal.load(operation_id)
         if existing is not None:
             return self._finalize_clock(existing, writes=0)
         epoch = self._epoch_provider()
-        if epoch.target.product_key != DC_PUMP_PRO_PRODUCT_KEY:
-            raise ValueError("this clock qualification is DC-only")
+        if epoch.target.product_key != self._product_key:
+            raise ValueError("clock qualification does not match the target product")
         record = None
         firmware = None
         with self._lease.acquire((epoch.target.physical_identity_key,)) as permit:
@@ -159,7 +161,7 @@ class DcClockQualificationProducer(ManualFlowQualificationProducer):
         epoch = intent.epoch
         if (
             payload != _canonical_json(intent.model_dump(mode="json"))
-            or epoch.target.product_key != DC_PUMP_PRO_PRODUCT_KEY
+            or epoch.target.product_key != self._product_key
             or intent.operation_id != record.request_id
             or record.phase is not TransactionPhase.VERIFIED
             or len(record.actions) != 2
@@ -245,3 +247,11 @@ class DcClockQualificationProducer(ManualFlowQualificationProducer):
             qualification_sha256=digest,
             completed_at=record.updated_at,
         )
+
+
+class DcClockQualificationProducer(_ClockQualificationProducer):
+    _product_key = DC_PUMP_PRO_PRODUCT_KEY
+
+
+class ProClockQualificationProducer(_ClockQualificationProducer):
+    _product_key = LOCAL_WAVEMAKER_PRO_PRODUCT_KEY

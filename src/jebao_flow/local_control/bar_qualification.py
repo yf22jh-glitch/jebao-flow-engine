@@ -73,6 +73,7 @@ _SUPPORTED = {
     "manual_mode": "Mode",
     "feeding_duration": "FeedTime",
     "motor_speed": "Motor_Speed",
+    "slave_common_flow": "Flow",
 }
 
 
@@ -123,7 +124,7 @@ class BarScalarQualificationIntent(BaseModel):
     schema_version: Literal[1] = 1
     operation_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,128}$")
     target: LocalDeviceBinding = Field(repr=False)
-    function: Literal["manual_frequency", "manual_mode", "feeding_duration"]
+    function: Literal["manual_frequency", "manual_mode", "feeding_duration", "slave_common_flow"]
     field: str = Field(min_length=1, max_length=64)
     baseline_value: int | str
     trial_value: int | str
@@ -546,14 +547,18 @@ class BarScalarQualificationProducer(ManualFlowQualificationProducer):
                     )
                 self._journal.load_blob(digest)
         baseline_bytes = _canonical_json(
-            {intent.field: internal_function_value(
-                intent.target.product_key, intent.function, intent.baseline_value
-            )}
+            {
+                intent.field: internal_function_value(
+                    intent.target.product_key, intent.function, intent.baseline_value
+                )
+            }
         )
         trial_bytes = _canonical_json(
-            {intent.field: internal_function_value(
-                intent.target.product_key, intent.function, intent.trial_value
-            )}
+            {
+                intent.field: internal_function_value(
+                    intent.target.product_key, intent.function, intent.trial_value
+                )
+            }
         )
         expected = (baseline_bytes, trial_bytes, baseline_bytes)
         expected_digests = tuple(hashlib.sha256(value).hexdigest() for value in expected)
