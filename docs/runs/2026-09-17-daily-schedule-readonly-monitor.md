@@ -127,3 +127,24 @@ publish도 각각 0개다.
 - analyzed at: `2026-09-17T05:01:13.317641Z`
 - opaque artifacts: `daily-three-pump-monitor-20260917.01`,
   `daily-three-pump-monitor-20260917.02`
+
+## 조기 종료 — 사용자 시간표 교체
+
+사용자가 35구간의 새 시간표로 교체하고 적용 뒤부터 새 24시간 관측을 시작하도록 요청했다.
+따라서 이 31구간 관측은 계획한 24시간 판정을 완료하지 않고
+`2026-09-17T05:22:30.807654Z` 마지막 표본에서 종료했다. 기존 파일은 덮어쓰지 않았고 종료 직전
+interim 결과를 `superseded-analysis.json`으로 별도 보존했다.
+
+pilot 8개와 main 84개, 합계 92개 표본의 ordinal은 연속이었고 65초 초과 cadence gap은 0개였다.
+관측한 13:38·14:00 두 경계는 모두 수렴했다. 세 장비의 role mismatch, power OFF, schedule OFF,
+31구간 image mismatch, missing/stale sample, fault episode는 전부 0개였다. collector의 장비 write와
+MQTT publish도 0개다.
+
+이 결과는 조기 종료된 구간만 설명하며 나머지 29개 미래 경계를 판정하지 않는다. 새 35구간
+시간표와 새 24시간 관측은 별도 run·artifact로 기록한다.
+
+- opaque artifact id: `daily-three-pump-monitor-20260917.02`
+- partial UTC span: `2026-09-17T04:41:00.063438Z`–`2026-09-17T05:22:30.807654Z`
+- `superseded-analysis.json` SHA-256:
+  `36747b53d4fb9a6d9895564001ae07a90f090b3db990459d97d965301fc09c78`
+- 종료 사유: 사용자 요청에 따른 새 시간표 교체; fault나 collector 실패가 아님
