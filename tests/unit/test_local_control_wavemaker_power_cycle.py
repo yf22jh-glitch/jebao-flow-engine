@@ -29,6 +29,7 @@ async def test_owned_master_power_cycle_writes_only_off_wait_on_and_preserves_so
     rig = Rig(tmp_path)
     source = await _pending_owned_pair(rig)
     writes_before = len(rig.sent)
+    reads_before = len(rig.reads)
 
     result = await rig.controller().cycle_master_power(
         request_id=source.request_id, targets=rig.targets
@@ -42,6 +43,9 @@ async def test_owned_master_power_cycle_writes_only_off_wait_on_and_preserves_so
         ("master", {"SwitchON": False}),
         ("master", {"SwitchON": True}),
     ]
+    cycle_reads = rig.reads[reads_before:]
+    assert cycle_reads[:2] == [("master", False), ("slave", True)]
+    assert cycle_reads[-2:] == [("master", False), ("slave", True)]
     assert any(9.9 <= seconds <= 10 for seconds in rig.sleeps)
     assert SCHEMA.decode_status(rig.states["master"])["SwitchON"] is True
     assert SCHEMA.decode_status(rig.states["master"])["Linkage"] == "master"

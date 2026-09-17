@@ -65,10 +65,17 @@ def validate_power_cycle(owner, record, context):
         raise ValueError("master 전원 cycle은 자기 Async 보류와 검증된 역할 cycle에만 결속됩니다")
 
     master = context.originals[0]
-    for original in context.originals:
+    for index, original in enumerate(context.originals):
         capture = json.loads(owner._journal.load_blob(original.capture_sha256))
-        if capture["action"] != 3 or capture["status_sha256"] != original.status_sha256:
-            raise ValueError("master 전원 cycle 원본은 fresh reply capture여야 합니다")
+        # The Async follower observed in the live run does not answer the reply-only
+        # query while attached, but does provide a fresh authenticated state report.
+        # It is never a power-cycle write target; only the master remains reply-only.
+        expected_action = 3 if index == 0 else 4
+        if (
+            capture["action"] != expected_action
+            or capture["status_sha256"] != original.status_sha256
+        ):
+            raise ValueError("master 전원 cycle 원본은 fresh capture여야 합니다")
         owner._journal.load_blob(capture["wire_sha256"])
         get_product_schema(original.target.product_key).decode_status(
             owner._journal.load_blob(original.status_sha256)
@@ -127,8 +134,12 @@ async def cycle_power_locked(owner, source, source_context, endpoints, permit):
     if record is None:
         originals = []
         statuses = {}
-        for endpoint in endpoints:
-            capture_sha256, status = await owner._read(endpoint, permit, reports=False)
+        for index, endpoint in enumerate(endpoints):
+            capture_sha256, status = await owner._read(
+                endpoint,
+                permit,
+                reports=index != 0,
+            )
             statuses[endpoint.target.logical_member] = status
             originals.append(
                 NativeOriginal(

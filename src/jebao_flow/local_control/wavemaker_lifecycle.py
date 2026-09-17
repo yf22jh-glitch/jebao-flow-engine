@@ -911,8 +911,13 @@ class NativeWavemakerController(LocalControlCoordinator):
             images = context.plan.compile_images()
             for index, endpoint in enumerate(endpoints):
                 if captures is None:
+                    reports = context.kind == "attach" or (
+                        context.kind == "master_power_cycle_v1" and index != 0
+                    )
                     capture, status = await self._read(
-                        endpoint, permit, reports=context.kind == "attach"
+                        endpoint,
+                        permit,
+                        reports=reports,
                     )
                 else:
                     began, raw = captures[endpoint.target.logical_member]
