@@ -498,6 +498,8 @@ def _run(args: argparse.Namespace) -> int:
         catalog = _runtime_catalog(
             qualifications,
             prepared.manifest.content,
+            config=prepared.config,
+            manifest=prepared.manifest,
             write_enabled=runtime_write_enabled,
         )
         schedule_plans = _schedule_plans(
@@ -543,7 +545,8 @@ def _run(args: argparse.Namespace) -> int:
             ownership_service=group_service,
             native_controller=(
                 _native_coordinator(prepared.config, catalog)
-                if projection.native_request_topic is not None else None
+                if projection.native_request_topic is not None
+                else None
             ),
         )
         group_router = (
@@ -771,17 +774,54 @@ def _runtime_coordinator(config, catalog, *, write_enabled: bool):
     return _coordinator(config, catalog) if write_enabled else None
 
 
-def _runtime_catalog(qualifications, current_content, *, write_enabled: bool):
+def _runtime_catalog(
+    qualifications,
+    current_content,
+    *,
+    config=None,
+    manifest=None,
+    write_enabled: bool,
+):
     """Keep a default service read-only even when current write receipts exist."""
 
     selected = qualifications if write_enabled else ()
-    return build_local_control_catalog(selected, current_content=current_content)
+    identity_authorizations = (
+        _identity_control_authorizations(config, manifest) if write_enabled else {}
+    )
+    return build_local_control_catalog(
+        selected,
+        current_content=current_content,
+        identity_control_authorizations=identity_authorizations,
+    )
+
+
+def _identity_control_authorizations(config, manifest):
+    """Bind explicit private-config controls to the same current manifest identities."""
+
+    if config is None or manifest is None:
+        return {}
+    binding_by_member = {item.logical_member: item for item in manifest.devices}
+    authorizations: dict[tuple[str, str], set[str]] = {}
+    for device in config.devices:
+        functions = tuple(getattr(device.control, "identity_bound_controls", ()))
+        if not functions:
+            continue
+        if not device.enabled or not device.control.allow_hardware_writes:
+            raise ValueError("identity-bound control device is not enabled for hardware writes")
+        target = binding_by_member.get(device.id)
+        if target is None or device.product_key is None or target.product_key != device.product_key:
+            raise ValueError("identity-bound control device is not in the current manifest")
+        for function in functions:
+            authorizations.setdefault((target.product_key, function), set()).add(
+                target.physical_identity_key
+            )
+    return {key: frozenset(identities) for key, identities in authorizations.items()}
 
 
 def _runtime_qualifications(path, *, write_enabled: bool):
     """A read-only service never depends on retained write-authority files."""
 
-    return load_current_qualifications(path) if write_enabled else ()
+    return load_current_qualifications(path) if write_enabled and path is not None else ()
 
 
 def _resolver(config) -> CurrentEndpointResolver:

@@ -294,7 +294,7 @@ class LocalControlMqttRouter:
                 if target is None:
                     raise ValueError("control entity is not in the current install manifest")
                 descriptor = catalog.find(target.product_key, entity.function)
-                if not descriptor.control_exposed:
+                if not descriptor.control_exposed_for(target.physical_identity_key):
                     raise ValueError("unqualified function received an MQTT command topic")
                 self._routes[entity.command_topic] = _ScalarRoute(entity, target)
                 continue

@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -135,8 +136,32 @@ class DeviceControlConfig(BaseModel):
     minimum_command_interval_ms: int = Field(default=1000, ge=100)
     restore_on_reconnect: bool = True
     allow_hardware_writes: bool = False
+    identity_bound_controls: tuple[Identifier, ...] = ()
     readback_delay_ms: int = Field(default=500, ge=0)
     readback_attempts: int = Field(default=3, ge=1, le=10)
+
+    @field_validator("identity_bound_controls")
+    @classmethod
+    def validate_identity_bound_controls(
+        cls,
+        values: tuple[Identifier, ...],
+    ) -> tuple[Identifier, ...]:
+        if len(values) != len(set(values)):
+            raise ValueError("identity-bound controls must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_identity_bound_write_authority(self) -> Self:
+        if self.identity_bound_controls and not self.allow_hardware_writes:
+            raise ValueError("identity-bound controls require explicit hardware write opt-in")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_compatible(self, handler):
+        payload = handler(self)
+        if not self.identity_bound_controls:
+            payload.pop("identity_bound_controls", None)
+        return payload
 
 
 class DeviceConfig(BaseModel):
@@ -238,9 +263,7 @@ class AppConfig(BaseModel):
                 raise ValueError(f"group {group.id!r} native pair must contain only wavemakers")
             product_keys = {device.product_key for device in pair_devices}
             if None not in product_keys and len(product_keys) != 1:
-                raise ValueError(
-                    f"group {group.id!r} native pair must use the same product family"
-                )
+                raise ValueError(f"group {group.id!r} native pair must use the same product family")
 
         vendor_ids = [
             device.identity.device_id

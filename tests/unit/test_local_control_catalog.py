@@ -201,9 +201,11 @@ def test_pro_clock_command_requires_its_own_current_qualification() -> None:
     assert descriptor.control_exposed is True
     assert descriptor.diagnostic_reason is None
     assert catalog.validate_intent(_intent("device_clock_sync", None)) == descriptor
-    assert not build_local_control_catalog().find(
-        LOCAL_WAVEMAKER_PRO_APP.product_key, "device_clock_sync"
-    ).control_exposed
+    assert (
+        not build_local_control_catalog()
+        .find(LOCAL_WAVEMAKER_PRO_APP.product_key, "device_clock_sync")
+        .control_exposed
+    )
 
 
 @pytest.mark.parametrize("value", (29, 101, True, "45"))
@@ -319,3 +321,137 @@ def test_qualification_is_scoped_to_the_receipted_physical_device() -> None:
     assert "5" * 64 not in str(qualified.public_dict())
     with pytest.raises(ValueError, match="not qualified"):
         catalog.validate_intent(other_intent)
+
+
+def test_identity_bound_control_exposes_only_the_named_current_device() -> None:
+    identity = "5" * 64
+    other_identity = "6" * 64
+    key = (AQUARIUM_PUMP_APP.product_key, "motor_speed")
+    catalog = build_local_control_catalog(identity_control_authorizations={key: (identity,)})
+    descriptor = catalog.find(*key)
+    intent = LocalControlIntent(
+        request_id="identity_request_0001",
+        target=LocalDeviceBinding(
+            logical_member="return_main",
+            product_key=AQUARIUM_PUMP_APP.product_key,
+            physical_identity_key=identity,
+            logical_role="return_main",
+            role_attested_by="on_site_operator",
+            role_attested_at=datetime(2026, 9, 17, tzinfo=UTC),
+        ),
+        function="motor_speed",
+        value=40,
+    )
+
+    assert descriptor.control_exposed is True
+    assert descriptor.control_exposed_for(identity) is True
+    assert descriptor.control_exposed_for(other_identity) is False
+    assert descriptor.is_identity_authorized_for(identity) is True
+    assert descriptor.qualification is None
+    assert descriptor.stage.value == "app_static"
+    assert descriptor.public_dict()["identity_authorized_device_count"] == 1
+    assert identity not in str(descriptor.public_dict())
+    assert catalog.validate_intent(intent) == descriptor
+    with pytest.raises(ValueError, match="not qualified"):
+        catalog.validate_intent(
+            intent.model_copy(
+                update={
+                    "target": intent.target.model_copy(
+                        update={"physical_identity_key": other_identity}
+                    )
+                }
+            )
+        )
+
+
+def test_identity_bound_controls_reject_non_executable_or_invalid_entries() -> None:
+    identity = "5" * 64
+    with pytest.raises(ValueError, match="not an executable encoded function"):
+        build_local_control_catalog(
+            identity_control_authorizations={
+                (AQUARIUM_PUMP_APP.product_key, "transport_mode"): (identity,)
+            }
+        )
+    with pytest.raises(ValueError, match="not in the product-scoped app catalog"):
+        build_local_control_catalog(
+            identity_control_authorizations={
+                (AQUARIUM_PUMP_APP.product_key, "not_a_function"): (identity,)
+            }
+        )
+    with pytest.raises(ValueError, match="lowercase SHA-256 identities"):
+        build_local_control_catalog(
+            identity_control_authorizations={
+                (AQUARIUM_PUMP_APP.product_key, "motor_speed"): ("INVALID",)
+            }
+        )
+
+
+def test_identity_authority_can_cover_every_implemented_product_function() -> None:
+    identity = "5" * 64
+    expected = {
+        "50dbc92221fd4d33ae69a1fedd43b555": {
+            "power",
+            "schedule_enable",
+            "linkage_role",
+            "manual_mode",
+            "manual_flow",
+            "manual_frequency",
+            "custom_wave_frequency",
+            "feeding_duration",
+            "schedule",
+            "slave_common_flow",
+            "slave_per_slot_flow_extension",
+            "schedule_reset",
+            "device_clock_sync",
+        },
+        "1d8c63eaccac4205b92c84d77d5a08fb": {
+            "power",
+            "schedule_enable",
+            "feed_switch",
+            "pulse_or_tide",
+            "linkage_role",
+            "manual_mode",
+            "manual_flow",
+            "manual_frequency",
+            "feeding_duration",
+            "schedule",
+            "device_clock_sync",
+        },
+        "0696a19599bc484f8e1866f5ccf4ee7e": {
+            "power",
+            "schedule_enable",
+            "manual_enable",
+            "manual_mode",
+            "manual_flow",
+            "manual_frequency",
+            "feeding_duration",
+            "schedule",
+            "schedule_reset",
+            "device_clock_sync",
+        },
+        AQUARIUM_PUMP_APP.product_key: {
+            "power",
+            "schedule_enable",
+            "feed_switch",
+            "motor_speed",
+            "feeding_duration",
+            "schedule",
+            "device_clock_sync",
+        },
+        DOSING_PUMP_APP.product_key: set(),
+    }
+    catalog = build_local_control_catalog(
+        identity_control_authorizations={
+            (product_key, function): (identity,)
+            for product_key, functions in expected.items()
+            for function in functions
+        }
+    )
+
+    for product_key, functions in expected.items():
+        exposed = {
+            descriptor.function
+            for descriptor in catalog.functions
+            if descriptor.product_key == product_key and descriptor.control_exposed_for(identity)
+        }
+        assert exposed == functions

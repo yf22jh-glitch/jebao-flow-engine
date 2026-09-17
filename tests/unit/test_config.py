@@ -30,6 +30,46 @@ def test_example_configuration_is_valid() -> None:
     assert config.observer.poll_interval_seconds == 5
     assert config.observer.publish_heartbeat_seconds == 300
     assert all(not device.control.allow_hardware_writes for device in config.devices)
+    assert all(not device.control.identity_bound_controls for device in config.devices)
+    assert all(
+        "identity_bound_controls" not in device.control.model_dump(mode="json")
+        for device in config.devices
+    )
+
+
+def test_identity_bound_controls_require_explicit_device_write_opt_in() -> None:
+    raw = yaml.safe_load((ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+    raw["devices"][0]["control"] = {"identity_bound_controls": ["manual_flow"]}
+
+    with pytest.raises(ValidationError, match="explicit hardware write opt-in"):
+        AppConfig.model_validate(raw)
+
+
+def test_identity_bound_controls_must_be_unique() -> None:
+    raw = yaml.safe_load((ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+    raw["devices"][0]["control"] = {
+        "allow_hardware_writes": True,
+        "identity_bound_controls": ["manual_flow", "manual_flow"],
+    }
+
+    with pytest.raises(ValidationError, match="must be unique"):
+        AppConfig.model_validate(raw)
+
+
+def test_identity_bound_controls_accept_an_explicit_write_enabled_device() -> None:
+    raw = yaml.safe_load((ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+    raw["devices"][0]["control"] = {
+        "allow_hardware_writes": True,
+        "identity_bound_controls": ["manual_flow", "power"],
+    }
+
+    config = AppConfig.model_validate(raw)
+
+    assert config.devices[0].control.identity_bound_controls == ("manual_flow", "power")
+    assert config.devices[0].control.model_dump(mode="json")["identity_bound_controls"] == [
+        "manual_flow",
+        "power",
+    ]
 
 
 def test_legacy_group_without_topology_fields_defaults_to_software_independent() -> None:

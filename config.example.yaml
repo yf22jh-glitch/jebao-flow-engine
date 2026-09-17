@@ -49,6 +49,9 @@ devices:
       minimum_command_interval_ms: 1000
       # Keep false until a reviewed low-output hardware test.
       allow_hardware_writes: false
+      # A private control deployment may explicitly list executable functions for this exact
+      # physical identity. Keep empty in the public observer example.
+      identity_bound_controls: []
       readback_delay_ms: 500
       readback_attempts: 3
 

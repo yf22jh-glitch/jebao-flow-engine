@@ -62,17 +62,21 @@ reported unavailable before any directory can be created. Once the current mount
 missing per-device lock may be created there as coordination state; its existence is never treated
 as prior device evidence or an installation input.
 
-This is implementation status, not a claim of device acceptance. At the time of this document,
-the five retained device records contain **zero accepted write capabilities**. An encoder being
-deterministic means only that it can produce bytes. A Home Assistant control appears only after a
-version/content-bound qualification supplies two distinct, preserved ACK/readback receipt files
-for that exact physical device. One product/function binding may contain receipt pairs for several
-devices, but qualified device membership is derived only from those verified files and is never a
-declared field that can name an unreceipted device. Each content-addressed file is hashed again and
-its product, function, physical identity, content versions, firmware, intent, ACK, and readback
-fields are validated before exposure and again before a send. Until then the same function appears
-as a diagnostic for that device and cannot receive a command. Public catalog and HA output expose
-only the qualified device count, never the physical identity keys.
+An encoder being deterministic means only that it can produce bytes. A private control deployment
+may expose an executable function by listing it in that device's `identity_bound_controls`. The
+runtime binds the list to the freshly derived install manifest's exact product and
+`physical_identity_key`; a different physical device receives no command topic and is rejected
+again before journal creation. The list is effective only with `runtime.mode: control`,
+`runtime.dry_run: false`, the invocation's `--write-enabled`, and that device's
+`allow_hardware_writes: true`.
+
+This identity-bound path does not bypass output ranges, single-send handling, the deployment-wide
+lease, the durable journal, or rollback/recovery. It also does not turn a function without a sender
+into a control: the Dosing Pump remains read-only, and Aquarium `transport_mode` remains excluded
+because the runtime has no handover/return implementation. Legacy version/content-bound control
+bindings remain readable for existing deployments, but they are optional and are not required by
+an identity-bound deployment. Public catalog and HA output expose only counts, never physical
+identity keys.
 
 ## Priority schedule behavior
 
@@ -156,9 +160,11 @@ jebao-flow-local prepare-install \
   --role-attested-by on_site_operator
 ```
 
-`JEBAO_FLOW_LOCAL_QUALIFICATIONS` is optional. If it is absent, the resulting HA surface is
-diagnostic-only. The public command result contains counts and content digests, never private paths
-or raw device identifiers. Multiple current template roots use the platform path separator.
+`JEBAO_FLOW_LOCAL_QUALIFICATIONS` is optional. If it is absent, only functions explicitly listed in
+the private config's `identity_bound_controls` can become command surfaces; without either input the
+surface is diagnostic-only. The public command result contains counts and content digests, never
+private paths or raw device identifiers. Multiple current template roots use the platform path
+separator.
 The write-ahead journal has no command-line or environment override: production always uses the
 fixed `local-control` directory inside the identity-verified hardware-safety root. A process cannot
 hide an unfinished transaction by changing an XDG variable or launch context.
@@ -272,13 +278,11 @@ environment variable is not consulted. This is a startup gate, not a periodic on
 new generation. A process already running from the old generation keeps its in-memory config until
 it is recreated; no background path silently mixes the two generations.
 
-Read-only generation never reads or bundles qualifications. A write-enabled generation may contain
-only the current qualification binding list. The `local-control-receipt-<sha256>.json` receipt
-artifacts themselves are never copied into an input bundle: they remain in the fixed qualification
-directory on the shared hardware-safety volume and are resolved and verified there. Consequently a
-hand-built bundle cannot manufacture receipt authority. `--write-enabled` remains an explicit
-generation option and still does not bypass current private-config permission, per-device receipts,
-stable identity resolution, leases, journal, rollback, or on-site live-write approval.
+Read-only generation never reads or bundles legacy control bindings. A write-enabled generation may
+omit them entirely and use only the explicit per-device `identity_bound_controls` stored in the
+owner-only private config. `--write-enabled` remains an explicit generation option and still does
+not bypass private-config permission, stable identity resolution, ranges, leases, journal,
+rollback, or on-site live-write approval.
 
 `ha-schema` accepts repeatable current topology declarations:
 
@@ -296,15 +300,12 @@ checks its stable role-binding digest on every restart; it does not read a times
 manifest or unit. An interactive `serve` without that digest is a new explicit operator attestation,
 not the generated-service continuity gate.
 
-`serve --write-enabled` only exposes controls when current qualifications match the current app
-audit version, app-catalog digest, template content digest, protocol source digest, and discovered
-firmware, and the current private device settings also permit hardware writes. The protocol digest
-includes the encoder and decoder sources as well as framing, profile, and schedule sources. Every
-claimed receipt names a canonical `local-control-receipt-<sha256>.json` artifact in the fixed
-qualification directory; a missing, changed, mismatched, reused-request, or wrong-device receipt
-cannot expose a control. A singleton receipt for a device remains insufficient without invalidating
-another device's complete pair. Running it against live hardware is a separate approved operation;
-this implementation and its tests did not start the service.
+`serve --write-enabled` exposes only executable functions explicitly authorized for the exact
+freshly derived physical identity, plus any valid legacy bindings supplied by an older deployment.
+An identity-bound function still requires the current private device settings to permit writes; an
+unknown function, unsupported sender, product mismatch, disabled device, or different identity
+fails before a journal or device frame is created. Running a command against live hardware remains
+a separate operation from deployment and discovery publication.
 
 ### Manual-flow qualification producer
 
@@ -434,12 +435,13 @@ source-file digest. Creating the set alone neither enables a control nor changes
 ### Observer control surface
 
 Top-level `runtime.mode: observer` takes precedence over the current `--write-enabled` invocation,
-retained qualification files, `runtime.dry_run`, and per-device write flags. Both `serve` and
-`ha-schema` treat that mode as having no control-surface authority: they do not read the
-qualification file or construct a write coordinator, and the projection contains no device scalar
-or per-slot schedule command topic, group switch, or per-member resume button. The MQTT adapter
-therefore subscribes to no command topic. Device and system diagnostics, schedule observation,
-availability, fresh device state, group actual output, and lifecycle inventory remain present.
+identity-bound control lists, retained legacy binding files, `runtime.dry_run`, and per-device write
+flags. Both `serve` and `ha-schema` treat that mode as having no control-surface authority: they do
+not read a legacy binding file or construct a write coordinator, and the projection contains no
+device scalar or per-slot schedule command topic, group switch, or per-member resume button. The
+MQTT adapter therefore subscribes to no command topic. Device and system diagnostics, schedule
+observation, availability, fresh device state, group actual output, and lifecycle inventory remain
+present.
 
 The projection reports the bounded top-level reason `runtime_mode_observer` in
 `control_surface_diagnostic_reason`. That field is additive and does not replace an entity's

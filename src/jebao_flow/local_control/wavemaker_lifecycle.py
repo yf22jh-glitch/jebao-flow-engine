@@ -1126,7 +1126,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 descriptor = self._catalog.find(endpoint.target.product_key, function)
                 if not descriptor.control_exposed_for(endpoint.target.physical_identity_key):
                     raise ValueError(f"현재 자격이 없는 기능입니다: {function}")
-                self._require_current_qualification(descriptor, endpoint)
+                self._require_current_control_authority(descriptor, endpoint)
             # 준비의 정상 Flow/주파수도 제품 범위·step 검증을 그대로 거친다.
             for function, value in (
                 ("manual_flow", plan.preparation_flow_for(endpoint.target.logical_member)),

@@ -205,6 +205,7 @@ class LocalFunctionDescriptor:
     diagnostic_reason: str | None
     qualification: QualificationBinding | None = None
     qualified_physical_identity_keys: frozenset[str] = frozenset()
+    identity_authorized_physical_identity_keys: frozenset[str] = frozenset()
     unqualified_stage: CapabilityStage = CapabilityStage.UNKNOWN
 
     def is_qualified_for(self, physical_identity_key: str) -> bool:
@@ -214,7 +215,13 @@ class LocalFunctionDescriptor:
         )
 
     def control_exposed_for(self, physical_identity_key: str) -> bool:
-        return self.control_exposed and self.is_qualified_for(physical_identity_key)
+        return self.control_exposed and (
+            self.is_qualified_for(physical_identity_key)
+            or self.is_identity_authorized_for(physical_identity_key)
+        )
+
+    def is_identity_authorized_for(self, physical_identity_key: str) -> bool:
+        return physical_identity_key in self.identity_authorized_physical_identity_keys
 
     def stage_for(self, physical_identity_key: str) -> CapabilityStage:
         if self.is_qualified_for(physical_identity_key):
@@ -222,7 +229,7 @@ class LocalFunctionDescriptor:
         return self.unqualified_stage
 
     def diagnostic_reason_for(self, physical_identity_key: str) -> str | None:
-        if self.control_exposed and not self.is_qualified_for(physical_identity_key):
+        if self.control_exposed and not self.control_exposed_for(physical_identity_key):
             return "physical_device_not_qualified"
         return self.diagnostic_reason
 
@@ -243,6 +250,9 @@ class LocalFunctionDescriptor:
             "encoding_available": self.encoding_available,
             "control_exposed": self.control_exposed,
             "qualified_device_count": len(self.qualified_physical_identity_keys),
+            "identity_authorized_device_count": len(
+                self.identity_authorized_physical_identity_keys
+            ),
             "diagnostic_reason": self.diagnostic_reason,
         }
         if self.qualification is not None:
@@ -294,6 +304,7 @@ def build_local_control_catalog(
     *,
     current_content: InstallContentBindings | None = None,
     current_app_version: str = "3.4.18",
+    identity_control_authorizations: Mapping[tuple[str, str], Iterable[str]] | None = None,
     _qualification_verifier_for_test: Callable[[QualificationBinding], frozenset[str]]
     | None = None,
 ) -> LocalControlCatalog:
@@ -305,6 +316,9 @@ def build_local_control_catalog(
         raise ValueError("qualification bindings must be unique by product and function")
     qualified: dict[tuple[str, str], tuple[QualificationBinding, frozenset[str]]] = {}
     ignored: dict[tuple[str, str], str] = {}
+    identity_authorized = _normalize_identity_control_authorizations(
+        identity_control_authorizations
+    )
     verifier = _qualification_verifier_for_test or qualified_physical_identity_keys
     for key, item in qualification_by_key.items():
         content_changed = current_content is not None and (
@@ -332,6 +346,7 @@ def build_local_control_catalog(
             qualified_item = qualified.get(key)
             binding = None if qualified_item is None else qualified_item[0]
             physical_keys = frozenset() if qualified_item is None else qualified_item[1]
+            identity_keys = identity_authorized.get(key, frozenset())
             ignored_reason = ignored.get(key)
             encoding_available = function.name in _ENCODABLE_FUNCTIONS_BY_PRODUCT.get(
                 product.product_key, frozenset()
@@ -341,6 +356,12 @@ def build_local_control_catalog(
             )
             if binding is not None and not encoding_available:
                 raise ValueError("qualified hardware control has no deterministic encoder")
+            if identity_keys and (
+                not encoding_available or not executable or function.kind is AppFunctionKind.STATUS
+            ):
+                raise ValueError(
+                    "identity-bound hardware control is not an executable encoded function"
+                )
             unqualified_stage = _initial_stage(function)
             stage = CapabilityStage.QUALIFIED if binding is not None else unqualified_stage
             native_minimum, native_maximum = _native_range(product.product_key, function)
@@ -360,19 +381,21 @@ def build_local_control_catalog(
                     item_size=function.item_size,
                     encoding_available=encoding_available,
                     control_exposed=(
-                        binding is not None
+                        (binding is not None or bool(identity_keys))
                         and executable
                         and function.kind is not AppFunctionKind.STATUS
                     ),
                     diagnostic_reason=_diagnostic_reason(
                         function,
                         binding=binding,
+                        identity_authorized=bool(identity_keys),
                         ignored_reason=ignored_reason,
                         encoding_available=encoding_available,
                         executable=executable,
                     ),
                     qualification=binding,
                     qualified_physical_identity_keys=physical_keys,
+                    identity_authorized_physical_identity_keys=identity_keys,
                     unqualified_stage=unqualified_stage,
                 )
             )
@@ -402,6 +425,9 @@ def build_local_control_catalog(
     unused = sorted(set(qualified) - known)
     if unused:
         raise ValueError("qualification binding is not in the product-scoped app catalog")
+    unused_identity = sorted(set(identity_authorized) - known)
+    if unused_identity:
+        raise ValueError("identity-bound control is not in the product-scoped app catalog")
     return LocalControlCatalog(
         tuple(functions),
         ignored_qualification_count=len(ignored),
@@ -418,11 +444,12 @@ def _diagnostic_reason(
     function: AppFunction,
     *,
     binding: QualificationBinding | None,
+    identity_authorized: bool,
     ignored_reason: str | None,
     encoding_available: bool,
     executable: bool,
 ) -> str | None:
-    if binding is not None and executable:
+    if (binding is not None or identity_authorized) and executable:
         return None
     if ignored_reason is not None:
         return ignored_reason
@@ -433,6 +460,32 @@ def _diagnostic_reason(
     if encoding_available:
         return "awaiting_version_bound_ack_and_readback_qualification"
     return "deterministic_encoder_unavailable"
+
+
+def _normalize_identity_control_authorizations(
+    values: Mapping[tuple[str, str], Iterable[str]] | None,
+) -> dict[tuple[str, str], frozenset[str]]:
+    normalized: dict[tuple[str, str], frozenset[str]] = {}
+    if values is None:
+        return normalized
+    for key, identities in values.items():
+        if (
+            not isinstance(key, tuple)
+            or len(key) != 2
+            or not all(isinstance(value, str) and value for value in key)
+        ):
+            raise ValueError("identity-bound control keys must be product/function pairs")
+        selected = frozenset(identities)
+        if not selected:
+            raise ValueError("identity-bound controls require at least one physical identity")
+        if any(
+            len(identity) != 64
+            or any(character not in "0123456789abcdef" for character in identity)
+            for identity in selected
+        ):
+            raise ValueError("identity-bound controls require lowercase SHA-256 identities")
+        normalized[key] = selected
+    return normalized
 
 
 def _native_range(

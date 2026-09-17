@@ -157,7 +157,7 @@ class LocalControlCoordinator:
             return existing
         descriptor = self._catalog.validate_intent(intent)
         endpoint = await self._resolver.resolve(intent.target)
-        self._require_current_qualification(descriptor, endpoint)
+        self._require_current_control_authority(descriptor, endpoint)
 
         with self._lease.acquire((intent.target.physical_identity_key,)) as active_lease:
             self._require_no_other_unfinished(
@@ -257,7 +257,7 @@ class LocalControlCoordinator:
                 raise ValueError("batch action target does not match the current endpoint")
             for intent in item.intents:
                 descriptor = self._catalog.validate_intent(intent)
-                self._require_current_qualification(descriptor, endpoint)
+                self._require_current_control_authority(descriptor, endpoint)
 
         with self._lease.acquire(lease_physical) as active_lease:
             self._require_no_other_unfinished(request_id, lease_physical)
@@ -326,14 +326,11 @@ class LocalControlCoordinator:
             plan.master.product_key,
             "slave_per_slot_flow_extension",
         )
-        if descriptor.stage is not CapabilityStage.QUALIFIED:
-            raise ValueError("slave per-slot Flow is not qualified for hardware control")
-
         targets = (plan.master, *(slave.target for slave in plan.slaves))
         endpoints = await self._resolver.resolve_many(targets)
         master_endpoint, *slave_endpoints = endpoints
         for endpoint in slave_endpoints:
-            self._require_current_qualification(descriptor, endpoint)
+            self._require_current_control_authority(descriptor, endpoint)
 
         physical_keys = tuple(target.physical_identity_key for target in targets)
         with self._lease.acquire(physical_keys) as active_lease:
@@ -414,11 +411,9 @@ class LocalControlCoordinator:
             master.product_key,
             "slave_per_slot_flow_extension",
         )
-        if descriptor.stage is not CapabilityStage.QUALIFIED:
-            raise ValueError("slave per-slot Flow is not qualified for hardware control")
         endpoints = await self._resolver.resolve_many((master, slave))
         master_endpoint, slave_endpoint = endpoints
-        self._require_current_qualification(descriptor, slave_endpoint)
+        self._require_current_control_authority(descriptor, slave_endpoint)
 
         with self._lease.acquire(
             (master.physical_identity_key, slave.physical_identity_key)
@@ -1003,11 +998,13 @@ class LocalControlCoordinator:
                 "this physical device has an unfinished change requiring terminal recovery"
             )
 
-    def _require_current_qualification(
+    def _require_current_control_authority(
         self,
         descriptor: LocalFunctionDescriptor,
         endpoint: ResolvedEndpoint,
     ) -> None:
+        if descriptor.is_identity_authorized_for(endpoint.target.physical_identity_key):
+            return
         qualification = descriptor.qualification
         if qualification is None or descriptor.stage is not CapabilityStage.QUALIFIED:
             raise ValueError("hardware control lacks a qualification binding")

@@ -158,6 +158,8 @@ def _coordinator(
     sessions: _SessionFactory,
     catalog_qualified_keys: frozenset[str] | None = None,
     runtime_qualified_keys: frozenset[str] | None = None,
+    identity_control_authorizations: dict[tuple[str, str], frozenset[str]] | None = None,
+    runtime_qualification_verifier=None,
 ) -> tuple[LocalControlCoordinator, LocalControlJournalStore]:
     journal = LocalControlJournalStore.for_test(tmp_path / "journal")
     default_keys = frozenset(
@@ -174,16 +176,94 @@ def _coordinator(
                     protocol_schema_sha256=current_protocol_schema_sha256(),
                     template_sha256=("1" * 64,),
                 ),
+                identity_control_authorizations=identity_control_authorizations,
                 _qualification_verifier_for_test=lambda _item: catalog_keys,
             ),
             resolver=resolver,  # type: ignore[arg-type]
             journal=journal,
             lease=_lease(tmp_path),
             session_factory=sessions,
-            qualification_verifier=lambda _item: runtime_keys,
+            qualification_verifier=(
+                runtime_qualification_verifier
+                if runtime_qualification_verifier is not None
+                else lambda _item: runtime_keys
+            ),
         ),
         journal,
     )
+
+
+@pytest.mark.asyncio
+async def test_exact_identity_authority_executes_without_legacy_artifacts(
+    tmp_path: Path,
+) -> None:
+    target = _binding("wavemaker_left", "a")
+    endpoint = ResolvedEndpoint(
+        target,
+        "current-address",
+        wifi_firmware_version="wifi-current",
+    )
+    session = _Session([_status(flow=40), _status(flow=41)])
+    coordinator, journal = _coordinator(
+        tmp_path,
+        qualifications=(),
+        resolver=_Resolver((endpoint,)),
+        sessions=_SessionFactory({"current-address": [session]}),
+        identity_control_authorizations={
+            (LOCAL_WAVEMAKER_PRO.product_key, "manual_flow"): frozenset(
+                {target.physical_identity_key}
+            )
+        },
+        runtime_qualification_verifier=lambda _item: (_ for _ in ()).throw(
+            AssertionError("legacy authority was consulted")
+        ),
+    )
+    intent = LocalControlIntent(
+        request_id="identity_request_0001",
+        target=target,
+        function="manual_flow",
+        value=41,
+    )
+
+    result = await coordinator.execute(intent)
+
+    assert result.phase is TransactionPhase.VERIFIED
+    assert result.physical_write_count == 1
+    assert len(session.sent) == 1
+    record = journal.load(intent.request_id)
+    assert record is not None
+    assert record.actions[0].target.physical_identity_key == target.physical_identity_key
+
+
+@pytest.mark.asyncio
+async def test_identity_authority_never_applies_to_another_physical_device(
+    tmp_path: Path,
+) -> None:
+    selected = _binding("selected", "a")
+    other = _binding("other", "b")
+    endpoint = ResolvedEndpoint(other, "other-current", wifi_firmware_version="wifi-current")
+    coordinator, journal = _coordinator(
+        tmp_path,
+        qualifications=(),
+        resolver=_Resolver((endpoint,)),
+        sessions=_SessionFactory({"other-current": []}),
+        identity_control_authorizations={
+            (LOCAL_WAVEMAKER_PRO.product_key, "manual_flow"): frozenset(
+                {selected.physical_identity_key}
+            )
+        },
+    )
+    intent = LocalControlIntent(
+        request_id="identity_wrong_device_0001",
+        target=other,
+        function="manual_flow",
+        value=41,
+    )
+
+    with pytest.raises(ValueError, match="not qualified"):
+        await coordinator.execute(intent)
+
+    assert journal.load(intent.request_id) is None
 
 
 @pytest.mark.asyncio
@@ -305,10 +385,7 @@ async def test_uncertain_forward_is_never_retried_and_can_restore_fresh_baseline
     assert event["action_index"] == 0
     assert event["request_sha256"] == hashlib.sha256(intent.request_id.encode("ascii")).hexdigest()
     assert event["exception_chain"][0]["type"] == "builtins.TimeoutError"
-    assert any(
-        frame["function"] == "send_once"
-        for frame in event["exception_chain"][0]["frames"]
-    )
+    assert any(frame["function"] == "send_once" for frame in event["exception_chain"][0]["frames"])
     assert "ack lost" not in caplog.text
 
     restored = await coordinator.recover(intent.request_id)
@@ -481,7 +558,10 @@ report_action_failure(
 """
     result = subprocess.run(
         [sys.executable, "-c", script, root_level],
-        capture_output=True, text=True, check=True, timeout=10,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
     )
     assert result.stdout == ""
     assert len(result.stderr.splitlines()) == 1
@@ -645,9 +725,7 @@ async def test_priority_schedule_reads_current_master_then_writes_each_slave_ima
     desired_image = desired_slot + bytes([0xEE]) * (432 - 9)
     baseline_image = bytes([0xEE]) * 432
     master_session = _Session([_status(schedule=master_image)])
-    slave_session = _Session(
-        [_status(schedule=baseline_image), _status(schedule=desired_image)]
-    )
+    slave_session = _Session([_status(schedule=baseline_image), _status(schedule=desired_image)])
     coordinator, journal = _coordinator(
         tmp_path,
         qualifications=(_qualification("slave_per_slot_flow_extension"),),
@@ -715,9 +793,7 @@ async def test_single_slot_flow_command_rederives_other_values_from_current_devi
         + bytes([0xEE]) * (432 - 18)
     )
     master_session = _Session([_status(schedule=master_image)])
-    slave_session = _Session(
-        [_status(schedule=slave_image), _status(schedule=desired)]
-    )
+    slave_session = _Session([_status(schedule=slave_image), _status(schedule=desired)])
     coordinator, _journal = _coordinator(
         tmp_path,
         qualifications=(_qualification("slave_per_slot_flow_extension"),),

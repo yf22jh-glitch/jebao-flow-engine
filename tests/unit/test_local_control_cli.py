@@ -714,8 +714,8 @@ def test_generated_service_identity_file_replaces_a_stale_raw_environment(
 def test_default_runtime_does_not_project_receipts_as_controls(monkeypatch) -> None:
     captured = []
 
-    def build(qualifications, *, current_content):
-        captured.append((qualifications, current_content))
+    def build(qualifications, *, current_content, identity_control_authorizations):
+        captured.append((qualifications, current_content, identity_control_authorizations))
         return "catalog"
 
     monkeypatch.setattr(local_control_cli, "build_local_control_catalog", build)
@@ -728,7 +728,7 @@ def test_default_runtime_does_not_project_receipts_as_controls(monkeypatch) -> N
         )
         == "catalog"
     )
-    assert captured == [((), "current-content")]
+    assert captured == [((), "current-content", {})]
 
 
 def test_default_runtime_does_not_read_a_retained_qualification_path(monkeypatch) -> None:
@@ -769,8 +769,8 @@ def test_default_runtime_does_not_construct_a_write_coordinator(monkeypatch) -> 
 def test_write_enabled_runtime_uses_only_current_receipts(monkeypatch) -> None:
     captured = []
 
-    def build(qualifications, *, current_content):
-        captured.append((qualifications, current_content))
+    def build(qualifications, *, current_content, identity_control_authorizations):
+        captured.append((qualifications, current_content, identity_control_authorizations))
         return "catalog"
 
     monkeypatch.setattr(local_control_cli, "build_local_control_catalog", build)
@@ -781,7 +781,91 @@ def test_write_enabled_runtime_uses_only_current_receipts(monkeypatch) -> None:
         write_enabled=True,
     )
 
-    assert captured == [(("current-receipt",), "current-content")]
+    assert captured == [(("current-receipt",), "current-content", {})]
+
+
+def test_write_enabled_runtime_binds_explicit_controls_to_current_manifest_identity(
+    monkeypatch,
+) -> None:
+    config = _observer_runtime_config().model_copy(
+        update={
+            "devices": tuple(
+                device.model_copy(
+                    update={
+                        "control": device.control.model_copy(
+                            update={
+                                "allow_hardware_writes": True,
+                                "identity_bound_controls": (
+                                    ("manual_flow", "power")
+                                    if device.id == "master"
+                                    else ("manual_frequency",)
+                                ),
+                            }
+                        )
+                    }
+                )
+                for device in _observer_runtime_config().devices
+            )
+        }
+    )
+    captured = []
+
+    def build(qualifications, *, current_content, identity_control_authorizations):
+        captured.append((qualifications, current_content, identity_control_authorizations))
+        return "catalog"
+
+    monkeypatch.setattr(local_control_cli, "build_local_control_catalog", build)
+
+    result = local_control_cli._runtime_catalog(
+        (),
+        _manifest().content,
+        config=config,
+        manifest=_manifest(),
+        write_enabled=True,
+    )
+
+    assert result == "catalog"
+    assert captured == [
+        (
+            (),
+            _manifest().content,
+            {
+                (LOCAL_WAVEMAKER_PRO.product_key, "manual_flow"): frozenset({"1" * 64}),
+                (LOCAL_WAVEMAKER_PRO.product_key, "power"): frozenset({"1" * 64}),
+                (LOCAL_WAVEMAKER_PRO.product_key, "manual_frequency"): frozenset({"2" * 64}),
+            },
+        )
+    ]
+
+
+def test_write_enabled_runtime_needs_no_legacy_authority_file() -> None:
+    assert local_control_cli._runtime_qualifications(None, write_enabled=True) == ()
+
+
+def test_disabled_device_cannot_add_identity_bound_controls() -> None:
+    config = _observer_runtime_config()
+    selected = config.devices[0]
+    config = config.model_copy(
+        update={
+            "devices": (
+                selected.model_copy(
+                    update={
+                        "enabled": False,
+                        "control": selected.control.model_copy(
+                            update={
+                                "allow_hardware_writes": True,
+                                "identity_bound_controls": ("manual_flow",),
+                            }
+                        ),
+                    }
+                ),
+                config.devices[1],
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="not enabled for hardware writes"):
+        local_control_cli._identity_control_authorizations(config, _manifest())
 
 
 def test_service_restart_binding_mismatch_fails_before_replacing_manifest(

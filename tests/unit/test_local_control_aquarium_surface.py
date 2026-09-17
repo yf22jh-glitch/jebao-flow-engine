@@ -49,6 +49,31 @@ def _surface():
     return manifest, catalog, projection
 
 
+def _identity_surface():
+    original = _manifest()
+    devices = tuple(
+        d.model_copy(update={"product_key": AQUARIUM_PUMP.product_key}) for d in original.devices
+    )
+    manifest = original.model_copy(update={"devices": devices})
+    identity = devices[0].physical_identity_key
+    catalog = build_local_control_catalog(
+        (),
+        current_content=manifest.content,
+        identity_control_authorizations={
+            (AQUARIUM_PUMP.product_key, function): (identity,)
+            for function in FUNCTIONS - {"transport_mode"}
+        },
+    )
+    projection = project_home_assistant(
+        manifest,
+        catalog,
+        topic_prefix="jebao/test",
+        discovery_prefix="homeassistant",
+        control_surface_enabled=True,
+    )
+    return manifest, catalog, projection
+
+
 def test_seven_app_functions_bind_to_one_identity_only_and_transport_stays_diagnostic():
     manifest, catalog, projection = _surface()
     selected, other = manifest.devices
@@ -69,6 +94,33 @@ def test_seven_app_functions_bind_to_one_identity_only_and_transport_stays_diagn
         e.control_available or e.schedule_request_topic
         for e in projection.entities
         if e.logical_member == other.logical_member
+    )
+
+
+def test_identity_bound_surface_exposes_all_seven_executable_functions_without_artifacts():
+    manifest, catalog, projection = _identity_surface()
+    selected, other = manifest.devices
+    exposed = {
+        entity.function: entity
+        for entity in projection.entities
+        if entity.logical_member == selected.logical_member
+        and (entity.control_available or entity.schedule_request_topic)
+    }
+
+    assert set(exposed) == FUNCTIONS - {"transport_mode"}
+    assert all(
+        catalog.find(selected.product_key, function).qualification is None for function in exposed
+    )
+    assert all(
+        catalog.find(selected.product_key, function).control_exposed_for(
+            selected.physical_identity_key
+        )
+        for function in exposed
+    )
+    assert not any(
+        entity.control_available or entity.schedule_request_topic
+        for entity in projection.entities
+        if entity.logical_member == other.logical_member
     )
 
 
