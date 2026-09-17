@@ -103,3 +103,27 @@ master 선행 후 다음 표본까지 모두 수렴한 것으로 보존됐다. �
 - 경계 전 sample SHA-256: `223a4d2d7007fb11877ec714be11b330fdcc3099557a00cb8ec88eb453b0fb98`
 - master 선행 sample SHA-256: `ca083d52d7e0937ddc0fd685d8cd899ac2e7de4eb7d57233a6f01fdcf1a286ba`
 - 전체 수렴 sample SHA-256: `0d9ada63ddf00dae48771243a65d25e5d3020c7162b946b739a856b5b5ec1394`
+
+## 진행 중 추가 — 14:00 KST 경계
+
+`daily-three-pump-monitor-20260917.01`과 `.02`의 보존 표본을 함께 읽는 interim analyzer가
+14:00 경계도 확인했다. 경계 뒤 `2026-09-17T05:00:30.329465Z` 표본에서 세 장비가 모두
+slot 19에 수렴했다. 경계 기준 수렴 시간은 30.329초였다.
+
+- Pro master: `Sine / Flow 45 / Frequency 60`
+- Pro Async: `Sine / Flow 40 / Frequency 60`
+- Bar: `Pulse / Flow 45 / Frequency 80 / PulseTide false`
+
+분석 시점까지 pilot 8개와 main 41개, 합계 49개 표본이 연속 ordinal이었고 65초를 넘는
+cadence gap은 0개였다. 세 장비 모두 role mismatch, power OFF, schedule OFF, 31구간 image
+mismatch, missing/stale sample, fault episode가 0개였다. sample의 hardware write와 MQTT
+publish도 각각 0개다.
+
+이는 진행 중인 중간 판정이다. `complete_counts_match=false`와 `deadline_covered=false`는 계획된
+24시간 종료 시각 전이라 정상이며, 최종 성공으로 읽지 않는다. 종료 뒤 같은 analyzer로 전체
+31경계와 fault 재발 여부를 다시 판정한다.
+
+- analyzer SHA-256: `3cda036a6c1391e619f56055a647c1aff21dbc031fb25a8eecf641e16b2ddbc5`
+- analyzed at: `2026-09-17T05:01:13.317641Z`
+- opaque artifacts: `daily-three-pump-monitor-20260917.01`,
+  `daily-three-pump-monitor-20260917.02`
