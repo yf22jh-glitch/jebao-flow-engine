@@ -144,3 +144,47 @@ local-control MQTT power topic으로 먼저 시도했으며, OFF가 `VERIFIED`�
 증가했다. 최신 표본의 master는 ON·master·schedule ON·35구간 exact·현재
 Random/Flow45/Frequency60을 유지했다. mismatch는 `faults_clear` 하나뿐이었다. 따라서 이번
 시도는 fault를 해제하지도, schedule·role·power를 바꾸지도 않았다.
+
+## 추가 관측 — native 소유 power-cycle의 baseline read 실패
+
+기존 Async source의 소유권을 우회하지 않도록 별도 `master_power_cycle_v1` child를 구현했다.
+이 child는 master 한 대에만 `SwitchON=false`, 검증된 OFF 뒤 최소 10초 대기,
+`SwitchON=true` 두 action을 durable journal에 먼저 기록하도록 구성했다. slave·시간표·역할에는
+forward write를 만들지 않는다.
+
+- 구현 commit: `4476b261529b5475684f0826217c553c5d744c28`
+- runtime image: `sha256:959d9df7d1fe38c4cd0e88b4bdf585d57641072f91309bf38a1db9a76424d933`
+- protocol schema: `b6ac93d8613706ebdc9bc282ea5c419948d927ec1826d203ec59b7e2ebd0188a`
+- 검증: unit `3794 passed`; 새 operation의 targeted/native/MQTT 회귀도 모두 통과했다.
+- 배포 직후 runtime은 running, restart count 0이었다. 기존 24시간 collector와 finalizer는
+  재시작하지 않았고 계속 running이었다.
+
+두 번의 MQTT envelope를 각각 한 번만 publish했다. 첫 시도 span은
+`2026-09-17T06:36:54.972588Z`–`06:37:16.655622Z`, 두 번째는
+`2026-09-17T06:40:11.251951Z`–`06:40:32.305608Z`다. 두 시도 모두 source 상태를 실패 결과로
+돌려줬고 deterministic power child record는 생성되지 않았다. operation count는 83으로
+불변이고 source record SHA-256도
+`435f7c99da0fb6b79549de7dadd9a2dfc2b1f6930609451069fc040a1aeb0641`로 불변이었다. 이 경로는
+durable child 생성 뒤에만 device send가 가능하므로 두 시도의 control write는 모두 0회다.
+
+각 시도 전후 MQTT state도 동일했다.
+
+- master: ON, master, schedule ON, 35 entries exact, `Fault_no_liveload` asserted.
+- Async: ON, `async_slave`, schedule ON, 35 entries exact, fault clear.
+- Bar 및 다른 장비 command 0회.
+
+보존 산출물은 다음과 같다.
+
+- opaque artifact `daily-three-pump-monitor-20260917.03/a4-native-power-cycle-4476b26.json`,
+  SHA-256 `cd26f7637c3d6d6dfae510749873f632b5feaad4ba41d953e434b59eedc68ee4`.
+- opaque artifact
+  `daily-three-pump-monitor-20260917.03/a4-native-power-cycle-retry-4476b26.json`,
+  SHA-256 `a627c549b2e65ad26cfbf7dfd78020476fe320c3f192d4bdeda54573c4ea36ae`.
+
+추가 read-only probe로 baseline capture의 실패 지점을 분리했다. fresh explicit-reply-only 읽기에서
+Async는 5.299초 뒤 `ProtocolTimeoutError`, master는 0.554초에 action 3 reply를 반환했다. 이
+probe는 control frame을 보내지 않았다. power child가 두 장비의 baseline을 reply-only로
+요구했기 때문에 Async 읽기에서 child 생성 전에 종료된 것이며, OFF/ON 구현이나 fault-clear
+결과까지 도달한 실행은 아직 없다. 다음 재개 조건은 전원을 쓰지 않는 Async 비교 읽기에 기존
+native attach와 같은 authenticated fresh report capture를 사용하고, master만 reply-only로
+유지하는 것이다.
