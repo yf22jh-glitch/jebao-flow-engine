@@ -188,3 +188,42 @@ probe는 control frame을 보내지 않았다. power child가 두 장비의 base
 결과까지 도달한 실행은 아직 없다. 다음 재개 조건은 전원을 쓰지 않는 Async 비교 읽기에 기존
 native attach와 같은 authenticated fresh report capture를 사용하고, master만 reply-only로
 유지하는 것이다.
+
+## 추가 관측 — master software power-cycle 완료, Er03 유지
+
+Async 비교 읽기만 기존 native attach와 같은 authenticated fresh report capture로 바꾸고,
+master 읽기는 explicit reply-only로 유지했다. protocol schema는
+`b6ac93d8613706ebdc9bc282ea5c419948d927ec1826d203ec59b7e2ebd0188a`로 불변이었다.
+
+- 구현 commit: `b2d346ddc00698407614b1bb36062811eb30afb9`
+- runtime image: `sha256:b81464ec1eb28d4a49936d462a53067c22c740122b51e390e0d3f2b2006bb6e0`
+- UTC span: `2026-09-17T07:04:00.199900Z`–`2026-09-17T07:04:34.309913Z`
+- MQTT envelope publish: 1회
+- child action: master `SwitchON=false` 1회, 10초 대기, master `SwitchON=true` 1회
+- 두 action 모두 ACK 수신·readback 일치·`VERIFIED`; child transaction도 `VERIFIED`
+- commanded physical target: master 한 대뿐
+
+사후 pair 비교에서 master는 ON·master·schedule ON·35 entries exact, Async는
+ON·`async_slave`·schedule ON·35 entries exact였다. 두 schedule image digest도 각각 원본과
+일치했다. Bar에는 command를 보내지 않았고 직후 collector 표본에서 ON·independent·schedule
+ON·35 entries exact를 유지했다.
+
+journal operation은 83개에서 84개로 늘었고 새 child만 추가됐다. 기존 source는 9 action과
+`RECOVERY_REQUIRED`를 그대로 유지했고 record SHA-256도
+`435f7c99da0fb6b79549de7dadd9a2dfc2b1f6930609451069fc040a1aeb0641`로 불변이다. unfinished는
+기존 source 1건뿐이다.
+
+software power-cycle 뒤에도 master의 `Fault_no_liveload`는 assert된 채였다. 따라서 이 장비에서
+앱과 같은 `SwitchON` OFF 10초/ON은 현재 Er03 latch를 해제하지 못했다. 이는 hard mains power
+removal과 같은 동작임을 뜻하지 않으며, 이번 실행은 software switch cycle의 결과만 확정한다.
+
+- opaque artifact:
+  `daily-three-pump-monitor-20260917.03/a4-native-power-cycle-fixed-b2d346d.json`
+- artifact SHA-256: `47aad32c49f164480a781b4a257016fb770929f006db2e60c155c836a9ffd95a`
+- 직후 collector sample: ordinal 181, `2026-09-17T07:05:25.985343Z`
+- collector/finalizer: 둘 다 running, restart count 0
+
+**이 실행으로 새로 확정된 사실:** source ownership과 single-write journal을 보존하면서 master
+한 대에만 software OFF→10초→ON을 완료할 수 있고, 그 과정은 master/Async 역할과 세 장비의
+35구간 schedule을 바꾸지 않았다. 그러나 이 software cycle은 현재 master의 Er03을 지우지
+못했다. 24시간 read-only 관측은 중단·재시작 없이 계속한다.
