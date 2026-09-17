@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-17 Pro Async·Bar 31구간 일일 시간표](2026-09-17-pro-async-bar-daily-schedule.md) — Pro master/Async·Bar schedule ON 및 exact image/현재 Auto 일치; 원 Async delivery UNKNOWN은 source unfinished로 보존.
+
 - [2026-09-17 전 기종 exact-identity 제어 활성화](2026-09-17-exact-identity-all-device-activation.md) — 6대·HA104/104, Dosing·Aquarium transport 포함; 기동 command0·journal/receipt 불변, 기능별 실클릭은 별도.
 
 - [2026-09-16 DC 읽기 전용 사전 확인](2026-09-16-dc-readonly-precheck.md) — MQTT 수동81/활성Auto60 구분·write0; 전체 기능 구현 재개, 메인 리턴은 제외가 아닌 후순위.
