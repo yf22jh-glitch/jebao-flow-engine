@@ -60,8 +60,7 @@ def _identity_surface():
         (),
         current_content=manifest.content,
         identity_control_authorizations={
-            (AQUARIUM_PUMP.product_key, function): (identity,)
-            for function in FUNCTIONS - {"transport_mode"}
+            (AQUARIUM_PUMP.product_key, function): (identity,) for function in FUNCTIONS
         },
     )
     projection = project_home_assistant(
@@ -74,7 +73,7 @@ def _identity_surface():
     return manifest, catalog, projection
 
 
-def test_seven_app_functions_bind_to_one_identity_only_and_transport_stays_diagnostic():
+def test_all_eight_app_functions_bind_to_one_identity_only():
     manifest, catalog, projection = _surface()
     selected, other = manifest.devices
     exposed = {
@@ -83,12 +82,12 @@ def test_seven_app_functions_bind_to_one_identity_only_and_transport_stays_diagn
         if e.logical_member == selected.logical_member
         and (e.control_available or e.schedule_request_topic)
     }
-    assert set(exposed) == FUNCTIONS - {"transport_mode"}
-    assert sum(e.control_available for e in exposed.values()) == 6
+    assert set(exposed) == FUNCTIONS
+    assert sum(e.control_available for e in exposed.values()) == 7
     assert exposed["schedule"].schedule_request_topic
     assert exposed["device_clock_sync"].platform is HomeAssistantPlatform.BUTTON
     assert catalog.find(selected.product_key, "transport_mode").encoding_available
-    assert not catalog.find(selected.product_key, "transport_mode").control_exposed
+    assert catalog.find(selected.product_key, "transport_mode").control_exposed
     assert "May Disconnect" in catalog.find(selected.product_key, "transport_mode").exposed_name
     assert not any(
         e.control_available or e.schedule_request_topic
@@ -97,7 +96,7 @@ def test_seven_app_functions_bind_to_one_identity_only_and_transport_stays_diagn
     )
 
 
-def test_identity_bound_surface_exposes_all_seven_executable_functions_without_artifacts():
+def test_identity_bound_surface_exposes_all_eight_functions_without_artifacts():
     manifest, catalog, projection = _identity_surface()
     selected, other = manifest.devices
     exposed = {
@@ -107,7 +106,7 @@ def test_identity_bound_surface_exposes_all_seven_executable_functions_without_a
         and (entity.control_available or entity.schedule_request_topic)
     }
 
-    assert set(exposed) == FUNCTIONS - {"transport_mode"}
+    assert set(exposed) == FUNCTIONS
     assert all(
         catalog.find(selected.product_key, function).qualification is None for function in exposed
     )
@@ -132,6 +131,7 @@ def test_identity_bound_surface_exposes_all_seven_executable_functions_without_a
         ("feed_switch", "OFF", False),
         ("motor_speed", "40", 40),
         ("feeding_duration", "10", 10),
+        ("transport_mode", "wireless", "wireless"),
         ("device_clock_sync", "PRESS", None),
     ],
 )

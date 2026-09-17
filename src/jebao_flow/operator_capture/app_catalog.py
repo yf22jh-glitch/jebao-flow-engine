@@ -46,6 +46,7 @@ class AppFunction:
     choices: tuple[str, ...] = ()
     app_minimum: int | None = None
     app_maximum: int | None = None
+    app_step: int | None = None
     count: int | None = None
     item_size: int | None = None
     confidence: CapabilityConfidence = CapabilityConfidence.APP_STATIC
@@ -66,6 +67,7 @@ class AppFunction:
         for description, value in (
             ("minimum", self.app_minimum),
             ("maximum", self.app_maximum),
+            ("step", self.app_step),
             ("count", self.count),
             ("item size", self.item_size),
         ):
@@ -81,6 +83,8 @@ class AppFunction:
             raise ValueError("app function count must be positive")
         if self.item_size is not None and self.item_size < 1:
             raise ValueError("app function item size must be positive")
+        if self.app_step is not None and self.app_step < 1:
+            raise ValueError("app function step must be positive")
 
     def public_dict(self) -> dict[str, object]:
         return {
@@ -90,6 +94,7 @@ class AppFunction:
             "choices": list(self.choices),
             "app_minimum": self.app_minimum,
             "app_maximum": self.app_maximum,
+            "app_step": self.app_step,
             "count": self.count,
             "item_size": self.item_size,
             "confidence": self.confidence.value,
@@ -547,11 +552,17 @@ DOSING_PUMP_APP = AppProductCatalog(
         ),
         AppFunction(
             "calibration",
-            AppFunctionKind.ACTION,
-            ("CALSW", "Calib1"),
+            AppFunctionKind.BOOLEAN,
+            ("CALSW", "CALSet", "Calib1"),
+            caveat="app start and stop copy the selected channel and calibration amount",
+        ),
+        AppFunction(
+            "calibration_amount",
+            AppFunctionKind.INTEGER,
+            ("Calib1",),
             app_minimum=10,
             app_maximum=100,
-            caveat="accepted calibration and dose ranges remain unverified",
+            app_step=10,
         ),
         AppFunction(
             "channel_schedule",

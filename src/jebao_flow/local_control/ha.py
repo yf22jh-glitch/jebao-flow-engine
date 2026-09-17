@@ -29,13 +29,25 @@ _TOPIC_PREFIX_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\Z")
 _INSTANCE_NAMESPACE_RE = re.compile(r"instance_[0-9a-f]{64}\Z")
 _RUNTIME_MODE_OBSERVER_REASON = "runtime_mode_observer"
 NATIVE_WAVEMAKER_FUNCTIONS = (
-    "power", "schedule_enable", "linkage_role", "manual_mode", "manual_flow",
-    "manual_frequency", "feeding_duration", "custom_wave_frequency", "schedule",
+    "power",
+    "schedule_enable",
+    "linkage_role",
+    "manual_mode",
+    "manual_flow",
+    "manual_frequency",
+    "feeding_duration",
+    "custom_wave_frequency",
+    "schedule",
 )
 _PREVIEW_PRODUCTS = {
-    LOCAL_WAVEMAKER_PRO_PRODUCT_KEY, LOCAL_WAVEMAKER_PRODUCT_KEY,
-    DC_PUMP_PRO_PRODUCT_KEY, AQUARIUM_PUMP_PRODUCT_KEY,
+    LOCAL_WAVEMAKER_PRO_PRODUCT_KEY,
+    LOCAL_WAVEMAKER_PRODUCT_KEY,
+    DC_PUMP_PRO_PRODUCT_KEY,
+    AQUARIUM_PUMP_PRODUCT_KEY,
 }
+_DOSING_CHANNEL_FUNCTIONS = frozenset(
+    {"manual_channel", "channel_timer_enable", "interval_days", "channel_schedule"}
+)
 
 
 class HomeAssistantPlatform(StrEnum):
@@ -69,7 +81,9 @@ class HomeAssistantEntityDescriptor:
     entity_category: str | None = None
     native_minimum: int | None = None
     native_maximum: int | None = None
+    native_step: int | None = None
     options: tuple[str, ...] = ()
+    channel_index: int | None = None
     slot_index: int | None = None
     schedule_request_topic: str | None = None
     preview_request_topic: str | None = None
@@ -82,12 +96,17 @@ class HomeAssistantEntityDescriptor:
         if self.control_available != (self.command_topic is not None):
             raise ValueError("Home Assistant command topic must match control availability")
         if self.schedule_request_topic is not None and (
-            self.function != "schedule" or self.platform is not HomeAssistantPlatform.SENSOR
+            self.function not in {"schedule", "channel_schedule"}
+            or self.platform is not HomeAssistantPlatform.SENSOR
         ):
             raise ValueError("schedule API belongs to the schedule diagnostic sensor")
+        if self.channel_index is not None and not 1 <= self.channel_index <= 4:
+            raise ValueError("Home Assistant channel index must be between 1 and 4")
         if self.platform is HomeAssistantPlatform.NUMBER:
             if self.native_minimum is None or self.native_maximum is None:
                 raise ValueError("Home Assistant number requires an explicit native range")
+            if self.native_step is not None and self.native_step < 1:
+                raise ValueError("Home Assistant number step must be positive")
         if self.platform is HomeAssistantPlatform.SELECT and not self.options:
             raise ValueError("Home Assistant select requires explicit options")
 
@@ -106,7 +125,9 @@ class HomeAssistantEntityDescriptor:
             "entity_category": self.entity_category,
             "native_minimum": self.native_minimum,
             "native_maximum": self.native_maximum,
+            "native_step": self.native_step,
             "options": list(self.options),
+            "channel_index": self.channel_index,
             "slot_index": self.slot_index,
         }
         if self.schedule_request_topic is not None:
@@ -124,9 +145,7 @@ class HomeAssistantEntityDescriptor:
             "unique_id": self.unique_id,
             "state_topic": self.state_topic,
             "device": {
-                "identifiers": [
-                    _device_identifier(self.instance_namespace, self.logical_member)
-                ],
+                "identifiers": [_device_identifier(self.instance_namespace, self.logical_member)],
                 "name": _english_member_name(self.logical_member),
                 "manufacturer": "Jebao",
                 "model": "Local Control",
@@ -181,7 +200,7 @@ class HomeAssistantEntityDescriptor:
                 {
                     "min": self.native_minimum,
                     "max": self.native_maximum,
-                    "step": 1,
+                    "step": self.native_step or 1,
                     "mode": "slider",
                 }
             )
@@ -253,9 +272,7 @@ class GroupHomeAssistantEntityDescriptor:
             ],
             "availability_mode": "all",
             "device": {
-                "identifiers": [
-                    _group_device_identifier(self.instance_namespace, self.group_id)
-                ],
+                "identifiers": [_group_device_identifier(self.instance_namespace, self.group_id)],
                 "name": f"{_english_member_name(self.group_id)} Group",
                 "manufacturer": "Jebao",
                 "model": "Local Control Group",
@@ -324,9 +341,7 @@ class GroupControlHomeAssistantEntityDescriptor:
             ],
             "availability_mode": "all",
             "device": {
-                "identifiers": [
-                    _group_device_identifier(self.instance_namespace, self.group_id)
-                ],
+                "identifiers": [_group_device_identifier(self.instance_namespace, self.group_id)],
                 "name": f"{_english_member_name(self.group_id)} Group",
                 "manufacturer": "Jebao",
                 "model": "Local Control Group",
@@ -389,9 +404,7 @@ class GroupMemberResumeHomeAssistantEntityDescriptor:
             ],
             "availability_mode": "all",
             "device": {
-                "identifiers": [
-                    _group_device_identifier(self.instance_namespace, self.group_id)
-                ],
+                "identifiers": [_group_device_identifier(self.instance_namespace, self.group_id)],
                 "name": f"{_english_member_name(self.group_id)} Group",
                 "manufacturer": "Jebao",
                 "model": "Local Control Group",
@@ -522,8 +535,13 @@ class HomeAssistantProjection:
             "members": list(self.native_wavemaker_members),
             "attach_qualified_members": list(self.native_attach_members),
             "operations": [
-                "preview", "attach", "detach", "recover", "status",
-                "assist_detach", "cycle_master",
+                "preview",
+                "attach",
+                "detach",
+                "recover",
+                "status",
+                "assist_detach",
+                "cycle_master",
             ],
         }
 
@@ -587,25 +605,34 @@ def project_home_assistant(
             item for item in catalog.functions if item.product_key == device.product_key
         )
         for descriptor in descriptors:
-            unique_id = _device_function_unique_id(
-                instance_namespace,
-                device.logical_member,
-                descriptor.function,
+            channel_indexes: tuple[int | None, ...] = (
+                (1, 2, 3, 4)
+                if device.product_key == DOSING_PUMP_APP.product_key
+                and descriptor.function in _DOSING_CHANNEL_FUNCTIONS
+                else (None,)
             )
-            potential_identities.add((HomeAssistantPlatform.SENSOR, unique_id))
-            control_platform = _platform_for(descriptor, control_available=True)
-            if control_platform is not HomeAssistantPlatform.SENSOR:
-                potential_identities.add((control_platform, unique_id))
-            entities.append(
-                _project_device_function(
-                    device,
-                    descriptor,
-                    topic_prefix,
-                    instance_namespace=instance_namespace,
-                    control_surface_enabled=control_surface_enabled,
-                    preview_requests_enabled=preview_requests_enabled,
+            for channel_index in channel_indexes:
+                unique_id = _device_function_unique_id(
+                    instance_namespace,
+                    device.logical_member,
+                    descriptor.function,
+                    channel_index=channel_index,
                 )
-            )
+                potential_identities.add((HomeAssistantPlatform.SENSOR, unique_id))
+                control_platform = _platform_for(descriptor, control_available=True)
+                if control_platform is not HomeAssistantPlatform.SENSOR:
+                    potential_identities.add((control_platform, unique_id))
+                entities.append(
+                    _project_device_function(
+                        device,
+                        descriptor,
+                        topic_prefix,
+                        instance_namespace=instance_namespace,
+                        control_surface_enabled=control_surface_enabled,
+                        preview_requests_enabled=preview_requests_enabled,
+                        channel_index=channel_index,
+                    )
+                )
     for descriptor in (item for item in catalog.functions if item.product_key is None):
         potential_identities.add(
             (
@@ -696,13 +723,17 @@ def project_home_assistant(
         topic_prefix=topic_prefix,
         entities=tuple(entities),
         native_wavemaker_members=tuple(
-            device.logical_member for device in manifest.devices
-            if native_lifecycle_enabled and control_surface_enabled
+            device.logical_member
+            for device in manifest.devices
+            if native_lifecycle_enabled
+            and control_surface_enabled
             and device.product_key == LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
         ),
         native_attach_members=tuple(
-            device.logical_member for device in manifest.devices
-            if native_lifecycle_enabled and control_surface_enabled
+            device.logical_member
+            for device in manifest.devices
+            if native_lifecycle_enabled
+            and control_surface_enabled
             and device.product_key == LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
             and all(
                 catalog.find(device.product_key, function).control_exposed_for(
@@ -816,15 +847,18 @@ def _project_device_function(
     instance_namespace: str,
     control_surface_enabled: bool,
     preview_requests_enabled: bool = False,
+    channel_index: int | None = None,
 ) -> HomeAssistantEntityDescriptor:
     base = f"{topic_prefix}/local/devices/{device.logical_member}/functions/{descriptor.function}"
+    if channel_index is not None:
+        base = f"{base}/channels/{channel_index}"
     control_available = control_surface_enabled and descriptor.control_exposed_for(
         device.physical_identity_key
     )
     platform = _platform_for(descriptor, control_available=control_available)
     schedule_request_topic = (
         f"{base}/request"
-        if control_available and descriptor.function == "schedule"
+        if control_available and descriptor.function in {"schedule", "channel_schedule"}
         else None
     )
     control_available = control_available and platform is not HomeAssistantPlatform.SENSOR
@@ -834,8 +868,13 @@ def _project_device_function(
             instance_namespace,
             device.logical_member,
             descriptor.function,
+            channel_index=channel_index,
         ),
-        name=descriptor.exposed_name,
+        name=(
+            descriptor.exposed_name
+            if channel_index is None
+            else f"Channel {channel_index} {descriptor.exposed_name}"
+        ),
         logical_member=device.logical_member,
         function=descriptor.function,
         state_topic=f"{base}/state",
@@ -846,11 +885,14 @@ def _project_device_function(
         entity_category=None if control_available else "diagnostic",
         native_minimum=descriptor.native_minimum,
         native_maximum=descriptor.native_maximum,
+        native_step=descriptor.native_step,
         options=descriptor.choices,
+        channel_index=channel_index,
         schedule_request_topic=schedule_request_topic,
         preview_request_topic=(
             f"{base}/preview"
-            if preview_requests_enabled and (
+            if preview_requests_enabled
+            and (
                 device.product_key in _PREVIEW_PRODUCTS
                 and descriptor.function in {"schedule", "device_clock_sync"}
                 or device.product_key == DOSING_PUMP_APP.product_key
@@ -951,10 +993,15 @@ def _device_function_unique_id(
     instance_namespace: str,
     logical_member: str,
     function: str,
+    *,
+    channel_index: int | None = None,
 ) -> str:
+    suffix = f"{logical_member}_{function.replace('.', '_')}"
+    if channel_index is not None:
+        suffix = f"{suffix}_channel_{channel_index}"
     return _unique_id(
         instance_namespace,
-        f"{logical_member}_{function.replace('.', '_')}",
+        suffix,
     )
 
 
@@ -1025,9 +1072,7 @@ def _validate_unique_schedule_topology(
     schedule_plans: tuple[FreshMasterSchedulePlan, ...],
 ) -> None:
     slave_members = [
-        slave.target.logical_member
-        for plan in schedule_plans
-        for slave in plan.slaves
+        slave.target.logical_member for plan in schedule_plans for slave in plan.slaves
     ]
     if len(slave_members) != len(set(slave_members)):
         raise ValueError("one slave cannot belong to multiple current schedule topologies")

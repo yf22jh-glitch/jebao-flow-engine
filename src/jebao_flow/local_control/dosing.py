@@ -90,7 +90,7 @@ class DailyDosingPlan:
             **self._content_dict(),
             "unused_entry_count": self.unused_entry_count,
             "plan_sha256": self.plan_sha256,
-            "wire_encoding_available": False,
+            "wire_encoding_available": self.app_schedule_preview_available,
             "device_acceptance": "unknown",
             "device_amount_resolution": "unknown",
             "app_direct_amount_step": "1",
@@ -206,7 +206,7 @@ class DosingChannelSchedulePreview:
             "app_display_unit": "mL",
             "physical_unit": "unknown",
             "device_acceptance": "unknown",
-            "wire_send_available": False,
+            "wire_send_available": True,
         }
 
 
@@ -271,7 +271,7 @@ class AverageIntervalDosingPlan:
             "plan_sha256": self.plan_sha256,
             "app_direct_amount_step": "1",
             "app_interval_range": [1, _MAX_APP_INTERVAL_DAYS],
-            "wire_encoding_available": False,
+            "wire_encoding_available": True,
             "device_acceptance": "unknown",
             "interval_device_semantics": "unknown",
         }
@@ -345,9 +345,7 @@ def _common_scale_integers(total: Decimal, step: Decimal) -> tuple[int, int]:
     total_integer = _decimal_coefficient(total) * 10 ** (
         int(total_tuple.exponent) - common_exponent
     )
-    step_integer = _decimal_coefficient(step) * 10 ** (
-        int(step_tuple.exponent) - common_exponent
-    )
+    step_integer = _decimal_coefficient(step) * 10 ** (int(step_tuple.exponent) - common_exponent)
     return total_integer, step_integer
 
 

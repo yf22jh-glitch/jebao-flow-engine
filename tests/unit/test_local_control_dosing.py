@@ -113,7 +113,7 @@ def test_half_milliliter_daily_average_uses_shortest_integer_app_interval() -> N
     assert plan.interval_days == 2
     assert plan.dose_amount == Decimal("1")
     assert plan.public_dict()["method"] == "integer_dose_over_app_interval"
-    assert plan.public_dict()["wire_encoding_available"] is False
+    assert plan.public_dict()["wire_encoding_available"] is True
     assert plan.public_dict()["interval_device_semantics"] == "unknown"
 
 
@@ -172,7 +172,7 @@ def test_integer_daily_plan_materializes_the_exact_app_channel_image() -> None:
         "app_display_unit": "mL",
         "physical_unit": "unknown",
         "device_acceptance": "unknown",
-        "wire_send_available": False,
+        "wire_send_available": True,
     }
     assert "image" not in preview.public_dict()
     assert str(preview.public_dict()).isascii()

@@ -68,7 +68,9 @@ class JournalAction(BaseModel):
     baseline_status_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     expected_readback_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     baseline_readback_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    verification_kind: str = Field(pattern=r"^(scalar_fields|schedule_image|device_clock)$")
+    verification_kind: str = Field(
+        pattern=r"^(scalar_fields|schedule_image|dosing_channel_image|device_clock)$"
+    )
     recovery_policy: Literal["restore_baseline", "observe_clock"] = "restore_baseline"
     restore_on_recovery: StrictBool = True
     native_evidence_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")

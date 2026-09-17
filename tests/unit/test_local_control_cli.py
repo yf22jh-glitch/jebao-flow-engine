@@ -134,7 +134,7 @@ def test_daily_dosing_command_can_publish_digest_only_app_image_metadata(capsys)
     assert preview["datapoint"] == "CH2SWTime"
     assert preview["image_size"] == 96
     assert len(preview["image_sha256"]) == 64
-    assert preview["wire_send_available"] is False
+    assert preview["wire_send_available"] is True
     assert "image" not in preview
     assert output.out.isascii()
 

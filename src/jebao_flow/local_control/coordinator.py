@@ -19,6 +19,7 @@ from jebao_flow.local_control.device_writer import (
     verify_prepared_baseline,
     verify_prepared_readback,
 )
+from jebao_flow.local_control.dosing_controls import DOSING_PUMP_PRODUCT_KEY
 from jebao_flow.local_control.failure_diagnostics import failure_clock_ns, report_action_failure
 from jebao_flow.local_control.install import current_protocol_schema_sha256
 from jebao_flow.local_control.journal import (
@@ -173,7 +174,12 @@ class LocalControlCoordinator:
                     writer.prepare_aquarium_schedule_save(intent, current)
                     if intent.target.product_key == AQUARIUM_PUMP_PRODUCT_KEY
                     and intent.function == "schedule"
-                    else (writer.prepare_scalar(intent, current),)
+                    else (
+                        writer.prepare_dosing_schedule_save(intent, current)
+                        if intent.target.product_key == DOSING_PUMP_PRODUCT_KEY
+                        and intent.function == "channel_schedule"
+                        else (writer.prepare_scalar(intent, current),)
+                    )
                 )
                 record = self._create_record(
                     request_id=intent.request_id,

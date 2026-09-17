@@ -25,6 +25,14 @@ from jebao_flow.local_control.bar_timer import prepare_bar_timer_command
 from jebao_flow.local_control.catalog import internal_function_value
 from jebao_flow.local_control.dc_timer import DcTimerScreen, prepare_dc_timer_command
 from jebao_flow.local_control.device_clock import clock_expectation, clock_readback_matches
+from jebao_flow.local_control.dosing_controls import (
+    DOSING_PUMP_PRODUCT_KEY,
+    decode_dosing_channel_readback,
+    dosing_channel_image_field,
+    encode_dosing_channel_readback,
+    parse_dosing_schedule_value,
+    prepare_dosing_control_command,
+)
 from jebao_flow.local_control.lease import LocalControlSendPermit
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.resolver import ResolvedEndpoint
@@ -157,9 +165,10 @@ _SCALAR_FIELD_BY_PRODUCT: dict[str, dict[str, str]] = {
         "power": "SwitchON",
         "transport_mode": "Mode",
     },
-    # Dosing control remains unavailable because its product schema intentionally has
-    # control_supported=False and no accepted write evidence exists.
-    "5b3c136fd4b74f3fb2a366a254c76c9a": {},
+    DOSING_PUMP_PRODUCT_KEY: {
+        "power": "switch",
+        "calibration_amount": "Calib1",
+    },
 }
 _FLOW_FUNCTIONS = frozenset({"manual_flow", "slave_common_flow", "motor_speed"})
 
@@ -185,7 +194,12 @@ class PreparedDeviceWrite:
             raise ValueError("forward payload must be one control action")
         if not self.rollback_payload or self.rollback_payload[0] != CONTROL_ACTION:
             raise ValueError("rollback payload must be one control action")
-        if self.verification_kind not in {"scalar_fields", "schedule_image", "device_clock"}:
+        if self.verification_kind not in {
+            "scalar_fields",
+            "schedule_image",
+            "dosing_channel_image",
+            "device_clock",
+        }:
             raise ValueError("prepared write verification kind is unsupported")
         if self.recovery_policy not in {"restore_baseline", "observe_clock"}:
             raise ValueError("unsupported recovery policy")
@@ -199,12 +213,29 @@ class PreparedDeviceWrite:
             self.target.target.product_key,
             {},
         ).get("power")
+        expected = (
+            json.loads(self.expected_readback.decode("ascii"))
+            if self.verification_kind == "scalar_fields"
+            else None
+        )
+        safer_power_off = self.function == "power" and expected == {power_field: False}
+        safer_dosing_stop = (
+            self.target.target.product_key == DOSING_PUMP_PRODUCT_KEY
+            and expected is not None
+            and (
+                (
+                    self.function == "manual_channel"
+                    and len(expected) == 1
+                    and next(iter(expected)).startswith("channe")
+                    and next(iter(expected.values())) is False
+                )
+                or (self.function == "calibration" and expected.get("CALSW") is False)
+            )
+        )
         if not self.restore_on_recovery and (
-            self.function != "power"
-            or self.verification_kind != "scalar_fields"
-            or json.loads(self.expected_readback.decode("ascii")) != {power_field: False}
+            self.verification_kind != "scalar_fields" or not (safer_power_off or safer_dosing_stop)
         ):
-            raise ValueError("only an exact power-off action may retain its forward state")
+            raise ValueError("only an exact stop action may retain its forward state")
 
     @property
     def forward_payload_sha256(self) -> str:
@@ -386,6 +417,10 @@ class ConnectedDeviceWriter:
     ) -> PreparedDeviceWrite:
         if not _same_stable_target(intent.target, self.endpoint.target):
             raise ValueError("control intent target does not match the current endpoint")
+        if intent.target.product_key == DOSING_PUMP_PRODUCT_KEY:
+            if intent.function == "channel_schedule":
+                raise ValueError("Dosing channel schedules use the complete-image preparation")
+            return self._prepare_dosing_control(intent, current_status)
         if intent.function == "schedule":
             return self._prepare_wavemaker_schedule(intent, current_status)
         if intent.function == "schedule_reset":
@@ -512,6 +547,80 @@ class ConnectedDeviceWriter:
             # to recreate a less-safe pre-write state.
             restore_on_recovery=not (intent.function == "power" and intent.value is False),
         )
+
+    def _prepare_dosing_control(
+        self,
+        intent: LocalControlIntent,
+        current_status: bytes,
+    ) -> PreparedDeviceWrite:
+        schema = get_product_schema(DOSING_PUMP_PRODUCT_KEY)
+        values = schema.decode_status(current_status)
+        command = prepare_dosing_control_command(intent.function, intent.value, values)
+        expected = dict(command.fields)
+        baseline = {name: values[name] for name in expected}
+        retain_safer_off = (
+            (intent.function == "power" and intent.value is False)
+            or (
+                intent.function == "manual_channel"
+                and isinstance(intent.value, dict)
+                and intent.value.get("value") is False
+            )
+            or (intent.function == "calibration" and intent.value is False)
+        )
+        return PreparedDeviceWrite(
+            target=self.endpoint,
+            function=intent.function,
+            forward_payload=build_control_payload(schema, expected),
+            rollback_payload=build_control_payload(schema, baseline),
+            baseline_status=bytes(current_status),
+            expected_readback=_canonical_values(expected),
+            baseline_readback=_canonical_values(baseline),
+            verification_kind="scalar_fields",
+            no_change=expected == baseline,
+            # A failed stop must never restart master power, a manual dose, or calibration.
+            restore_on_recovery=not retain_safer_off,
+        )
+
+    def prepare_dosing_schedule_save(
+        self,
+        intent: LocalControlIntent,
+        current_status: bytes,
+    ) -> tuple[PreparedDeviceWrite, ...]:
+        """Replace one 96-byte channel image, optionally followed by its interval frame."""
+
+        if (
+            intent.target.product_key != DOSING_PUMP_PRODUCT_KEY
+            or intent.function != "channel_schedule"
+        ):
+            raise ValueError("Dosing schedule save requires its channel_schedule intent")
+        channel, image, interval_days = parse_dosing_schedule_value(intent.value)
+        schema = get_product_schema(DOSING_PUMP_PRODUCT_KEY)
+        values = schema.decode_status(current_status)
+        field = dosing_channel_image_field(channel)
+        baseline_image = values[field]
+        image_action = PreparedDeviceWrite(
+            target=self.endpoint,
+            function="channel_schedule",
+            forward_payload=build_control_payload(schema, {field: image}),
+            rollback_payload=build_control_payload(schema, {field: baseline_image}),
+            baseline_status=bytes(current_status),
+            expected_readback=encode_dosing_channel_readback(channel, image),
+            baseline_readback=encode_dosing_channel_readback(channel, baseline_image),
+            verification_kind="dosing_channel_image",
+            no_change=image == baseline_image,
+        )
+        if interval_days is None:
+            return (image_action,)
+        interval = self._prepare_dosing_control(
+            intent.model_copy(
+                update={
+                    "function": "interval_days",
+                    "value": {"channel": channel, "value": interval_days},
+                }
+            ),
+            current_status,
+        )
+        return image_action, interval
 
     def _aquarium_minute(self) -> int:
         provider = self._device_local_time or self._bar_timer_local_time
@@ -1087,6 +1196,10 @@ class ConnectedDeviceWriter:
 
 
 def verify_prepared_readback(prepared: PreparedDeviceWrite, status: bytes) -> bool:
+    if prepared.verification_kind == "dosing_channel_image":
+        channel, image = decode_dosing_channel_readback(prepared.expected_readback)
+        decoded = get_product_schema(DOSING_PUMP_PRODUCT_KEY).decode_status(status)
+        return decoded[dosing_channel_image_field(channel)] == image
     if prepared.verification_kind == "schedule_image":
         return (
             extract_current_schedule_image(prepared.target.target.product_key, status)
@@ -1110,6 +1223,10 @@ def verify_prepared_baseline(prepared: PreparedDeviceWrite, status: bytes) -> bo
             extract_current_schedule_image(prepared.target.target.product_key, status)
             == prepared.baseline_readback
         )
+    if prepared.verification_kind == "dosing_channel_image":
+        channel, image = decode_dosing_channel_readback(prepared.baseline_readback)
+        decoded = get_product_schema(DOSING_PUMP_PRODUCT_KEY).decode_status(status)
+        return decoded[dosing_channel_image_field(channel)] == image
     schema = get_product_schema(prepared.target.target.product_key)
     decoded = schema.decode_status(status)
     expected = json.loads(prepared.baseline_readback.decode("ascii"))

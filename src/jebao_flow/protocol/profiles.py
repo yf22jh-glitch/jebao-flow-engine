@@ -129,8 +129,7 @@ DC_PUMP_PRO = ProductSchema(
         _uint8(8, "AutoFreq", 7, 0, 100),
         _uint8(9, "AutoFeedTime", 8, 1, 60),
         *tuple(
-            _binary(10 + index, f"AutoTime{index:02d}", 9 + index * 8, 8)
-            for index in range(48)
+            _binary(10 + index, f"AutoTime{index:02d}", 9 + index * 8, 8) for index in range(48)
         ),
         _binary(58, "YMDData", 393, 4),
         _binary(59, "HMSData", 397, 4),
@@ -177,7 +176,6 @@ DOSING_PUMP = ProductSchema(
         _bool(22, "Fault_UART", 0, byte_offset=393, kind=DatapointKind.FAULT),
     ),
     enabled_attribute="switch",
-    control_supported=False,
 )
 
 
@@ -204,8 +202,7 @@ LOCAL_WAVEMAKER = ProductSchema(
         _uint8(12, "AutoFreq", 6, 0, 100),
         _uint8(13, "AutoFeedTime", 7, 1, 60),
         *tuple(
-            _binary(14 + index, f"AutoTime{index:02d}", 8 + index * 8, 8)
-            for index in range(48)
+            _binary(14 + index, f"AutoTime{index:02d}", 8 + index * 8, 8) for index in range(48)
         ),
         _binary(62, "YMDData", 392, 4),
         _binary(63, "HMSData", 396, 4),
@@ -240,8 +237,7 @@ AQUARIUM_PUMP = ProductSchema(
         _binary(9, "YMDData", 5, 4),
         _binary(10, "HMSData", 9, 4),
         *tuple(
-            _binary(11 + index, f"AutoTime{index:02d}", 13 + index * 6, 6)
-            for index in range(48)
+            _binary(11 + index, f"AutoTime{index:02d}", 13 + index * 6, 6) for index in range(48)
         ),
         *_faults(59, 301),
     ),
@@ -307,8 +303,7 @@ LOCAL_WAVEMAKER_PRO = ProductSchema(
         _uint8(11, "Auto_Cust_Wav_Freq", 9, 0, 100),
         _uint8(12, "AutoFeedTime", 10, 1, 60),
         *tuple(
-            _binary(13 + index, f"AutoTime{index:02d}", 11 + index * 9, 9)
-            for index in range(48)
+            _binary(13 + index, f"AutoTime{index:02d}", 11 + index * 9, 9) for index in range(48)
         ),
         _binary(61, "YMDData", 443, 4),
         _binary(62, "HMSData", 447, 4),

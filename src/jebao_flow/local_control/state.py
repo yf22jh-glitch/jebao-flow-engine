@@ -198,7 +198,11 @@ class LocalControlStateProjector:
             if entity.control_available:
                 if entity.platform is HomeAssistantPlatform.BUTTON:
                     continue
-                value = _primary_observed_value(descriptor, decoded)
+                value = _primary_observed_value(
+                    descriptor,
+                    decoded,
+                    channel_index=entity.channel_index,
+                )
                 value = public_function_value(target.product_key, entity.function, value)
                 publications.append(
                     StatePublication(
@@ -219,6 +223,7 @@ class LocalControlStateProjector:
                 descriptor,
                 decoded,
                 schedule,
+                channel_index=entity.channel_index,
             )
             if observed is not None:
                 diagnostic["observed"] = observed
@@ -397,6 +402,8 @@ def _observations_keep_exact_bindings(
 def _primary_observed_value(
     descriptor: LocalFunctionDescriptor,
     decoded: Mapping[str, object],
+    *,
+    channel_index: int | None = None,
 ) -> object | None:
     if descriptor.product_key == "0696a19599bc484f8e1866f5ccf4ee7e" and descriptor.function in {
         "schedule_enable",
@@ -406,6 +413,9 @@ def _primary_observed_value(
         if type(timer) is not bool or type(power) is not bool:
             return None
         return power and (timer if descriptor.function == "schedule_enable" else not timer)
+    dosing_field = _dosing_channel_field(descriptor.function, channel_index)
+    if dosing_field is not None:
+        return decoded.get(dosing_field)
     for field in descriptor.fields:
         if field in decoded:
             return decoded[field]
@@ -417,7 +427,13 @@ def _diagnostic_observation(
     descriptor: LocalFunctionDescriptor,
     decoded: Mapping[str, object],
     schedule: DeviceSchedule | None,
+    *,
+    channel_index: int | None = None,
 ) -> object | None:
+    dosing_field = _dosing_channel_field(descriptor.function, channel_index)
+    if dosing_field is not None:
+        value = decoded.get(dosing_field)
+        return None if value is None else {dosing_field: _json_safe(value)}
     if descriptor.function in {
         "schedule",
         "schedule_reset",
@@ -433,6 +449,25 @@ def _diagnostic_observation(
         if field in decoded
     }
     return selected or None
+
+
+def _dosing_channel_field(function: str, channel_index: int | None) -> str | None:
+    if channel_index is None:
+        return None
+    prefixes = {
+        "manual_channel": "channe",
+        "channel_timer_enable": "Timer",
+        "interval_days": "IntervalT",
+        "channel_schedule": "CH",
+    }
+    prefix = prefixes.get(function)
+    if prefix is None:
+        return None
+    return (
+        f"{prefix}{channel_index}SWTime"
+        if function == "channel_schedule"
+        else f"{prefix}{channel_index}{'ON' if function == 'channel_timer_enable' else ''}"
+    )
 
 
 def _schedule_summary(product_key: str, schedule: DeviceSchedule | None) -> object | None:

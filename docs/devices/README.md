@@ -41,7 +41,7 @@ fresh capture에서 약 0.43초 만에 중단되어 role journal·Linkage write�
 | Aquarium Pump (WiFi+BLE) | 1 | return pump 후보 | 성공 | 미검증 |
 | Local Wavemaker (with AP time-sync) | 1 | wavemaker | 성공 | 미검증 |
 | Local Wavemaker Pro (WiFi+BLE) | 2 | wavemaker | 성공 | 제한 시험·attended 정확 복원, 미승격 |
-| Dosing Pump (no AP time-sync) | 1 | dosing pump, MVP 제외 | 성공 | 미검증 |
+| Dosing Pump (no AP time-sync) | 1 | dosing pump, app-mapped sender 구현 | 성공 | 실기 미검증 |
 
 물리 모델명과 안전한 최소 출력은 장비 라벨 및 저출력 실험으로 별도 확인해야 합니다.
 상세 데이터 포인트 위치는 아직 이 저장소에 복사하지 않았으며, 공개 MIT 구현의 제품

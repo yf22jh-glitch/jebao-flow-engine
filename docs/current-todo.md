@@ -382,8 +382,10 @@ stop-first로 격리한 **별도 유인 operation**으로만 수행한다.
 ### M8 — 수류모터 뒤 제품 확장
 
 - [ ] DC Pump Pro/리턴: active template·manual scalar·schedule coupling·restore·qualification
-- [ ] Aquarium Pump/바형 확장: transport 방향·motor safe range·schedule restore 근거
-- [ ] Dosing Pump: physical volume unit·calibration·interval semantics·write/restore qualification
+- [ ] Aquarium Pump/바형 확장: direct transport sender와 schedule restore 구현 완료;
+  transport 후 연결 유지·motor 물리 수용은 장비별 실기 대기
+- [ ] Dosing Pump: app-mapped write/readback/recovery 구현 완료; physical volume unit·calibration·
+  interval semantics와 장비 수용은 채널별 실기 대기
 - [ ] 앱 없는 Wi-Fi provisioning과 control-mode reconnect restore
 - [ ] 필요할 때만 HA addon/card-native surface를 별도 제품 slice로 결정
 

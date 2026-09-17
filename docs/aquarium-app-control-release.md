@@ -3,6 +3,18 @@
 2026-09-17, DC → Pro → Bar 이후 Aquarium 한 기종만 진행한다. 이 문서는 소프트웨어
 계약이며 실기 기록이 아니다. 이 단계의 장비 송신·새 영수증 발급·운영 교체는 0이다.
 
+## 2026-09-17 현재 정정 — exact identity 활성화
+
+아래의 template/영수증 보류는 당시 artifact-bound 후보에 대한 기록으로 보존한다. 현재 배포
+정책은 freshly derived manifest의 exact product·physical identity와 private config의
+`identity_bound_controls`를 직접 결속하며, cached template나 자격 영수증을 실행 선행조건으로
+사용하지 않는다. 출력 범위, single-send, durable journal, readback 및 rollback은 그대로다.
+
+`transport_mode`도 실행 표면에 포함한다. 이 기능은 vendor-declared `Mode` 한 프레임과 자기
+baseline readback/rollback을 제공한다. 자동 AP/Wireless 재연결·endpoint 인계 기능이라는 뜻은
+아니다. 전환 뒤 현재 transport로 readback할 수 없으면 성공으로 포장하지 않고 operation을
+`UNCERTAIN`으로 남긴다.
+
 ## 근거와 남은 활성본 결속
 
 cached shuibeng 두 사본은 12개 명령 호출부의 계약이 같다. SHA-256은 각각
@@ -30,7 +42,7 @@ vendor productConfig의 digest는
 | schedule_enable OFF | TimerOFF + fresh Motor_Speed |
 | schedule | 전체 48×6-byte image; TimerON이면 별도 두 번째 slot-seed 명령 |
 | device_clock_sync | 설정 시간대의 현재 YMD/HMS, 과거 시각 재송신 없이 관측 복구 |
-| transport_mode | vendor-declared Mode encoder만 구현; AP/Wireless 인계·원복 경로 미구현으로 실행 노출 안 함 |
+| transport_mode | vendor-declared Mode direct write + 자기 readback/rollback; 자동 AP/Wireless 인계는 미주장 |
 
 앱의 급이 스위치는 TimerOFF를 동반한다. 이름 붙은 한 필드만 복원하면 이 부수 효과를
 놓치므로 실제 쓴 persistent 필드의 합집합을 초기 raw에서 복원한다. 급이 경과시간은
@@ -82,19 +94,17 @@ feed 시험은 반대값→원래값→실제로 쓴 필드 원복이다. 타이
 쓴다. 원 시간표의 허용 출력 55/config 60을 되돌린 뒤에도 시험 상한 45로 실패시키지 않는다.
 균일한 전일 trial image가 이미 저장돼 있어도 ON/OFF 두 명령 시험을 막지 않는다.
 
-## 보류 항목 및 재개 조건
+## 당시 보류 항목 및 현재 해석
 
-1. **transport 인계·원복**: 코드가 가진 것은 Mode의 vendor 선언과 인코더뿐이다. 현재
-   AP측 연결을 열거나 전환 후 재발견·원복하는 절차가 없다. 성공하면 반드시 연결이 끊긴다는
-   펌웨어 가설도 확정하지 않는다. (a) 별도 승인된 앱 전환과 read-only capture,
-   (b) 앱/SDK의 AP·Wireless 전송 경로 정적 추적 후 명시적 인계 구현이 대안이다. 그 경로와
-   현장 복구 수단이 확보되면 왕복 시험을 재개한다. 영향은 transport 한 기능의 실행 노출뿐이다.
+1. **transport 인계·원복**: direct Mode command는 현재 노출한다. AP측 연결을 별도로 열거나
+   전환 후 자동 재발견하는 절차는 없으므로, 현장 실기는 연결 변화 가능성을 알고 한 기능씩
+   수행한다. 연결 소실은 성공이 아니라 durable `UNCERTAIN`이다.
 2. **활성 template 바이트**: 실제 loader가 읽는 파일 관측 또는 정확히 resolve된 원본
    배포물을 확보하는 두 경로가 있다. 제품 귀속과 실제 바이트가 확인되기 전에는 cached
    사본으로 실제 자격을 발급하지 않는다. 오프라인 구현·테스트·비활성 image 준비는 계속한다.
 
-따라서 전체 선언 8기능 중 실행 표면 후보는 7종(HA 6 controls + schedule API 1)이며,
-transport encoder/진단 1종을 모두 구현·수용 완료라고 합산하지 않는다.
+현재 전체 선언 8기능은 HA 7 controls + schedule API 1로 projection 가능하다. 이는 software
+surface 완결을 뜻하며 장비 수용을 실증했다는 뜻은 아니다.
 
 ## 검증 및 비활성 후보
 

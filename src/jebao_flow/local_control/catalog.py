@@ -83,9 +83,18 @@ _ENCODABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
             "device_clock_sync",
         }
     ),
-    # The Dosing Pump schema deliberately keeps control_supported=False until captured evidence
-    # establishes its accepted write layout. Its complete app surface remains diagnostic here.
-    "5b3c136fd4b74f3fb2a366a254c76c9a": frozenset(),
+    "5b3c136fd4b74f3fb2a366a254c76c9a": frozenset(
+        {
+            "power",
+            "manual_channel",
+            "channel_timer_enable",
+            "interval_days",
+            "calibration_channel",
+            "calibration",
+            "calibration_amount",
+            "channel_schedule",
+        }
+    ),
 }
 
 # A deterministic byte builder and an end-to-end product surface are different claims. Generic
@@ -145,17 +154,27 @@ _EXECUTABLE_FUNCTIONS_BY_PRODUCT: dict[str, frozenset[str]] = {
     "6a5c47b3ea364ecb841b47f5997a1775": frozenset(
         {
             "power",
+            "transport_mode",
             "feed_switch",
             "motor_speed",
             "feeding_duration",
             "device_clock_sync",
             "schedule",
             "schedule_enable",
-            # Mode has a vendor-declared encoder, but no AP/Wireless handover/return
-            # implementation. A receipt must not silently expose that missing path.
         }
     ),
-    "5b3c136fd4b74f3fb2a366a254c76c9a": frozenset(),
+    "5b3c136fd4b74f3fb2a366a254c76c9a": frozenset(
+        {
+            "power",
+            "manual_channel",
+            "channel_timer_enable",
+            "interval_days",
+            "calibration_channel",
+            "calibration",
+            "calibration_amount",
+            "channel_schedule",
+        }
+    ),
 }
 
 _ENGLISH_NAME_BY_PRODUCT_FUNCTION = {
@@ -179,6 +198,14 @@ _PUBLIC_VALUE_BY_PRODUCT_FUNCTION = {
         "manual_mode",
         "circulation",
     ): "Cross-flow",
+    **{
+        (
+            "5b3c136fd4b74f3fb2a366a254c76c9a",
+            "calibration_channel",
+            f"calibrate_{channel}",
+        ): f"channel_{channel}"
+        for channel in range(1, 5)
+    },
 }
 _INTERNAL_VALUE_BY_PRODUCT_FUNCTION = {
     (product_key, function, public): internal
@@ -198,6 +225,7 @@ class LocalFunctionDescriptor:
     choices: tuple[str, ...]
     native_minimum: int | None
     native_maximum: int | None
+    native_step: int | None
     count: int | None
     item_size: int | None
     encoding_available: bool
@@ -245,6 +273,7 @@ class LocalFunctionDescriptor:
             "choices": list(self.choices),
             "native_minimum": self.native_minimum,
             "native_maximum": self.native_maximum,
+            "native_step": self.native_step,
             "count": self.count,
             "item_size": self.item_size,
             "encoding_available": self.encoding_available,
@@ -377,6 +406,7 @@ def build_local_control_catalog(
                     choices=function.choices,
                     native_minimum=native_minimum,
                     native_maximum=native_maximum,
+                    native_step=function.app_step,
                     count=function.count,
                     item_size=function.item_size,
                     encoding_available=encoding_available,
@@ -413,6 +443,7 @@ def build_local_control_catalog(
                 choices=function.choices,
                 native_minimum=function.app_minimum,
                 native_maximum=function.app_maximum,
+                native_step=function.app_step,
                 count=function.count,
                 item_size=function.item_size,
                 encoding_available=False,
@@ -532,6 +563,17 @@ def internal_function_value(product_key: str, function: str, value: object) -> o
 
 def _validate_value(descriptor: LocalFunctionDescriptor, value: object) -> None:
     kind = descriptor.kind
+    if descriptor.product_key == "5b3c136fd4b74f3fb2a366a254c76c9a" and descriptor.function in {
+        "manual_channel",
+        "channel_timer_enable",
+        "interval_days",
+    }:
+        if not isinstance(value, dict) or set(value) != {"channel", "value"}:
+            raise ValueError("Dosing channel controls require channel and value")
+        channel = value["channel"]
+        if isinstance(channel, bool) or not isinstance(channel, int) or not 1 <= channel <= 4:
+            raise ValueError("Dosing channel must be between 1 and 4")
+        value = value["value"]
     if kind is AppFunctionKind.BOOLEAN:
         if not isinstance(value, bool):
             raise TypeError("boolean app controls require true or false")
@@ -543,6 +585,10 @@ def _validate_value(descriptor: LocalFunctionDescriptor, value: object) -> None:
             raise ValueError("integer app control is below its declared native range")
         if descriptor.native_maximum is not None and value > descriptor.native_maximum:
             raise ValueError("integer app control is above its declared native range")
+        if descriptor.native_step is not None:
+            origin = descriptor.native_minimum or 0
+            if (value - origin) % descriptor.native_step:
+                raise ValueError("integer app control does not match its declared step")
         return
     if kind is AppFunctionKind.ENUM:
         if not isinstance(value, str):

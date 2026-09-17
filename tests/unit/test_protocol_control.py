@@ -45,6 +45,10 @@ def test_control_payload_rejects_fault_and_unknown_datapoints() -> None:
         build_control_payload(LOCAL_WAVEMAKER_PRO, {"missing": 1})
 
 
-def test_control_is_disabled_for_out_of_scope_dosing_pump() -> None:
-    with pytest.raises(ValueError, match="control is not enabled"):
-        build_control_payload(DOSING_PUMP, {"switch": True})
+def test_dosing_control_uses_its_three_byte_flags_and_complete_value_buffer() -> None:
+    payload = build_control_payload(DOSING_PUMP, {"switch": True, "IntervalT3": 7})
+
+    assert len(payload) == 1 + 3 + 391
+    assert payload[1:4] == bytes.fromhex("002001")
+    assert payload[5] & 1
+    assert payload[4 + 4] == 7

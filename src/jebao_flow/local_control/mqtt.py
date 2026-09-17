@@ -20,7 +20,7 @@ import aiomqtt
 from jebao_flow.config import MqttConfig
 from jebao_flow.local_control.catalog import LocalControlCatalog
 from jebao_flow.local_control.coordinator import LocalControlCoordinator, LocalControlResult
-from jebao_flow.local_control.dosing_preview import preview_dosing_plan
+from jebao_flow.local_control.dosing_preview import build_dosing_apply_value, preview_dosing_plan
 from jebao_flow.local_control.group_service import (
     GROUP_FORCED_OFF_WILL_REVERT,
     DirectControlOwnershipDecision,
@@ -213,6 +213,12 @@ class _WavemakerScheduleRoute:
     target: LocalDeviceBinding
 
 
+@dataclass(frozen=True, slots=True)
+class _DosingScheduleRoute:
+    entity: HomeAssistantEntityDescriptor
+    target: LocalDeviceBinding
+
+
 class LocalControlMqttRouter:
     """Route only command topics that were actually projected as qualified controls."""
 
@@ -250,7 +256,10 @@ class LocalControlMqttRouter:
         ):
             raise ValueError("direct ownership and device writes require one shared operation lock")
         device_by_member = {device.logical_member: device for device in manifest.devices}
-        self._routes: dict[str, _ScalarRoute | _ScheduleRoute | _WavemakerScheduleRoute] = {}
+        self._routes: dict[
+            str,
+            _ScalarRoute | _ScheduleRoute | _WavemakerScheduleRoute | _DosingScheduleRoute,
+        ] = {}
         plans_by_topic: dict[str, tuple[FreshMasterSchedulePlan, int]] = {}
         for plan in schedule_plans:
             for slave_index, slave in enumerate(plan.slaves):
@@ -274,7 +283,7 @@ class LocalControlMqttRouter:
                 target = device_by_member.get(entity.logical_member)
                 if target is None:
                     raise ValueError("schedule API is not in the current install manifest")
-                descriptor = catalog.find(target.product_key, "schedule")
+                descriptor = catalog.find(target.product_key, entity.function)
                 if (
                     projection.control_surface_diagnostic_reason is not None
                     or not descriptor.control_exposed_for(target.physical_identity_key)
@@ -282,8 +291,10 @@ class LocalControlMqttRouter:
                     raise ValueError("unqualified device received a schedule request topic")
                 if entity.schedule_request_topic in self._routes:
                     raise ValueError("local-control MQTT command topic is duplicated")
-                self._routes[entity.schedule_request_topic] = _WavemakerScheduleRoute(
-                    entity, target
+                self._routes[entity.schedule_request_topic] = (
+                    _DosingScheduleRoute(entity, target)
+                    if entity.function == "channel_schedule"
+                    else _WavemakerScheduleRoute(entity, target)
                 )
             if entity.command_topic is None:
                 continue
@@ -348,6 +359,8 @@ class LocalControlMqttRouter:
             ) from error
         if isinstance(route, _WavemakerScheduleRoute):
             return await self._handle_wavemaker_schedule(route, payload, coordinator)
+        if isinstance(route, _DosingScheduleRoute):
+            return await self._handle_dosing_schedule(route, payload, coordinator)
         value = _parse_entity_value(route.entity, payload)
         logical_member = (
             route.target.logical_member
@@ -380,11 +393,16 @@ class LocalControlMqttRouter:
             raise LocalControlCommandConflictError(reason)
         request_id = f"mqtt_{secrets.token_hex(16)}"
         if isinstance(route, _ScalarRoute):
+            intent_value = (
+                {"channel": route.entity.channel_index, "value": value}
+                if route.entity.channel_index is not None
+                else value
+            )
             intent = LocalControlIntent(
                 request_id=request_id,
                 target=route.target,
                 function=route.entity.function,
-                value=value,
+                value=intent_value,
             )
             result = await coordinator.execute(intent)
         else:
@@ -407,6 +425,51 @@ class LocalControlMqttRouter:
             result=result,
             ownership=ownership,
         )
+
+    async def _handle_dosing_schedule(
+        self,
+        route: _DosingScheduleRoute,
+        payload: bytes | str,
+        coordinator: LocalControlCoordinator,
+    ) -> RoutedCommandResult | RoutedNativeResult:
+        request = _parse_bounded_json(payload)
+        if not isinstance(request, dict) or set(request) != {"operation", "request_id", "plan"}:
+            raise LocalControlMqttError(
+                "Dosing schedule request requires operation, request_id and plan"
+            )
+        operation = request["operation"]
+        if operation not in {"preview", "apply"}:
+            raise LocalControlMqttError("Dosing schedule operation must be preview or apply")
+        try:
+            request_id = LocalControlIntent.validate_request_id(request["request_id"])
+            planned = build_dosing_apply_value(request["plan"])
+        except (TypeError, ValueError) as error:
+            raise LocalControlMqttError("Dosing plan violates the app schedule contract") from error
+        if planned["channel"] != route.entity.channel_index:
+            raise LocalControlMqttError("Dosing plan channel differs from the command topic")
+        if operation == "preview":
+            return RoutedNativeResult(request_id, operation, preview_dosing_plan(request["plan"]))
+        ownership = (
+            None
+            if self._ownership_service is None
+            else await self._ownership_service.claim_direct_ownership(
+                route.target.logical_member,
+                power_on_requested=False,
+            )
+        )
+        if ownership is not None and not ownership.allowed:
+            raise LocalControlCommandConflictError(
+                ownership.diagnostic_reason or "dosing_schedule_ownership_rejected"
+            )
+        result = await coordinator.execute(
+            LocalControlIntent(
+                request_id=request_id,
+                target=route.target,
+                function="channel_schedule",
+                value=planned,
+            )
+        )
+        return RoutedCommandResult(request_id, None, None, result, ownership)
 
     async def _handle_wavemaker_schedule(
         self,
@@ -544,6 +607,8 @@ class LocalControlMqttRouter:
             request_id = LocalControlIntent.validate_request_id(request["request_id"])
             if field == "plan":
                 result = preview_dosing_plan(request["plan"])
+                if result["plan"]["channel"] != entity.channel_index:
+                    raise ValueError("Dosing plan channel differs from the preview topic")
             elif field == "local_time":
                 result = preview_device_clock(
                     target.product_key, datetime.fromisoformat(request["local_time"])

@@ -46,7 +46,7 @@ _REQUEST = TypeAdapter(
 )
 
 
-def preview_dosing_plan(value: object) -> dict[str, object]:
+def _resolve_dosing_plan(value: object):
     request = _REQUEST.validate_python(value)
     average = None
     if isinstance(request, DailyDosingRequest):
@@ -81,6 +81,25 @@ def preview_dosing_plan(value: object) -> dict[str, object]:
             first_dose_minute=request.first_dose_minute,
             amount_step="1",
         )
+    return request, plan, average
+
+
+def build_dosing_apply_value(value: object) -> dict[str, object]:
+    """Return the exact channel image and optional app interval for one apply request."""
+
+    _request, plan, average = _resolve_dosing_plan(value)
+    if not plan.app_schedule_preview_available:
+        raise ValueError("Dosing apply requires integer app schedule amounts")
+    preview = build_dosing_channel_schedule_preview(plan)
+    return {
+        "channel": plan.channel,
+        "image": list(preview.image),
+        **({"interval_days": average.interval_days} if average is not None else {}),
+    }
+
+
+def preview_dosing_plan(value: object) -> dict[str, object]:
+    request, plan, average = _resolve_dosing_plan(value)
     image = (
         build_dosing_channel_schedule_preview(plan).public_dict()
         if plan.app_schedule_preview_available
@@ -93,7 +112,7 @@ def preview_dosing_plan(value: object) -> dict[str, object]:
         "dose_day_image": image,
         "image_unavailable_reason": None if image is not None else "fractional_or_out_of_app_range",
         "hardware_write": False,
-        "wire_send_available": False,
+        "wire_send_available": image is not None,
         "device_acceptance": "unverified",
         "physical_unit": "unknown",
         "interval_device_semantics": "unknown",

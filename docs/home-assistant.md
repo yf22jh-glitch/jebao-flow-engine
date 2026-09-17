@@ -96,9 +96,10 @@ topic_prefix: jebao-flow/main
 title: 리턴 및 도징
 ```
 
-카드는 서버가 노출한 리턴·도징 엔티티를 자동으로 찾습니다. 리턴펌프는 단순 ON/OFF와 출력,
-도징기는 상태 중심으로 표시합니다. 도징 동작은 실제 모델의 용량·채널·보정 단위를 검증한 뒤에만
-쓰기 기능을 열며, 현재 안전 계약에서는 읽기 전용입니다.
+카드는 서버가 노출한 리턴·도징 엔티티를 자동으로 찾습니다. exact-identity control 배포에서는
+리턴펌프의 앱 대응 제어와 도징기의 전원, 채널별 수동/타이머/interval/시간표, calibration 제어가
+노출됩니다. 도징 schedule은 채널마다 별도 request topic을 사용하고 optimistic state를 쓰지
+않습니다. 물리 투여 단위와 장비 수용은 현장 실기로 별도 판정합니다.
 
 ## Current native discovery observer
 

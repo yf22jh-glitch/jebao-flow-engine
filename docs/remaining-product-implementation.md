@@ -1,5 +1,20 @@
 # 남은 제품 기능 구현 — 2026-09-16
 
+## 2026-09-17 현재 정정
+
+아래 본문은 기능 공백을 발견했을 당시의 계획과 당시 검증 결과다. 이후 정책과 구현은 다음처럼
+바뀌었으며, 이 절이 현재 상태다.
+
+- legacy template/qualification artifact는 control 활성화 선행조건이 아니다. private config가
+  exact product·physical identity별 `identity_bound_controls`를 선언한다.
+- Aquarium `transport_mode`는 vendor-declared `Mode` direct write, exact readback, durable
+  journal/rollback과 HA select까지 연결했다. 자동 AP/Wireless handover는 주장하지 않는다.
+- Dosing의 실제 writable schema에 대응하는 전원, 수동 채널 4개, 타이머 4개, interval 4개,
+  calibration channel/start-stop/amount, 채널별 96-byte schedule sender를 구현했다.
+- Dosing 정수 plan은 preview와 apply가 가능하고 fractional plan은 preview-only다. 제품 schema에
+  존재하지 않는 YMD/HMS clock datapoint는 발명하지 않는다.
+- 배포·discovery 자체는 장비 write 0이다. 실기 수용은 배포 후 한 장비·한 기능씩 별도 기록한다.
+
 사용자는 Aquarium 속도 제어로 공용 writer가 바뀌면 기존 Pro/Bar 자격을 새 버전에서
 갱신해야 한다는 설명에 동의했고, 이어서 "죄다 구현해"라고 요청했다. Claude token limit으로
 Codex가 단독 진행한다. 이는 코드 구현·오프라인 검증 범위이며 새 실기·배포·자격 발급은 아니다.
@@ -12,7 +27,8 @@ Codex가 단독 진행한다. 이는 코드 구현·오프라인 검증 범위�
 
 1. Aquarium `motor_speed`: 기존 Motor_Speed 필드에 앱 30..100 범위 encoder를 연결한다.
    기존 scalar readback·자기 baseline 복구·single-send를 재사용한다. 제품별 qualification
-   경로와 CLI를 추가하되 없는 Flow/Linkage를 만들지 않는다. 자격 없는 HA 제어는 닫힌다.
+   경로와 CLI를 추가하되 없는 Flow/Linkage를 만들지 않는다. 현재는 qualification 대신
+   exact-identity private authorization으로 HA 제어를 연다.
 2. 도징: 이전 요청인 하루 총량/횟수 자동 배분, 1 mL 미만 목표의 여러 날 평균 계획을
    유지하고 HA/MQTT에서 이용 가능한 비전송 계획 API를 연결한다. 확인된 채널 schedule
    이미지는 preview만 제공한다. 실제 투여량과 interval 의미를 추정하지 않는다.
@@ -38,8 +54,9 @@ tests·제품 문서다. `protocol/`, 기존 frozen native 하네스·직접 tes
 - DC schedule mode 1/2와 Aquarium transport bool 방향: 이름 매핑이 미확정이다.
 - clock sync: byte builder는 있으나 계속 흐르는 시각을 무엇으로 검증할지, 과거 시각으로
   되돌리지 않는 복구 계약이 미정이다. 기존 exact scalar 복구로 위장하지 않는다.
-- 도징: protocol schema의 control_supported=False와 미확정 물리 단위·interval semantics는
-  그대로다. 캘리브레이션 10 mL는 0.5 mL wire scale의 근거가 아니다.
+- 도징: 당시 protocol schema의 `control_supported=False`는 sender 부재를 뜻했다. 앱 payload
+  mapping을 구현한 뒤 제거했지만 미확정 물리 단위·interval semantics는 그대로다.
+  캘리브레이션 10 mL는 0.5 mL wire scale의 근거가 아니다.
 
 대안은 (1) 추가 앱 정적 자료·기존 raw를 read-only로 확보하여 shape/의미를 확정하거나,
 (2) 별도 승인된 최소 앱 조작과 raw 관측으로 두 가설을 구분하는 것이다. park 중에는 해당
@@ -55,7 +72,7 @@ native source를 복구·삭제하거나 전역 unfinished 차단을 우회하�
 | Bar/Aquarium 급이시간 | 기존 scalar same/step/원본 복구 producer·CLI | baseline FeedTime 1..60 필요, 0 원본은 쓰기 전 거부; 실제 자격 |
 | Bar/DC/Aquarium 시간표 | 선언 image 준비, A/B 두 image 시험 후 자기 원본 raw image 복구 producer·CLI | 실제 image 수용·원본 복원 자격 후 별도 실행 승격; 현재 HA apply는 계속 닫힘 |
 | Pro/DC 전체 시간표 삭제 | reset → 지정 B image → reset → 자기 원본 raw 복구 producer·CLI | 실제 reset 두 요청의 자격; 기존 executor 재사용 |
-| 도징 | 기존 총량/횟수 및 장기평균 planner의 HA/MQTT 비전송 API | 실제 단위·interval 의미·실행/복구 계약·protocol 동결의 별도 해제 |
+| 도징 | 총량/횟수·장기평균 preview와 정수 image apply, 전원/채널/타이머/interval/calibration sender | 실제 단위·interval 의미와 기능별 live 수용 |
 
 시간표 producer는 임의 baseline을 편집 모델로 다시 해석하지 않는다. 최초 raw image를 모든
 action의 복구 대상으로 먼저 내구화하고 마지막에도 정확히 그 image로 복원한다. 실패한
@@ -82,13 +99,13 @@ jebao-flow-local-qualify run --function schedule_reset --schedule-a empty.json -
 
 - Pro/Bar/DC/Aquarium clock은 preview까지만 있다. 오차·관측 시각·실패 처리 계약 없이
   과거 시각을 exact rollback하는 실행기는 만들지 않았다.
-- Bar timer·feed_switch/pulse_or_tide/linkage와 DC/Aquarium timer·Aquarium feed_switch/transport는
-  기존 encoder 여부와 별개로 결합 동작·원본 복원 또는 방향 근거가 부족하다. 기존 진단과
-  이미 있는 gated executor는 유지하고 새 자격을 발명하지 않았다.
+- Bar timer·feed_switch/pulse_or_tide/linkage와 DC/Aquarium timer·Aquarium feed_switch는
+  제품별 app shape와 자기 원본 복구 경로가 구현됐다. Aquarium transport는 direct Mode
+  명령으로 노출하되 자동 네트워크 인계를 주장하지 않는다.
 - DC schedule mode 1/2는 계속 거부한다. 구현된 constant/random/feed image와 별개다.
-- 도징 power/manual/timer/interval/calibration/channel schedule의 live write는 여전히 없다.
-  기존 frozen protocol의 `control_supported=False`를 바꾸거나 별도 sender로 우회하지 않았다.
-  계획 API는 실제 자동 투여가 아니며 캘리브레이션을 했다고 주장하지 않는다.
+- 도징 power/manual/timer/interval/calibration/channel schedule은 이후 app-mapped sender와
+  HA/MQTT route가 구현됐다. 계획 API의 preview는 여전히 write 0이며, apply만 durable writer를
+  사용한다. 이 구현 자체를 실제 투여 수용이나 캘리브레이션 완료로 주장하지 않는다.
 - 앱 외 Wi-Fi provisioning, 초기화, native 실기 질문 Q1/Q2, 현재 Pro 미완료 source의 정리는
   이 요청의 기능 코딩으로 수행하지 않는다. 특히 마지막 live source의 전역 차단은 유지된다.
 
@@ -100,7 +117,7 @@ jebao-flow-local-qualify run --function schedule_reset --schedule-a empty.json -
 
 - 관련 suite **417 passed**. 기존 Pro/Bar/DC/Aquarium 회귀, 각 실제 모델의 own-baseline
   복구, schedule 세 phase 및 reset 실패의 receipt 0/no-resend, CLI 선택, HA 물리 identity
-  자격 격리, 도징 observer 요청과 금지된 apply 거부를 포함한다.
+  identity 격리, 도징 채널별 preview/apply와 channel mismatch 거부를 포함한다.
 - 전체 suite **3139 passed, 5 failed, 2 warnings**. `/proc/.../boot_id` 없는 macOS의 boot-id
   시험 하나, receipt claim 동시성 두 시험, umask 077 조건의 directory-mode 두 시험이
   실패했다. 이전 baseline과 같은 실패 형상이며 이번에 수정하지 않았다. 전체 PASS가 아니다.

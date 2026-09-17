@@ -71,12 +71,13 @@ again before journal creation. The list is effective only with `runtime.mode: co
 `allow_hardware_writes: true`.
 
 This identity-bound path does not bypass output ranges, single-send handling, the deployment-wide
-lease, the durable journal, or rollback/recovery. It also does not turn a function without a sender
-into a control: the Dosing Pump remains read-only, and Aquarium `transport_mode` remains excluded
-because the runtime has no handover/return implementation. Legacy version/content-bound control
-bindings remain readable for existing deployments, but they are optional and are not required by
-an identity-bound deployment. Public catalog and HA output expose only counts, never physical
-identity keys.
+lease, the durable journal, or rollback/recovery. All app-mapped Dosing controls and Aquarium
+`transport_mode` now have send/readback paths and can be exposed for one exact physical identity.
+Aquarium transport is one direct `Mode` command, not an automatic AP/Wireless connection handover;
+if the command changes reachability before readback, the journal remains `UNCERTAIN` instead of
+claiming success. Legacy version/content-bound control bindings remain readable for existing
+deployments, but they are optional and are not required by an identity-bound deployment. Public
+catalog and HA output expose only counts, never physical identity keys.
 
 ## Priority schedule behavior
 
@@ -870,12 +871,13 @@ term means the device accepted a write.
 | Local Wavemaker Pro | power, timer, four linkage roles, nine modes, Flow, Frequency, custom frequency, feeding, 48x9 schedule, common slave Flow, per-slot slave Flow extension, current schedule status, reset, clock, faults | scalar and schedule `ENC/DEC`; exact reset executable after per-device qualification; per-slot local composition implemented; accepted `0` |
 | Local Wavemaker | power, timer, feed switch, pulse/tide, three linkage roles, four modes, Flow, Frequency, feeding, 48x8 schedule, current schedule status, clock, faults | scalar `ENC/DEC`; full-image schedule and clock `ENC/DEC` but diagnostic-only until an execution contract exists; no separate app reset action; accepted `0` |
 | DC Pump Pro | power, timer, five manual modes, Flow, Frequency, feeding, 48x8 schedule, current schedule status, reset, clock, faults | scalar and schedule `ENC/DEC`; exact reset executable after per-device qualification; schedule mode codes 1/2 and timer coupling remain unknown; accepted `0` |
-| Aquarium Pump | power, transport mode, feed switch, motor speed, feeding, 48x6 schedule, current schedule status, clock, faults | known scalar plus full-image schedule and clock `ENC/DEC`; transport direction, motor safe range, and timer coupling remain unknown; no separate app reset action; accepted `0` |
-| Dosing Pump | power, four manual channels, four timers, intervals, calibration channel/value/duration, four 24-entry schedules, faults | channel images `DEC` and exact app-shaped preview available; sending remains disabled; accepted `0` |
+| Aquarium Pump | power, transport mode, feed switch, motor speed, feeding, 48x6 schedule, current schedule status, clock, faults | scalar, full-image schedule, clock, and direct transport `ENC/DEC`; transport reachability after a mode change remains a live observation question; no separate app reset action; accepted `0` |
+| Dosing Pump | power, four manual channels, four timers, intervals, calibration channel/value/duration, four 24-entry schedules, faults | app-derived scalar and per-channel 96-byte schedule `ENC/DEC`; integer plan apply is journalled; physical dose unit and device acceptance remain unverified; accepted `0` |
 
 ### Automatic daily dosing planner
 
-The local runtime also includes a wire-free dosing planner for the four-channel Dosing Pump. It
+The local runtime includes a pure dosing planner for the four-channel Dosing Pump. Planning itself
+is wire-free; only the explicit identity-bound apply route sends an integer result. The planner
 accepts a channel, exact daily amount, dose count (`1..24` from the audited app-derived per-channel
 layout, not yet a wire claim), first dose time, and explicit amount
 step. It spaces the requested doses evenly across 24 hours, balances individual amounts within one
@@ -896,10 +898,10 @@ that the app schedule stores each dose as `[hour, minute, volume_uint16_be]`, la
 milliliters, applies no fractional scale, and accepts integer input. The smallest positive value the
 app can express directly is therefore `1 mL`; a `0.5 mL` planned dose is never rounded or encoded.
 
-For an integer-milliliter plan, `--app-image-preview` materializes the exact 96-byte
-`CHnSWTime` image (`24 x 4`) and publishes only its layout, size, and SHA-256. It still reports
-`wire_send_available=false`, `physical_unit=unknown`, and `device_acceptance=unknown`; no Dosing
-write path exists. A fractional plan is rejected by this preview instead of being silently scaled.
+For an integer app-unit plan, `--app-image-preview` materializes the exact 96-byte `CHnSWTime`
+image (`24 x 4`). The same image can be sent through the identity-bound `channel_schedule` apply
+route, which journals and verifies only that channel and optionally writes its interval as a second
+action. Fractional plans remain preview-only and are never silently rounded or scaled.
 
 The app calibration input is exactly `10, 20, ..., 100`; the observed `10 mL` calibration is its
 minimum reference value, not a fractional schedule scale. The read-only `time1` datapoint is exposed
@@ -911,10 +913,11 @@ For example, a `0.5 mL/day` target becomes a local plan of `1 mL` every `2` days
 interval picker as Days, but the vendor definition declares no unit and there is no accepted device
 write, so `interval_device_semantics` and `device_acceptance` remain `unknown`.
 
-The same plans are now available through the existing HA/MQTT diagnostic preview route; see
-[the dosing planning API](pump-mqtt-apis.md#도징-계획-api-추가). It accepts exact decimal amounts,
-returns the planned times and quantities, and never sends a dose, changes calibration, or installs
-a device timer. In average-interval mode the requested count applies to each dose day, not every day.
+The same plans are available through the HA/MQTT preview and apply routes; see
+[the dosing planning API](pump-mqtt-apis.md#도징-계획-api-추가). Preview never writes. Apply accepts
+only an integer image, uses a caller-supplied request id, and enters the same durable single-send
+coordinator as other controls. In average-interval mode the requested count applies to each dose
+day, not every day.
 
 The packet version recorded by product documents and the GAgent frame magic are different fields.
 The former is not used to replace protocol magic `0x00000003`.
@@ -939,13 +942,12 @@ mapped by product-specific datapoint fingerprints and content digest. The actual
 template selection remains unresolved, but findings shared by the audited retained versions do not
 depend on choosing the newest cache entry.
 
-Static app dataflow now fixes the four schedule geometries, the zero-prefixed HMS clock command,
-the product-specific single-slot versus full-image save forms, and the `0xEE` unused sentinel. Pro
-and DC expose separate all-slot reset actions; Bar and Aquarium do not. Pro timer enable also writes
-inverse `SwitchON` and detaches a current slave to `independent`. DC has two conflicting timer
-couplings, while Bar and Aquarium include current `Auto*` fields, so those three timer controls stay
-diagnostic. Pro manual mode code 6 is exposed in English as `Cross-flow`; DC schedule mode codes 1
-and 2 remain unresolved even though its manual mode map is known.
+Static app dataflow fixes the five product schedule geometries, the zero-prefixed HMS clock command
+where that product schema declares clock fields, the product-specific channel/full-image save
+forms, and the `0xEE` unused sentinel. Pro and DC expose separate all-slot reset actions; Bar and
+Aquarium do not. Product-specific compound timer commands are preserved rather than reduced to a
+generic boolean. Pro manual mode code 6 is exposed in English as `Cross-flow`; DC schedule mode
+codes 1 and 2 remain unresolved even though its manual mode map is known.
 
 The catalog therefore keeps unsupported or unresolved functions visible with an English diagnostic
 reason. It does not invent a hidden control, a firmware rejection gate, or a fake successful action.
@@ -1050,18 +1052,19 @@ a claim of excessive physical command rate, or a reason to invent a firmware tim
 Actual per-device send timing and any separately justified pacing change remain open. No
 source, configuration, or write-path guard was changed to obtain this result.
 
-## Still requiring evidence
+## Still requiring live evidence
 
-The code is ready for isolated and simulator review, but hardware controls remain hidden until
-qualification. The next evidence work should prioritize:
+Exact-identity controls may be deployed without legacy qualification/template artifacts. That
+activation decision does not claim hardware acceptance. Live work remains one device and one
+operator-approved operation at a time; the next evidence work should prioritize:
 
 1. accepted captures for Pro scalar and schedule writes;
 2. a bounded Sync/Async per-slot Flow test with exact ACK and readback;
 3. product acceptance for the statically derived reset, schedule, and clock payloads;
 4. DC Pump Pro schedule mode codes 1/2 and its two timer coupling paths;
 5. Bar and Aquarium timer writes that include current `Auto*` fields;
-6. Aquarium transport boolean direction and motor safe range;
-7. Dosing Pump volume code physical unit, calibration relation, interval semantics, and write
+6. Aquarium transport change reachability and motor physical acceptance;
+7. Dosing Pump volume code physical unit, calibration relation, interval semantics, and device
    acceptance;
 8. the P0 attribute-flag bit order as a retained wire-level differential.
 

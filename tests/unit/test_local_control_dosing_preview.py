@@ -24,7 +24,7 @@ def test_daily_dosing_preserves_requested_total_count_and_app_image():
     assert sum(Decimal(entry["amount"]) for entry in entries) == Decimal("13")
     assert len(entries) == 4 and result["dose_day_image"]["image_size"] == 96
     assert result["dose_day_image"]["datapoint"] == "CH3SWTime"
-    assert result["hardware_write"] is False and result["wire_send_available"] is False
+    assert result["hardware_write"] is False and result["wire_send_available"] is True
 
 
 def test_fractional_dosing_remains_exact_local_plan_not_rounded_wire_image():
@@ -98,8 +98,9 @@ def test_dosing_request_rejects_ambiguous_amounts_and_unknown_operations(changes
 
 async def test_dosing_mqtt_in_observer_mode_does_not_need_coordinator_or_write_opt_in():
     router = _router(DOSING_PUMP_APP.product_key)
-    topic = "jebao-flow/main/local/devices/pump/functions/channel_schedule/preview"
-    assert router.command_topics == () and router.request_topics == (topic,)
+    topic = "jebao-flow/main/local/devices/pump/functions/channel_schedule/channels/4/preview"
+    assert router.command_topics == () and len(router.request_topics) == 4
+    assert topic in router.request_topics
     request = {
         "request_id": "dosing_preview_01",
         "plan": {"method": "daily", "channel": 4, "daily_amount": "12", "dose_count": 4},
@@ -113,3 +114,14 @@ async def test_dosing_mqtt_in_observer_mode_does_not_need_coordinator_or_write_o
             await router.handle(topic, json.dumps({**request, **forbidden}))
     replay = await router.handle(topic, json.dumps(request))
     assert replay.result == response.result
+
+
+async def test_dosing_preview_topic_rejects_a_different_channel():
+    router = _router(DOSING_PUMP_APP.product_key)
+    topic = "jebao-flow/main/local/devices/pump/functions/channel_schedule/channels/1/preview"
+    request = {
+        "request_id": "dosing_preview_02",
+        "plan": {"method": "daily", "channel": 2, "daily_amount": "12", "dose_count": 4},
+    }
+    with pytest.raises(LocalControlMqttError):
+        await router.handle(topic, json.dumps(request))

@@ -27,16 +27,19 @@ validation:
 
 capabilities:
   observed_readable: [switch, channe1, channe2, channe3, channe4]
-  schema_declared_writable: [switch, channe1, channe2, channe3, channe4, calibration, schedules]
+  schema_declared_writable:
+    [switch, channe1, channe2, channe3, channe4, timers, intervals, calibration, schedules]
   write_validated: []
   faults_present: [UART]
 
 scope:
-  mvp_included: false
-  reason: Dosing control is outside the initial wavemaker and return-pump MVP.
+  mvp_included: true
+  reason: App-mapped local sender and exact-identity HA surface are implemented; live acceptance is pending.
 
 evidence:
   captured_at: 2026-08-25
   capture_environment: isolated IoT VLAN through home server and router
   notes:
     - One device returned a complete 394-byte status payload.
+    - Static app payloads cover power, four manual channels, four timers, intervals, calibration, and four 96-byte channel schedules.
+    - The product schema has no YMDData/HMSData datapoints, so no Dosing clock sender is invented.

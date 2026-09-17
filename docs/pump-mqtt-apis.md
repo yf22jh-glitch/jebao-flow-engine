@@ -1,4 +1,9 @@
-# 펌프 MQTT API — native lifecycle와 읽기 전용 미리보기
+# 펌프 MQTT API — native lifecycle, preview와 exact-identity apply
+
+2026-09-17 현재: legacy template/영수증은 exact-identity control의 선행조건이 아니다.
+`identity_bound_controls`에 등록된 실물만 command topic을 받으며, 도징 정수 계획은 채널별
+preview/apply를 제공한다. Aquarium transport는 direct Mode control로 노출하지만 자동 네트워크
+인계를 약속하지 않는다.
 
 후속 운영 연결: [2026-09-16 observer 배포](runs/2026-09-16-observer-preview-deployment.md).
 상태 조회·11개 preview topic만 활성화됐고 아래 native/apply 명령은 운영에 열리지 않았다.
@@ -121,14 +126,13 @@ native 예외는 바깥 `status: failed`와 보존 가능한 durable 진단을 �
 요청·신원 불일치 등은 기존 `<prefix>/local/status`에 안전한 reason으로 거부되므로 request별
 응답을 항상 보장하지 않는다. 응답 없음은 성공도 재전송 허가도 아니다.
 
-리턴모터의 기존 scalar encoder/executor와 HA 진단은 보존한다. 이번에 schedule·clock을 live
-조작으로 승격하지 않는다. Bar timer의 Auto 필드 결합, DC timer/mode 1·2, Aquarium transport
-방향·속도 범위·feed 동작, clock 검증은 미확정이다. 앱 근거와 승인된 장비 검증이 필요하다.
+리턴모터의 scalar/schedule/clock executor와 HA 진단은 보존한다. exact-identity 설정은 이
+표면을 자격 영수증 없이 열 수 있지만, 배포 자체는 장비 프레임을 보내지 않는다. Aquarium
+transport는 direct command이며 전환 후 연결 유지나 자동 handover를 증명하지 않는다.
 
 도징기는 [기존 요구 및 planner](local-control.md#automatic-daily-dosing-planner)를 따른다.
-하루 총량·횟수의 exact Decimal 분배와 정수 투입량의 여러 날 평균 계획은 이미 있다.
-1mL 미만을 몰래 반올림·배율 변경하지 않으며 calibration의 10mL를 시간표 최소량으로 혼동하지
-않는다. 도징 live write와 임의 신규 정책은 이번 변경에 넣지 않았다.
+하루 총량·횟수의 exact Decimal 분배와 정수 투입량의 여러 날 평균 계획을 유지한다. 정수 계획은
+채널별 96-byte image로 apply할 수 있고, 소수 계획은 몰래 반올림하지 않고 preview-only다.
 
 ## 보류의 영향과 재개 조건
 
@@ -142,15 +146,18 @@ Aquarium 전원의 별도 상태 모델을 추가했다. 실제 receipt 발급�
 재개에는 해당 계약·근거와 실기 operation별 maintainer/on-site 승인이 필요하다. 그동안 기존
 qualified 기능은 유지하고 나머지는 진단·미리보기까지만 제공한다. 새 receipt나 실행 승격은 없다.
 
-Clock은 (1) maintainer가 진행 시각의 허용 오차·readback·실패 후 처리 계약을 결정한 뒤 구현하거나,
-(2) 계속 미리보기로 두고 앱에서 시각을 관리할 수 있다. 현재는 후자에 해당하며 clock apply는 없다.
-도징은 보존된 요구를 유지하되 추가 조건과 interval의 실제 의미를 확인하기 전 live write를 열지 않는다.
+도징 제품 schema에는 YMDData/HMSData datapoint가 없어 generic 앱 template의 clock 호출을 이
+제품용으로 인코딩하지 않는다. 이는 빠뜨린 sender가 아니라 제품 schema에 주소가 없는 명령이다.
 
 ## 도징 계획 API 추가
 
-`channel_schedule` 진단의 `preview_request_topic`에 다음 요청을 보낸다. 경로는
-`<prefix>/local/devices/<logical_member>/functions/channel_schedule/preview`이며 observer 모드에서도
-사용할 수 있다. 별도 화면이나 HA custom integration은 없다. 결과 topic은 위 공통 규칙을 따른다.
+`channel_schedule`은 채널별 entity다. preview 경로는 아래이고 observer에서도 사용할 수 있다.
+control mode에서 exact identity가 허용된 같은 entity에는 `/request` apply 경로가 추가된다.
+
+```text
+<prefix>/local/devices/<logical_member>/functions/channel_schedule/channels/<1..4>/preview
+<prefix>/local/devices/<logical_member>/functions/channel_schedule/channels/<1..4>/request
+```
 
 ```json
 {
@@ -187,10 +194,15 @@ Clock은 (1) maintainer가 진행 시각의 허용 오차·readback·실패 후 
 횟수다. 3회면 정확한 평균을 유지하는 가장 짧은 간격인 6일에 1 mL씩 3회다. 30일 이내에
 정수 dose로 표현할 수 없으면 거부하며 기약 없는 반올림은 하지 않는다.
 
-결과에는 개별 시간·양, 계획 digest, 가능한 경우 96-byte 채널 이미지의 크기/digest가 있다.
-항상 `hardware_write=false`, `wire_send_available=false`, `calendar_schedule_installed=false`이며
-physical unit와 장비 interval 의미는 unknown이다. power/manual dose/timer/calibration/apply
-명령은 이 API에 없다. 실제 장비 상태로 계획 값을 낙관적으로 발행하지 않는다.
+preview 결과에는 개별 시간·양, 계획 digest, 가능한 경우 96-byte 채널 이미지의 크기/digest가
+있다. `hardware_write=false`이며 정수 image이면 `wire_send_available=true`, 소수이면 false다.
+실제 장비 상태로 계획 값을 낙관적으로 발행하지 않는다.
+
+apply는 같은 JSON에 `"operation":"apply"`를 추가해 `/request`로 보낸다. topic의 채널과 plan channel이 다르면
+첫 write 전에 거부한다. 정수 image만 허용하며 journal에 해당 `CHnSWTime` 전체 원본과 forward를
+먼저 저장한 뒤 한 번 전송하고 exact readback을 확인한다. average-interval plan은 image 다음에
+그 채널 `IntervalTn`을 별도 두 번째 action으로 보낸다. ACK 뒤 readback 실패 시 forward를 다시
+보내지 않고 해당 채널 원 image만 복구한다. 이미 배출된 액체를 회수했다는 뜻은 아니다.
 
 후속 구현·현재 보류 목록은 [남은 제품 구현](remaining-product-implementation.md)을 따른다.
 Aquarium 속도 writer 및 compiler 지문 결속이 추가돼 새 버전의 schema digest가 바뀐다.

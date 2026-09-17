@@ -369,7 +369,7 @@ def test_identity_bound_controls_reject_non_executable_or_invalid_entries() -> N
     with pytest.raises(ValueError, match="not an executable encoded function"):
         build_local_control_catalog(
             identity_control_authorizations={
-                (AQUARIUM_PUMP_APP.product_key, "transport_mode"): (identity,)
+                (DOSING_PUMP_APP.product_key, "fault_status"): (identity,)
             }
         )
     with pytest.raises(ValueError, match="not in the product-scoped app catalog"):
@@ -431,6 +431,7 @@ def test_identity_authority_can_cover_every_implemented_product_function() -> No
         },
         AQUARIUM_PUMP_APP.product_key: {
             "power",
+            "transport_mode",
             "schedule_enable",
             "feed_switch",
             "motor_speed",
@@ -438,7 +439,16 @@ def test_identity_authority_can_cover_every_implemented_product_function() -> No
             "schedule",
             "device_clock_sync",
         },
-        DOSING_PUMP_APP.product_key: set(),
+        DOSING_PUMP_APP.product_key: {
+            "power",
+            "manual_channel",
+            "channel_timer_enable",
+            "interval_days",
+            "calibration_channel",
+            "calibration",
+            "calibration_amount",
+            "channel_schedule",
+        },
     }
     catalog = build_local_control_catalog(
         current_content=_content().model_copy(update={"template_sha256": ()}),
