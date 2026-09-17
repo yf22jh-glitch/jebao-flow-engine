@@ -28,7 +28,13 @@ from tests.unit.test_local_control_wavemaker_lifecycle import Rig, _plan
 
 
 def _setup(
-    rig, *, native=True, control=True, qualified=True, targets=None, ownership=None,
+    rig,
+    *,
+    native=True,
+    control=True,
+    qualified=True,
+    targets=None,
+    ownership=None,
     previews=False,
 ):
     content = InstallContentBindings(
@@ -180,7 +186,8 @@ async def test_native_observation_pause_is_not_automatically_restored_or_retried
     rig = Rig(tmp_path)
     projection, router = _setup(rig)
     command = _request(
-        "attach", plan=_plan("async").model_dump(mode="json"),
+        "attach",
+        plan=_plan("async").model_dump(mode="json"),
         await_operator_observation=True,
     )
     first = await router.handle(_topic(projection), command)
@@ -211,8 +218,10 @@ async def test_native_master_cycle_result_does_not_clear_original_uncertain_deli
     lost_reply(rig)
     projection, router = _setup(rig)
     result = await router.handle(
-        _topic(projection), _request(
-            "attach", plan=_plan("async").model_dump(mode="json"),
+        _topic(projection),
+        _request(
+            "attach",
+            plan=_plan("async").model_dump(mode="json"),
             master_cycle_on_async_failure=True,
         ),
     )
@@ -230,6 +239,27 @@ async def test_native_master_cycle_result_does_not_clear_original_uncertain_deli
     assert rig.store.load("mqtt_native_0001") == source
 
 
+async def test_native_routes_owned_master_power_cycle_without_touching_slave(tmp_path):
+    from tests.unit.test_local_control_wavemaker_master_cycle import attach, lost_reply
+
+    rig = Rig(tmp_path)
+    lost_reply(rig)
+    await attach(rig)
+    writes = len(rig.sent)
+    projection, router = _setup(rig)
+    assert "cycle_master_power" in projection.native_wavemaker_api["operations"]
+
+    result = await router.handle(
+        _topic(projection),
+        _request("cycle_master_power", record_id="cycle_source_01"),
+    )
+    assert not result.failed and result.result["accepted"]
+    assert [(row[0], row[1]) for row in rig.sent[writes:]] == [
+        ("master", {"SwitchON": False}),
+        ("master", {"SwitchON": True}),
+    ]
+
+
 async def test_native_group_conflict_never_reaches_controller(tmp_path):
     rig = Rig(tmp_path)
     ownership = _OwnershipService(
@@ -242,7 +272,7 @@ async def test_native_group_conflict_never_reaches_controller(tmp_path):
     assert rig.store.load("mqtt_native_0001") is None
 
 
-@pytest.mark.parametrize("operation", ["status", "detach", "recover"])
+@pytest.mark.parametrize("operation", ["status", "detach", "recover", "cycle_master_power"])
 async def test_native_record_requires_current_physical_binding(tmp_path, operation):
     rig = Rig(tmp_path)
     await rig.attach(request_id="native_existing")
@@ -343,20 +373,28 @@ async def test_fresh_diagnostics_preserve_observed_truth_and_all_api_addresses(t
     projection, router = _setup(rig, previews=True)
     client = _Client()
     entity = next(
-        entity for entity in projection.entities
+        entity
+        for entity in projection.entities
         if entity.logical_member == "master" and entity.function == "schedule"
     )
     observed = {"active_slot_count": 0, "entries": []}
     adapter = LocalControlMqttAdapter(
         MqttConfig(host="broker.invalid", topic_prefix="jebao-flow/main"),
-        projection=projection, router=router,
+        projection=projection,
+        router=router,
         state_poller=SimpleNamespace(logical_members=("master", "slave")),
     )
-    await adapter._publish_fresh_state(client, FreshDeviceState(
-        logical_member="master", available=True,
-        observed_at=datetime(2026, 9, 16, tzinfo=UTC),
-        publications=(StatePublication(entity.state_topic, json.dumps({"observed": observed})),),
-    ))
+    await adapter._publish_fresh_state(
+        client,
+        FreshDeviceState(
+            logical_member="master",
+            available=True,
+            observed_at=datetime(2026, 9, 16, tzinfo=UTC),
+            publications=(
+                StatePublication(entity.state_topic, json.dumps({"observed": observed})),
+            ),
+        ),
+    )
     payload = json.loads(client.published[0][1])
     assert payload["observed"] == observed
     assert payload["native_wavemaker_api"] == projection.native_wavemaker_api

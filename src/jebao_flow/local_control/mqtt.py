@@ -567,6 +567,8 @@ class LocalControlMqttRouter:
                 result = await controller.assist_detach(request_id=record_id, targets=targets)
             elif operation == "cycle_master":
                 result = await controller.cycle_master(request_id=record_id, targets=targets)
+            elif operation == "cycle_master_power":
+                result = await controller.cycle_master_power(request_id=record_id, targets=targets)
             else:
                 result = await controller.recover_native(request_id=record_id, targets=targets)
         except (OSError, RuntimeError, ValueError):
@@ -1237,7 +1239,13 @@ def _parse_native_request(payload: bytes | str) -> dict:
             optional = {"await_operator_observation", "master_cycle_on_async_failure"}
     elif operation == "detach":
         required.add("attachment_id")
-    elif operation in ("status", "recover", "assist_detach", "cycle_master"):
+    elif operation in (
+        "status",
+        "recover",
+        "assist_detach",
+        "cycle_master",
+        "cycle_master_power",
+    ):
         required.add("record_id")
     else:
         raise LocalControlMqttError("unsupported native operation")

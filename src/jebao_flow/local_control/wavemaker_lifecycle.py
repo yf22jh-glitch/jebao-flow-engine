@@ -66,6 +66,10 @@ def native_master_cycle_request_id(attach_id: str) -> str:
     return "wm_cycle_" + hashlib.sha256(attach_id.encode("ascii")).hexdigest()
 
 
+def native_master_power_cycle_request_id(attach_id: str) -> str:
+    return "wm_power_" + hashlib.sha256(attach_id.encode("ascii")).hexdigest()
+
+
 class NativeOriginal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -78,7 +82,13 @@ class NativeContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     version: Literal[1] = 1
-    kind: Literal["attach", "detach", "detach_assist", "master_link_cycle_v1"]
+    kind: Literal[
+        "attach",
+        "detach",
+        "detach_assist",
+        "master_link_cycle_v1",
+        "master_power_cycle_v1",
+    ]
     attach_request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,128}$")
     source_context_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     schema_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -88,6 +98,8 @@ class NativeContext(BaseModel):
     activation_sequence: Literal["staged_roles_v1"] | None = None
     await_operator_observation: Literal[True] | None = None
     master_cycle_on_async_failure: Literal[True] | None = None
+    power_cycle_basis_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    power_off_seconds: Literal[10] | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_assistance(self, handler):
@@ -100,6 +112,10 @@ class NativeContext(BaseModel):
             result.pop("await_operator_observation", None)
         if self.master_cycle_on_async_failure is None:
             result.pop("master_cycle_on_async_failure", None)
+        if self.power_cycle_basis_sha256 is None:
+            result.pop("power_cycle_basis_sha256", None)
+        if self.power_off_seconds is None:
+            result.pop("power_off_seconds", None)
         return result
 
 
@@ -399,11 +415,15 @@ class NativeWavemakerController(LocalControlCoordinator):
     def _owned_cycle_ids(self, context):
         if context.master_cycle_on_async_failure is not True:
             return ()
-        request_id = native_master_cycle_request_id(context.attach_request_id)
-        record = self._journal.load(request_id)
-        if record is not None:
-            self._context(record)
-        return (request_id,)
+        request_ids = (
+            native_master_cycle_request_id(context.attach_request_id),
+            native_master_power_cycle_request_id(context.attach_request_id),
+        )
+        for request_id in request_ids:
+            record = self._journal.load(request_id)
+            if record is not None:
+                self._context(record)
+        return request_ids
 
     async def cycle_master(self, *, request_id, targets):
         """Resume only this explicitly opted-in source's two master-only actions."""
@@ -426,6 +446,32 @@ class NativeWavemakerController(LocalControlCoordinator):
             )
             self._validate_endpoints(tuple(o.target for o in context.originals), endpoints)
             return await cycle_locked(self, source, context, endpoints, permit)
+
+    async def cycle_master_power(self, *, request_id, targets):
+        """Power-cycle only the owned master while preserving the pending Async source."""
+
+        from jebao_flow.local_control.wavemaker_power_cycle import cycle_power_locked
+
+        source = self._required(request_id)
+        context = self._context(source)
+        self._require_current_targets(context, targets)
+        if context.kind != "attach" or context.master_cycle_on_async_failure is not True:
+            raise ValueError("이 attach에는 master 전원 cycle 소유권이 없습니다")
+        with self._lease.acquire(tuple(t.physical_identity_key for t in targets)) as permit:
+            source = self._required(request_id)
+            context = self._context(source)
+            child_id = native_master_power_cycle_request_id(request_id)
+            child = self._journal.load(child_id)
+            if child is not None and child.phase in _TERMINAL:
+                return self._public(child, current=False)
+            self._require_available(targets, allowed=(request_id, *self._owned_cycle_ids(context)))
+            if not self._awaiting_operator(source, context):
+                raise ValueError("마지막 Async 이후 보류된 자기 source만 지원합니다")
+            endpoints = await self._resolver.resolve_many(
+                tuple(o.target for o in context.originals)
+            )
+            self._validate_endpoints(tuple(o.target for o in context.originals), endpoints)
+            return await cycle_power_locked(self, source, context, endpoints, permit)
 
     def _require_assistance_source(self, source, context):
         if source.phase is TransactionPhase.VERIFIED:
@@ -600,6 +646,24 @@ class NativeWavemakerController(LocalControlCoordinator):
             started = failure_clock_ns()
             try:
                 if (
+                    context.kind == "master_power_cycle_v1"
+                    and index == 1
+                    and action.phase is ActionPhase.PREPARED
+                ):
+                    previous = record.actions[0]
+                    if previous.phase is not ActionPhase.VERIFIED:
+                        raise LocalControlExecutionError(
+                            "master OFF가 이 작업에서 검증되지 않아 ON을 보내지 않습니다"
+                        )
+                    elapsed = max(
+                        0.0,
+                        (datetime.now(UTC) - record.updated_at).total_seconds(),
+                    )
+                    remaining = max(0.0, context.power_off_seconds - elapsed)
+                    if remaining:
+                        await self._sequence_sleep(remaining)
+                    permit.require_permitted()
+                if (
                     context.kind == "attach"
                     and context.plan.mode == "async"
                     and action.phase is ActionPhase.PREPARED
@@ -683,7 +747,11 @@ class NativeWavemakerController(LocalControlCoordinator):
                     current,
                     index,
                     phase=phase,
-                    diagnostic="native_stage_unverified",
+                    diagnostic=(
+                        "master_power_cycle_unverified"
+                        if context.kind == "master_power_cycle_v1"
+                        else "native_stage_unverified"
+                    ),
                     transaction_phase=TransactionPhase.RECOVERY_REQUIRED,
                 )
                 report_action_failure(
@@ -837,7 +905,9 @@ class NativeWavemakerController(LocalControlCoordinator):
     async def _finish(self, record, context, endpoints, permit, *, captures=None):
         rows = []
         try:
-            snapshots = self._snapshots(context)
+            snapshots = (
+                None if context.kind == "master_power_cycle_v1" else self._snapshots(context)
+            )
             images = context.plan.compile_images()
             for index, endpoint in enumerate(endpoints):
                 if captures is None:
@@ -849,6 +919,8 @@ class NativeWavemakerController(LocalControlCoordinator):
                     capture, status = self._capture(raw, began), raw.status_payload
                 name = endpoint.target.logical_member
                 if context.kind == "detach":
+                    if snapshots is None:
+                        raise AssertionError("detach requires owned restore snapshots")
                     row = compare_restore_readback(
                         snapshots[name], target=endpoint.target, status=status
                     )
@@ -1019,21 +1091,50 @@ class NativeWavemakerController(LocalControlCoordinator):
             "detach": native_detach_request_id(context.attach_request_id),
             "detach_assist": native_assistance_request_id(context.attach_request_id),
             "master_link_cycle_v1": native_master_cycle_request_id(context.attach_request_id),
+            "master_power_cycle_v1": native_master_power_cycle_request_id(
+                context.attach_request_id
+            ),
         }[context.kind]
         if record.request_id != expected_id:
             raise ValueError("native 원본 소유 요청이 다릅니다")
-        if context.kind in {"detach", "detach_assist", "master_link_cycle_v1"}:
+        if context.kind in {
+            "detach",
+            "detach_assist",
+            "master_link_cycle_v1",
+            "master_power_cycle_v1",
+        }:
             source = self._required(context.attach_request_id)
             source_context = self._context(source)
+            same_originals = source_context.originals == context.originals
+            stable_child_originals = len(source_context.originals) == len(
+                context.originals
+            ) and all(
+                _same_stable_target(source_item.target, child_item.target)
+                for source_item, child_item in zip(
+                    source_context.originals, context.originals, strict=True
+                )
+            )
             if (
                 source_context.kind != "attach"
                 or source.native_context_sha256 != context.source_context_sha256
-                or source_context.originals != context.originals
                 or source_context.plan != context.plan
                 or source_context.master_cycle_on_async_failure
                 != context.master_cycle_on_async_failure
+                or (
+                    context.kind == "master_power_cycle_v1"
+                    and (
+                        not stable_child_originals
+                        or source_context.schema_sha256 != context.schema_sha256
+                        or source_context.activation_sequence != context.activation_sequence
+                    )
+                )
+                or (context.kind != "master_power_cycle_v1" and not same_originals)
             ):
                 raise ValueError("자기 attach가 포착하지 않은 baseline 복원 금지")
+        if context.kind != "master_power_cycle_v1" and (
+            context.power_cycle_basis_sha256 is not None or context.power_off_seconds is not None
+        ):
+            raise ValueError("기존 native 기록에는 master 전원 cycle 범위를 넣지 않습니다")
         if context.kind == "detach_assist":
             if context.assisted_record_sha256 is None:
                 raise ValueError("지원 전 미완료 기록 결속이 없습니다")
@@ -1047,13 +1148,18 @@ class NativeWavemakerController(LocalControlCoordinator):
             from jebao_flow.local_control.wavemaker_master_cycle import validate_cycle
 
             validate_cycle(self, record, context)
+        elif context.kind == "master_power_cycle_v1":
+            from jebao_flow.local_control.wavemaker_power_cycle import validate_power_cycle
+
+            validate_power_cycle(self, record, context)
         elif context.assisted_record_sha256 is not None:
             raise ValueError("기존 native 기록에는 지원 범위를 넣지 않습니다")
         for action in record.actions:
             original = next((o for o in context.originals if o.target == action.target), None)
             if original is None or action.baseline_status_sha256 != original.status_sha256:
                 raise ValueError("native action의 원본 결속이 다릅니다")
-        self._snapshots(context)
+        if context.kind != "master_power_cycle_v1":
+            self._snapshots(context)
         return context
 
     def _snapshots(self, context):
@@ -1211,7 +1317,10 @@ class NativeWavemakerController(LocalControlCoordinator):
                 {
                     "master_cycle_request_id": native_master_cycle_request_id(
                         context.attach_request_id
-                    )
+                    ),
+                    "master_power_cycle_request_id": native_master_power_cycle_request_id(
+                        context.attach_request_id
+                    ),
                 }
                 if context.master_cycle_on_async_failure
                 else {}
@@ -1241,6 +1350,23 @@ class NativeWavemakerController(LocalControlCoordinator):
                     ),
                 }
                 if context.kind == "master_link_cycle_v1"
+                else {}
+            ),
+            **(
+                {
+                    "original_async_delivery": (
+                        "ACKNOWLEDGED"
+                        if self._required(context.attach_request_id)
+                        .actions[-1]
+                        .acknowledgement_sha256
+                        is not None
+                        else "UNKNOWN"
+                    ),
+                    "source_phase": self._required(context.attach_request_id).phase.value,
+                    "acceptance_basis": "owned_master_off_wait_on_then_pair_comparison",
+                    "power_off_seconds": context.power_off_seconds,
+                }
+                if context.kind == "master_power_cycle_v1"
                 else {}
             ),
             **(

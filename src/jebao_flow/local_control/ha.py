@@ -542,6 +542,7 @@ class HomeAssistantProjection:
                 "status",
                 "assist_detach",
                 "cycle_master",
+                "cycle_master_power",
             ],
         }
 
