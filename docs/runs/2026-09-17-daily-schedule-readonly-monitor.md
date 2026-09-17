@@ -148,3 +148,28 @@ MQTT publish도 0개다.
 - `superseded-analysis.json` SHA-256:
   `36747b53d4fb9a6d9895564001ae07a90f090b3db990459d97d965301fc09c78`
 - 종료 사유: 사용자 요청에 따른 새 시간표 교체; fault나 collector 실패가 아님
+
+## append-only 정정 — 종료 직후 마지막 표본 포함
+
+위 `superseded-analysis.json`을 만든 뒤 collector가 종료되기 전에 main ordinal 85 한 건을
+추가로 fsync했다. 기존 파일은 수정하지 않고, 보존된 pilot·main 전체를 같은 analyzer로 다시
+읽어 별도 최종 감사 산출물을 만들었다.
+
+- 재분석 시각: `2026-09-17T07:13:59.812341Z`
+- 실제 마지막 표본: `2026-09-17T05:23:00.814531Z`
+- 표본: pilot 8 + main 85 = 합계 93
+- ordinal: pilot·main 각각 연속
+- 65초 초과 cadence gap: 0
+- 관측된 경계: 2, 수렴한 경계: 2, 미수렴: 0
+- 세 장비 role mismatch·power OFF·schedule OFF·31구간 image mismatch·missing/stale: 0
+- 세 장비 fault episode: 0
+- sample hardware write: 0, MQTT publish: 0
+- analyzer SHA-256: `3cda036a6c1391e619f56055a647c1aff21dbc031fb25a8eecf641e16b2ddbc5`
+- opaque artifact:
+  `daily-three-pump-monitor-20260917.02/superseded-analysis-final-audit.json`
+- artifact SHA-256: `365e04ce26206e856ccd07f6a0aa669b886c6c842b524cb01595a31be8132b05`
+
+마지막 한 표본을 포함해도 조기 종료 판정은 바뀌지 않는다. 13:38·14:00 두 경계만 관측했고
+나머지 29개 미래 경계와 원 예정 종료 시각은 덮지 못했다. 따라서 이 산출물을 31구간의 하루
+완료 판정으로 승격하지 않는다. 이후 실행 중인 관측은 사용자가 교체한 35구간 시간표의 별도
+run·artifact다.
