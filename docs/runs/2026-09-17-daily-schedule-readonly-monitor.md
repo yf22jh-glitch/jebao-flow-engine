@@ -83,3 +83,23 @@ Constant에서도 mode와 flow는 계속 비교하고, 전체 31구간 image, �
 
 하루 전체 경계의 연속 동작과 fault 재발 여부는 아직 확정하지 않는다. 예정 종료 뒤 sample 수,
 mismatch/fault episode, 각 경계 전환과 종료 artifact digest를 이 파일의 새 절로 덧붙인다.
+
+## 진행 중 추가 — 13:38 KST 첫 경계
+
+판정식이 과도했던 첫 collector도 원래 MQTT 관측값은 보존했으므로 13:38 경계를 재검토했다.
+`2026-09-17T04:37:43.350483Z`에는 세 장비 모두 직전 `Constant / Flow 35` 구간이었다.
+경계 뒤 첫 30초 표본 `04:38:13.356662Z`에서는 master가 먼저
+`Pulse / Flow 40 / Frequency 80`으로 바뀌었고, Async와 Bar는 아직 직전 값을 보고했다.
+다음 표본 `04:38:43.364431Z`에는 Async가 `Pulse / Flow 35 / Frequency 80`, Bar가
+`Sine / Flow 45 / Frequency 70 / PulseTide false`로 합류했다. 이후 pilot 종료까지 같은 값이
+유지됐고 세 장비 fault는 전 표본 0이었다.
+
+따라서 13:38 전환은 세 장비가 한 표본에서 원자적으로 바뀐 것이 아니라, 30초 cadence에서
+master 선행 후 다음 표본까지 모두 수렴한 것으로 보존됐다. 이는 물리 파형 동시성을 증명하지
+않으며 MQTT가 보고한 `Auto*` 전환 순서만 기술한다.
+
+- opaque artifact id: `daily-three-pump-monitor-20260917.01`
+- `plan.json` SHA-256: `3843b8f518ad4b8ab7ece54ede5257d77498d85f3718812c42155ed60c07ab05`
+- 경계 전 sample SHA-256: `223a4d2d7007fb11877ec714be11b330fdcc3099557a00cb8ec88eb453b0fb98`
+- master 선행 sample SHA-256: `ca083d52d7e0937ddc0fd685d8cd899ac2e7de4eb7d57233a6f01fdcf1a286ba`
+- 전체 수렴 sample SHA-256: `0d9ada63ddf00dae48771243a65d25e5d3020c7162b946b739a856b5b5ec1394`
