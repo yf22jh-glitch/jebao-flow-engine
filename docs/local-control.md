@@ -134,12 +134,13 @@ audited app version, it is ignored and reported as `qualification_not_current`; 
 diagnostics still start, while the old receipt cannot expose a control or turn into an install
 failure.
 
-If no current template root is supplied, preparation still succeeds with an empty template binding
-and reports `no_current_template_binding_controls_remain_diagnostic`. It does not guess a cache
-directory and it does not inherit a root from an older manifest. `--role-attested-by` remains an
-explicit operator statement; it is never filled from a username, hostname, or another machine
-attribute. A generated service carries the operator's actual attestation time instead of inventing
-a new confirmation time on every automatic restart. It also carries a private content digest of
+If no current template root is supplied, preparation still succeeds with an empty template binding.
+That makes legacy content-bound controls diagnostic-only, but it does not suppress functions listed
+for an exact current device in `identity_bound_controls`. Preparation does not guess a cache
+directory or inherit a root from an older manifest. `--role-attested-by` remains an explicit
+operator statement; it is never filled from a username, hostname, or another machine attribute. A
+generated service carries the operator's actual attestation time instead of inventing a new
+confirmation time on every automatic restart. It also carries a private content digest of
 only the stable logical-member, logical-role, product, and physical-identity bindings. Each restart
 rederives those facts from the current config and refuses to reuse the attestation if that stable
 role mapping changed. Runtime address, PID, hostname, path, mtime, and service generation are absent
@@ -180,9 +181,10 @@ jebao-flow-local prepare-service \
 
 The command never reads or merges an older unit, never writes a system service directory, and never
 invokes `systemctl`. The generated unit contains the current executable, config, manifest, and
-template paths as execution settings only; write-enabled generation additionally carries the
-current qualification path. They are not device identity inputs and their digest is not added to
-the install manifest. Run `prepare-service` again when those current install locations change, and
+template paths as execution settings only. A write-enabled identity-bound generation needs no
+legacy authority path; if one is explicitly supplied for compatibility, it is carried as a separate
+optional input. These paths are not device identity inputs and their digest is not added to the
+install manifest. Run `prepare-service` again when those current install locations change, and
 explicitly re-attest if the stable logical-role mapping changes. The MQTT password value is never
 copied into the unit
 or a command argument. At service start it is read from the named current owner-only `0600` regular
@@ -201,14 +203,13 @@ instead supplies `/hardware-safety` as a named volume, so this bare unit is only
 the same identified volume is mounted at that fixed path. Absence remains an explicit dependency
 failure rather than permanent unknown state.
 
-The generated service omits `--write-enabled` by default. In that mode a qualification path is not
-retained, writer journals and write leases are not opened, and retained qualifications are neither
-read nor projected as commands. The service therefore remains a useful read-only state and
-diagnostic surface instead of failing merely because receipt files exist or later move. Adding the
-flag to the staging command uses only the current verified receipts and records the separately
-selected runtime opt-in; it does not
-install or start the service and it does not replace the qualification, private-config, lease,
-journal, or on-site live-write gates.
+The generated service omits `--write-enabled` by default. In that mode a legacy authority path is
+not retained, writer journals and write leases are not opened, and no function is projected as a
+command. The service therefore remains a useful read-only state and diagnostic surface. Adding the
+flag records the separately selected runtime opt-in; exact-device functions come from the current
+private config and fresh manifest, while an explicitly supplied legacy authority remains optional.
+Generation does not install or start the service and it does not replace private-config, identity,
+lease, journal, or on-site live-write gates.
 
 ### Standalone Docker Compose deployment
 

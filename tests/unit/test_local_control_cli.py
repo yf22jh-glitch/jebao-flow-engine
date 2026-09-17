@@ -371,6 +371,63 @@ def test_prepare_service_uses_only_current_inputs_and_keeps_write_off_by_default
     assert output.err == ""
 
 
+def test_prepare_service_write_enabled_needs_no_legacy_authority_file(
+    monkeypatch,
+    capsys,
+) -> None:
+    current = SimpleNamespace(
+        config=SimpleNamespace(mqtt=SimpleNamespace(password_env=None)),
+        manifest=_manifest(),
+        config_path=local_control_cli.Path("/current/private/config.yaml"),
+        manifest_path=local_control_cli.Path("/current/private/install.json"),
+        template_roots=(),
+    )
+    captured = {}
+    monkeypatch.setenv("JEBAO_FLOW_HARDWARE_SAFETY_VOLUME_ID", "0" * 32)
+    monkeypatch.delenv("JEBAO_FLOW_LOCAL_QUALIFICATIONS", raising=False)
+    monkeypatch.setattr(local_control_cli, "_prepare_current", lambda args: current)
+    monkeypatch.setattr(
+        local_control_cli,
+        "load_current_qualifications",
+        lambda path: (_ for _ in ()).throw(
+            AssertionError("identity-only service inspected legacy authority")
+        ),
+    )
+    monkeypatch.setattr(
+        local_control_cli,
+        "resolve_current_executable",
+        lambda path: local_control_cli.Path("/current/bin/jebao-flow-local"),
+    )
+
+    class _Artifact:
+        def public_dict(self):
+            return {"status": "service_prepared"}
+
+    def replace(output, spec, *, hardware_safety_volume_id):
+        captured["spec"] = spec
+        return _Artifact()
+
+    monkeypatch.setattr(local_control_cli, "replace_prepared_service", replace)
+
+    result = local_control_cli.main(
+        [
+            "prepare-service",
+            "--config",
+            "/current/private/config.yaml",
+            "--role-attested-by",
+            "operator",
+            "--output",
+            "/current/private/jebao-flow-local.service",
+            "--write-enabled",
+        ]
+    )
+
+    assert result == 0
+    assert captured["spec"].write_enabled is True
+    assert captured["spec"].qualifications is None
+    assert capsys.readouterr().err == ""
+
+
 def test_prepare_service_requires_a_current_password_file_when_config_names_password_env(
     monkeypatch,
     capsys,

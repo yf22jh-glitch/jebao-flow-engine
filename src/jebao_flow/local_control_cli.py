@@ -404,17 +404,13 @@ def _run(args: argparse.Namespace) -> int:
                 raise ValueError("current MQTT password requires --mqtt-password-file")
             mqtt_password_file = require_current_mqtt_password_file(args.mqtt_password_file)
         qualifications = None
-        if args.write_enabled:
+        if args.write_enabled and args.qualifications is not None:
             # Write authority is current input only. A default read-only service does not inspect,
-            # retain, or fail because of a qualification path left in the launch environment.
+            # retain, or fail because of a legacy authority path left in the launch environment.
             load_current_qualifications(args.qualifications)
-            qualifications = (
-                None
-                if args.qualifications is None
-                else current_service_path(
-                    args.qualifications,
-                    description="local-control qualification file",
-                )
+            qualifications = current_service_path(
+                args.qualifications,
+                description="local-control qualification file",
             )
         artifact = replace_prepared_service(
             service_output,

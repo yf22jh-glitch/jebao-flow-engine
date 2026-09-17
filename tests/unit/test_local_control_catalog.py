@@ -441,11 +441,12 @@ def test_identity_authority_can_cover_every_implemented_product_function() -> No
         DOSING_PUMP_APP.product_key: set(),
     }
     catalog = build_local_control_catalog(
+        current_content=_content().model_copy(update={"template_sha256": ()}),
         identity_control_authorizations={
             (product_key, function): (identity,)
             for product_key, functions in expected.items()
             for function in functions
-        }
+        },
     )
 
     for product_key, functions in expected.items():
@@ -455,3 +456,8 @@ def test_identity_authority_can_cover_every_implemented_product_function() -> No
             if descriptor.product_key == product_key and descriptor.control_exposed_for(identity)
         }
         assert exposed == functions
+        assert all(
+            descriptor.qualification is None
+            for descriptor in catalog.functions
+            if descriptor.product_key == product_key and descriptor.function in functions
+        )
