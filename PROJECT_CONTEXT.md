@@ -61,65 +61,16 @@ Jebao/Gizwits 프로토콜을 알지 못하고 native discovery entity와 데몬
 - 운영 그룹은 각 펌프를 `independent`로 두고 소프트웨어가 멤버별 `gain`/`phase`를 계산하는
   방식을 기본으로 합니다. 네이티브 Sync/Async는 동일 Pro 두 대의 장비 내부 Linkage를 나타내는
   별도 페어이며, 바형 펌프는 독립 보조 멤버로 남습니다.
-- 네이티브 slave의 개별 `Flow`는 지원되는 것으로 가정하지 않습니다. 이를 사용하는 UI와
-  명령 계약은 현장 qualification 전까지 잠그고, 개별 출력이 필요하면 독립 소프트웨어 그룹을
-  사용합니다.
+- 네이티브 slave의 개별 `Flow` 의미는 확정된 것으로 가정하지 않습니다. direct Pro 제어와
+  native API는 exact identity로 노출하지만, per-slot extension은 명시적 topology가 있을 때만
+  entity를 만들며 Q1/Q2의 답으로 간주하지 않습니다.
 
-## 현재 안전 단계: Observer
+## 현재 배포 단계: Exact-identity control
 
-실제 write 실험 전에는 `runtime.mode: observer`만 사용합니다. 이 모드에서는 MQTT 명령을
-거부하고, 장비 설정에 write 허용값이 잘못 들어 있어도 observer 전용 factory가 하드웨어
-write gate를 강제로 닫습니다. 장비는 공개 설정의 product key나 검색 순서가 아니라 비공개
-설정의 정확한 Gizwits device ID/MAC으로만 논리 장비에 매핑합니다.
-
-Observer는 5초 기본 주기로 실제 전원·출력·모드·주파수와 확인된 Timer/Auto 설정 단서,
-지원 제품군의 48슬롯 장비 내장 시간표를 읽어 MQTT와 로컬 JSONL 변경 기록에 반영합니다.
-시간표 슬롯의 시각·모드·파라미터 변화는 추적하지만, 명령 출처는 프로토콜에 없으므로
-앱·클라우드·장비 자체 중 하나로 단정하지 않고 `external_or_native`로 기록합니다.
-
-네이티브 Linkage 트랜잭션 코어와 제한된 현장 실행·attended recovery까지 완료됐습니다.
-current `jebao-flow-local`에는 별도 journal·lease를 쓰는 software-independent group executor와
-native MQTT projection이 연결되어 있지만, 기본 `observer`에서는 qualification을 읽거나 writer,
-coordinator, command entity·subscription을 구성하지 않습니다. frozen native Sync/Async 시험 API도
-Home Assistant에 광고하지 않습니다. control activation과 장비 write는 observer 첫 배포와 별도입니다.
-2026-08-27 Async 장기 시험은 슬레이브 출력 변경 시점 직후 안전 실패했고 자동 exact restore가
-완료되지 않아 영수증 0/2 상태로 끝났습니다. 새 토큰의 attended recovery는 성공했으며 Observer가
-시험 전 TimerON 상태를 다시 확인했습니다. 이 결과는 Linkage 레지스터 관계 자체를 부정하지 않지만,
-slave별 gain/출력 지원을 입증하지도 않습니다.
-후속 저출력 Sync 세 건도 영수증 0/2였습니다. 마지막 실행은 TimerON convergence 수정 뒤에도
-slave detach에서 자동 rollback이 실패했지만, attended recovery와 Observer 확인으로 두 장비를
-시험 전 상태로 복원했습니다. 현재 코드는 rollback 첫 reconciliation보다 앞서 slave→master 새
-인증 세션을 강제하고 refresh/detach 실패 시 fresh 안전 fallback을 사용하도록 수정됐으며 테스트
-571개를 통과했습니다. 수정 배포 뒤 저출력 Sync 31%/31%는 자동 exact restore와 qualification
-영수증 2/2까지 성공했습니다. 그러나 후속 Async 35%/33%→slave 38% 진단은 자동 rollback이
-실패했고, attended recovery와 Observer 교차 확인으로만 원복을 완료했습니다. typed primary
-failure가 없어 Async 독립 출력은 여전히 미검증이며 네이티브 Linkage 잠금은 유지합니다.
-2026-08-28의 TimerON Constant→Sine 단일 시험은 두 역할 적용까지 진행했지만, `async_slave`
-적용 직후 슬레이브 manual Frequency가 여러 fresh explicit reply에서 원 snapshot과 다르게 유지되어
-A→B 관찰 전에 fail-closed로 종료됐습니다. 자동 rollback과 두 번의 새 연결 control/schedule
-비교는 exact였고 Observer도 복귀했습니다. 이 결과는 역할 유발 Frequency side effect의 증거이지
-슬롯별 slave `AutoFlow` 전환 증거가 아닙니다. 후속 코드는 token-bound Constant/Sine 값 중 하나가
-서로 다른 새 세션에서 2회 연속 같을 때만 그 값을 run-local로 고정하며 Frequency write는 보내지
-않습니다. 실기 재검증 전까지 네이티브 Linkage 잠금은 그대로 유지합니다.
-같은 날 `da62b73`으로 새 `_08`을 한 번 실행했습니다. write 없는 preflight는 통과했고 임시
-Constant 31%/32% → Sine 35%/40% 계획도 staged됐지만, native 역할 실행·Linkage write와 A→B
-관찰 전에 `role_preflight`에서 fail-closed로 끝났습니다. 자동 outer rollback은 완료됐고
-outer-control·temporary-schedule·role journal은 모두 `none`이었습니다. 서로 독립적인 fresh
-read-only 확인 두 번에서 원래 controls와 두 장비의 완전한 432-byte schedule image가 exact임을
-확인했습니다. private 설정은 `dry_run: true`이고 Observer와 recovery 서비스도 정상 복귀했습니다.
-이 실행은 재시도하지 않았으며, slave의 슬롯별 `AutoFlow` 적용 여부는 계속 미검증입니다.
-후속 `_09`는 같은 임시 저출력 계획의 read-only preflight, schedule stage, TimerON arm과
-role preflight를 완료했지만 role run의 fresh capture에서 약 0.43초 만에 fail-closed로 끝났습니다.
-role journal·Linkage write·A→B sample은 없었고 자동 outer rollback 뒤 journal 세 종류가 모두
-`none`이었습니다. 독립된 새 세션 두 번에서 원 controls와 두 장비의 완전한 432-byte schedule
-image가 exact임을 다시 확인했으며 private 설정과 두 서비스도 안전 상태로 복귀했습니다. 당시
-진단은 generic `fresh_capture`만 남겨 transport와 semantic failure를 구분하지 못했습니다. 후속
-코드는 session refresh 또는 explicit reply 실패에만 2초 뒤 정확히 한 번 재시도하고, semantic
-drift는 즉시 거부하며, 재시도 전후 stop·safety epoch·deadline을 다시 검사합니다. 전체 테스트
-1059개는 통과했지만 이 보완은 아직 새 실기로 검증하지 않았고 `_09`도 재실행하지 않습니다.
-실제 wiring에서는 fail-closed Linkage safety interlock을 비상정지·정비 latch와 공유해야
-하며, journal lease를 획득하지 못한 다른 daemon은 시험이나 startup recovery를 실행하지
-않습니다.
+현재 운영 배포 상태와 검증 범위는
+[2026-09-17 전 기종 exact-identity 제어 활성화](docs/runs/2026-09-17-exact-identity-all-device-activation.md)를
+기준으로 합니다. 과거 Observer·native Linkage 실행과 미확정 질문은
+[append-only 실행 기록](docs/runs/README.md)에 보존합니다.
 
 ## 상태 모델
 

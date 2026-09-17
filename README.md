@@ -5,27 +5,10 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 엔트리포인트는 `jebao-flow-local`입니다. 기존 `jebao-flowd`와 그 aggregate MQTT/custom-component
 경로는 동결된 legacy surface이며 현재 경로와 함께 실행하지 않습니다.
 
-> 현재 상태: 실제 장비의 읽기 전용 검증과 지속 Observer, 오프라인 control 프레임 생성,
-> MQTT 상태 계약과 Home Assistant native MQTT Discovery까지 구현했습니다. 기본 실행 모드는
-> `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 현장 전용 경로에서는 Pro 두 대의
-> 제한된 저출력 Sync와 자동 exact restore가 성공해 qualification 영수증 2/2를 발급했습니다.
-> 다만 Async 슬레이브 출력 변경과 TimerON 슬롯별 출력 전환은 아직 성공으로 인정할 수 없습니다.
-> 2026-08-28의 첫 단일 시험은 `master` 적용 뒤 `async_slave`까지 도달했지만, 역할 적용 시
-> 슬레이브의 manual Frequency가 지속적으로 바뀌는 펌웨어 동작을 명시적 응답에서 확인하고 A→B
-> 시간표 경계 전에 안전 중단했습니다. 자동 rollback, 두 번의 새 연결 원상태 비교, Observer 복귀는
-> 모두 성공했습니다. 이어 `da62b73`으로 실행한 새 `_08`은 write 없는 preflight를 통과하고 임시
-> Constant 31%/32% → Sine 35%/40% 계획을 staged했지만, native 역할 실행과 Linkage write 및
-> A→B 관찰 전 `role_preflight`에서 fail-closed로 종료됐습니다. 자동 outer rollback 완료 뒤 세
-> journal은 모두 `none`이었고, 서로 독립적인 두 번의 fresh read-only 확인에서 원래 controls와
-> 두 장비의 전체 432-byte schedule image가 정확히 일치했습니다. 설정은 `dry_run: true`로 다시
-> 잠겼고 Observer와 recovery 서비스가 정상 복귀했으며 `_08`은 재실행하지 않았습니다. 따라서 핵심
-> slave 슬롯별 `AutoFlow` 질문은 계속 미검증입니다. 후속 `_09`는 같은 임시 저출력 계획의
-> preflight·schedule stage·TimerON arm·role preflight까지 완료했지만, role run의 첫 fresh capture가
-> 약 0.43초 만에 실패해 역할 journal·Linkage write·A→B 관찰 전에 종료됐습니다. 자동 outer
-> rollback 뒤 세 journal은 `none`이었고, 독립 세션 두 번에서 원 controls와 두 432-byte schedule
-> image의 exact 일치를 확인했습니다. 실패 원인은 당시 generic `fresh_capture`보다 좁혀지지 않았으며
-> slave 슬롯별 `AutoFlow` 질문도 여전히 미검증입니다. 네이티브 Linkage는 운영 기능으로 잠겨 있고
-> 일반 데몬·MQTT·HA에 시험 기능을 노출하지 않습니다.
+> 현재 배포 상태와 검증 범위는
+> [2026-09-17 전 기종 exact-identity 제어 활성화](docs/runs/2026-09-17-exact-identity-all-device-activation.md)를
+> 기준으로 합니다. 과거 실행과 미확정 native ASYNC 질문은 [append-only 실행 기록](docs/runs/README.md)에
+> 보존합니다.
 
 ## 구조
 
@@ -51,12 +34,13 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flow-local`�
 `software_independent`입니다. 그래서 두 Pro와 바형 보조에 각각 gain/phase/출력을 적용할 수
 있습니다. 장비의 native Sync/Async는 동일 Pro 두 대의 장비 내부 Linkage용 별도 페어이며,
 소프트웨어 `Sync`/`Anti Phase` 패턴과 같은 기능으로 취급하지 않습니다. 현재 native 페어는
-실기 자격 미충족으로 잠겨 있습니다.
+정확한 identity에 결속된 Sync/Async API로 노출되지만, 동결된 native ASYNC 실험 질문의 답으로
+간주하지 않습니다.
 
 `software_independent`용 planner·plan-atomic runtime과 local-control writer는 별도 journal·lease
-아래 연결되어 있습니다. 다만 현재 첫 배포는 `observer`라 writer·coordinator·command entity와
-subscription을 구성하지 않습니다. control activation과 장비 write qualification은 이 observer
-배포와 별도이고, native Sync/Async 시험 경로는 계속 동결합니다.
+아래 연결되어 있습니다. 현재 운영 배포는 정확한 물리 identity별 허용 function으로 writer,
+coordinator, command entity와 subscription을 구성합니다. legacy qualification receipt는 제어
+노출 조건이 아니며, 동결된 native Sync/Async 시험 경로는 계속 별도로 둡니다.
 
 ## 현재 포함된 것
 
