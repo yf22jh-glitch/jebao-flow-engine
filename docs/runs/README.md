@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-18 HA Aqua 조명 대상 교정](2026-09-18-ha-aqua-light-target-correction.md) — Pink Fam 집 조명 원본 복원, NP Noopsyche K7 panel만 Aqua로 이전; entity누락0·journal불변·장비write0.
+
 - [2026-09-18 HA Aqua 대시보드 생성·조명 뷰 이전](2026-09-18-ha-aqua-dashboard.md) — Aqua 4개 유형 뷰·Jebao 조작65/65·Pink Fam 조명 이전15링크, HA 재조회 exact·local-control journal 불변·장비write0.
 
 - [2026-09-18 Pro Async·Bar Random-free 35구간 시간표](2026-09-18-pro-async-bar-random-free-schedule.md) — 이전 source 재전송 없이 원복, 새 35구간 exact·Master/Async/Bar 현재값·fault0 일치; 별도 24h MQTT-only 관측 진행 중.
