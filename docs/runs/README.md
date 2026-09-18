@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-18 Async slave Timer 재활성화 master power cycle](2026-09-18-async-slave-timer-rearm-master-power-cycle.md) — master OFF→10초→ON은 검증·원상복귀했으나 slave TimerOFF 유지; 양쪽 image exact·slave write0.
+
 - [2026-09-18 HA Aqua 조명 대상 교정](2026-09-18-ha-aqua-light-target-correction.md) — Pink Fam 집 조명 원본 복원, NP Noopsyche K7 panel만 Aqua로 이전; entity누락0·journal불변·장비write0.
 
 - [2026-09-18 HA Aqua 대시보드 생성·조명 뷰 이전](2026-09-18-ha-aqua-dashboard.md) — Aqua 4개 유형 뷰·Jebao 조작65/65·Pink Fam 조명 이전15링크, HA 재조회 exact·local-control journal 불변·장비write0.
