@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-18 Pro Async·Bar Random-free 35구간 시간표](2026-09-18-pro-async-bar-random-free-schedule.md) — 이전 source 재전송 없이 원복, 새 35구간 exact·Master/Async/Bar 현재값·fault0 일치; 별도 24h MQTT-only 관측 진행 중.
+
 - [2026-09-17 Pro Async·Bar 35구간 Feeding 시간표](2026-09-17-pro-async-bar-35-slot-feeding-schedule.md) — Feeding3분·Constant35 복귀 포함 35구간 exact, 역할 유지; master Er03 재발 구간 확인·24h MQTT-only 관측 진행 중.
 
 - [2026-09-17 세 펌프 일일 시간표 읽기 전용 관측](2026-09-17-daily-schedule-readonly-monitor.md) — 30초 MQTT-only 관측 진행 중; 전날 master `Er03`은 raw `Fault_no_liveload` 전환으로 확인, 오늘 시작 fault0·역할/31구간/현재 Auto 일치.
