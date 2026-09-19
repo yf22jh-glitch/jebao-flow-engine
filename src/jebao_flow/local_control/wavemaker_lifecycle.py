@@ -70,6 +70,10 @@ def native_master_power_cycle_request_id(attach_id: str) -> str:
     return "wm_power_" + hashlib.sha256(attach_id.encode("ascii")).hexdigest()
 
 
+def native_slave_timer_rearm_request_id(attach_id: str) -> str:
+    return "wm_rearm_" + hashlib.sha256(attach_id.encode("ascii")).hexdigest()
+
+
 class NativeOriginal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -88,6 +92,7 @@ class NativeContext(BaseModel):
         "detach_assist",
         "master_link_cycle_v1",
         "master_power_cycle_v1",
+        "slave_timer_rearm_v1",
     ]
     attach_request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,128}$")
     source_context_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -418,6 +423,7 @@ class NativeWavemakerController(LocalControlCoordinator):
         request_ids = (
             native_master_cycle_request_id(context.attach_request_id),
             native_master_power_cycle_request_id(context.attach_request_id),
+            native_slave_timer_rearm_request_id(context.attach_request_id),
         )
         for request_id in request_ids:
             record = self._journal.load(request_id)
@@ -472,6 +478,36 @@ class NativeWavemakerController(LocalControlCoordinator):
             )
             self._validate_endpoints(tuple(o.target for o in context.originals), endpoints)
             return await cycle_power_locked(self, source, context, endpoints, permit)
+
+    async def rearm_async_slave_schedule(self, *, request_id, targets):
+        """Re-enable the owned Async slave without sending either schedule image."""
+
+        from jebao_flow.local_control.wavemaker_slave_rearm import rearm_slave_locked
+
+        source = self._required(request_id)
+        context = self._context(source)
+        self._require_current_targets(context, targets)
+        if (
+            context.kind != "attach"
+            or context.plan.mode != "async"
+            or context.master_cycle_on_async_failure is not True
+        ):
+            raise ValueError("이 attach에는 Async slave 재진입 소유권이 없습니다")
+        with self._lease.acquire(tuple(t.physical_identity_key for t in targets)) as permit:
+            source = self._required(request_id)
+            context = self._context(source)
+            child_id = native_slave_timer_rearm_request_id(request_id)
+            child = self._journal.load(child_id)
+            if child is not None and child.phase in _TERMINAL:
+                return self._public(child, current=False)
+            self._require_available(targets, allowed=(request_id, *self._owned_cycle_ids(context)))
+            if not self._awaiting_operator(source, context):
+                raise ValueError("마지막 Async 이후 보류된 자기 source만 재진입할 수 있습니다")
+            endpoints = await self._resolver.resolve_many(
+                tuple(o.target for o in context.originals)
+            )
+            self._validate_endpoints(tuple(o.target for o in context.originals), endpoints)
+            return await rearm_slave_locked(self, source, context, endpoints, permit)
 
     def _require_assistance_source(self, source, context):
         if source.phase is TransactionPhase.VERIFIED:
@@ -906,13 +942,16 @@ class NativeWavemakerController(LocalControlCoordinator):
         rows = []
         try:
             snapshots = (
-                None if context.kind == "master_power_cycle_v1" else self._snapshots(context)
+                None
+                if context.kind in {"master_power_cycle_v1", "slave_timer_rearm_v1"}
+                else self._snapshots(context)
             )
             images = context.plan.compile_images()
             for index, endpoint in enumerate(endpoints):
                 if captures is None:
                     reports = context.kind == "attach" or (
-                        context.kind == "master_power_cycle_v1" and index != 0
+                        context.kind in {"master_power_cycle_v1", "slave_timer_rearm_v1"}
+                        and index != 0
                     )
                     capture, status = await self._read(
                         endpoint,
@@ -943,6 +982,8 @@ class NativeWavemakerController(LocalControlCoordinator):
                             "Linkage": "master" if index == 0 else context.plan.mode + "_slave",
                         }
                     )
+                    if context.kind == "slave_timer_rearm_v1" and index == 1:
+                        expected["Mode"] = "constant"
                     actual = get_product_schema(endpoint.target.product_key).decode_status(status)
                     fields = {
                         key: {
@@ -1099,6 +1140,7 @@ class NativeWavemakerController(LocalControlCoordinator):
             "master_power_cycle_v1": native_master_power_cycle_request_id(
                 context.attach_request_id
             ),
+            "slave_timer_rearm_v1": native_slave_timer_rearm_request_id(context.attach_request_id),
         }[context.kind]
         if record.request_id != expected_id:
             raise ValueError("native 원본 소유 요청이 다릅니다")
@@ -1107,6 +1149,7 @@ class NativeWavemakerController(LocalControlCoordinator):
             "detach_assist",
             "master_link_cycle_v1",
             "master_power_cycle_v1",
+            "slave_timer_rearm_v1",
         }:
             source = self._required(context.attach_request_id)
             source_context = self._context(source)
@@ -1126,14 +1169,17 @@ class NativeWavemakerController(LocalControlCoordinator):
                 or source_context.master_cycle_on_async_failure
                 != context.master_cycle_on_async_failure
                 or (
-                    context.kind == "master_power_cycle_v1"
+                    context.kind in {"master_power_cycle_v1", "slave_timer_rearm_v1"}
                     and (
                         not stable_child_originals
                         or source_context.schema_sha256 != context.schema_sha256
                         or source_context.activation_sequence != context.activation_sequence
                     )
                 )
-                or (context.kind != "master_power_cycle_v1" and not same_originals)
+                or (
+                    context.kind not in {"master_power_cycle_v1", "slave_timer_rearm_v1"}
+                    and not same_originals
+                )
             ):
                 raise ValueError("자기 attach가 포착하지 않은 baseline 복원 금지")
         if context.kind != "master_power_cycle_v1" and (
@@ -1157,13 +1203,17 @@ class NativeWavemakerController(LocalControlCoordinator):
             from jebao_flow.local_control.wavemaker_power_cycle import validate_power_cycle
 
             validate_power_cycle(self, record, context)
+        elif context.kind == "slave_timer_rearm_v1":
+            from jebao_flow.local_control.wavemaker_slave_rearm import validate_slave_rearm
+
+            validate_slave_rearm(self, record, context)
         elif context.assisted_record_sha256 is not None:
             raise ValueError("기존 native 기록에는 지원 범위를 넣지 않습니다")
         for action in record.actions:
             original = next((o for o in context.originals if o.target == action.target), None)
             if original is None or action.baseline_status_sha256 != original.status_sha256:
                 raise ValueError("native action의 원본 결속이 다릅니다")
-        if context.kind != "master_power_cycle_v1":
+        if context.kind not in {"master_power_cycle_v1", "slave_timer_rearm_v1"}:
             self._snapshots(context)
         return context
 
@@ -1326,6 +1376,9 @@ class NativeWavemakerController(LocalControlCoordinator):
                     "master_power_cycle_request_id": native_master_power_cycle_request_id(
                         context.attach_request_id
                     ),
+                    "slave_timer_rearm_request_id": native_slave_timer_rearm_request_id(
+                        context.attach_request_id
+                    ),
                 }
                 if context.master_cycle_on_async_failure
                 else {}
@@ -1372,6 +1425,16 @@ class NativeWavemakerController(LocalControlCoordinator):
                     "power_off_seconds": context.power_off_seconds,
                 }
                 if context.kind == "master_power_cycle_v1"
+                else {}
+            ),
+            **(
+                {
+                    "source_phase": self._required(context.attach_request_id).phase.value,
+                    "acceptance_basis": "image_free_slave_timer_manual_power_async_sequence",
+                    "schedule_image_written": False,
+                    "manual_fallback": "constant",
+                }
+                if context.kind == "slave_timer_rearm_v1"
                 else {}
             ),
             **(

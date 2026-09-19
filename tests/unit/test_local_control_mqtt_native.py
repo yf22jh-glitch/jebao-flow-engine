@@ -260,6 +260,37 @@ async def test_native_routes_owned_master_power_cycle_without_touching_slave(tmp
     ]
 
 
+async def test_native_routes_image_free_async_slave_timer_rearm(tmp_path):
+    from jebao_flow.local_control.wavemaker_slave_rearm import KIND
+    from tests.unit.test_local_control_wavemaker_lifecycle import _put
+    from tests.unit.test_local_control_wavemaker_master_cycle import attach, lost_reply
+
+    rig = Rig(tmp_path)
+    lost_reply(rig)
+    await attach(rig)
+    rig.states["slave"] = _put(
+        rig.states["slave"],
+        {
+            "SwitchON": True,
+            "TimerON": False,
+            "Linkage": "async_slave",
+            "Mode": "feed",
+        },
+    )
+    writes = len(rig.sent)
+    projection, router = _setup(rig)
+    assert "rearm_async_slave_schedule" in projection.native_wavemaker_api["operations"]
+
+    result = await router.handle(
+        _topic(projection),
+        _request("rearm_async_slave_schedule", record_id="cycle_source_01"),
+    )
+
+    assert not result.failed and result.result["accepted"]
+    assert result.result["kind"] == KIND
+    assert len(rig.sent) == writes + 4
+
+
 async def test_native_group_conflict_never_reaches_controller(tmp_path):
     rig = Rig(tmp_path)
     ownership = _OwnershipService(
@@ -272,7 +303,16 @@ async def test_native_group_conflict_never_reaches_controller(tmp_path):
     assert rig.store.load("mqtt_native_0001") is None
 
 
-@pytest.mark.parametrize("operation", ["status", "detach", "recover", "cycle_master_power"])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "status",
+        "detach",
+        "recover",
+        "cycle_master_power",
+        "rearm_async_slave_schedule",
+    ],
+)
 async def test_native_record_requires_current_physical_binding(tmp_path, operation):
     rig = Rig(tmp_path)
     await rig.attach(request_id="native_existing")

@@ -569,6 +569,10 @@ class LocalControlMqttRouter:
                 result = await controller.cycle_master(request_id=record_id, targets=targets)
             elif operation == "cycle_master_power":
                 result = await controller.cycle_master_power(request_id=record_id, targets=targets)
+            elif operation == "rearm_async_slave_schedule":
+                result = await controller.rearm_async_slave_schedule(
+                    request_id=record_id, targets=targets
+                )
             else:
                 result = await controller.recover_native(request_id=record_id, targets=targets)
         except (OSError, RuntimeError, ValueError):
@@ -1245,6 +1249,7 @@ def _parse_native_request(payload: bytes | str) -> dict:
         "assist_detach",
         "cycle_master",
         "cycle_master_power",
+        "rearm_async_slave_schedule",
     ):
         required.add("record_id")
     else:

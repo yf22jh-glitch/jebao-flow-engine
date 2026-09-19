@@ -543,6 +543,7 @@ class HomeAssistantProjection:
                 "assist_detach",
                 "cycle_master",
                 "cycle_master_power",
+                "rearm_async_slave_schedule",
             ],
         }
 
