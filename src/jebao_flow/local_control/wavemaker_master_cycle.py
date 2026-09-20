@@ -1,4 +1,8 @@
-"""Owned master-only fallback; never retry or rewrite the source Async operation.
+"""Owned master-link cycle; never retry or rewrite the source Async operation.
+
+The master release and rearm are the recovery. The released window is also the only point
+where the slave accepts an acknowledged control write, so a v2 source repairs its manual
+Mode there; see the layout note in wavemaker_sequence.
 
 The app observation in 2026-09-15-async-master-link-app-rearm.md supplies the
 procedure, not a firmware model or proof of the original command's delivery.
@@ -6,6 +10,7 @@ procedure, not a firmware model or proof of the original command's delivery.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -29,8 +34,27 @@ from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.session import RawStateCapture
 
 KIND = "master_link_cycle_v1"
+# The slave's own role transition makes the device rewrite its manual Mode, and that block is
+# what the pump runs whenever TimerON drops; ``feed`` stops it. A bound slave never answers a
+# control write with an ACK and ignores Linkage/TimerON, so the only window in this operation
+# where the value can be repaired and acknowledged is while the master is released. Sources
+# recorded before this existed keep their two master-only actions.
+_REPAIR_SLAVE_MANUAL_MODE = "constant"
 _LOGGER = logging.getLogger(__name__)
 _CLOSED_BY_CYCLE = "native_async_role_verified_by_master_cycle_delivery_unknown"
+
+
+def cycle_steps(context, endpoints):
+    """master release, the slave manual repair that only this window allows, master rearm."""
+
+    from jebao_flow.local_control.wavemaker_sequence import STAGED_ROLES_V2
+
+    master, slave = endpoints
+    steps = [(master, "linkage_role", "independent")]
+    if context.activation_sequence == STAGED_ROLES_V2:
+        steps.append((slave, "manual_mode", _REPAIR_SLAVE_MANUAL_MODE))
+    steps.append((master, "linkage_role", "master"))
+    return tuple(steps)
 
 
 def validate_cycle(owner, record, context):
@@ -40,21 +64,31 @@ def validate_cycle(owner, record, context):
         owner._journal.load_blob(context.assisted_record_sha256)
     )
     source_context = owner._context(stalled)
+    expected = _expected_cycle_steps(context)
     if (
         stalled.request_id != context.attach_request_id
         or stalled.native_context_sha256 != context.source_context_sha256
         or not owner._awaiting_operator(stalled, source_context)
-        or len(record.actions) != 2
+        or len(record.actions) != len(expected)
     ):
         raise ValueError("cycle은 자기 마지막 Async 보류에만 결속됩니다")
-    for action, role in zip(record.actions, ("independent", "master"), strict=True):
+    for action, (index, function, values) in zip(record.actions, expected, strict=True):
         if (
-            action.target != context.originals[0].target
-            or action.function != "linkage_role"
-            or json.loads(owner._journal.load_blob(action.expected_readback_sha256))
-            != {"Linkage": role}
+            action.target != context.originals[index].target
+            or action.function != function
+            or json.loads(owner._journal.load_blob(action.expected_readback_sha256)) != values
         ):
-            raise ValueError("cycle은 master Linkage 두 명령뿐입니다")
+            raise ValueError("cycle은 master Linkage 두 명령과 released 구간 manual 복구뿐입니다")
+
+
+def _expected_cycle_steps(context):
+    from jebao_flow.local_control.wavemaker_sequence import STAGED_ROLES_V2
+
+    steps = [(0, "linkage_role", {"Linkage": "independent"})]
+    if context.activation_sequence == STAGED_ROLES_V2:
+        steps.append((1, "manual_mode", {"Mode": _REPAIR_SLAVE_MANUAL_MODE}))
+    steps.append((0, "linkage_role", {"Linkage": "master"}))
+    return tuple(steps)
 
 
 async def _pair(owner, record, context, endpoints, permit, *, released):
@@ -71,6 +105,11 @@ async def _pair(owner, record, context, endpoints, permit, *, released):
             "TimerON": True,
             "Linkage": ("independent" if released else "master") if index == 0 else "async_slave",
         }
+        if index == 1 and not released and _repairs_slave_manual(context):
+            # The repair is only worth anything if it is still there after the rearm. If the
+            # device rewrites the manual block again when the master takes the role back, this
+            # fails loudly with the frames preserved instead of leaving `feed` latent.
+            expected["Mode"] = _REPAIR_SLAVE_MANUAL_MODE
         fields = {
             k: {"expected": v, "actual": actual[k], "match": actual[k] == v}
             for k, v in expected.items()
@@ -121,7 +160,6 @@ async def cycle_locked(owner, source, context, endpoints, permit):
                 "cycle 미확인 명령 재전송 금지; 자기 원복이 필요합니다"
             )
     owner._qualify(request_id, context.plan, endpoints)
-    master = endpoints[0]
     if record is None:
         cycle_context = NativeContext(
             **{
@@ -133,20 +171,29 @@ async def cycle_locked(owner, source, context, endpoints, permit):
                 ),
             }
         )
-        _, current = await owner._read(master, permit, reports=True)
-        baseline = owner._snapshots(context)[master.target.logical_member].baseline_status
-        writer = owner._writer_factory(master)
+        snapshots = owner._snapshots(context)
+        current = {}
+        for endpoint in endpoints:
+            _, status = await owner._read(endpoint, permit, reports=True)
+            current[endpoint.target.logical_member] = status
         prepared = []
-        for role in ("independent", "master"):
-            intent = LocalControlIntent(
-                request_id=request_id, target=master.target, function="linkage_role", value=role
-            )
-            owner._catalog.validate_intent(intent)
-            scalar = writer.prepare_scalar(intent, current)
-            owned = writer.prepare_native_controls({"Linkage": role}, baseline)
-            if scalar.forward_payload != owned.forward_payload:
-                raise ValueError("앱 scalar와 소유 cycle payload가 다릅니다")
-            prepared.append(replace(owned, function="linkage_role"))
+        writers = {e.target.logical_member: owner._writer_factory(e) for e in endpoints}
+        try:
+            for endpoint, function, value in cycle_steps(cycle_context, endpoints):
+                name = endpoint.target.logical_member
+                intent = LocalControlIntent(
+                    request_id=request_id, target=endpoint.target, function=function, value=value
+                )
+                owner._catalog.validate_intent(intent)
+                scalar = writers[name].prepare_scalar(intent, current[name])
+                owned = writers[name].prepare_native_controls(
+                    json.loads(scalar.expected_readback), snapshots[name].baseline_status
+                )
+                if scalar.forward_payload != owned.forward_payload:
+                    raise ValueError("앱 scalar와 소유 cycle payload가 다릅니다")
+                prepared.append(replace(owned, function=function))
+        finally:
+            await asyncio.gather(*(w.close() for w in writers.values()))
         # Both owned payloads + source snapshot are durable before the first cycle send.
         record = owner._create_record(
             request_id=request_id,
@@ -160,21 +207,23 @@ async def cycle_locked(owner, source, context, endpoints, permit):
     config = DeviceControlConfig()
     index = 0
     started = failure_clock_ns()
+    by_name = {e.target.logical_member: e for e in endpoints}
     try:
-        for index in range(2):
+        for index in range(len(record.actions)):
             action = record.actions[index]
             if index == 1:
                 record = await _pair(owner, record, cycle_context, endpoints, permit, released=True)
                 await owner._sequence_sleep(config.minimum_command_interval_ms / 1000)
             if action.phase in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}:
                 continue
-            writer = owner._writer_factory(master)
+            endpoint = by_name[action.target.logical_member]
+            writer = owner._writer_factory(endpoint)
             started = failure_clock_ns()
             try:
                 began = datetime.now(UTC)
                 capture = await writer.connect_and_capture(accept_reports=True)
                 permit.require_permitted()
-                prepared = owner._forward_prepared(action, master)
+                prepared = owner._forward_prepared(action, endpoint)
                 record = owner._evidence(record, index, capture, began, prepared, "before")
                 if verify_prepared_readback(prepared, capture.status_payload):
                     record = owner._save_action(record, index, phase=ActionPhase.NO_CHANGE)
@@ -300,3 +349,9 @@ def _released_slave_reply(owner, cycle, name):
                 return row["capture_sha256"], datetime.fromisoformat(capture["started_at"])
         digest = blob["previous"]
     return None
+
+
+def _repairs_slave_manual(context) -> bool:
+    from jebao_flow.local_control.wavemaker_sequence import STAGED_ROLES_V2
+
+    return context.activation_sequence == STAGED_ROLES_V2

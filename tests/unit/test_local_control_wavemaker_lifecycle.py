@@ -31,10 +31,9 @@ from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
 from jebao_flow.protocol.session import RawStateCapture
 from tests.unit.test_local_control_coordinator import _binding, _lease, _qualification, _Resolver
 
-# v2 staged layout: 0..1 safe controls, 2..3 images, 4..5 timers, 6 master role,
-# 7 sync_slave role, 8 slave manual re-assert, 9 async_slave role.
-STAGED_SLAVE_MANUAL = 8
-STAGED_ASYNC_ROLE = 9
+# Staged layout, both versions: 0..1 safe controls, 2..3 images, 4..5 timers,
+# 6 master role, 7 sync_slave role, 8 async_slave role.
+STAGED_ASYNC_ROLE = 8
 
 FUNCTIONS = (
     "power",
@@ -966,8 +965,7 @@ async def test_failed_last_async_and_detach_can_restore_owned_original_without_r
     source = rig.store.load("attach_0001")
     child = rig.store.load(native_detach_request_id(source.request_id))
     assert source.phase is TransactionPhase.RECOVERY_REQUIRED
-    assert [a.phase for a in source.actions[:STAGED_SLAVE_MANUAL]] == [ActionPhase.VERIFIED] * 8
-    assert source.actions[STAGED_SLAVE_MANUAL].phase is ActionPhase.NO_CHANGE
+    assert [a.phase for a in source.actions[:STAGED_ASYNC_ROLE]] == [ActionPhase.VERIFIED] * 8
     assert source.actions[STAGED_ASYNC_ROLE].phase is ActionPhase.UNCERTAIN
     assert child.actions[0].phase is ActionPhase.UNCERTAIN
     assert all(a.phase is ActionPhase.PREPARED for a in child.actions[1:])

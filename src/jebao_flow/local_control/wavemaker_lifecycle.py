@@ -819,7 +819,7 @@ class NativeWavemakerController(LocalControlCoordinator):
         """Only the final role delta after this pair's verified Sync, never qualification."""
         staged = context.activation_sequence in STAGED_SEQUENCES
         layout = staged_layout(context) if staged else None
-        sync = (layout.manual or layout.async_role) - 1 if staged else index - 1
+        sync = index - 1
         return (
             context.kind == "attach"
             and context.plan.mode == "async"
@@ -838,16 +838,6 @@ class NativeWavemakerController(LocalControlCoordinator):
                 {"Linkage": "sync_slave"}
                 if staged
                 else {"SwitchON": True, "TimerON": True, "Linkage": "sync_slave"}
-            )
-            # v2 re-asserts the slave manual block between the two role writes.
-            and (
-                layout is None
-                or layout.manual is None
-                or (
-                    record.actions[layout.manual].target == record.actions[index].target
-                    and record.actions[layout.manual].phase
-                    in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
-                )
             )
         )
 
@@ -1009,9 +999,8 @@ class NativeWavemakerController(LocalControlCoordinator):
                         # The device rewrites the slave's manual block when it takes the role
                         # (2026-09-18 01:47:11.021 constant->feed). That block runs the pump
                         # whenever TimerON is false, so the attachment is not complete until
-                        # the re-asserted values are the ones the device still holds.
+                        # the master cycle's released-window repair is the value it still holds.
                         expected["Mode"] = "constant"
-                        expected["Frequency"] = context.plan.preparation_frequency
                     actual = get_product_schema(endpoint.target.product_key).decode_status(status)
                     fields = {
                         key: {

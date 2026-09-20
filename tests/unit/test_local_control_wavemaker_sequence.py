@@ -22,7 +22,6 @@ from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
 from jebao_flow.protocol.session import RawStateCapture
 from tests.unit.test_local_control_wavemaker_lifecycle import (
     STAGED_ASYNC_ROLE,
-    STAGED_SLAVE_MANUAL,
     MemoryTransport,
     Rig,
     _plan,
@@ -182,7 +181,7 @@ async def test_staged_sync_stage_failure_has_owned_assistance_and_immutable_cont
     source = rig.store.load("attach_0001")
     controller = rig.controller()
     context = controller._context(source)
-    sync_role = STAGED_SLAVE_MANUAL - 1
+    sync_role = STAGED_ASYNC_ROLE - 1
     assert context.activation_sequence == STAGED_ROLES_V2
     assert source.actions[sync_role].phase is ActionPhase.UNCERTAIN
     assert all(a.phase is ActionPhase.PREPARED for a in source.actions[sync_role + 1 :])
@@ -253,9 +252,8 @@ async def test_variable_auto_is_observation_only_during_staged_activation(tmp_pa
     assert set(master_row["fields"]) == {"SwitchON", "TimerON", "Linkage"}
     # The slave's manual block belongs to the attachment: it is what the pump runs whenever
     # TimerON drops, and the device rewrites it when it takes the role.
-    assert set(slave_row["fields"]) == {"SwitchON", "TimerON", "Linkage", "Mode", "Frequency"}
+    assert set(slave_row["fields"]) == {"SwitchON", "TimerON", "Linkage", "Mode"}
     assert slave_row["fields"]["Mode"]["expected"] == "constant"
-    assert slave_row["fields"]["Frequency"]["expected"] == 21
     await rig.detach()
     assert rig.states == rig.originals
 
@@ -323,71 +321,6 @@ async def test_initial_pair_failure_is_not_attributed_to_action_zero(tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_slave_manual_block_rewritten_by_the_device_is_put_back_before_the_async_role(
-    tmp_path, monkeypatch
-):
-    """2026-09-18 01:47:11.021: 0.62 s after the sync_slave write landed, and with no command
-    from us, the slave had rewritten its own manual Mode constant->feed and Frequency 80->70
-    (raw bytes[1] 0x02->0x07, bytes[3] 0x50->0x46). Three 2026-09-15 attaches show the same
-    rewrite with constant->sine and 20->30. That manual block is what the pump runs whenever
-    TimerON is false and ``feed`` stops it, so the planned values go back before the remaining
-    role write. Byte-copy rig: this reproduces the recorded rewrite, not a firmware model."""
-
-    rig = Rig(tmp_path)
-    original_send = MemoryTransport.send_raw_control
-
-    async def send(self, payload):
-        acknowledgement = await original_send(self, payload)
-        if rig.sent[-1][1] == {"Linkage": "sync_slave"}:
-            rig.states["slave"] = _put(rig.states["slave"], {"Mode": "feed", "Frequency": 70})
-        return acknowledgement
-
-    monkeypatch.setattr(MemoryTransport, "send_raw_control", send)
-    assert (await rig.attach("async"))["accepted"]
-    assert [(s[0], s[1]) for s in rig.sent[6:]] == [
-        ("master", {"Linkage": "master"}),
-        ("slave", {"Linkage": "sync_slave"}),
-        ("slave", {"Mode": "constant", "Frequency": 21}),
-        ("slave", {"Linkage": "async_slave"}),
-    ]
-    slave = SCHEMA.decode_status(rig.states["slave"])
-    assert slave["Mode"] == "constant" and slave["Frequency"] == 21
-    assert (await rig.detach())["accepted"] and rig.states == rig.originals
-
-
-@pytest.mark.asyncio
-async def test_untouched_slave_manual_block_costs_no_extra_frame(tmp_path):
-    rig = Rig(tmp_path)
-    assert (await rig.attach("async"))["accepted"]
-    assert len(rig.sent) == 9 and not any(s[1].get("Mode") == "constant" for s in rig.sent[6:])
-    source = rig.store.load("attach_0001")
-    assert source.actions[STAGED_SLAVE_MANUAL].phase is ActionPhase.NO_CHANGE
-    assert (await rig.detach())["accepted"] and rig.states == rig.originals
-
-
-@pytest.mark.asyncio
-async def test_a_manual_block_the_device_keeps_rewriting_fails_instead_of_staying_latent(
-    tmp_path, monkeypatch
-):
-    rig = Rig(tmp_path)
-    original_send = MemoryTransport.send_raw_control
-    clobbered = ({"Linkage": "sync_slave"}, {"Mode": "constant", "Frequency": 21})
-
-    async def send(self, payload):
-        acknowledgement = await original_send(self, payload)
-        if rig.sent[-1][1] in clobbered:
-            rig.states["slave"] = _put(rig.states["slave"], {"Mode": "feed", "Frequency": 70})
-        return acknowledgement
-
-    monkeypatch.setattr(MemoryTransport, "send_raw_control", send)
-    with pytest.raises(LocalControlExecutionError, match="자기 원본 복원 확인"):
-        await rig.attach("async")
-    # The role is never taken while a pump-stop value is latent in the manual block.
-    assert sum(s[1] == {"Linkage": "async_slave"} for s in rig.sent) == 0
-    assert rig.states == rig.originals
-
-
-@pytest.mark.asyncio
 async def test_a_bound_slave_answering_only_with_report_frames_still_completes(
     tmp_path, monkeypatch
 ):
@@ -415,11 +348,10 @@ async def test_a_bound_slave_answering_only_with_report_frames_still_completes(
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
-def test_v1_records_keep_their_own_action_layout(mode):
-    """A journal is append-only history: records written before the slave manual re-assert
-    must still be read from their own layout. Recomputing old records with the new positions
-    made every historical staged record fail validation, and `_require_available` walks every
-    stored record, so one unreadable record blocked all later Pro operations."""
+def test_both_sequence_versions_share_one_staged_layout(mode):
+    """A journal is append-only history, so stored records must keep being read from their own
+    positions. v2 does not move any staged action: a bound slave never acknowledges a write,
+    so the manual repair lives in the master cycle's released window, not in this plan."""
 
     plan = _plan(mode)
     members = tuple(
@@ -429,18 +361,12 @@ def test_v1_records_keep_their_own_action_layout(mode):
     legacy = SimpleNamespace(activation_sequence=STAGED_ROLES, plan=plan, originals=members)
     current = SimpleNamespace(activation_sequence=STAGED_ROLES_V2, plan=plan, originals=members)
 
-    old, new = staged_layout(legacy), staged_layout(current)
-    assert old.manual is None and new.manual == 8
-    assert old.count == (9 if mode == "async" else 8)
-    assert new.count == old.count + 1
-    assert old.async_role == (8 if mode == "async" else None)
-    assert new.async_role == (9 if mode == "async" else None)
-
-    legacy_controls = [values for _name, values in staged_controls(legacy)]
-    assert not any("Mode" in v and set(v) == {"Mode", "Frequency"} for v in legacy_controls)
-    assert {"Mode": "constant", "Frequency": 21} in [
-        values for _name, values in staged_controls(current)
-    ]
+    assert staged_layout(legacy) [1:] == staged_layout(current)[1:]
+    assert staged_layout(current).count == (9 if mode == "async" else 8)
+    assert staged_layout(current).async_role == (8 if mode == "async" else None)
+    assert staged_controls(legacy) == staged_controls(current)
+    assert not any("Mode" in values and set(values) == {"Mode"} for _n, values in
+                   staged_controls(current))
 
 
 @pytest.mark.asyncio
