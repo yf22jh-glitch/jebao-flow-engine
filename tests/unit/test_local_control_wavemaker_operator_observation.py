@@ -9,6 +9,7 @@ from jebao_flow import local_control_cli
 from jebao_flow.config import RuntimeMode
 from jebao_flow.local_control.coordinator import LocalControlExecutionError
 from jebao_flow.local_control.journal import ActionPhase, native_detach_request_id
+from jebao_flow.local_control.wavemaker_sequence import STAGED_ASYNC_ROLE
 from tests.unit.test_local_control_wavemaker_lifecycle import Rig, _plan
 
 
@@ -53,11 +54,11 @@ async def test_final_attempt_retains_state_until_explicit_owned_recovery(tmp_pat
             == rig.originals[original.target.logical_member]
         )
     if failure != "none":
-        assert result["actions"][8]["acknowledgement_received"] is False
-        assert result["actions"][8]["delivery"] == "UNKNOWN"
+        assert result["actions"][STAGED_ASYNC_ROLE]["acknowledgement_received"] is False
+        assert result["actions"][STAGED_ASYNC_ROLE]["delivery"] == "UNKNOWN"
     if failure in {"ack_unapplied", "cancel"}:
-        assert source.actions[8].phase is ActionPhase.UNCERTAIN
-        assert source.actions[8].diagnostic == "native_stage_unverified"
+        assert source.actions[STAGED_ASYNC_ROLE].phase is ActionPhase.UNCERTAIN
+        assert source.actions[STAGED_ASYNC_ROLE].diagnostic == "native_stage_unverified"
     count = len(rig.reads)
     cached = await observe(rig)
     assert cached["awaiting_operator_observation"] and not cached["current_state_verified"]

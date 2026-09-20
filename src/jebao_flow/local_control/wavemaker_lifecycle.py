@@ -37,7 +37,11 @@ from jebao_flow.local_control.wavemaker_restore import (
     compare_restore_readback,
 )
 from jebao_flow.local_control.wavemaker_sequence import (
+    STAGED_ACTION_COUNT,
+    STAGED_ASYNC_ROLE,
     STAGED_ROLES,
+    STAGED_SLAVE_MANUAL,
+    STAGED_SYNC_ROLE,
     SequenceDeviceWriter,
     advance_staged_roles,
     staged_controls,
@@ -274,21 +278,24 @@ class NativeWavemakerController(LocalControlCoordinator):
                 record.phase is TransactionPhase.VERIFIED
                 and context.await_operator_observation is not True
             )
-            or len(record.actions) != 9
+            or len(record.actions) != STAGED_ACTION_COUNT["async"]
             or any(
                 a.phase not in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
-                for a in record.actions[:8]
+                for a in record.actions[:STAGED_ASYNC_ROLE]
             )
-            or record.actions[8].phase
+            or record.actions[STAGED_ASYNC_ROLE].phase
             not in {ActionPhase.UNCERTAIN, ActionPhase.FORWARD_ATTEMPTING, ActionPhase.VERIFIED}
         ):
             return False
         # Reuse the exact owned plan comparison, not just the action count or last field.
         actions = record.actions
-        if actions[8].phase is ActionPhase.FORWARD_ATTEMPTING:
+        if actions[STAGED_ASYNC_ROLE].phase is ActionPhase.FORWARD_ATTEMPTING:
             # A crash at the send boundary also means unknown delivery, not permission
             # to resend. This is a validation view; the stored phase stays untouched.
-            actions = (*actions[:8], actions[8].model_copy(update={"phase": ActionPhase.UNCERTAIN}))
+            actions = (
+                *actions[:STAGED_ASYNC_ROLE],
+                actions[STAGED_ASYNC_ROLE].model_copy(update={"phase": ActionPhase.UNCERTAIN}),
+            )
         validate_staged_assistance_source(
             self,
             record.model_copy(
@@ -811,26 +818,34 @@ class NativeWavemakerController(LocalControlCoordinator):
     def _can_reconcile_async(self, record, context, index):
         """Only the final role delta after this pair's verified Sync, never qualification."""
         staged = context.activation_sequence == STAGED_ROLES
+        sync = STAGED_SYNC_ROLE if staged else index - 1
         return (
             context.kind == "attach"
             and context.plan.mode == "async"
             and len(context.originals) == 2
-            and len(record.actions) == (9 if staged else 7)
-            and index == (8 if staged else 6)
+            and len(record.actions) == (STAGED_ACTION_COUNT["async"] if staged else 7)
+            and index == (STAGED_ASYNC_ROLE if staged else 6)
             and record.actions[index].acknowledgement_sha256 is None
             and record.actions[index].function == "native_controls"
             and record.actions[index].target == context.originals[1].target
-            and record.actions[index - 1].target == record.actions[index].target
-            and record.actions[index - 1].phase is ActionPhase.VERIFIED
+            and record.actions[sync].target == record.actions[index].target
+            and record.actions[sync].phase is ActionPhase.VERIFIED
             and json.loads(self._journal.load_blob(record.actions[index].expected_readback_sha256))
             == {"Linkage": "async_slave"}
-            and json.loads(
-                self._journal.load_blob(record.actions[index - 1].expected_readback_sha256)
-            )
+            and json.loads(self._journal.load_blob(record.actions[sync].expected_readback_sha256))
             == (
                 {"Linkage": "sync_slave"}
                 if staged
                 else {"SwitchON": True, "TimerON": True, "Linkage": "sync_slave"}
+            )
+            # The staged plan re-asserts the slave manual block between the two role writes.
+            and (
+                not staged
+                or (
+                    record.actions[STAGED_SLAVE_MANUAL].target == record.actions[index].target
+                    and record.actions[STAGED_SLAVE_MANUAL].phase
+                    in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
+                )
             )
         )
 
@@ -984,6 +999,17 @@ class NativeWavemakerController(LocalControlCoordinator):
                     )
                     if context.kind == "slave_timer_rearm_v1" and index == 1:
                         expected["Mode"] = "constant"
+                    if (
+                        context.kind == "attach"
+                        and context.activation_sequence == STAGED_ROLES
+                        and index == 1
+                    ):
+                        # The device rewrites the slave's manual block when it takes the role
+                        # (2026-09-18 01:47:11.021 constant->feed). That block runs the pump
+                        # whenever TimerON is false, so the attachment is not complete until
+                        # the re-asserted values are the ones the device still holds.
+                        expected["Mode"] = "constant"
+                        expected["Frequency"] = context.plan.preparation_frequency
                     actual = get_product_schema(endpoint.target.product_key).decode_status(status)
                     fields = {
                         key: {

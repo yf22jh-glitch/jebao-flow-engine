@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -25,8 +26,11 @@ from jebao_flow.local_control.journal import (
 )
 from jebao_flow.local_control.models import LocalControlIntent
 from jebao_flow.protocol.profiles import get_product_schema
+from jebao_flow.protocol.session import RawStateCapture
 
 KIND = "master_link_cycle_v1"
+_LOGGER = logging.getLogger(__name__)
+_CLOSED_BY_CYCLE = "native_async_role_verified_by_master_cycle_delivery_unknown"
 
 
 def validate_cycle(owner, record, context):
@@ -201,7 +205,6 @@ async def cycle_locked(owner, source, context, endpoints, permit):
                 await writer.close()
         record = await _pair(owner, record, cycle_context, endpoints, permit, released=False)
         record = owner._save_transaction_phase(record, TransactionPhase.VERIFIED)
-        return owner._public(record, current=True)
     except BaseException as error:
         record = owner._required(request_id)
         phase = record.actions[index].phase
@@ -217,5 +220,82 @@ async def cycle_locked(owner, source, context, endpoints, permit):
         report_action_failure(
             record, index, error, started_ns=started, failed_ns=failure_clock_ns()
         )
-        # No reverse rollback to master, no source mutation, no implicit detach on cancellation.
+        # No reverse rollback to master, no implicit detach on cancellation. The source is
+        # closed out only after this cycle is durably verified, never from inside this handler.
         raise
+    # Outside the handler on purpose: a verified cycle is never downgraded by the close-out.
+    await _close_source_async_role(owner, source, endpoints, permit, record)
+    return owner._public(record, current=True)
+
+
+async def _close_source_async_role(owner, source, endpoints, permit, cycle):
+    """Write this cycle's own explicit slave reply back onto the stalled Async role action.
+
+    The verified cycle already holds exactly the evidence ``_reconcile_async_reply`` asked for
+    and could not get at the time: a fresh ``action 3`` reply showing the slave holding
+    ``async_slave`` with its power, timer and byte-exact schedule image, captured while the
+    master was released. Leaving that proof only in the cycle record is what pinned the source
+    at ``recovery_required``; a pending source owns the physical pump, so every ordinary
+    command on it — including the ``manual_mode`` write that clears a ``feed`` fallback — was
+    refused for the 22 hours after 2026-09-18 01:47. Nothing is sent here, the absent ACK is
+    preserved, and a source that cannot be closed is left exactly as it is today.
+    """
+
+    from jebao_flow.local_control.wavemaker_sequence import STAGED_ASYNC_ROLE
+
+    try:
+        record = owner._required(source.request_id)
+        context = owner._context(record)
+        if not owner._awaiting_operator(record, context):
+            return
+        slave = endpoints[1]
+        action = record.actions[STAGED_ASYNC_ROLE]
+        if action.target != slave.target or action.phase is ActionPhase.VERIFIED:
+            return
+        row = _released_slave_reply(owner, cycle, slave.target.logical_member)
+        if row is None:
+            return
+        capture_id, began = row
+        capture = json.loads(owner._journal.load_blob(capture_id))
+        reply = RawStateCapture(
+            owner._journal.load_blob(capture["wire_sha256"]),
+            capture["action"],
+            owner._journal.load_blob(capture["status_sha256"]),
+        )
+        prepared = owner._forward_prepared(action, slave)
+        record = owner._evidence(
+            record, STAGED_ASYNC_ROLE, reply, began, prepared, "master_cycle_released_reply"
+        )
+        if reply.action != 3 or not verify_prepared_readback(prepared, reply.status_payload):
+            return
+        record = owner._save_action(
+            record,
+            STAGED_ASYNC_ROLE,
+            phase=ActionPhase.VERIFIED,
+            transaction_phase=TransactionPhase.EXECUTING,
+            diagnostic=_CLOSED_BY_CYCLE,
+        )
+        await owner._finish(record, context, endpoints, permit)
+    except Exception as error:
+        # The cycle itself stays verified. An unclosed source is today's behaviour, not a
+        # reason to fail the recovery that already put the pair back together.
+        _LOGGER.error("native_source_closeout_failed type=%s", type(error).__name__)
+
+
+def _released_slave_reply(owner, cycle, name):
+    """Latest complete ``released_reply_pair`` row for the slave, newest chain entry first."""
+
+    digest = cycle.native_final_sha256
+    while digest:
+        blob = json.loads(owner._journal.load_blob(digest))
+        for row in reversed(blob["devices"]):
+            if (
+                row.get("stage") == "released_reply_pair"
+                and row.get("logical_member") == name
+                and row.get("action") == 3
+                and row.get("complete") is True
+            ):
+                capture = json.loads(owner._journal.load_blob(row["capture_sha256"]))
+                return row["capture_sha256"], datetime.fromisoformat(capture["started_at"])
+        digest = blob["previous"]
+    return None

@@ -16,7 +16,10 @@ from tests.unit.test_local_control_wavemaker_master_cycle import attach, lost_re
 
 async def _pending_owned_pair(rig):
     lost_reply(rig)
-    result = await attach(rig)
+    # The operator explicitly owns the interval, so a verified cycle still leaves the source
+    # pending. Without that flag the cycle now closes the source out with its own explicit
+    # reply and the pair is released, which is what this child exists to avoid needing.
+    result = await attach(rig, await_operator_observation=True)
     assert result["kind"] == "master_link_cycle_v1"
     assert result["accepted"]
     source = rig.store.load("cycle_source_01")

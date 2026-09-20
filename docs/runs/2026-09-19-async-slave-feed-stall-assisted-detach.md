@@ -71,3 +71,60 @@
   동반하기 때문이다.
 - 이 실행으로 확정하지 못한 것: `2026-09-18T11:36:31Z` 직전 `TimerON`을 끈 주체, 그 시점에
   제어 쓰기만 무응답이 된 이유, 물리 유량.
+
+## 덧붙임 (2026-09-20) — 보존 프레임 재판독
+
+§4에 따라 위 기록의 사실 기술은 고치지 않고 덧붙인다. 같은 저널의 보존 캡처를 시각순으로
+전부 복호해 「확정하지 못한 것」 중 두 가지가 확정됐다. 새 실기는 없었다.
+
+### 1. `Mode=feed`는 장비가 스스로 썼다
+
+`kaga_daily_async_20260918_01`의 evidence chain 41행 중 하단 `flow_pro_d7a8` 구간:
+
+| 시각(UTC) | stage | act | Linkage | manual Mode / Flow / Freq |
+|---|---|---|---|---|
+| 01:47:08.655 | `staged_post_role_pair` | 3 | independent | constant / 40 / 80 |
+| 01:47:10.401 | `staged_after_read` | 4 | **sync_slave** | constant / 40 / 80 |
+| 01:47:11.021 | `staged_post_role_pair` | 4 | sync_slave | **feed / 40 / 70** |
+
+두 캡처 사이 이 소프트웨어의 전송은 **0건**이다. action 07은 ACK를 받고 01:47:10.401에
+verified가 됐고, action 08은 아직 전송 전이며 그 BEFORE 증거가 같은 01:47:11 pair 캡처다.
+452바이트 raw 차이는 네 바이트뿐이고 그중 데이터는 둘이다 — `byte[1] 0x02→0x07`
+(constant→feed), `byte[3] 0x50→0x46`(80→70). 나머지 둘은 장비 시계(HMS)다.
+
+같은 재작성이 2026-09-15 attach 세 건에도 있다. `wm_product_async_staged_5ac6e17_01`
+14:56:54.552에 `flow_pro_d0a4`가 sync_slave가 되면서 manual이 `constant/20`에서 `sine/30`으로
+바뀌었고, 그 값은 그 장비의 `AutoMode=sine`·`AutoFreq=30`과 같다. 09-18에는
+`AutoMode=pulse`·`AutoFreq=70`이었는데 manual Mode는 `feed`가 됐다. Frequency는 AutoFreq와
+일치하지만 **Mode 값의 선택 규칙은 `UNKNOWN`**이며 펌웨어 가설로 적지 않는다.
+
+확정되는 사실은 하나다. **Pro는 slave 역할을 잡는 순간 자기 manual `Mode`와 `Frequency`를
+우리가 보내지 않은 값으로 덮어쓴다.** 관측 4회 중 4회. `TimerON`이 내려가면 펌프가 실제로
+도는 것은 이 manual 블록이고 `feed`는 정지값이다. `staged_controls()`는 `Mode="constant"`를
+역할 전환 **이전**(timers 단계)에만 쓰고 이후에 다시 확인하지 않았으므로 그 값이 그대로 남았다.
+
+### 2. 22시간 동안 풀리지 않은 것은 장비가 아니라 기록이다
+
+- action 08(`{"Linkage":"async_slave"}`)의 `acknowledgement_sha256`은 `None`이고 AFTER 증거가
+  없다 — `send_once`가 ACK 대기에서 실패했다. action 00~07은 전부 ACK가 있다.
+- `_reconcile_async_reply`가 `accept_reports=False`로 한 번 읽었고, 그 창에서 보존된 5프레임
+  (01:47:21.366~01:47:21.399)은 **전부 act=4, 전부 `selected=false`**다. act=3이 오지 않아
+  읽기가 타임아웃했고 action 08은 `uncertain`으로 남았다.
+- 그 직후 `wm_cycle_de6d2756…`(01:47:22~01:48:02)가 자동 실행돼 **verified**로 끝났다.
+  그 기록의 `released_reply_pair` 01:47:57.706은 **act=3 명시 응답**으로 하단이
+  `async_slave`·`SwitchON`·`TimerON`이고 시간표 image가 바이트 동일함을 증명한다.
+  모니터 샘플도 01:47:15 `independent` → 01:47:45 `async_slave`로 바뀐다.
+- **장비는 40초 만에 복구됐다.** 그러나 `cycle_locked`는 설계상 source를 건드리지 않아
+  source는 `recovery_required`로 남았고, 보류 기록이 그 physical device를 소유하므로 이후
+  22시간 동안 모든 일반 명령이 거부됐다 — `feed`를 지울 `manual_mode=constant`를 포함해서.
+- 부수 확인: 01:47:08.655(하단 independent)에서는 같은 reply-only 읽기가 act=3을 받았고,
+  01:47:10.401(역할 획득) 이후 보존된 모든 프레임은 act=4다. `wavemaker_master_cycle`이
+  전 구간 `accept_reports=True`를 쓰는 이유가 이것이다.
+
+- 증거 등급: (b) preserved structured·durable daemon artifact. 원본 wire frame이 아니라
+  저널이 보존한 캡처(`action`·`status_sha256`·`wire_sha256`)와 그 452바이트 status다.
+- **이 재판독으로 새로 확정된 사실:** (a) Pro는 slave 역할 획득 시 자기 manual 블록을
+  덮어쓴다, (b) 역할을 가진 slave는 report 프레임(act=4)만 보낸다, (c) master cycle이
+  성공해도 source가 닫히지 않아 장비가 계속 소유 상태로 남는다.
+- 여전히 확정하지 못한 것: 장비가 manual `Mode`에 쓰는 값의 선택 규칙, `2026-09-18T11:36:31Z`
+  직전 `TimerON`을 끈 주체, 그 시점에 제어 쓰기만 무응답이 된 이유, 물리 유량.

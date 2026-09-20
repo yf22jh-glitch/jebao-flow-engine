@@ -18,7 +18,9 @@ from tests.unit.test_local_control_wavemaker_master_cycle import attach, lost_re
 
 async def _pending_source(rig):
     lost_reply(rig)
-    result = await attach(rig)
+    # Operator-owned interval: a verified cycle keeps this source pending. See the same note
+    # in test_local_control_wavemaker_power_cycle.
+    result = await attach(rig, await_operator_observation=True)
     assert result["kind"] == "master_link_cycle_v1"
     source = rig.store.load("cycle_source_01")
     assert source.phase is TransactionPhase.RECOVERY_REQUIRED

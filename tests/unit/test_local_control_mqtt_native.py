@@ -15,6 +15,7 @@ from jebao_flow.config import MqttConfig
 from jebao_flow.local_control.catalog import build_local_control_catalog
 from jebao_flow.local_control.ha import project_home_assistant
 from jebao_flow.local_control.install import current_protocol_schema_sha256
+from jebao_flow.local_control.journal import ActionPhase
 from jebao_flow.local_control.models import FreshInstallManifest, InstallContentBindings
 from jebao_flow.local_control.mqtt import (
     LocalControlCommandConflictError,
@@ -23,6 +24,7 @@ from jebao_flow.local_control.mqtt import (
     LocalControlMqttRouter,
 )
 from jebao_flow.local_control.state import FreshDeviceState, StatePublication
+from jebao_flow.local_control.wavemaker_sequence import STAGED_ASYNC_ROLE
 from tests.unit.test_local_control_mqtt import _Client, _OneMessageClient, _OwnershipService
 from tests.unit.test_local_control_wavemaker_lifecycle import Rig, _plan
 
@@ -211,7 +213,7 @@ async def test_native_observation_pause_is_not_automatically_restored_or_retried
     assert restored.result["accepted"] and rig.states == rig.originals
 
 
-async def test_native_master_cycle_result_does_not_clear_original_uncertain_delivery(tmp_path):
+async def test_native_master_cycle_closes_the_source_without_claiming_delivery(tmp_path):
     from tests.unit.test_local_control_wavemaker_master_cycle import lost_reply
 
     rig = Rig(tmp_path)
@@ -228,8 +230,11 @@ async def test_native_master_cycle_result_does_not_clear_original_uncertain_deli
     assert result.result["kind"] == "master_link_cycle_v1"
     assert result.result["original_async_delivery"] == "UNKNOWN"
     source = rig.store.load("mqtt_native_0001")
-    assert source.phase.value == "recovery_required"
-    assert source.actions[8].acknowledgement_sha256 is None
+    # The cycle's own released explicit reply closes the stalled role action, so the pair is
+    # released for ordinary commands. The lost ACK is still recorded: delivery stays UNKNOWN.
+    assert source.phase.value == "verified"
+    assert source.actions[STAGED_ASYNC_ROLE].acknowledgement_sha256 is None
+    assert source.actions[STAGED_ASYNC_ROLE].phase is ActionPhase.VERIFIED
     writes, reads = len(rig.sent), len(rig.reads)
     replay = await router.handle(
         _topic(projection), _request("cycle_master", record_id="mqtt_native_0001")
@@ -244,7 +249,7 @@ async def test_native_routes_owned_master_power_cycle_without_touching_slave(tmp
 
     rig = Rig(tmp_path)
     lost_reply(rig)
-    await attach(rig)
+    await attach(rig, await_operator_observation=True)
     writes = len(rig.sent)
     projection, router = _setup(rig)
     assert "cycle_master_power" in projection.native_wavemaker_api["operations"]
@@ -267,7 +272,7 @@ async def test_native_routes_image_free_async_slave_timer_rearm(tmp_path):
 
     rig = Rig(tmp_path)
     lost_reply(rig)
-    await attach(rig)
+    await attach(rig, await_operator_observation=True)
     rig.states["slave"] = _put(
         rig.states["slave"],
         {

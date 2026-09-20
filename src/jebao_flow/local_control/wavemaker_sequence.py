@@ -25,6 +25,14 @@ from jebao_flow.protocol.errors import ProtocolError
 from jebao_flow.protocol.profiles import get_product_schema
 
 STAGED_ROLES = "staged_roles_v1"
+# Staged action positions for the Pro pair: 0..1 safe controls, 2..3 schedule images,
+# 4..5 timers, then the role writes. Named because the loop below branches on them.
+_TIMERS = (4, 5)
+_MASTER_ROLE = 6
+STAGED_SYNC_ROLE = 7
+STAGED_SLAVE_MANUAL = 8
+STAGED_ASYNC_ROLE = 9
+STAGED_ACTION_COUNT = {"sync": 9, "async": 10}
 _CONTROL = DeviceControlConfig()
 # Existing schedule_flow_experiment._ROLE_PREFLIGHT_SETTLE_SECONDS; no harness import.
 _ROLE_SETTLE_SECONDS = 1.0
@@ -129,6 +137,14 @@ def staged_controls(context):
     roles = [(names[0], {"Linkage": "master"})]
     for name in names[1:]:
         roles.append((name, {"Linkage": "sync_slave"}))
+        # Taking the slave role makes the device rewrite its own manual Mode and Frequency
+        # about a second later with no command from us: 2026-09-18 01:47:11.021 showed
+        # constant->feed and 80->70, and three 2026-09-15 attaches showed constant->sine and
+        # 20->30. The manual block is what the pump runs whenever TimerON is false, and
+        # ``feed`` stops it, so the planned values go back before the remaining role write
+        # instead of being left at whatever the device chose. Ordinary journalled action:
+        # when the device did not touch them the read before it matches and nothing is sent.
+        roles.append((name, {"Mode": "constant", "Frequency": plan.preparation_frequency}))
         if plan.mode == "async":
             roles.append((name, {"Linkage": "async_slave"}))
     return (*timers, *roles)
@@ -159,7 +175,7 @@ def validate_staged_assistance_source(controller, source, context):
         return  # Final comparison can fail after acknowledged or reply-confirmed actions.
     first = next(i for i, phase in enumerate(phases) if phase not in done)
     if (
-        first not in (7, 8)
+        first not in (STAGED_SYNC_ROLE, STAGED_SLAVE_MANUAL, STAGED_ASYNC_ROLE)
         or phases[first] not in {ActionPhase.PREPARED, ActionPhase.UNCERTAIN}
         or any(p is not ActionPhase.PREPARED for p in phases[first + 1 :])
     ):
@@ -311,13 +327,13 @@ async def advance_staged_roles(controller, record, context, endpoints, permit):
             endpoint = by_name[action.target.logical_member]
             name = endpoint.target.logical_member
             prepared = controller._forward_prepared(action, endpoint)
-            if index == 8:
+            if index == STAGED_ASYNC_ROLE:
                 observe_before_async()  # Same pair captures and connection, no extra read.
             reports = action.verification_kind != "schedule_image"
             if action.verification_kind == "schedule_image":
                 # The existing reply-only image precondition remains adjacent to each send.
                 await refresh_pair(False, "staged_before_image")
-            elif index in (4, 5):
+            elif index in _TIMERS:
                 # Keep the existing connection, but don't reuse a BEFORE from the peer's write.
                 await read_one(endpoint, True, "staged_before_timer")
                 record = controller._required(record.request_id)
@@ -376,7 +392,7 @@ async def advance_staged_roles(controller, record, context, endpoints, permit):
                 await refresh_pair(True, "staged_pause_fresh")
                 if not verify_prepared_readback(prepared, captures[name][1].status_payload):
                     raise LocalControlExecutionError("새 연결의 준비값 반환 불일치")
-            elif index == 5:
+            elif index == _TIMERS[-1]:
                 await refresh_pair(False, "staged_timer_pair")
                 verify_pair_roles()
                 # Observe current Auto without importing the old clock/Auto refusal gates.
@@ -385,11 +401,14 @@ async def advance_staged_roles(controller, record, context, endpoints, permit):
                 await controller._sequence_sleep(_ROLE_SETTLE_SECONDS)
                 await refresh_pair(False, "staged_before_master")
                 verify_pair_roles()
-            elif index >= 6:
-                # Old fixed-Q2 Sync intermediate uses raw report-capable capture. Other role
-                # barriers use explicit replies; do not flatten the two old paths into one.
-                reports = context.plan.mode == "async" and index == 7
-                await refresh_pair(reports, "staged_post_role_pair")
+            elif index >= _MASTER_ROLE:
+                # From the instant the slave holds a role it answers with report frames only.
+                # Every preserved frame from 2026-09-18 01:47:10.401 onward is action 4, while
+                # the same reply-only read at 01:47:08.655 — slave still independent — got
+                # action 3. The master barrier therefore keeps the explicit reply; every
+                # barrier after it accepts reports, as wavemaker_master_cycle already does for
+                # the same window. verify_pair_roles still checks the decoded roles.
+                await refresh_pair(index > _MASTER_ROLE, "staged_post_role_pair")
                 verify_pair_roles()
         return await controller._finish(record, context, endpoints, permit, captures=captures)
     except BaseException as error:

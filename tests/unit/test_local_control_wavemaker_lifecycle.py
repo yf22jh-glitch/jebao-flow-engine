@@ -26,6 +26,7 @@ from jebao_flow.local_control.models import InstallContentBindings
 from jebao_flow.local_control.resolver import ResolvedEndpoint
 from jebao_flow.local_control.wavemaker import NativeWavemakerPlan
 from jebao_flow.local_control.wavemaker_lifecycle import NativeWavemakerController
+from jebao_flow.local_control.wavemaker_sequence import STAGED_ASYNC_ROLE, STAGED_SLAVE_MANUAL
 from jebao_flow.protocol.control import _place_value
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
 from jebao_flow.protocol.session import RawStateCapture
@@ -131,6 +132,11 @@ class MemoryTransport:
     def quarantine(self):
         self.rig.events.append(("quarantine", self, self.rig.virtual_time))
 
+    async def read_raw_state(self, *, accept_reports=True):
+        # Same delegation as protocol.session.GizwitsSession.read_raw_state.
+        capture = await self.read_raw_state_capture(accept_reports=accept_reports)
+        return capture.status_payload
+
     async def read_raw_state_capture(self, *, accept_reports, state_frame_observer=None):
         rig = self.rig
         rig.events.append(("read", self, rig.virtual_time))
@@ -164,8 +170,12 @@ class MemoryTransport:
         ]
         assert len(matches) == 1
         record, action = matches[0]
-        assert record.native_context_sha256 is not None
-        assert action.native_evidence_sha256 is not None
+        # Native plans and their children must have durable context and a BEFORE evidence row
+        # before any send. Ordinary scalar commands on the same rig carry neither.
+        if action.function in {"native_controls", "native_image"}:
+            assert record.native_context_sha256 is not None
+        if record.native_context_sha256 is not None:
+            assert action.native_evidence_sha256 is not None
         rig.store._require_referenced_blobs(record)
         flags = payload[1 : 1 + SCHEMA.attribute_flags_size][::-1]
         values = payload[1 + SCHEMA.attribute_flags_size :]
@@ -386,8 +396,11 @@ async def test_async_ack_error_never_accepts_missing_mismatched_or_report_only_r
     assert reads == [False]
     assert rig.states == rig.originals
     source = rig.store.load("attach_0001")
-    assert source.actions[8].acknowledgement_sha256 is None
-    assert source.actions[8].diagnostic == "native_own_baseline_restored_delivery_unknown"
+    assert source.actions[STAGED_ASYNC_ROLE].acknowledgement_sha256 is None
+    assert (
+        source.actions[STAGED_ASYNC_ROLE].diagnostic
+        == "native_own_baseline_restored_delivery_unknown"
+    )
     assert sum(s[2] == "attach_0001" and s[1] == {"Linkage": "async_slave"} for s in rig.sent) == 1
 
 
@@ -420,14 +433,14 @@ async def test_reply_confirmed_async_final_failure_can_use_owned_assistance(tmp_
         await rig.attach("async")
     source = rig.store.load("attach_0001")
     assert source.phase is TransactionPhase.RECOVERY_REQUIRED
-    assert source.actions[8].phase is ActionPhase.VERIFIED
-    assert source.actions[8].acknowledgement_sha256 is None
+    assert source.actions[STAGED_ASYNC_ROLE].phase is ActionPhase.VERIFIED
+    assert source.actions[STAGED_ASYNC_ROLE].acknowledgement_sha256 is None
     monkeypatch.setattr(MemoryTransport, "send_raw_control", original_send)
     rig.fail_ack = rig.reject_send = None
     result = await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
     assert result["accepted"] and rig.states == rig.originals
     assert (
-        rig.store.load("attach_0001").actions[8].diagnostic
+        rig.store.load("attach_0001").actions[STAGED_ASYNC_ROLE].diagnostic
         == "native_own_baseline_restored_delivery_unknown"
     )
 
@@ -949,10 +962,12 @@ async def test_failed_last_async_and_detach_can_restore_owned_original_without_r
     source = rig.store.load("attach_0001")
     child = rig.store.load(native_detach_request_id(source.request_id))
     assert source.phase is TransactionPhase.RECOVERY_REQUIRED
-    assert [a.phase for a in source.actions] == [ActionPhase.VERIFIED] * 8 + [ActionPhase.UNCERTAIN]
+    assert [a.phase for a in source.actions[:STAGED_SLAVE_MANUAL]] == [ActionPhase.VERIFIED] * 8
+    assert source.actions[STAGED_SLAVE_MANUAL].phase is ActionPhase.NO_CHANGE
+    assert source.actions[STAGED_ASYNC_ROLE].phase is ActionPhase.UNCERTAIN
     assert child.actions[0].phase is ActionPhase.UNCERTAIN
     assert all(a.phase is ActionPhase.PREPARED for a in child.actions[1:])
-    failed = source.actions[8]
+    failed = source.actions[STAGED_ASYNC_ROLE]
     rig.before_send = None
     sent = len(rig.sent)
     result = await rig.controller().assist_detach(request_id=source.request_id, targets=rig.targets)
@@ -961,9 +976,15 @@ async def test_failed_last_async_and_detach_can_restore_owned_original_without_r
     recovered = rig.store.load(source.request_id)
     assert recovered.phase is TransactionPhase.ROLLED_BACK
     assert recovered.native_context_sha256 == source.native_context_sha256
-    assert recovered.actions[8].acknowledgement_sha256 is None
-    assert recovered.actions[8].native_evidence_sha256 == failed.native_evidence_sha256
-    assert recovered.actions[8].diagnostic == "native_own_baseline_restored_delivery_unknown"
+    assert recovered.actions[STAGED_ASYNC_ROLE].acknowledgement_sha256 is None
+    assert (
+        recovered.actions[STAGED_ASYNC_ROLE].native_evidence_sha256
+        == failed.native_evidence_sha256
+    )
+    assert (
+        recovered.actions[STAGED_ASYNC_ROLE].diagnostic
+        == "native_own_baseline_restored_delivery_unknown"
+    )
     assert all(
         row[0] != "slave"
         or (
@@ -1042,5 +1063,7 @@ async def test_pre_async_pair_read_failure_sends_no_async_and_restores(tmp_path)
     with pytest.raises(LocalControlExecutionError, match="자기 원본 복원 확인"):
         await rig.attach("async")
     assert all(row[1].get("Linkage") != "async_slave" for row in rig.sent)
-    assert rig.store.load("attach_0001").actions[8].acknowledgement_sha256 is None
+    assert (
+        rig.store.load("attach_0001").actions[STAGED_ASYNC_ROLE].acknowledgement_sha256 is None
+    )
     assert rig.states == rig.originals

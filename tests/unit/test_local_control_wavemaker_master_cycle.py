@@ -7,10 +7,17 @@ from pathlib import Path
 import pytest
 
 from jebao_flow.local_control.coordinator import LocalControlExecutionError
-from jebao_flow.local_control.journal import ActionPhase, native_detach_request_id
+from jebao_flow.local_control.journal import (
+    ActionPhase,
+    LocalControlJournalRecord,
+    native_detach_request_id,
+)
+from jebao_flow.local_control.models import LocalControlIntent
 from jebao_flow.local_control.wavemaker import NativeWavemakerPlan
 from jebao_flow.local_control.wavemaker_lifecycle import native_master_cycle_request_id
-from tests.unit.test_local_control_wavemaker_lifecycle import Rig, _plan
+from jebao_flow.local_control.wavemaker_sequence import STAGED_ASYNC_ROLE
+from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
+from tests.unit.test_local_control_wavemaker_lifecycle import Rig, _plan, _put
 
 
 async def attach(rig, **kwargs):
@@ -44,9 +51,12 @@ async def test_cycle_preserves_source_delivery_and_replays_without_contact(tmp_p
     assert result["accepted"] and result["current_state_verified"]
     assert result["kind"] == "master_link_cycle_v1"
     assert result["original_async_delivery"] == "UNKNOWN"
-    assert source.actions[8].phase is ActionPhase.UNCERTAIN
-    assert source.actions[8].acknowledgement_sha256 is None
-    assert source.actions[8].diagnostic == "native_stage_unverified"
+    assert source.actions[STAGED_ASYNC_ROLE].phase is ActionPhase.VERIFIED
+    assert source.actions[STAGED_ASYNC_ROLE].acknowledgement_sha256 is None
+    assert (
+        source.actions[STAGED_ASYNC_ROLE].diagnostic
+        == "native_async_role_verified_by_master_cycle_delivery_unknown"
+    )
     assert [(s[0], s[1]) for s in rig.sent[9:]] == [
         ("master", {"Linkage": "independent"}),
         ("master", {"Linkage": "master"}),
@@ -59,7 +69,14 @@ async def test_cycle_preserves_source_delivery_and_replays_without_contact(tmp_p
     assert all(row["action"] == 3 for row in released["devices"])
     cycle = rig.store.load(result["request_id"])
     context = rig.controller()._context(cycle)
-    assert rig.store.load_blob(context.assisted_record_sha256) == source.model_dump_json().encode()
+    # The snapshot keeps the stalled source exactly as the cycle found it. Closing the source
+    # out adds the cycle's own explicit reply as evidence; it never rewrites that snapshot.
+    stalled = LocalControlJournalRecord.model_validate_json(
+        rig.store.load_blob(context.assisted_record_sha256)
+    )
+    assert stalled.request_id == source.request_id
+    assert stalled.actions[STAGED_ASYNC_ROLE].phase is ActionPhase.UNCERTAIN
+    assert stalled.actions[STAGED_ASYNC_ROLE].diagnostic == "native_stage_unverified"
     reads = len(rig.reads)
     assert not (await attach(rig))["current_state_verified"]
     assert len(rig.reads) == reads and len(rig.sent) == 11
@@ -70,7 +87,38 @@ async def test_cycle_preserves_source_delivery_and_replays_without_contact(tmp_p
     )
     assert restored["accepted"] and rig.states == rig.originals
     assert rig.store.unfinished_records() == ()
-    assert rig.controller().status("cycle_source_01")["actions"][8]["delivery"] == "UNKNOWN"
+    status = rig.controller().status("cycle_source_01")["actions"][STAGED_ASYNC_ROLE]
+    assert status["delivery"] == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_verified_cycle_releases_the_pair_for_ordinary_commands(tmp_path):
+    """2026-09-18: the cycle put the pair back together in 40 s and verified the slave's role
+    with its own explicit reply at 01:47:57.706, but the source stayed in recovery_required.
+    A pending source owns the physical pump, so `manual_mode` — the one command that would
+    have cleared the latent `feed` — was refused for the next 22 hours."""
+
+    rig = Rig(tmp_path)
+    lost_reply(rig)
+    assert (await attach(rig))["kind"] == "master_link_cycle_v1"
+    assert rig.store.unfinished_records() == ()
+    # The 2026-09-18 state: the device left `feed` in the slave's manual block when it took
+    # the role, and that value stops the pump the moment TimerON drops.
+    rig.states["slave"] = _put(rig.states["slave"], {"Mode": "feed"})
+    writes = len(rig.sent)
+
+    result = await rig.controller().execute(
+        LocalControlIntent(
+            request_id="ordinary_after_cycle_01",
+            target=rig.targets[1],
+            function="manual_mode",
+            value="constant",
+        )
+    )
+
+    assert result.accepted
+    assert [(row[0], row[1]) for row in rig.sent[writes:]] == [("slave", {"Mode": "constant"})]
+    assert SCHEMA.decode_status(rig.states["slave"])["Mode"] == "constant"
 
 
 @pytest.mark.asyncio
@@ -110,7 +158,7 @@ async def test_cycle_failure_retains_state_and_owned_restore_is_not_blocked(tmp_
     assert len(rig.sent) == 10
     assert cycle.phase.value == "recovery_required"
     assert rig.store.load(native_detach_request_id(source.request_id)) is None
-    assert source.actions[8].phase is ActionPhase.UNCERTAIN
+    assert source.actions[STAGED_ASYNC_ROLE].phase is ActionPhase.UNCERTAIN
     count = len(rig.reads)
     assert not (await attach(rig))["accepted"]
     assert len(rig.sent) == 10 and len(rig.reads) == count

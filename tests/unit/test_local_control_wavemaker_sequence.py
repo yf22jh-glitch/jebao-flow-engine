@@ -10,7 +10,14 @@ from jebao_flow.local_control.device_writer import ConnectedDeviceWriter
 from jebao_flow.local_control.install import current_protocol_schema_sha256
 from jebao_flow.local_control.journal import ActionPhase, TransactionPhase, native_detach_request_id
 from jebao_flow.local_control.wavemaker_lifecycle import NativeContext, NativeOriginal
-from jebao_flow.local_control.wavemaker_sequence import STAGED_ROLES, SequenceDeviceWriter
+from jebao_flow.local_control.wavemaker_sequence import (
+    STAGED_ASYNC_ROLE,
+    STAGED_ROLES,
+    STAGED_SLAVE_MANUAL,
+    STAGED_SYNC_ROLE,
+    SequenceDeviceWriter,
+)
+from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
 from jebao_flow.protocol.session import RawStateCapture
 from tests.unit.test_local_control_wavemaker_lifecycle import (
     MemoryTransport,
@@ -148,8 +155,11 @@ async def test_rejected_report_before_reply_timeout_is_preserved_not_accepted(
     assert len(frames) == 1 and frames[0]["selected"] is False
     capture = json.loads(rig.store.load_blob(frames[0]["capture_sha256"]))
     assert capture["action"] == 4
-    assert source.actions[8].acknowledgement_sha256 is None
-    assert source.actions[8].diagnostic == "native_own_baseline_restored_delivery_unknown"
+    assert source.actions[STAGED_ASYNC_ROLE].acknowledgement_sha256 is None
+    assert (
+        source.actions[STAGED_ASYNC_ROLE].diagnostic
+        == "native_own_baseline_restored_delivery_unknown"
+    )
     assert sum(s[1] == {"Linkage": "async_slave"} for s in rig.sent) == 1
     assert rig.states == rig.originals
 
@@ -170,8 +180,8 @@ async def test_staged_sync_stage_failure_has_owned_assistance_and_immutable_cont
     controller = rig.controller()
     context = controller._context(source)
     assert context.activation_sequence == STAGED_ROLES
-    assert source.actions[7].phase is ActionPhase.UNCERTAIN
-    assert all(a.phase is ActionPhase.PREPARED for a in source.actions[8:])
+    assert source.actions[STAGED_SYNC_ROLE].phase is ActionPhase.UNCERTAIN
+    assert all(a.phase is ActionPhase.PREPARED for a in source.actions[STAGED_SYNC_ROLE + 1 :])
     controller._require_assistance_source(source, context)
     with pytest.raises(ValueError):
         controller._require_assistance_source(
@@ -235,10 +245,13 @@ async def test_variable_auto_is_observation_only_during_staged_activation(tmp_pa
     )
     result = await rig.attach("async")
     assert result["accepted"]
-    assert all(
-        set(d["fields"]) == {"SwitchON", "TimerON", "Linkage"}
-        for d in result["verification"]["devices"]
-    )
+    master_row, slave_row = result["verification"]["devices"]
+    assert set(master_row["fields"]) == {"SwitchON", "TimerON", "Linkage"}
+    # The slave's manual block belongs to the attachment: it is what the pump runs whenever
+    # TimerON drops, and the device rewrites it when it takes the role.
+    assert set(slave_row["fields"]) == {"SwitchON", "TimerON", "Linkage", "Mode", "Frequency"}
+    assert slave_row["fields"]["Mode"]["expected"] == "constant"
+    assert slave_row["fields"]["Frequency"]["expected"] == 21
     await rig.detach()
     assert rig.states == rig.originals
 
@@ -303,3 +316,95 @@ async def test_initial_pair_failure_is_not_attributed_to_action_zero(tmp_path, m
     assert all(row[2] != "attach_0001" for row in rig.sent)
     assert rig.states == rig.originals
     assert wavemaker_sequence.STAGED_ROLES == "staged_roles_v1"
+
+
+@pytest.mark.asyncio
+async def test_slave_manual_block_rewritten_by_the_device_is_put_back_before_the_async_role(
+    tmp_path, monkeypatch
+):
+    """2026-09-18 01:47:11.021: 0.62 s after the sync_slave write landed, and with no command
+    from us, the slave had rewritten its own manual Mode constant->feed and Frequency 80->70
+    (raw bytes[1] 0x02->0x07, bytes[3] 0x50->0x46). Three 2026-09-15 attaches show the same
+    rewrite with constant->sine and 20->30. That manual block is what the pump runs whenever
+    TimerON is false and ``feed`` stops it, so the planned values go back before the remaining
+    role write. Byte-copy rig: this reproduces the recorded rewrite, not a firmware model."""
+
+    rig = Rig(tmp_path)
+    original_send = MemoryTransport.send_raw_control
+
+    async def send(self, payload):
+        acknowledgement = await original_send(self, payload)
+        if rig.sent[-1][1] == {"Linkage": "sync_slave"}:
+            rig.states["slave"] = _put(rig.states["slave"], {"Mode": "feed", "Frequency": 70})
+        return acknowledgement
+
+    monkeypatch.setattr(MemoryTransport, "send_raw_control", send)
+    assert (await rig.attach("async"))["accepted"]
+    assert [(s[0], s[1]) for s in rig.sent[6:]] == [
+        ("master", {"Linkage": "master"}),
+        ("slave", {"Linkage": "sync_slave"}),
+        ("slave", {"Mode": "constant", "Frequency": 21}),
+        ("slave", {"Linkage": "async_slave"}),
+    ]
+    slave = SCHEMA.decode_status(rig.states["slave"])
+    assert slave["Mode"] == "constant" and slave["Frequency"] == 21
+    assert (await rig.detach())["accepted"] and rig.states == rig.originals
+
+
+@pytest.mark.asyncio
+async def test_untouched_slave_manual_block_costs_no_extra_frame(tmp_path):
+    rig = Rig(tmp_path)
+    assert (await rig.attach("async"))["accepted"]
+    assert len(rig.sent) == 9 and not any(s[1].get("Mode") == "constant" for s in rig.sent[6:])
+    source = rig.store.load("attach_0001")
+    assert source.actions[STAGED_SLAVE_MANUAL].phase is ActionPhase.NO_CHANGE
+    assert (await rig.detach())["accepted"] and rig.states == rig.originals
+
+
+@pytest.mark.asyncio
+async def test_a_manual_block_the_device_keeps_rewriting_fails_instead_of_staying_latent(
+    tmp_path, monkeypatch
+):
+    rig = Rig(tmp_path)
+    original_send = MemoryTransport.send_raw_control
+    clobbered = ({"Linkage": "sync_slave"}, {"Mode": "constant", "Frequency": 21})
+
+    async def send(self, payload):
+        acknowledgement = await original_send(self, payload)
+        if rig.sent[-1][1] in clobbered:
+            rig.states["slave"] = _put(rig.states["slave"], {"Mode": "feed", "Frequency": 70})
+        return acknowledgement
+
+    monkeypatch.setattr(MemoryTransport, "send_raw_control", send)
+    with pytest.raises(LocalControlExecutionError, match="자기 원본 복원 확인"):
+        await rig.attach("async")
+    # The role is never taken while a pump-stop value is latent in the manual block.
+    assert sum(s[1] == {"Linkage": "async_slave"} for s in rig.sent) == 0
+    assert rig.states == rig.originals
+
+
+@pytest.mark.asyncio
+async def test_a_bound_slave_answering_only_with_report_frames_still_completes(
+    tmp_path, monkeypatch
+):
+    """From the instant the slave holds a role the device answers with report frames only:
+    every preserved frame from 2026-09-18 01:47:10.401 onward is action 4, while the same
+    reply-only read at 01:47:08.655 — slave still independent — returned action 3."""
+
+    rig = Rig(tmp_path)
+    original = MemoryTransport.read_raw_state_capture
+    bound_reads = []
+
+    async def read(self, *, accept_reports, **kwargs):
+        role = SCHEMA.decode_status(rig.states["slave"])["Linkage"]
+        if self.address == "slave" and role != "independent":
+            bound_reads.append(accept_reports)
+            if not accept_reports:
+                raise TimeoutError("a bound slave emits report frames only")
+        return await original(self, accept_reports=accept_reports, **kwargs)
+
+    monkeypatch.setattr(MemoryTransport, "read_raw_state_capture", read)
+    assert (await rig.attach("async"))["accepted"]
+    assert bound_reads and all(bound_reads)
+    monkeypatch.setattr(MemoryTransport, "read_raw_state_capture", original)
+    assert (await rig.detach())["accepted"] and rig.states == rig.originals
