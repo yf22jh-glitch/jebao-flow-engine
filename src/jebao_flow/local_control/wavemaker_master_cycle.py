@@ -72,12 +72,12 @@ def validate_cycle(owner, record, context):
         owner._journal.load_blob(context.assisted_record_sha256)
     )
     source_context = owner._context(stalled)
-    expected = _expected_cycle_steps(context)
+    expected = _CYCLE_SHAPES.get(len(record.actions))
     if (
         stalled.request_id != context.attach_request_id
         or stalled.native_context_sha256 != context.source_context_sha256
         or not owner._awaiting_operator(stalled, source_context)
-        or len(record.actions) != len(expected)
+        or expected is None
     ):
         raise ValueError("cycle은 자기 마지막 Async 보류에만 결속됩니다")
     for action, (index, function, values) in zip(record.actions, expected, strict=True):
@@ -89,18 +89,23 @@ def validate_cycle(owner, record, context):
             raise ValueError("cycle은 master Linkage 두 명령과 released 구간 manual 복구뿐입니다")
 
 
+# Every shape this operation has ever written to the journal. Validation reads a stored
+# record from its own shape; only creation uses the current one. Recomputing old records with
+# the newest shape made `_require_available` refuse every Pro operation twice on 2026-09-20.
+_RELEASE = (0, "linkage_role", {"Linkage": "independent"})
+_REARM = (0, "linkage_role", {"Linkage": "master"})
+_REPAIR = (1, "manual_mode", {"Mode": _REPAIR_SLAVE_MANUAL_MODE})
+_STEP_OUT = (1, "linkage_role", {"Linkage": "independent"})
+_STEP_BACK = (1, "linkage_role", {"Linkage": "async_slave"})
+_CYCLE_SHAPES = {
+    2: (_RELEASE, _REARM),
+    3: (_RELEASE, _REPAIR, _REARM),
+    5: (_RELEASE, _STEP_OUT, _REPAIR, _STEP_BACK, _REARM),
+}
 def _expected_cycle_steps(context):
     from jebao_flow.local_control.wavemaker_sequence import STAGED_ROLES_V2
 
-    steps = [(0, "linkage_role", {"Linkage": "independent"})]
-    if context.activation_sequence == STAGED_ROLES_V2:
-        steps += [
-            (1, "linkage_role", {"Linkage": "independent"}),
-            (1, "manual_mode", {"Mode": _REPAIR_SLAVE_MANUAL_MODE}),
-            (1, "linkage_role", {"Linkage": "async_slave"}),
-        ]
-    steps.append((0, "linkage_role", {"Linkage": "master"}))
-    return tuple(steps)
+    return _CYCLE_SHAPES[5 if context.activation_sequence == STAGED_ROLES_V2 else 2]
 
 
 async def _pair(owner, record, context, endpoints, permit, *, released):

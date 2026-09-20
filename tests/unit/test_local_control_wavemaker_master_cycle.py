@@ -382,3 +382,23 @@ async def test_a_manual_block_rewritten_again_on_rebind_fails_loudly(tmp_path, m
     # One repair frame was sent and never replayed; the rearm comparison caught the rewrite.
     assert sum(s[1] == {"Mode": "constant"} for s in rig.sent) == 1
     assert SCHEMA.decode_status(rig.states["slave"])["Mode"] == "feed"
+
+
+def test_every_cycle_shape_ever_written_is_still_readable():
+    """`_require_available` re-validates every stored record before any Pro operation, so a
+    cycle record must be read from the shape it was written with. Recomputing stored records
+    from the newest shape refused every Pro operation twice on 2026-09-20, both times before
+    a single frame reached a device."""
+
+    from jebao_flow.local_control.wavemaker_master_cycle import _CYCLE_SHAPES
+
+    assert sorted(_CYCLE_SHAPES) == [2, 3, 5]
+    for shape in _CYCLE_SHAPES.values():
+        assert shape[0] == (0, "linkage_role", {"Linkage": "independent"})
+        assert shape[-1] == (0, "linkage_role", {"Linkage": "master"})
+        assert all(index in (0, 1) for index, _f, _v in shape)
+    assert _CYCLE_SHAPES[5][1:4] == (
+        (1, "linkage_role", {"Linkage": "independent"}),
+        (1, "manual_mode", {"Mode": "constant"}),
+        (1, "linkage_role", {"Linkage": "async_slave"}),
+    )
