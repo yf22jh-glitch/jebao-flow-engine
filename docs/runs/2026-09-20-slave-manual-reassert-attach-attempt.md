@@ -1,0 +1,97 @@
+# run: 2026-09-20-slave-manual-reassert-attach-attempt
+
+- 목적(한 문장): slave 역할 획득 시 장비가 manual 블록을 덮어쓰는 문제를 고친 빌드를 배포하고,
+  09-18과 동일한 계획으로 Async attach 1회를 돌려 수정이 실제로 막는지 확인한다.
+- 이 실행이 답하려던 질문: 역할 전환 뒤 slave의 manual `Mode`/`Frequency`를 계획값으로
+  되돌리는 프레임이 장비에 실제로 적용되는가?
+- 실행한 commit SHA: `6440958deb11e88915e904db5a489ab935e62396`
+  (빌드 image `sha256:e4bd4ba04c860590a830613ac8e99878606212f3ccce8d70c2ff000cb8989e47`)
+- 사용한 계획: `kaga_daily_async_20260918_01`의 저장된 계획 그대로. preview에서 image digest가
+  09-18과 바이트 동일함을 먼저 확인했다(master `73e0f45b5ce883f1…`, slave `2e6a9814c08ff86d…`,
+  `hardware_write=false`).
+- 사용한 명령: MQTT `jebao-flow/main/local/wavemakers/request`로
+  (1) `preview`, (2) `attach` `kaga_daily_async_20260920_01`
+  (`master_cycle_on_async_failure=true`), (3) `assist_detach`.
+- physical-write UTC span: `2026-09-20T03:00:10.336Z`–`2026-09-20T03:04:16.952Z`
+- 종료 지점: **attach 실패.** action 08에서 ACK 타임아웃으로 `recovery_required`.
+  `assist_detach`가 두 장비를 attach 이전 원본으로 복원하고 6/6 `verified`로 종결했다.
+
+## 실제 결과
+
+### 0. 배포 전 거부 — 하위호환 결함 (장비 전송 0건)
+
+첫 배포본 `6a64141`은 첫 write 전에 attach를 거부했다. 단계별 action 배치에 slave manual
+재확인을 끼워 넣으면서 Sync 역할 뒤 위치가 밀렸는데 그 새 위치를 **기존 기록에도** 적용했다.
+`_require_available`은 저장된 모든 기록을 `_context`로 검증하므로, 09-18의 9-action 스냅샷을
+들고 있는 `wm_cycle_…`의 `validate_cycle`이 `_awaiting_operator`에서 action 10개를 요구받아
+실패했다. 기록 생성 0건, 장비 전송 0건으로 확인했다. `activation_sequence`를 배치 버전으로
+분리해(`staged_roles_v1` / `staged_roles_v2`) 수정하고 재배포했다(`6440958`).
+
+### 1. 장비의 manual 블록 자기 재작성 — 실시간 재현
+
+| 시각(UTC) | stage | act | Linkage | manual Mode / Flow / Freq |
+|---|---|---|---|---|
+| 03:00:30.680 | `staged_post_role_pair` | 3 | independent | constant / 40 / 80 |
+| 03:00:32.296 | `staged_after_read` | 4 | **sync_slave** | **feed / 40 / 5** |
+
+09-18(`constant→feed`, `80→70`)과 09-15 세 건(`constant→sine`, `20→30`)에 이어 **관측 5회 중
+5회**다. 이번에는 장비 로컬 12:00, 즉 계획의 `12:00–12:03 feed` 구간이 활성인 시각이었다.
+값의 선택 규칙은 여전히 `UNKNOWN`이며 펌웨어 가설로 적지 않는다.
+
+### 2. 수정 프레임은 발동했지만 ACK를 받지 못했다
+
+action 08(`{"Frequency":80,"Mode":"constant"}`, 하단)은 `send_once`에서
+`ProtocolTimeoutError`로 끝났다(`acknowledgement_sha256=None`, `uncertain`,
+`wavemaker_sequence:advance_staged_roles:407`). action 09(`async_slave`)는 `prepared`로 남아
+전송되지 않았다. 이어 자기 원복이 시작됐지만 detach child의 action 00(하단 대상)도 같은
+`send_once` 타임아웃으로 `uncertain`이 됐다(`wavemaker_lifecycle:_advance:770`).
+
+- **이 실행으로 새로 확정된 사실:** **역할이 붙은 Pro slave는 제어 쓰기에 ACK를 주지 않는다.**
+  오늘 두 건(manual 재확인, detach 첫 프레임)이 모두 `send_once`에서 timeout이었고, 결속 이전의
+  모든 쓰기는 정상 ACK를 받았다. 같은 형태가 09-18 async 역할 쓰기, 09-19 recover 시도,
+  09-15 세 건의 async 역할 쓰기에 모두 있다. 반례는 없다.
+- 따라서 **`async_slave` 역할 쓰기가 ACK를 받은 실행은 지금까지 한 번도 없으며**, Async 결속은
+  언제나 master-only로 동작하는 master cycle이 완성해 왔다.
+- 파생 결론: slave의 manual 블록은 **결속이 걸려 있는 동안에는 고칠 수 없다.** 역할 사이에
+  재확인 프레임을 넣은 이번 설계는 위치가 틀렸다.
+
+### 3. 복구
+
+`assist_detach` `wm_assist_c26166cc…`가 5 scalar action으로 성공했다. 첫 프레임이 상단을
+`independent`로 풀어 결속을 해제하고, 그 뒤 하단 쓰기가 다시 동작했다. detach child
+`wm_detach_c26166cc…`는 6/6 `verified`, source는 `rolled_back`이다.
+
+- 장비가 실제로 돌려준 값:
+  - 증거 등급: (b) preserved structured·durable daemon artifact
+  - source `kaga_daily_async_20260920_01` journal `7e572d40bab36540be5e67fc2b73c9cc…`,
+    `activation_sequence=staged_roles_v2`, 10 actions
+  - assist `fc9f949898691723e2afa7ff4f3c02a3…`, detach `14ef78126d02ba5ca3a28c9a0e947611…`
+  - 복원 뒤 상단 `independent / constant / Flow 40 / Freq 34`,
+    하단 `independent / constant / Flow 30 / Freq 32`, 두 대 모두 power ON·schedule ON,
+    최종 대조 두 장비 모두 `complete=true`
+  - 미완료 기록 0건
+- 원복 검증 결과: attach 이전 원본 제어값과 원본 schedule image로 복원됐다. 일일 Async 계획은
+  적용돼 있지 않다.
+
+### 4. 배포 롤백
+
+배포본을 실기 이전의 알려진 정상 image
+`sha256:b81464ec1eb28d4a49936d462a53067c22c740122b51e390e0d3f2b2006bb6e0`로 되돌렸다.
+이번 빌드는 Async attach를 **이전보다 나쁘게** 만든다 — 실패 지점이 action 08로 앞당겨지면서
+`_awaiting_operator`가 성립하지 않아 자동 master cycle 구제 경로까지 막히기 때문이다.
+
+## 부수 확인
+
+- 역할 이후 pair barrier의 report 프레임 수용은 동작했다. 03:00:33.835 `staged_post_role_pair`
+  하단 캡처가 act=4였고 barrier가 이를 받아들였다.
+- preview는 `hardware_write=false`로 장비 전송 0건이었다.
+
+## 현재 판정
+
+- 이 실행으로 확정하지 못한 것: 장비가 manual `Mode`에 쓰는 값의 선택 규칙,
+  `2026-09-18T11:36:31Z` 직전 `TimerON`을 끈 주체, 물리 유량.
+- 다음 실험 제안: slave의 manual 블록을 쓸 수 있는 유일한 창은 **master가 결속을 놓고 있는
+  구간**이다. master cycle은 이미 `independent`로 푼 뒤 `released_reply_pair`에서 하단을 act=3
+  명시 응답으로 읽는다. 그 구간에서 manual `Mode`/`Frequency`를 재확인하는 설계를 다음 후보로
+  둔다. 이번처럼 오프라인 시험만으로 배포하지 않고, 먼저 그 구간에서 하단 쓰기가 ACK를 받는지
+  단독으로 확인한다.
