@@ -241,15 +241,16 @@ async def _close_source_async_role(owner, source, endpoints, permit, cycle):
     preserved, and a source that cannot be closed is left exactly as it is today.
     """
 
-    from jebao_flow.local_control.wavemaker_sequence import STAGED_ASYNC_ROLE
+    from jebao_flow.local_control.wavemaker_sequence import staged_layout
 
     try:
         record = owner._required(source.request_id)
         context = owner._context(record)
         if not owner._awaiting_operator(record, context):
             return
+        role = staged_layout(context).async_role
         slave = endpoints[1]
-        action = record.actions[STAGED_ASYNC_ROLE]
+        action = record.actions[role]
         if action.target != slave.target or action.phase is ActionPhase.VERIFIED:
             return
         row = _released_slave_reply(owner, cycle, slave.target.logical_member)
@@ -264,13 +265,13 @@ async def _close_source_async_role(owner, source, endpoints, permit, cycle):
         )
         prepared = owner._forward_prepared(action, slave)
         record = owner._evidence(
-            record, STAGED_ASYNC_ROLE, reply, began, prepared, "master_cycle_released_reply"
+            record, role, reply, began, prepared, "master_cycle_released_reply"
         )
         if reply.action != 3 or not verify_prepared_readback(prepared, reply.status_payload):
             return
         record = owner._save_action(
             record,
-            STAGED_ASYNC_ROLE,
+            role,
             phase=ActionPhase.VERIFIED,
             transaction_phase=TransactionPhase.EXECUTING,
             diagnostic=_CLOSED_BY_CYCLE,

@@ -26,11 +26,15 @@ from jebao_flow.local_control.models import InstallContentBindings
 from jebao_flow.local_control.resolver import ResolvedEndpoint
 from jebao_flow.local_control.wavemaker import NativeWavemakerPlan
 from jebao_flow.local_control.wavemaker_lifecycle import NativeWavemakerController
-from jebao_flow.local_control.wavemaker_sequence import STAGED_ASYNC_ROLE, STAGED_SLAVE_MANUAL
 from jebao_flow.protocol.control import _place_value
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
 from jebao_flow.protocol.session import RawStateCapture
 from tests.unit.test_local_control_coordinator import _binding, _lease, _qualification, _Resolver
+
+# v2 staged layout: 0..1 safe controls, 2..3 images, 4..5 timers, 6 master role,
+# 7 sync_slave role, 8 slave manual re-assert, 9 async_slave role.
+STAGED_SLAVE_MANUAL = 8
+STAGED_ASYNC_ROLE = 9
 
 FUNCTIONS = (
     "power",

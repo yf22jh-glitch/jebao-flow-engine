@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,15 +12,17 @@ from jebao_flow.local_control.install import current_protocol_schema_sha256
 from jebao_flow.local_control.journal import ActionPhase, TransactionPhase, native_detach_request_id
 from jebao_flow.local_control.wavemaker_lifecycle import NativeContext, NativeOriginal
 from jebao_flow.local_control.wavemaker_sequence import (
-    STAGED_ASYNC_ROLE,
     STAGED_ROLES,
-    STAGED_SLAVE_MANUAL,
-    STAGED_SYNC_ROLE,
+    STAGED_ROLES_V2,
     SequenceDeviceWriter,
+    staged_controls,
+    staged_layout,
 )
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
 from jebao_flow.protocol.session import RawStateCapture
 from tests.unit.test_local_control_wavemaker_lifecycle import (
+    STAGED_ASYNC_ROLE,
+    STAGED_SLAVE_MANUAL,
     MemoryTransport,
     Rig,
     _plan,
@@ -179,9 +182,10 @@ async def test_staged_sync_stage_failure_has_owned_assistance_and_immutable_cont
     source = rig.store.load("attach_0001")
     controller = rig.controller()
     context = controller._context(source)
-    assert context.activation_sequence == STAGED_ROLES
-    assert source.actions[STAGED_SYNC_ROLE].phase is ActionPhase.UNCERTAIN
-    assert all(a.phase is ActionPhase.PREPARED for a in source.actions[STAGED_SYNC_ROLE + 1 :])
+    sync_role = STAGED_SLAVE_MANUAL - 1
+    assert context.activation_sequence == STAGED_ROLES_V2
+    assert source.actions[sync_role].phase is ActionPhase.UNCERTAIN
+    assert all(a.phase is ActionPhase.PREPARED for a in source.actions[sync_role + 1 :])
     controller._require_assistance_source(source, context)
     with pytest.raises(ValueError):
         controller._require_assistance_source(
@@ -408,3 +412,78 @@ async def test_a_bound_slave_answering_only_with_report_frames_still_completes(
     assert bound_reads and all(bound_reads)
     monkeypatch.setattr(MemoryTransport, "read_raw_state_capture", original)
     assert (await rig.detach())["accepted"] and rig.states == rig.originals
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_v1_records_keep_their_own_action_layout(mode):
+    """A journal is append-only history: records written before the slave manual re-assert
+    must still be read from their own layout. Recomputing old records with the new positions
+    made every historical staged record fail validation, and `_require_available` walks every
+    stored record, so one unreadable record blocked all later Pro operations."""
+
+    plan = _plan(mode)
+    members = tuple(
+        SimpleNamespace(target=SimpleNamespace(logical_member=name))
+        for name in ("master", "slave")
+    )
+    legacy = SimpleNamespace(activation_sequence=STAGED_ROLES, plan=plan, originals=members)
+    current = SimpleNamespace(activation_sequence=STAGED_ROLES_V2, plan=plan, originals=members)
+
+    old, new = staged_layout(legacy), staged_layout(current)
+    assert old.manual is None and new.manual == 8
+    assert old.count == (9 if mode == "async" else 8)
+    assert new.count == old.count + 1
+    assert old.async_role == (8 if mode == "async" else None)
+    assert new.async_role == (9 if mode == "async" else None)
+
+    legacy_controls = [values for _name, values in staged_controls(legacy)]
+    assert not any("Mode" in v and set(v) == {"Mode", "Frequency"} for v in legacy_controls)
+    assert {"Mode": "constant", "Frequency": 21} in [
+        values for _name, values in staged_controls(current)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_pending_v1_source_is_still_recognised_as_awaiting_the_operator(tmp_path):
+    """The exact production regression: `validate_cycle` re-reads the snapshot of the stalled
+    source held by a historical master-cycle record, and `_require_available` walks every
+    stored record. When `_awaiting_operator` demanded the v2 action count, that nine-action v1
+    snapshot stopped validating and every later Pro operation was refused before any write."""
+
+    rig = Rig(tmp_path)
+    controller = rig.controller()
+    originals = []
+    for target in rig.targets:
+        status = rig.originals[target.logical_member]
+        raw = RawStateCapture(b"v1-capture" + status, 3, status)
+        originals.append(
+            NativeOriginal(
+                target=target,
+                status_sha256=rig.store.install_blob(status),
+                capture_sha256=controller._capture(raw, datetime.now(UTC)),
+            )
+        )
+    context = NativeContext(
+        kind="attach",
+        attach_request_id="legacy_staged_01",
+        plan=_plan("async"),
+        schema_sha256=current_protocol_schema_sha256(),
+        originals=tuple(originals),
+        activation_sequence=STAGED_ROLES,
+        master_cycle_on_async_failure=True,
+    )
+    record = controller._prepare("legacy_staged_01", "2" * 64, context, rig.endpoints)
+    assert len(record.actions) == 9
+    assert staged_layout(context).count == 9 and staged_layout(context).async_role == 8
+
+    for index in range(8):
+        record = controller._save_action(record, index, phase=ActionPhase.NO_CHANGE)
+    record = controller._save_action(
+        record,
+        8,
+        phase=ActionPhase.UNCERTAIN,
+        diagnostic="native_stage_unverified",
+        transaction_phase=TransactionPhase.RECOVERY_REQUIRED,
+    )
+    assert controller._awaiting_operator(record, controller._context(record)) is True
+    controller._require_assistance_source(record, controller._context(record))

@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 from datetime import UTC, datetime
+from typing import NamedTuple
 
 from jebao_flow.config import DeviceControlConfig
 from jebao_flow.local_control.coordinator import LocalControlExecutionError
@@ -24,15 +25,36 @@ from jebao_flow.local_control.journal import ActionPhase, TransactionPhase
 from jebao_flow.protocol.errors import ProtocolError
 from jebao_flow.protocol.profiles import get_product_schema
 
-STAGED_ROLES = "staged_roles_v1"
 # Staged action positions for the Pro pair: 0..1 safe controls, 2..3 schedule images,
-# 4..5 timers, then the role writes. Named because the loop below branches on them.
+# 4..5 timers, then the role writes. v2 adds the slave manual re-assert between the two
+# role writes, so the positions after the Sync role move. The v1 name keeps its original
+# meaning forever: journal records written before that change are still validated from it.
+STAGED_ROLES = "staged_roles_v1"
+STAGED_ROLES_V2 = "staged_roles_v2"
+STAGED_SEQUENCES = (STAGED_ROLES, STAGED_ROLES_V2)
 _TIMERS = (4, 5)
 _MASTER_ROLE = 6
-STAGED_SYNC_ROLE = 7
-STAGED_SLAVE_MANUAL = 8
-STAGED_ASYNC_ROLE = 9
-STAGED_ACTION_COUNT = {"sync": 9, "async": 10}
+_SYNC_ROLE = 7
+_SLAVE_MANUAL = 8
+
+
+class StagedLayout(NamedTuple):
+    """Where each staged action sits in one plan; ``manual`` is None on v1 records."""
+
+    sequence: str
+    manual: int | None
+    async_role: int | None
+    count: int
+
+
+def staged_layout(context) -> StagedLayout:
+    sequence = context.activation_sequence
+    if sequence not in STAGED_SEQUENCES:
+        raise ValueError("단계별 활성화 원본이 아닙니다")
+    manual = _SLAVE_MANUAL if sequence == STAGED_ROLES_V2 else None
+    last = _SYNC_ROLE if manual is None else manual
+    async_role = last + 1 if context.plan.mode == "async" else None
+    return StagedLayout(sequence, manual, async_role, (async_role if async_role else last) + 1)
 _CONTROL = DeviceControlConfig()
 # Existing schedule_flow_experiment._ROLE_PREFLIGHT_SETTLE_SECONDS; no harness import.
 _ROLE_SETTLE_SECONDS = 1.0
@@ -137,6 +159,7 @@ def staged_controls(context):
     roles = [(names[0], {"Linkage": "master"})]
     for name in names[1:]:
         roles.append((name, {"Linkage": "sync_slave"}))
+        # v1 records predate this frame and must keep their original eight/nine actions.
         # Taking the slave role makes the device rewrite its own manual Mode and Frequency
         # about a second later with no command from us: 2026-09-18 01:47:11.021 showed
         # constant->feed and 80->70, and three 2026-09-15 attaches showed constant->sine and
@@ -144,7 +167,8 @@ def staged_controls(context):
         # ``feed`` stops it, so the planned values go back before the remaining role write
         # instead of being left at whatever the device chose. Ordinary journalled action:
         # when the device did not touch them the read before it matches and nothing is sent.
-        roles.append((name, {"Mode": "constant", "Frequency": plan.preparation_frequency}))
+        if context.activation_sequence == STAGED_ROLES_V2:
+            roles.append((name, {"Mode": "constant", "Frequency": plan.preparation_frequency}))
         if plan.mode == "async":
             roles.append((name, {"Linkage": "async_slave"}))
     return (*timers, *roles)
@@ -152,8 +176,9 @@ def staged_controls(context):
 
 def validate_staged_assistance_source(controller, source, context):
     """Recognize this owned staged plan, not an arbitrary eight/nine-action record."""
-    if context.kind != "attach" or context.activation_sequence != STAGED_ROLES:
+    if context.kind != "attach":
         raise ValueError("단계별 활성화 원본이 아닙니다")
+    layout = staged_layout(context)
     if len(context.originals) != 2 or source.phase is not TransactionPhase.RECOVERY_REQUIRED:
         raise ValueError("지원할 단계별 Pro pair 원본이 아닙니다")
     names = [o.target.logical_member for o in context.originals]
@@ -175,7 +200,7 @@ def validate_staged_assistance_source(controller, source, context):
         return  # Final comparison can fail after acknowledged or reply-confirmed actions.
     first = next(i for i, phase in enumerate(phases) if phase not in done)
     if (
-        first not in (STAGED_SYNC_ROLE, STAGED_SLAVE_MANUAL, STAGED_ASYNC_ROLE)
+        first not in {_SYNC_ROLE, layout.manual, layout.async_role}
         or phases[first] not in {ActionPhase.PREPARED, ActionPhase.UNCERTAIN}
         or any(p is not ActionPhase.PREPARED for p in phases[first + 1 :])
     ):
@@ -185,6 +210,7 @@ def validate_staged_assistance_source(controller, source, context):
 async def advance_staged_roles(controller, record, context, endpoints, permit):
     """Journaled writes, staged TimerON, then role deltas on verified pair connections."""
     writers, captures, last_send = {}, {}, {}
+    layout = staged_layout(context)
     by_name = {e.target.logical_member: e for e in endpoints}
     index = None
     started = failure_clock_ns()
@@ -327,7 +353,7 @@ async def advance_staged_roles(controller, record, context, endpoints, permit):
             endpoint = by_name[action.target.logical_member]
             name = endpoint.target.logical_member
             prepared = controller._forward_prepared(action, endpoint)
-            if index == STAGED_ASYNC_ROLE:
+            if index == layout.async_role:
                 observe_before_async()  # Same pair captures and connection, no extra read.
             reports = action.verification_kind != "schedule_image"
             if action.verification_kind == "schedule_image":

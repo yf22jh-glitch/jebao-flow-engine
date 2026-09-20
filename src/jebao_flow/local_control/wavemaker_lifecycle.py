@@ -37,14 +37,12 @@ from jebao_flow.local_control.wavemaker_restore import (
     compare_restore_readback,
 )
 from jebao_flow.local_control.wavemaker_sequence import (
-    STAGED_ACTION_COUNT,
-    STAGED_ASYNC_ROLE,
-    STAGED_ROLES,
-    STAGED_SLAVE_MANUAL,
-    STAGED_SYNC_ROLE,
+    STAGED_ROLES_V2,
+    STAGED_SEQUENCES,
     SequenceDeviceWriter,
     advance_staged_roles,
     staged_controls,
+    staged_layout,
     validate_staged_assistance_source,
 )
 from jebao_flow.protocol.errors import ProtocolError
@@ -104,7 +102,9 @@ class NativeContext(BaseModel):
     plan: NativeWavemakerPlan
     originals: tuple[NativeOriginal, ...] = Field(min_length=2)
     assisted_record_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    activation_sequence: Literal["staged_roles_v1"] | None = None
+    # v1 records keep their own eight/nine-action layout forever; v2 adds the slave manual
+    # re-assert between the two role writes. Reading an old record must never need new code.
+    activation_sequence: Literal["staged_roles_v1", "staged_roles_v2"] | None = None
     await_operator_observation: Literal[True] | None = None
     master_cycle_on_async_failure: Literal[True] | None = None
     power_cycle_basis_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -225,7 +225,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 plan=plan,
                 schema_sha256=current_protocol_schema_sha256(),
                 originals=tuple(originals),
-                activation_sequence=STAGED_ROLES,
+                activation_sequence=STAGED_ROLES_V2,
                 await_operator_observation=True if await_operator_observation else None,
                 master_cycle_on_async_failure=True if master_cycle_on_async_failure else None,
             )
@@ -272,30 +272,30 @@ class NativeWavemakerController(LocalControlCoordinator):
             )
             or context.kind != "attach"
             or context.plan.mode != "async"
-            or context.activation_sequence != STAGED_ROLES
+            or context.activation_sequence not in STAGED_SEQUENCES
             or record.phase is TransactionPhase.ROLLED_BACK
             or (
                 record.phase is TransactionPhase.VERIFIED
                 and context.await_operator_observation is not True
             )
-            or len(record.actions) != STAGED_ACTION_COUNT["async"]
+            or len(record.actions) != staged_layout(context).count
             or any(
                 a.phase not in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
-                for a in record.actions[:STAGED_ASYNC_ROLE]
+                for a in record.actions[: staged_layout(context).async_role]
             )
-            or record.actions[STAGED_ASYNC_ROLE].phase
+            or record.actions[staged_layout(context).async_role].phase
             not in {ActionPhase.UNCERTAIN, ActionPhase.FORWARD_ATTEMPTING, ActionPhase.VERIFIED}
         ):
             return False
         # Reuse the exact owned plan comparison, not just the action count or last field.
+        role = staged_layout(context).async_role
         actions = record.actions
-        if actions[STAGED_ASYNC_ROLE].phase is ActionPhase.FORWARD_ATTEMPTING:
+        if actions[role].phase is ActionPhase.FORWARD_ATTEMPTING:
             # A crash at the send boundary also means unknown delivery, not permission
             # to resend. This is a validation view; the stored phase stays untouched.
-            actions = (
-                *actions[:STAGED_ASYNC_ROLE],
-                actions[STAGED_ASYNC_ROLE].model_copy(update={"phase": ActionPhase.UNCERTAIN}),
-            )
+            actions = (*actions[:role], actions[role].model_copy(
+                update={"phase": ActionPhase.UNCERTAIN}
+            ))
         validate_staged_assistance_source(
             self,
             record.model_copy(
@@ -519,7 +519,7 @@ class NativeWavemakerController(LocalControlCoordinator):
     def _require_assistance_source(self, source, context):
         if source.phase is TransactionPhase.VERIFIED:
             return
-        if context.activation_sequence == STAGED_ROLES:
+        if context.activation_sequence in STAGED_SEQUENCES:
             validate_staged_assistance_source(self, source, context)
             return
         # 2026-09-15 product Async: original ownership survives its last-role ACK timeout.
@@ -598,7 +598,7 @@ class NativeWavemakerController(LocalControlCoordinator):
         snapshots = self._snapshots(context)
         writers = {e.target.logical_member: self._writer_factory(e) for e in endpoints}
         names = [item.target.logical_member for item in context.originals]
-        staged = context.kind == "attach" and context.activation_sequence == STAGED_ROLES
+        staged = context.kind == "attach" and context.activation_sequence in STAGED_SEQUENCES
         # 전송 전 준비만 한다. 각 action의 실제 no-change와 image 안전 조건은 직전 읽기로 판정한다.
         for name in names if staged else names[1:] + names[:1]:
             prepared.append(
@@ -676,7 +676,7 @@ class NativeWavemakerController(LocalControlCoordinator):
         return result
 
     async def _advance(self, record, context, endpoints, permit):
-        if context.kind == "attach" and context.activation_sequence == STAGED_ROLES:
+        if context.kind == "attach" and context.activation_sequence in STAGED_SEQUENCES:
             return await advance_staged_roles(self, record, context, endpoints, permit)
         by_name = {e.target.logical_member: e for e in endpoints}
         for index in range(len(record.actions)):
@@ -817,14 +817,15 @@ class NativeWavemakerController(LocalControlCoordinator):
 
     def _can_reconcile_async(self, record, context, index):
         """Only the final role delta after this pair's verified Sync, never qualification."""
-        staged = context.activation_sequence == STAGED_ROLES
-        sync = STAGED_SYNC_ROLE if staged else index - 1
+        staged = context.activation_sequence in STAGED_SEQUENCES
+        layout = staged_layout(context) if staged else None
+        sync = (layout.manual or layout.async_role) - 1 if staged else index - 1
         return (
             context.kind == "attach"
             and context.plan.mode == "async"
             and len(context.originals) == 2
-            and len(record.actions) == (STAGED_ACTION_COUNT["async"] if staged else 7)
-            and index == (STAGED_ASYNC_ROLE if staged else 6)
+            and len(record.actions) == (layout.count if staged else 7)
+            and index == (layout.async_role if staged else 6)
             and record.actions[index].acknowledgement_sha256 is None
             and record.actions[index].function == "native_controls"
             and record.actions[index].target == context.originals[1].target
@@ -838,12 +839,13 @@ class NativeWavemakerController(LocalControlCoordinator):
                 if staged
                 else {"SwitchON": True, "TimerON": True, "Linkage": "sync_slave"}
             )
-            # The staged plan re-asserts the slave manual block between the two role writes.
+            # v2 re-asserts the slave manual block between the two role writes.
             and (
-                not staged
+                layout is None
+                or layout.manual is None
                 or (
-                    record.actions[STAGED_SLAVE_MANUAL].target == record.actions[index].target
-                    and record.actions[STAGED_SLAVE_MANUAL].phase
+                    record.actions[layout.manual].target == record.actions[index].target
+                    and record.actions[layout.manual].phase
                     in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
                 )
             )
@@ -1001,7 +1003,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                         expected["Mode"] = "constant"
                     if (
                         context.kind == "attach"
-                        and context.activation_sequence == STAGED_ROLES
+                        and context.activation_sequence == STAGED_ROLES_V2
                         and index == 1
                     ):
                         # The device rewrites the slave's manual block when it takes the role

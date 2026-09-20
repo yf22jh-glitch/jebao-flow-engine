@@ -9,8 +9,7 @@ from jebao_flow import local_control_cli
 from jebao_flow.config import RuntimeMode
 from jebao_flow.local_control.coordinator import LocalControlExecutionError
 from jebao_flow.local_control.journal import ActionPhase, native_detach_request_id
-from jebao_flow.local_control.wavemaker_sequence import STAGED_ASYNC_ROLE
-from tests.unit.test_local_control_wavemaker_lifecycle import Rig, _plan
+from tests.unit.test_local_control_wavemaker_lifecycle import STAGED_ASYNC_ROLE, Rig, _plan
 
 
 async def observe(rig, **kwargs):

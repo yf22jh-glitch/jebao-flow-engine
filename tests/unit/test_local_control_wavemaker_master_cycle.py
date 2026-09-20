@@ -15,9 +15,8 @@ from jebao_flow.local_control.journal import (
 from jebao_flow.local_control.models import LocalControlIntent
 from jebao_flow.local_control.wavemaker import NativeWavemakerPlan
 from jebao_flow.local_control.wavemaker_lifecycle import native_master_cycle_request_id
-from jebao_flow.local_control.wavemaker_sequence import STAGED_ASYNC_ROLE
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
-from tests.unit.test_local_control_wavemaker_lifecycle import Rig, _plan, _put
+from tests.unit.test_local_control_wavemaker_lifecycle import STAGED_ASYNC_ROLE, Rig, _plan, _put
 
 
 async def attach(rig, **kwargs):

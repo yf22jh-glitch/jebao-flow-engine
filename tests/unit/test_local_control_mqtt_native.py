@@ -24,9 +24,8 @@ from jebao_flow.local_control.mqtt import (
     LocalControlMqttRouter,
 )
 from jebao_flow.local_control.state import FreshDeviceState, StatePublication
-from jebao_flow.local_control.wavemaker_sequence import STAGED_ASYNC_ROLE
 from tests.unit.test_local_control_mqtt import _Client, _OneMessageClient, _OwnershipService
-from tests.unit.test_local_control_wavemaker_lifecycle import Rig, _plan
+from tests.unit.test_local_control_wavemaker_lifecycle import STAGED_ASYNC_ROLE, Rig, _plan
 
 
 def _setup(
