@@ -149,3 +149,56 @@ shape다. 미확인은 마지막 재결속이 manual을 다시 덮어쓰는지 �
 
 대안은 latent 값을 고치는 대신 **`TimerON`이 내려가는 사건 자체를 감시해 기존
 `slave_timer_rearm` 자식을 돌리는** 방향이다. 어느 쪽을 제품 동작으로 삼을지는 사람이 정한다.
+
+## 덧붙임 — 판정 실기: 덮어쓰기 주체는 "활성 master가 링크를 잡고 있는 상태"다
+
+위 「다음 실험 제안」의 순서를 구현해(`6e9a92a98eebe572cbb290b9d9d153a0a992469d`,
+image `sha256:337a80b778c0b855ec2d147727dcbca125356e7458d1de1f1619b04836b15930`) 같은 계획으로
+attach 1회를 더 돌렸다(`kaga_daily_async_20260920_03`). 배포 전에 live journal 대상
+read-only 전제 검사를 먼저 통과시켰다.
+
+### cycle 5 action은 전부 verified, 그리고 그 직후가 답이다
+
+`wm_cycle_a4afa6bb…`:
+
+| 시각(UTC) | 대상 | 프레임 | 결과 |
+|---|---|---|---|
+| 09:30:11.158 | 상단 | `Linkage=independent` | ack=Y, verified |
+| 09:30:18.748 | 하단 | `Linkage=independent` | ack=Y, `async_slave→independent`, Mode 여전히 `feed` |
+| 09:30:20.694 | 하단 | `Mode=constant` | ack=Y, **적용됨** (`feed→constant`) |
+| 09:30:22.483 | 하단 | `Linkage=async_slave` | ack=Y, `async_slave` 복귀, **Mode `constant` 유지** |
+| 09:30:24.477 | 상단 | `Linkage=master` | ack=Y, verified |
+| 09:30:26.015 | 하단 | (rearmed_pair 읽기) | act=4, **Mode `feed`** ✗ |
+
+- **이 실행으로 새로 확정된 사실:**
+  1. 장비가 역할을 벗어나면 manual `Mode` 쓰기는 정상 적용된다(09:30:20.694).
+  2. **하단의 자기 역할 복귀(independent→async_slave)는 manual을 덮어쓰지 않는다**
+     (09:30:22.483에 `constant` 유지).
+  3. **덮어쓰는 것은 상단이 링크를 다시 잡는 순간이다** — 09:30:24.477에 상단이 `master`가
+     되고 1.5초 뒤 하단 manual이 `feed`가 됐다.
+  4. 따라서 **pair가 링크되어 있는 동안 하단 manual `Mode`는 `feed`로 고정되며, 어떤 쓰기
+     순서로도 다른 값으로 유지할 수 없다.** manual 블록 복구는 불가능으로 확정한다.
+- 추가한 `rearmed_pair`의 하단 `Mode` 대조가 이를 잡아 cycle을 실패시켰다. feed를 숨긴 채
+  성공을 주장하지 않았다는 점에서 가드는 의도대로 동작했다.
+- 여전히 `UNKNOWN`: 장비가 `feed`라는 값을 고르는 규칙. 09-20 09:30 시점 활성 구간은
+  `18:08–19:00 pulse/45/70`이었으므로 현재 프로그램 값도 아니다. 펌웨어 가설은 적지 않는다.
+
+### 복구
+
+`recover`는 detach child의 action 00이 `uncertain`이 되며 실패했고, `assist_detach`
+`kaga_assist_20260920_02`가 두 장비를 attach 이전 원본으로 복원해 6/6 `verified`로 끝냈다.
+미완료 기록 0건. 배포본은 다시 `sha256:b81464ec…`로 되돌렸다.
+
+## 이 조사의 종결 판정
+
+- **왜 `feed`에 들어갔는가:** pair가 링크되면 장비가 하단 manual `Mode`를 스스로 `feed`로
+  만든다. 관측 7회 중 7회. 우리 코드가 보낸 적은 한 번도 없다.
+- **고칠 수 있는가:** 없다. 링크 중에는 쓰기가 적용되지 않고, 링크를 풀고 고쳐도 상단이
+  다시 잡는 순간 되돌아간다. 세 가지 위치를 실기로 배제했다.
+- **그러면 무엇이 보호인가:** latent 값을 고치는 대신 **하단이 `TimerON`을 잃는 사건**을
+  감시해 기존 `slave_timer_rearm` 자식으로 시간표를 되살리는 것이다. 그 자식은 이미 있고
+  2026-09-18에 동작이 확인됐다. 다만 지금은 보류된 source에만 결속되므로, 정상 종료된
+  attachment에서도 쓸 수 있게 하는 변경이 필요하다.
+- 함께 필요한 것: master cycle이 성공했을 때 source를 닫아 장비 소유를 해제하는 변경
+  (09-18에 22시간 동안 모든 명령을 막았던 원인). 이번 세 번의 실행에서 cycle이 한 번도
+  끝까지 성공하지 못해 그 경로는 아직 실기로 확인되지 않았다.
