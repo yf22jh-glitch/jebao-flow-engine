@@ -35,10 +35,14 @@ from jebao_flow.protocol.session import RawStateCapture
 
 KIND = "master_link_cycle_v1"
 # The slave's own role transition makes the device rewrite its manual Mode, and that block is
-# what the pump runs whenever TimerON drops; ``feed`` stops it. A bound slave never answers a
-# control write with an ACK and ignores Linkage/TimerON, so the only window in this operation
-# where the value can be repaired and acknowledged is while the master is released. Sources
-# recorded before this existed keep their two master-only actions.
+# what the pump runs whenever TimerON drops; ``feed`` stops it. Two placements were tried on
+# hardware and rejected: between the role writes a bound slave never acknowledges anything
+# (2026-09-20 03:00:33 send, no ACK, unapplied at 03:00:40), and in the released window an
+# ``async_slave`` acknowledges the write but does not apply it (09:08:26 ack, still ``feed``
+# at 09:09:33). The value only moves while the device is out of its slave role, which the
+# assisted detach showed at 03:03:56. So v2 steps the slave out, repairs it, and puts the role
+# back, all inside the released window. TimerON is never touched, so the schedule keeps
+# running. Sources recorded before this existed keep their two master-only actions.
 _REPAIR_SLAVE_MANUAL_MODE = "constant"
 _LOGGER = logging.getLogger(__name__)
 _CLOSED_BY_CYCLE = "native_async_role_verified_by_master_cycle_delivery_unknown"
@@ -52,7 +56,11 @@ def cycle_steps(context, endpoints):
     master, slave = endpoints
     steps = [(master, "linkage_role", "independent")]
     if context.activation_sequence == STAGED_ROLES_V2:
-        steps.append((slave, "manual_mode", _REPAIR_SLAVE_MANUAL_MODE))
+        steps += [
+            (slave, "linkage_role", "independent"),
+            (slave, "manual_mode", _REPAIR_SLAVE_MANUAL_MODE),
+            (slave, "linkage_role", "async_slave"),
+        ]
     steps.append((master, "linkage_role", "master"))
     return tuple(steps)
 
@@ -86,7 +94,11 @@ def _expected_cycle_steps(context):
 
     steps = [(0, "linkage_role", {"Linkage": "independent"})]
     if context.activation_sequence == STAGED_ROLES_V2:
-        steps.append((1, "manual_mode", {"Mode": _REPAIR_SLAVE_MANUAL_MODE}))
+        steps += [
+            (1, "linkage_role", {"Linkage": "independent"}),
+            (1, "manual_mode", {"Mode": _REPAIR_SLAVE_MANUAL_MODE}),
+            (1, "linkage_role", {"Linkage": "async_slave"}),
+        ]
     steps.append((0, "linkage_role", {"Linkage": "master"}))
     return tuple(steps)
 
@@ -243,12 +255,15 @@ async def cycle_locked(owner, source, context, endpoints, permit):
                     phase=ActionPhase.FORWARD_ACKNOWLEDGED,
                     acknowledgement_sha256=owner._journal.install_blob(ack),
                 )
-                await owner._sequence_sleep(config.readback_delay_ms / 1000)
-                began = datetime.now(UTC)
-                capture = await writer.capture_readback(permit, accept_reports=True)
-                record = owner._evidence(record, index, capture, began, prepared, "after")
-                if not verify_prepared_readback(prepared, capture.status_payload):
-                    raise LocalControlExecutionError("cycle 명령 반환값 불일치")
+                for attempt in range(config.readback_attempts):
+                    await owner._sequence_sleep(config.readback_delay_ms / 1000)
+                    began = datetime.now(UTC)
+                    capture = await writer.capture_readback(permit, accept_reports=True)
+                    record = owner._evidence(record, index, capture, began, prepared, "after")
+                    if verify_prepared_readback(prepared, capture.status_payload):
+                        break
+                    if attempt == config.readback_attempts - 1:
+                        raise LocalControlExecutionError("cycle 명령 반환값 불일치")
                 record = owner._save_action(record, index, phase=ActionPhase.VERIFIED)
             finally:
                 await writer.close()

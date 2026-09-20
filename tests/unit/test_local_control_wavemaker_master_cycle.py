@@ -64,9 +64,15 @@ async def test_cycle_preserves_source_delivery_and_replays_without_contact(tmp_p
     )
     assert [(s[0], s[1]) for s in rig.sent[9:]] == [
         ("master", {"Linkage": "independent"}),
+        ("slave", {"Linkage": "independent"}),
+        ("slave", {"Linkage": "async_slave"}),
         ("master", {"Linkage": "master"}),
     ]
-    assert sum(s[1] == {"Linkage": "async_slave"} for s in rig.sent) == 1
+    # The attach's own Async role frame is never replayed; the cycle's step-back is its own.
+    source_async = [
+        s for s in rig.sent if s[1] == {"Linkage": "async_slave"} and s[2] == "cycle_source_01"
+    ]
+    assert len(source_async) == 1
     final = result["verification"]
     assert all(row["complete"] for row in final["devices"])
     released = json.loads(rig.store.load_blob(final["previous"]))
@@ -84,7 +90,7 @@ async def test_cycle_preserves_source_delivery_and_replays_without_contact(tmp_p
     assert stalled.actions[STAGED_ASYNC_ROLE].diagnostic == "native_stage_unverified"
     reads = len(rig.reads)
     assert not (await attach(rig))["current_state_verified"]
-    assert len(rig.reads) == reads and len(rig.sent) == 11
+    assert len(rig.reads) == reads and len(rig.sent) == 13
     assert rig.store.load("cycle_source_01") == source
     # Cycle must not block the same source's ordinary owned restoration.
     restored = await rig.controller().recover_native(
@@ -300,8 +306,8 @@ def _clobber_manual_at_bind(rig, monkeypatch, *, keep_rewriting=False):
     async def send(self, payload):
         acknowledgement = await original(self, payload)
         binds = rig.sent[-1][1] == {"Linkage": "sync_slave"}
-        rearms = keep_rewriting and rig.sent[-1][1] == {"Linkage": "master"}
-        if binds or rearms:
+        rebinds = keep_rewriting and rig.sent[-1][1] == {"Linkage": "async_slave"}
+        if binds or rebinds:
             rig.states["slave"] = _put(rig.states["slave"], {"Mode": "feed"})
         return acknowledgement
 
@@ -325,7 +331,9 @@ async def test_released_window_repairs_the_manual_mode_the_device_rewrote(tmp_pa
     assert result["accepted"] and result["kind"] == "master_link_cycle_v1"
     assert [(s[0], s[1]) for s in rig.sent[9:]] == [
         ("master", {"Linkage": "independent"}),
+        ("slave", {"Linkage": "independent"}),
         ("slave", {"Mode": "constant"}),
+        ("slave", {"Linkage": "async_slave"}),
         ("master", {"Linkage": "master"}),
     ]
     assert SCHEMA.decode_status(rig.states["slave"])["Mode"] == "constant"
@@ -337,21 +345,31 @@ async def test_released_window_repairs_the_manual_mode_the_device_rewrote(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_an_untouched_manual_block_costs_no_extra_frame(tmp_path):
+async def test_an_untouched_manual_block_sends_no_repair_frame(tmp_path):
     rig = Rig(tmp_path)
     lost_reply(rig)
     assert (await attach(rig))["accepted"]
+    # The repair itself is skipped by the read before it; the role step-out and step-back are
+    # what carry it, so they are still sent.
     assert [(s[0], s[1]) for s in rig.sent[9:]] == [
         ("master", {"Linkage": "independent"}),
+        ("slave", {"Linkage": "independent"}),
+        ("slave", {"Linkage": "async_slave"}),
         ("master", {"Linkage": "master"}),
     ]
     cycle = rig.store.load(native_master_cycle_request_id("cycle_source_01"))
-    assert [a.function for a in cycle.actions] == ["linkage_role", "manual_mode", "linkage_role"]
-    assert cycle.actions[1].phase is ActionPhase.NO_CHANGE
+    assert [a.function for a in cycle.actions] == [
+        "linkage_role",
+        "linkage_role",
+        "manual_mode",
+        "linkage_role",
+        "linkage_role",
+    ]
+    assert cycle.actions[2].phase is ActionPhase.NO_CHANGE
 
 
 @pytest.mark.asyncio
-async def test_a_manual_block_rewritten_again_on_rearm_fails_loudly(tmp_path, monkeypatch):
+async def test_a_manual_block_rewritten_again_on_rebind_fails_loudly(tmp_path, monkeypatch):
     rig = Rig(tmp_path)
     lost_reply(rig)
     _clobber_manual_at_bind(rig, monkeypatch, keep_rewriting=True)
