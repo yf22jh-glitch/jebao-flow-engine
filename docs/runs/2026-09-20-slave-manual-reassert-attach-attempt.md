@@ -95,3 +95,57 @@ action 08(`{"Frequency":80,"Mode":"constant"}`, 하단)은 `send_once`에서
   명시 응답으로 읽는다. 그 구간에서 manual `Mode`/`Frequency`를 재확인하는 설계를 다음 후보로
   둔다. 이번처럼 오프라인 시험만으로 배포하지 않고, 먼저 그 구간에서 하단 쓰기가 ACK를 받는지
   단독으로 확인한다.
+
+## 덧붙임 — 두 번째 위치(master cycle released 구간)도 성립하지 않는다
+
+§4에 따라 위 기술은 고치지 않고 덧붙인다. 위 「다음 실험 제안」대로 복구를 master cycle의
+released 구간으로 옮겨(`08aab8cff96ede9ad47c417383cc2d1dfe0a2c55`,
+image `sha256:15ef95d45b75a080102518cbc219da78dd75e74d4b8540099ed8cc664c5b9bdc`) 같은 계획으로
+attach 1회를 더 돌렸다(`kaga_daily_async_20260920_02`).
+
+### 결과 — ACK는 오고, 적용은 되지 않는다
+
+cycle `wm_cycle_695a50f2…`의 3 action 중:
+
+| action | 대상 | 내용 | 결과 |
+|---|---|---|---|
+| 0 | 상단 | `Linkage=independent` | `verified`, ack=Y |
+| 1 | 하단 | `Mode=constant` | **ack=Y**, 반환값 불일치로 `uncertain` |
+| 2 | 상단 | `Linkage=master` | 미전송 |
+
+action 1의 증거:
+
+```
+09:08:23.738  released_reply_pair  하단  act=3  Link=async_slave  Mode=feed    (complete)
+09:08:26.286  before               하단  act=3  Link=async_slave  Mode=feed    → 전송, ack=Y
+09:08:27.188  after                하단  act=4  Link=async_slave  Mode=feed    ✗
+09:09:33      (운영자 읽기)        하단        Link=async_slave  Mode=feed    ✗ 66초 뒤에도
+```
+
+- **이 실행으로 새로 확정된 사실:** 상단이 released여도 **`async_slave`는 manual `Mode` 쓰기를
+  ACK만 하고 적용하지 않는다.** 66초 뒤에도 `feed`였으므로 readback 창 길이 문제가 아니다.
+  즉 두 번째 위치도 틀렸다.
+- 대조 관측: 2026-09-20 03:03:52.912에는 하단이 **`sync_slave`** 이고 상단이 released인 상태에서
+  manual이 `constant/80`으로 돌아와 있었다. 역할 종류에 따라 다르며, 그 규칙은 `UNKNOWN`이다.
+- 파생 결론: **manual `Mode`는 slave가 역할을 벗어난 상태에서만 고칠 수 있다.** 실제로
+  09-20 03:03:56의 `schedule_enable`(앱 shape상 `Linkage=independent` 동반) 프레임은 ack=Y로
+  적용됐고 그 뒤 하단 쓰기가 전부 정상 동작했다.
+
+### 복구와 롤백
+
+`recover` `kaga_recover_20260920_01`이 detach child `wm_detach_695a50f2…`를 6/6 `verified`로
+끝냈고 두 장비 모두 `complete=true`로 attach 이전 원본에 복원됐다. 미완료 기록 0건.
+09:11:50 확인: 상단 `independent/constant/34`, 하단 `independent/constant/32`, 둘 다 schedule ON.
+배포본은 다시 `sha256:b81464ec…`로 되돌렸다 — 이번 빌드는 기존에 성공하던 master cycle을
+실패시키므로 이전보다 나쁘다.
+
+### 다음 실험 제안
+
+남은 후보는 **released 구간에서 하단을 한 번 결속 해제했다가 다시 붙이는** 순서다.
+`상단→independent`, `하단→independent`, `하단 Mode=constant`, `하단→async_slave`,
+`상단→master`. 앞의 세 프레임은 09-20 03:03:51~03:03:59에 전부 ack·적용이 확인된 것과 같은
+shape다. 미확인은 마지막 재결속이 manual을 다시 덮어쓰는지 하나뿐이며, `rearmed_pair` 대조에
+하단 `Mode`를 포함해 두면 그 한 가지가 이 실행 1회로 판정된다.
+
+대안은 latent 값을 고치는 대신 **`TimerON`이 내려가는 사건 자체를 감시해 기존
+`slave_timer_rearm` 자식을 돌리는** 방향이다. 어느 쪽을 제품 동작으로 삼을지는 사람이 정한다.
