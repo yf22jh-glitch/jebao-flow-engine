@@ -40,7 +40,12 @@ def _stuck_feed_slave(rig):
 
 
 @pytest.mark.asyncio
-async def test_rearm_writes_only_four_scalar_frames_and_preserves_both_images(tmp_path):
+async def test_rearm_releases_the_master_then_repairs_the_timer_and_rebinds(tmp_path):
+    """The order is the one hardware accepted on 2026-09-20: a bound slave never acknowledges
+    a control write (03:00:33 no ACK), an acknowledged one comes straight back once the master
+    is released (03:03:56), the slave's own role restore does not disturb it (09:30:22.483),
+    and the master taking the link back leaves TimerON alone (09:30:26.015)."""
+
     rig = Rig(tmp_path)
     source = await _pending_source(rig)
     _stuck_feed_slave(rig)
@@ -57,13 +62,11 @@ async def test_rearm_writes_only_four_scalar_frames_and_preserves_both_images(tm
     assert result["kind"] == "slave_timer_rearm_v1"
     assert result["schedule_image_written"] is False
     assert [(row[0], row[1]) for row in rig.sent[writes:]] == [
-        (
-            "slave",
-            {"SwitchON": False, "TimerON": True, "Linkage": "independent"},
-        ),
-        ("slave", {"Mode": "constant"}),
+        ("master", {"Linkage": "independent"}),
+        ("slave", {"SwitchON": False, "TimerON": True, "Linkage": "independent"}),
         ("slave", {"SwitchON": True}),
         ("slave", {"Linkage": "async_slave"}),
+        ("master", {"Linkage": "master"}),
     ]
     assert all(not any(name.startswith("AutoTime") for name in row[1]) for row in rig.sent[writes:])
     assert extract_current_pro_schedule_image(rig.states["master"]) == master_image
@@ -72,15 +75,23 @@ async def test_rearm_writes_only_four_scalar_frames_and_preserves_both_images(tm
     assert values["SwitchON"] is True
     assert values["TimerON"] is True
     assert values["Linkage"] == "async_slave"
-    assert values["Mode"] == "constant"
+    # The manual Mode is deliberately left alone: the link reverts anything written there.
+    assert values["Mode"] == "feed"
+    assert SCHEMA.decode_status(rig.states["master"])["Linkage"] == "master"
     assert all(row["complete"] for row in result["verification"]["devices"])
 
     child = rig.store.load(native_slave_timer_rearm_request_id(source.request_id))
     assert child.phase is TransactionPhase.VERIFIED
     assert all(action.phase is ActionPhase.VERIFIED for action in child.actions)
-    assert {action.baseline_status_sha256 for action in child.actions} == {
-        child.actions[0].baseline_status_sha256
-    }
+    # Each frame is bound to its own device's initial raw from the one fresh pair capture.
+    master_actions = [a for a in child.actions if a.target.logical_member == "master"]
+    slave_actions = [a for a in child.actions if a.target.logical_member == "slave"]
+    assert len(master_actions) == 2 and len(slave_actions) == 3
+    for group in (master_actions, slave_actions):
+        assert {a.baseline_status_sha256 for a in group} == {group[0].baseline_status_sha256}
+    assert (
+        master_actions[0].baseline_status_sha256 != slave_actions[0].baseline_status_sha256
+    )
 
     sent = len(rig.sent)
     replay = await rig.controller().rearm_async_slave_schedule(
@@ -115,7 +126,7 @@ async def test_ack_loss_is_observed_without_replaying_the_timer_frame(tmp_path):
         targets=rig.targets,
     )
     assert result["accepted"]
-    assert len(rig.sent) == count + 3
+    assert len(rig.sent) == count + 4
     timer_payloads = [
         row for row in rig.sent if row[2] == child_id and row[1].get("TimerON") is True
     ]

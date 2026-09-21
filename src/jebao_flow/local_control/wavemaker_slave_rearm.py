@@ -1,9 +1,18 @@
 """Source-owned Async slave timer rearm without a schedule-image write.
 
-The operation exists only for an explicitly pending two-device Pro Async attachment.  It
-captures the current pair, proves that both installed schedule images still match that
-attachment, journals every scalar frame, then sends the app-shaped timer transition followed
-by a latent manual fallback, power restore, and direct Async role restore.
+This repairs the one failure that actually stops the pump. On 2026-09-18T11:36:31Z the bound
+slave turned its own ``TimerON`` off with no command from anyone; its manual block, which the
+device had already forced to ``feed`` when the role landed, became live and the pump stood
+still for 22 hours. The manual value cannot be changed while the pair is linked -- three write
+orders were tried on hardware and the device reverts all of them -- but ``TimerON`` is not
+forced by the link, so putting the schedule back is what ends the stall.
+
+The order matters and is the one the hardware accepted on 2026-09-20. A bound slave never
+acknowledges a control write (03:00:33 send, no ACK, still unapplied at 03:00:40), so the
+master is released first; an acknowledged slave write comes straight back once it is
+(03:03:56 ack after the master went independent at 03:03:51). The slave's own role restore
+does not disturb it (09:30:22.483), and the master taking the link back leaves ``TimerON``
+alone (09:30:26.015 ``TimerON=true``).
 
 No schedule payload is constructed by this module.  A failed child is never replayed under a
 new id; the owning attachment's exact native restore remains the recovery authority.
@@ -11,6 +20,7 @@ new id; the owning attachment's exact native restore remains the recovery author
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import replace
@@ -28,12 +38,23 @@ from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_MODES
 KIND = "slave_timer_rearm_v1"
 _MIN_FLOW = 30
 _MAX_FLOW = 45
+# (endpoint index, function, value). The app's timer handler clears SwitchON when it sets
+# TimerON, so power is restored right after it; manual Mode is deliberately not written
+# because the link reverts it.
 _STEPS = (
-    ("schedule_enable", True),
-    ("manual_mode", "constant"),
-    ("power", True),
-    ("linkage_role", "async_slave"),
+    (0, "linkage_role", "independent"),
+    (1, "schedule_enable", True),
+    (1, "power", True),
+    (1, "linkage_role", "async_slave"),
+    (0, "linkage_role", "master"),
 )
+_EXPECTED_BY_STEP = {
+    (0, "linkage_role", "independent"): {"Linkage": "independent"},
+    (1, "schedule_enable", True): {"TimerON": True, "SwitchON": False, "Linkage": "independent"},
+    (1, "power", True): {"SwitchON": True},
+    (1, "linkage_role", "async_slave"): {"Linkage": "async_slave"},
+    (0, "linkage_role", "master"): {"Linkage": "master"},
+}
 
 
 def _json(value) -> bytes:
@@ -99,7 +120,7 @@ def _expected_fields(function: str) -> set[str]:
 
 
 def validate_slave_rearm(owner, record, context) -> None:
-    """Validate immutable owner evidence and all four app-shaped scalar frames."""
+    """Validate immutable owner evidence and every app-shaped scalar frame."""
 
     if (
         context.master_cycle_on_async_failure is not True
@@ -118,9 +139,9 @@ def validate_slave_rearm(owner, record, context) -> None:
         or source_snapshot.native_context_sha256 != source.native_context_sha256
         or source_context.kind != "attach"
         or source_context.plan.mode != "async"
-        or not owner._awaiting_operator(source, source_context)
+        or not _owns_live_pair(owner, source, source_context)
     ):
-        raise ValueError("Async slave 재진입은 자기 보류 source에만 결속됩니다")
+        raise ValueError("Async slave 재진입은 자기 Async source에만 결속됩니다")
 
     statuses: dict[str, bytes] = {}
     for index, original in enumerate(context.originals):
@@ -135,27 +156,18 @@ def validate_slave_rearm(owner, record, context) -> None:
         statuses[original.target.logical_member] = owner._journal.load_blob(original.status_sha256)
     _require_pair_state(context, statuses)
 
-    slave = context.originals[1]
-    schema = get_product_schema(slave.target.product_key)
-    baseline_values = schema.decode_status(statuses[slave.target.logical_member])
-    expected_by_function = {
-        "schedule_enable": {
-            "TimerON": True,
-            "SwitchON": False,
-            "Linkage": "independent",
-        },
-        "manual_mode": {"Mode": "constant"},
-        "power": {"SwitchON": True},
-        "linkage_role": {"Linkage": "async_slave"},
-    }
-    for action, (function, _value) in zip(record.actions, _STEPS, strict=True):
-        expected = expected_by_function[function]
-        baseline = {name: baseline_values[name] for name in expected}
+    for action, step in zip(record.actions, _STEPS, strict=True):
+        index, function, _value = step
+        original = context.originals[index]
+        schema = get_product_schema(original.target.product_key)
+        values = schema.decode_status(statuses[original.target.logical_member])
+        expected = _EXPECTED_BY_STEP[step]
+        baseline = {name: values[name] for name in expected}
         if (
-            action.target != slave.target
+            action.target != original.target
             or action.function != function
             or action.verification_kind != "scalar_fields"
-            or action.baseline_status_sha256 != slave.status_sha256
+            or action.baseline_status_sha256 != original.status_sha256
             or action.restore_on_recovery is not True
             or owner._journal.load_blob(action.forward_payload_sha256)
             != build_control_payload(schema, expected)
@@ -180,9 +192,9 @@ async def rearm_slave_locked(owner, source, source_context, endpoints, permit):
         source_context.kind != "attach"
         or source_context.plan.mode != "async"
         or source_context.master_cycle_on_async_failure is not True
-        or not owner._awaiting_operator(source, source_context)
+        or not _owns_live_pair(owner, source, source_context)
     ):
-        raise ValueError("Async slave 재진입에는 보류된 자기 Async source가 필요합니다")
+        raise ValueError("Async slave 재진입에는 자기 Async source가 필요합니다")
     request_id = native_slave_timer_rearm_request_id(source.request_id)
     record = owner._journal.load(request_id)
     if record is not None:
@@ -220,24 +232,29 @@ async def rearm_slave_locked(owner, source, source_context, endpoints, permit):
             }
         )
         _require_pair_state(child_context, statuses)
-        slave = endpoints[1]
-        slave_status = statuses[slave.target.logical_member]
-        writer = owner._writer_factory(slave)
+        writers = {e.target.logical_member: owner._writer_factory(e) for e in endpoints}
         prepared = []
         try:
-            for function, value in _STEPS:
+            for step in _STEPS:
+                index, function, value = step
+                endpoint = endpoints[index]
+                name = endpoint.target.logical_member
+                writer = writers[name]
+                status = statuses[name]
                 intent = LocalControlIntent(
                     request_id=request_id,
-                    target=slave.target,
+                    target=endpoint.target,
                     function=function,
                     value=value,
                 )
                 owner._catalog.validate_intent(intent)
-                scalar = writer.prepare_scalar(intent, slave_status)
+                scalar = writer.prepare_scalar(intent, status)
                 expected = json.loads(scalar.expected_readback)
-                if set(expected) != _expected_fields(function):
+                if set(expected) != _expected_fields(function) or expected != _EXPECTED_BY_STEP[
+                    step
+                ]:
                     raise ValueError("Async slave 재진입 scalar 필드 shape가 다릅니다")
-                owned = writer.prepare_native_controls(expected, slave_status)
+                owned = writer.prepare_native_controls(expected, status)
                 if (
                     scalar.forward_payload != owned.forward_payload
                     or scalar.rollback_payload != owned.rollback_payload
@@ -246,16 +263,16 @@ async def rearm_slave_locked(owner, source, source_context, endpoints, permit):
                     or scalar.baseline_readback != owned.baseline_readback
                 ):
                     raise ValueError("앱 scalar와 Async slave 재진입 payload가 다릅니다")
-                # Every frame is prepared against the initial slave raw, so the power and
-                # role frames restore values the device already held before frame one ran:
-                # their ``no_change`` is True at preparation time.  ``_advance`` decides what
-                # to send from a fresh capture taken immediately before each frame, not from
-                # this flag, which is why both still reach the device.  Routing this child
-                # through the ordinary coordinator instead would skip them and leave the pump
-                # switched off and detached from its master.
+                # Every frame is prepared against that device's initial raw, so the power and
+                # role frames restore values it already held before frame one ran: their
+                # ``no_change`` is True at preparation time.  ``_advance`` decides what to send
+                # from a fresh capture taken immediately before each frame, not from this flag,
+                # which is why they still reach the device.  Routing this child through the
+                # ordinary coordinator instead would skip them and leave the pump switched off
+                # and detached from its master.
                 prepared.append(replace(scalar, function=function))
         finally:
-            await writer.close()
+            await asyncio.gather(*(item.close() for item in writers.values()))
         record = owner._create_record(
             request_id=request_id,
             intent_sha256=hashlib.sha256(child_context.model_dump_json().encode()).hexdigest(),
@@ -267,3 +284,20 @@ async def rearm_slave_locked(owner, source, source_context, endpoints, permit):
 
     owner._context(record)
     return await owner._advance(record, child_context, endpoints, permit)
+
+
+def _owns_live_pair(owner, source, source_context) -> bool:
+    """This child belongs to its own Async attachment, pending or already completed.
+
+    The stall it repairs happens hours into a healthy attachment, not only while one is
+    waiting on the operator, so a verified source must be able to own it too. The device-state
+    precondition in ``_require_pair_state`` is the real gate: master holding the link, slave
+    powered and in its Async role with its timer off, and both installed images still byte
+    exact against the owning plan.
+    """
+
+    if source_context.master_cycle_on_async_failure is not True:
+        return False
+    if owner._awaiting_operator(source, source_context):
+        return True
+    return source.phase is TransactionPhase.VERIFIED

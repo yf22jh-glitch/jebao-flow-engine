@@ -18,7 +18,6 @@ from jebao_flow.local_control.wavemaker_lifecycle import native_master_cycle_req
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
 from tests.unit.test_local_control_wavemaker_lifecycle import (
     STAGED_ASYNC_ROLE,
-    MemoryTransport,
     Rig,
     _plan,
     _put,
@@ -64,8 +63,6 @@ async def test_cycle_preserves_source_delivery_and_replays_without_contact(tmp_p
     )
     assert [(s[0], s[1]) for s in rig.sent[9:]] == [
         ("master", {"Linkage": "independent"}),
-        ("slave", {"Linkage": "independent"}),
-        ("slave", {"Linkage": "async_slave"}),
         ("master", {"Linkage": "master"}),
     ]
     # The attach's own Async role frame is never replayed; the cycle's step-back is its own.
@@ -90,7 +87,7 @@ async def test_cycle_preserves_source_delivery_and_replays_without_contact(tmp_p
     assert stalled.actions[STAGED_ASYNC_ROLE].diagnostic == "native_stage_unverified"
     reads = len(rig.reads)
     assert not (await attach(rig))["current_state_verified"]
-    assert len(rig.reads) == reads and len(rig.sent) == 13
+    assert len(rig.reads) == reads and len(rig.sent) == 11
     assert rig.store.load("cycle_source_01") == source
     # Cycle must not block the same source's ordinary owned restoration.
     restored = await rig.controller().recover_native(
@@ -294,101 +291,29 @@ async def test_default_context_bytes_omit_cycle_and_cancel_does_not_cycle(tmp_pa
     assert rig.store.load(native_master_cycle_request_id("cycle_source_01")) is None
 
 
-def _clobber_manual_at_bind(rig, monkeypatch, *, keep_rewriting=False):
-    """Reproduce the recorded device behaviour: taking the slave role rewrites its own manual
-    Mode about a second later with no command from us. 2026-09-20 03:00:32.329 showed
-    constant->feed / 80->5, 2026-09-18 01:47:11.021 constant->feed / 80->70, and three
-    2026-09-15 attaches constant->sine / 20->30. Byte-copy rig: this replays the observation,
-    it is not a firmware model."""
-
-    original = MemoryTransport.send_raw_control
-
-    async def send(self, payload):
-        acknowledgement = await original(self, payload)
-        binds = rig.sent[-1][1] == {"Linkage": "sync_slave"}
-        rebinds = keep_rewriting and rig.sent[-1][1] == {"Linkage": "async_slave"}
-        if binds or rebinds:
-            rig.states["slave"] = _put(rig.states["slave"], {"Mode": "feed"})
-        return acknowledgement
-
-    monkeypatch.setattr(MemoryTransport, "send_raw_control", send)
-
-
 @pytest.mark.asyncio
-async def test_released_window_repairs_the_manual_mode_the_device_rewrote(tmp_path, monkeypatch):
-    """A bound slave never acknowledges a control write and ignores Linkage/TimerON
-    (2026-09-20 03:00:33 send, no ACK, still unapplied at 03:00:40). The one window where the
-    write is acknowledged is while the master is released: 03:03:56 came back ack=Y right after
-    the master went independent at 03:03:51. The repair belongs there."""
+async def test_cycle_never_writes_the_slave(tmp_path):
+    """Three write orders for the slave's manual Mode were tried on hardware and the device
+    reverted all of them; while the pair is linked that block is the device's. The cycle is
+    master-only again, and what actually stops the pump -- the slave losing TimerON -- is the
+    slave timer rearm's job."""
 
-    rig = Rig(tmp_path)
-    lost_reply(rig)
-    _clobber_manual_at_bind(rig, monkeypatch)
-    assert SCHEMA.decode_status(rig.states["slave"])["Mode"] == "sine"
-
-    result = await attach(rig)
-
-    assert result["accepted"] and result["kind"] == "master_link_cycle_v1"
-    assert [(s[0], s[1]) for s in rig.sent[9:]] == [
-        ("master", {"Linkage": "independent"}),
-        ("slave", {"Linkage": "independent"}),
-        ("slave", {"Mode": "constant"}),
-        ("slave", {"Linkage": "async_slave"}),
-        ("master", {"Linkage": "master"}),
-    ]
-    assert SCHEMA.decode_status(rig.states["slave"])["Mode"] == "constant"
-    assert all(row["complete"] for row in result["verification"]["devices"])
-    restored = await rig.controller().recover_native(
-        request_id="cycle_source_01", targets=rig.targets
-    )
-    assert restored["accepted"] and rig.states == rig.originals
-
-
-@pytest.mark.asyncio
-async def test_an_untouched_manual_block_sends_no_repair_frame(tmp_path):
     rig = Rig(tmp_path)
     lost_reply(rig)
     assert (await attach(rig))["accepted"]
-    # The repair itself is skipped by the read before it; the role step-out and step-back are
-    # what carry it, so they are still sent.
     assert [(s[0], s[1]) for s in rig.sent[9:]] == [
         ("master", {"Linkage": "independent"}),
-        ("slave", {"Linkage": "independent"}),
-        ("slave", {"Linkage": "async_slave"}),
         ("master", {"Linkage": "master"}),
     ]
     cycle = rig.store.load(native_master_cycle_request_id("cycle_source_01"))
-    assert [a.function for a in cycle.actions] == [
-        "linkage_role",
-        "linkage_role",
-        "manual_mode",
-        "linkage_role",
-        "linkage_role",
-    ]
-    assert cycle.actions[2].phase is ActionPhase.NO_CHANGE
-
-
-@pytest.mark.asyncio
-async def test_a_manual_block_rewritten_again_on_rebind_fails_loudly(tmp_path, monkeypatch):
-    rig = Rig(tmp_path)
-    lost_reply(rig)
-    _clobber_manual_at_bind(rig, monkeypatch, keep_rewriting=True)
-
-    with pytest.raises(LocalControlExecutionError, match="대조 불일치"):
-        await attach(rig)
-
-    cycle = rig.store.load(native_master_cycle_request_id("cycle_source_01"))
-    assert cycle.phase.value == "recovery_required"
-    # One repair frame was sent and never replayed; the rearm comparison caught the rewrite.
-    assert sum(s[1] == {"Mode": "constant"} for s in rig.sent) == 1
-    assert SCHEMA.decode_status(rig.states["slave"])["Mode"] == "feed"
+    assert [a.target.logical_member for a in cycle.actions] == ["master", "master"]
+    assert all(s[0] == "master" for s in rig.sent[9:])
 
 
 def test_every_cycle_shape_ever_written_is_still_readable():
     """`_require_available` re-validates every stored record before any Pro operation, so a
-    cycle record must be read from the shape it was written with. Recomputing stored records
-    from the newest shape refused every Pro operation twice on 2026-09-20, both times before
-    a single frame reached a device."""
+    cycle record must be read from the shape it was written with. The live journal holds
+    2-, 3- and 5-action cycle records from the withdrawn attempts."""
 
     from jebao_flow.local_control.wavemaker_master_cycle import _CYCLE_SHAPES
 
@@ -397,8 +322,3 @@ def test_every_cycle_shape_ever_written_is_still_readable():
         assert shape[0] == (0, "linkage_role", {"Linkage": "independent"})
         assert shape[-1] == (0, "linkage_role", {"Linkage": "master"})
         assert all(index in (0, 1) for index, _f, _v in shape)
-    assert _CYCLE_SHAPES[5][1:4] == (
-        (1, "linkage_role", {"Linkage": "independent"}),
-        (1, "manual_mode", {"Mode": "constant"}),
-        (1, "linkage_role", {"Linkage": "async_slave"}),
-    )

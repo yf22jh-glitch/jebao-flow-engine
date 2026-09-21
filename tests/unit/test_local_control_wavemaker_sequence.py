@@ -182,7 +182,7 @@ async def test_staged_sync_stage_failure_has_owned_assistance_and_immutable_cont
     controller = rig.controller()
     context = controller._context(source)
     sync_role = STAGED_ASYNC_ROLE - 1
-    assert context.activation_sequence == STAGED_ROLES_V2
+    assert context.activation_sequence == STAGED_ROLES
     assert source.actions[sync_role].phase is ActionPhase.UNCERTAIN
     assert all(a.phase is ActionPhase.PREPARED for a in source.actions[sync_role + 1 :])
     controller._require_assistance_source(source, context)
@@ -248,12 +248,10 @@ async def test_variable_auto_is_observation_only_during_staged_activation(tmp_pa
     )
     result = await rig.attach("async")
     assert result["accepted"]
-    master_row, slave_row = result["verification"]["devices"]
-    assert set(master_row["fields"]) == {"SwitchON", "TimerON", "Linkage"}
-    # The slave's manual block belongs to the attachment: it is what the pump runs whenever
-    # TimerON drops, and the device rewrites it when it takes the role.
-    assert set(slave_row["fields"]) == {"SwitchON", "TimerON", "Linkage", "Mode"}
-    assert slave_row["fields"]["Mode"]["expected"] == "constant"
+    assert all(
+        set(row["fields"]) == {"SwitchON", "TimerON", "Linkage"}
+        for row in result["verification"]["devices"]
+    )
     await rig.detach()
     assert rig.states == rig.originals
 
@@ -348,10 +346,12 @@ async def test_a_bound_slave_answering_only_with_report_frames_still_completes(
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
-def test_both_sequence_versions_share_one_staged_layout(mode):
-    """A journal is append-only history, so stored records must keep being read from their own
-    positions. v2 does not move any staged action: a bound slave never acknowledges a write,
-    so the manual repair lives in the master cycle's released window, not in this plan."""
+def test_a_stored_v2_record_keeps_its_own_action_layout(mode):
+    """A journal is append-only history. v2 was one deployed attempt that inserted a slave
+    manual re-assert at position 8; hardware rejected the idea and new attachments use v1
+    again, but one 10-action v2 record is stored and must still be read from its own layout.
+    Recomputing stored records with the current shape refused every Pro operation twice on
+    2026-09-20, both times before a single frame reached a device."""
 
     plan = _plan(mode)
     members = tuple(
@@ -359,14 +359,18 @@ def test_both_sequence_versions_share_one_staged_layout(mode):
         for name in ("master", "slave")
     )
     legacy = SimpleNamespace(activation_sequence=STAGED_ROLES, plan=plan, originals=members)
-    current = SimpleNamespace(activation_sequence=STAGED_ROLES_V2, plan=plan, originals=members)
+    stored_v2 = SimpleNamespace(activation_sequence=STAGED_ROLES_V2, plan=plan, originals=members)
 
-    assert staged_layout(legacy) [1:] == staged_layout(current)[1:]
-    assert staged_layout(current).count == (9 if mode == "async" else 8)
-    assert staged_layout(current).async_role == (8 if mode == "async" else None)
-    assert staged_controls(legacy) == staged_controls(current)
-    assert not any("Mode" in values and set(values) == {"Mode"} for _n, values in
-                   staged_controls(current))
+    assert staged_layout(legacy).manual is None
+    assert staged_layout(stored_v2).manual == 8
+    assert staged_layout(legacy).count == (9 if mode == "async" else 8)
+    assert staged_layout(stored_v2).count == staged_layout(legacy).count + 1
+    assert staged_layout(legacy).async_role == (8 if mode == "async" else None)
+    assert staged_layout(stored_v2).async_role == (9 if mode == "async" else None)
+
+    manual = {"Mode": "constant", "Frequency": 21}
+    assert manual not in [values for _n, values in staged_controls(legacy)]
+    assert manual in [values for _n, values in staged_controls(stored_v2)]
 
 
 @pytest.mark.asyncio

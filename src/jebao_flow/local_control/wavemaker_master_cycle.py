@@ -34,35 +34,32 @@ from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.session import RawStateCapture
 
 KIND = "master_link_cycle_v1"
-# The slave's own role transition makes the device rewrite its manual Mode, and that block is
-# what the pump runs whenever TimerON drops; ``feed`` stops it. Two placements were tried on
-# hardware and rejected: between the role writes a bound slave never acknowledges anything
-# (2026-09-20 03:00:33 send, no ACK, unapplied at 03:00:40), and in the released window an
-# ``async_slave`` acknowledges the write but does not apply it (09:08:26 ack, still ``feed``
-# at 09:09:33). The value only moves while the device is out of its slave role, which the
-# assisted detach showed at 03:03:56. So v2 steps the slave out, repairs it, and puts the role
-# back, all inside the released window. TimerON is never touched, so the schedule keeps
-# running. Sources recorded before this existed keep their two master-only actions.
-_REPAIR_SLAVE_MANUAL_MODE = "constant"
+# This operation stays master-only. Three placements for repairing the slave's manual Mode
+# were tried on hardware and all three were rejected by the device:
+#   * between the role writes, a bound slave never acknowledges a control write
+#     (2026-09-20 03:00:33 send, no ACK, still unapplied at 03:00:40);
+#   * in the released window, an ``async_slave`` acknowledges but does not apply it
+#     (09:08:26 ack, still ``feed`` at 09:09:33);
+#   * stepping the slave out, repairing it and stepping it back does apply
+#     (09:30:20.694 ``feed``->``constant``, still ``constant`` at 09:30:22.483 after the
+#     slave rebound), but the master taking the link back reverts it 1.5 s later
+#     (09:30:24.477 master rearmed, 09:30:26.015 ``feed`` again).
+# So while the pair is linked the manual Mode is the device's to set and no write order keeps
+# another value there. The pump only stops because that block becomes live when the slave
+# loses ``TimerON``, and ``TimerON`` is not forced by the link - that is what the slave timer
+# rearm repairs. The 3- and 5-action shapes below are stored records from those attempts.
 _LOGGER = logging.getLogger(__name__)
 _CLOSED_BY_CYCLE = "native_async_role_verified_by_master_cycle_delivery_unknown"
 
 
 def cycle_steps(context, endpoints):
-    """master release, the slave manual repair that only this window allows, master rearm."""
+    """The master release and rearm; the slave is never written by this operation."""
 
-    from jebao_flow.local_control.wavemaker_sequence import STAGED_ROLES_V2
-
-    master, slave = endpoints
-    steps = [(master, "linkage_role", "independent")]
-    if context.activation_sequence == STAGED_ROLES_V2:
-        steps += [
-            (slave, "linkage_role", "independent"),
-            (slave, "manual_mode", _REPAIR_SLAVE_MANUAL_MODE),
-            (slave, "linkage_role", "async_slave"),
-        ]
-    steps.append((master, "linkage_role", "master"))
-    return tuple(steps)
+    master = endpoints[0]
+    return (
+        (master, "linkage_role", "independent"),
+        (master, "linkage_role", "master"),
+    )
 
 
 def validate_cycle(owner, record, context):
@@ -94,7 +91,7 @@ def validate_cycle(owner, record, context):
 # the newest shape made `_require_available` refuse every Pro operation twice on 2026-09-20.
 _RELEASE = (0, "linkage_role", {"Linkage": "independent"})
 _REARM = (0, "linkage_role", {"Linkage": "master"})
-_REPAIR = (1, "manual_mode", {"Mode": _REPAIR_SLAVE_MANUAL_MODE})
+_REPAIR = (1, "manual_mode", {"Mode": "constant"})
 _STEP_OUT = (1, "linkage_role", {"Linkage": "independent"})
 _STEP_BACK = (1, "linkage_role", {"Linkage": "async_slave"})
 _CYCLE_SHAPES = {
@@ -102,10 +99,8 @@ _CYCLE_SHAPES = {
     3: (_RELEASE, _REPAIR, _REARM),
     5: (_RELEASE, _STEP_OUT, _REPAIR, _STEP_BACK, _REARM),
 }
-def _expected_cycle_steps(context):
-    from jebao_flow.local_control.wavemaker_sequence import STAGED_ROLES_V2
-
-    return _CYCLE_SHAPES[5 if context.activation_sequence == STAGED_ROLES_V2 else 2]
+def _expected_cycle_steps(_context):
+    return _CYCLE_SHAPES[2]
 
 
 async def _pair(owner, record, context, endpoints, permit, *, released):
@@ -122,11 +117,6 @@ async def _pair(owner, record, context, endpoints, permit, *, released):
             "TimerON": True,
             "Linkage": ("independent" if released else "master") if index == 0 else "async_slave",
         }
-        if index == 1 and not released and _repairs_slave_manual(context):
-            # The repair is only worth anything if it is still there after the rearm. If the
-            # device rewrites the manual block again when the master takes the role back, this
-            # fails loudly with the frames preserved instead of leaving `feed` latent.
-            expected["Mode"] = _REPAIR_SLAVE_MANUAL_MODE
         fields = {
             k: {"expected": v, "actual": actual[k], "match": actual[k] == v}
             for k, v in expected.items()
@@ -369,9 +359,3 @@ def _released_slave_reply(owner, cycle, name):
                 return row["capture_sha256"], datetime.fromisoformat(capture["started_at"])
         digest = blob["previous"]
     return None
-
-
-def _repairs_slave_manual(context) -> bool:
-    from jebao_flow.local_control.wavemaker_sequence import STAGED_ROLES_V2
-
-    return context.activation_sequence == STAGED_ROLES_V2

@@ -37,7 +37,7 @@ from jebao_flow.local_control.wavemaker_restore import (
     compare_restore_readback,
 )
 from jebao_flow.local_control.wavemaker_sequence import (
-    STAGED_ROLES_V2,
+    STAGED_ROLES,
     STAGED_SEQUENCES,
     SequenceDeviceWriter,
     advance_staged_roles,
@@ -225,7 +225,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 plan=plan,
                 schema_sha256=current_protocol_schema_sha256(),
                 originals=tuple(originals),
-                activation_sequence=STAGED_ROLES_V2,
+                activation_sequence=STAGED_ROLES,
                 await_operator_observation=True if await_operator_observation else None,
                 master_cycle_on_async_failure=True if master_cycle_on_async_failure else None,
             )
@@ -989,18 +989,9 @@ class NativeWavemakerController(LocalControlCoordinator):
                             "Linkage": "master" if index == 0 else context.plan.mode + "_slave",
                         }
                     )
-                    if context.kind == "slave_timer_rearm_v1" and index == 1:
-                        expected["Mode"] = "constant"
-                    if (
-                        context.kind == "attach"
-                        and context.activation_sequence == STAGED_ROLES_V2
-                        and index == 1
-                    ):
-                        # The device rewrites the slave's manual block when it takes the role
-                        # (2026-09-18 01:47:11.021 constant->feed). That block runs the pump
-                        # whenever TimerON is false, so the attachment is not complete until
-                        # the master cycle's released-window repair is the value it still holds.
-                        expected["Mode"] = "constant"
+                    # The rearm no longer writes the slave's manual Mode and cannot: while the
+                    # pair is linked the device reverts every value we put there. Requiring
+                    # `constant` here would fail a repair that did exactly what it should.
                     actual = get_product_schema(endpoint.target.product_key).decode_status(status)
                     fields = {
                         key: {

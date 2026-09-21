@@ -292,7 +292,7 @@ async def test_native_routes_image_free_async_slave_timer_rearm(tmp_path):
 
     assert not result.failed and result.result["accepted"]
     assert result.result["kind"] == KIND
-    assert len(rig.sent) == writes + 4
+    assert len(rig.sent) == writes + 5
 
 
 async def test_native_group_conflict_never_reaches_controller(tmp_path):

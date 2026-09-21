@@ -26,24 +26,28 @@ from jebao_flow.protocol.errors import ProtocolError
 from jebao_flow.protocol.profiles import get_product_schema
 
 # Staged action positions for the Pro pair: 0..1 safe controls, 2..3 schedule images,
-# 4..5 timers, then the role writes. Both versions share this layout. v2 differs only in
-# who repairs the slave's manual block: a bound slave never acknowledges a control write
-# (2026-09-20 03:00:33 send, no ACK, still unapplied at 03:00:40) and ignores Linkage and
-# TimerON, so the repair cannot sit between the role writes. It belongs to the master
-# cycle's released window, where an ACK comes straight back (03:03:56 ack after the master
-# was released at 03:03:51). The v1 name keeps its original meaning for stored records.
+# 4..5 timers, then the role writes.
+#
+# v2 was one deployed attempt that inserted a slave manual re-assert at position 8, before the
+# Async role. Hardware rejected the idea: a bound slave never acknowledges a control write
+# (2026-09-20 03:00:33 send, no ACK, still unapplied at 03:00:40), and the value cannot be kept
+# while the pair is linked at all (09:30:24.477 master rearmed, 09:30:26.015 back to `feed`).
+# The name is kept because one 10-action record was written with it and stored records are read
+# from their own layout; new attachments use v1, whose positions never changed.
 STAGED_ROLES = "staged_roles_v1"
 STAGED_ROLES_V2 = "staged_roles_v2"
 STAGED_SEQUENCES = (STAGED_ROLES, STAGED_ROLES_V2)
 _TIMERS = (4, 5)
 _MASTER_ROLE = 6
 _SYNC_ROLE = 7
+_SLAVE_MANUAL = 8
 
 
 class StagedLayout(NamedTuple):
-    """Where each staged action sits in one plan."""
+    """Where each staged action sits in one plan; ``manual`` is None outside v2."""
 
     sequence: str
+    manual: int | None
     async_role: int | None
     count: int
 
@@ -52,8 +56,10 @@ def staged_layout(context) -> StagedLayout:
     sequence = context.activation_sequence
     if sequence not in STAGED_SEQUENCES:
         raise ValueError("단계별 활성화 원본이 아닙니다")
-    async_role = _SYNC_ROLE + 1 if context.plan.mode == "async" else None
-    return StagedLayout(sequence, async_role, (async_role if async_role else _SYNC_ROLE) + 1)
+    manual = _SLAVE_MANUAL if sequence == STAGED_ROLES_V2 else None
+    last = _SYNC_ROLE if manual is None else manual
+    async_role = last + 1 if context.plan.mode == "async" else None
+    return StagedLayout(sequence, manual, async_role, (async_role if async_role else last) + 1)
 _CONTROL = DeviceControlConfig()
 # Existing schedule_flow_experiment._ROLE_PREFLIGHT_SETTLE_SECONDS; no harness import.
 _ROLE_SETTLE_SECONDS = 1.0
@@ -158,10 +164,13 @@ def staged_controls(context):
     roles = [(names[0], {"Linkage": "master"})]
     for name in names[1:]:
         # Taking the slave role makes the device rewrite its own manual Mode about a second
-        # later with no command from us (five of five observed attaches). The repair is not
-        # here: the slave is bound from this point on and will not acknowledge a write. It is
-        # the master cycle's released window that owns it; see wavemaker_master_cycle.
+        # later with no command from us (seven of seven observed attaches). Nothing here can
+        # keep another value: while the pair is linked that block belongs to the device. What
+        # stops the pump is the slave later losing TimerON, which the slave timer rearm
+        # repairs. The v2 frame below is reproduced only so stored v2 records still validate.
         roles.append((name, {"Linkage": "sync_slave"}))
+        if context.activation_sequence == STAGED_ROLES_V2:
+            roles.append((name, {"Mode": "constant", "Frequency": plan.preparation_frequency}))
         if plan.mode == "async":
             roles.append((name, {"Linkage": "async_slave"}))
     return (*timers, *roles)
@@ -193,7 +202,7 @@ def validate_staged_assistance_source(controller, source, context):
         return  # Final comparison can fail after acknowledged or reply-confirmed actions.
     first = next(i for i, phase in enumerate(phases) if phase not in done)
     if (
-        first not in {_SYNC_ROLE, layout.async_role}
+        first not in {_SYNC_ROLE, layout.manual, layout.async_role}
         or phases[first] not in {ActionPhase.PREPARED, ActionPhase.UNCERTAIN}
         or any(p is not ActionPhase.PREPARED for p in phases[first + 1 :])
     ):
