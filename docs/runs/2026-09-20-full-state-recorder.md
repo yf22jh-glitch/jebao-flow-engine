@@ -62,3 +62,59 @@ frame**을 보존하며, `CaptureTransportPolicy.REPLY_OR_REPORT`가 act=3·act=
 - **이 실행으로 새로 확정된 사실:** 데몬이 publish하는 16개 function 중 6개만 기록되고
   있었고, manual 블록은 전혀 기록되지 않았다. 지금은 98개 토픽의 모든 값 변화가 남는다.
 - 확정하지 못한 것: 11:36:31Z의 방아쇠. 다음 발생 때 이 기록으로 판정한다.
+
+## 덧붙임 (2026-09-21) — raw wire frame 앵커 추가, 두 조건 모두 해소
+
+위에 「아직 남은 것」으로 적어둔 두 가지를 처리했다.
+
+### 1. 전용 collector image
+
+`verify_collector_source_tree()`는 `git`, 지정 commit과 일치하는 HEAD, `--untracked-files=all`
+기준으로 완전히 clean한 tree, 그리고 **`jebao_flow`가 site-packages가 아니라 그 tree에서
+import될 것**, `sys.dont_write_bytecode is True`를 요구한다.
+
+그래서 패키지를 설치하지 않는 image를 따로 만들었다. 의존성 세 개(`aiomqtt`, `pydantic`,
+`PyYAML`)만 설치하고, repo는 git bundle로 옮겨 `/repo`에 clone한 뒤 해당 commit으로 detach
+checkout하며, `PYTHONPATH=/repo/src`와 `PYTHONDONTWRITEBYTECODE=1`로 실행한다.
+
+- image: `jebao-readonly-collector:f39b207`
+  (`sha256:073cf6187f4bf015f220ca7efd90332a6f7d6c2782430d84ff7792313f97e91e`)
+- 고정 commit: `f39b20714eea1d092b9a1885cb55eecab3e7b7ff`
+- image 안에서 `verify_collector_source_tree()` 직접 호출이 통과함을 먼저 확인했다
+  (`commit=f39b20714eea`, `runtime_source_digest=45d9e2873f98dbe6…`,
+  module path `/repo/src/jebao_flow/read_only_collector_cli.py`, `dont_write_bytecode=True`).
+
+collector는 추가로 `runtime.dry_run is True`와 **모든 장비의
+`control.allow_hardware_writes is False`**를 요구한다(`runtime_not_dry_run`,
+`hardware_writes_not_fully_locked`). 배포 설정은 데몬용이라 둘 다 반대이므로, 그 두 항목만
+잠근 파생 설정을 전용 volume에 `0600`으로 만들어 쓴다. 나머지 항목은 그대로 두었고 내용은
+어디에도 출력하지 않았으며 저장소로 옮기지 않았다. 파생본 SHA-256
+`d030c7317cc1b4518468219fce111bde32cc1fe70a1f7f3aac51410d6dc0d690`.
+
+### 2. 저빈도 앵커 — 조사 대상을 건드리지 않는 간격
+
+collector는 표본마다 장비 세션을 새로 연다. 지금 조사 대상이 링크/상태 불안정이므로 고빈도
+세션은 현상 자체를 바꿀 수 있다. 그래서 **5분 간격**으로 고정했다. 데몬 observer가 이미 약
+15초마다 읽고 있으므로 이 추가분은 장비당 하루 288세션, 기존 대비 수 %다.
+
+스모크(2표본 / 60초)로 먼저 확인했다: `accepted_pair_count=2`, `rejected=0`,
+`read_failure=0`, `action_counts {"0x03": 4, "0x04": 0}`. 두 Pro가 현재 `independent`라
+명시 응답만 왔다. `reply_or_report` 정책이라 결속된 slave의 act=4도 받는다.
+
+- artifact: `/out/anchor`의 series `JFS-7974c178ad369a750f63417429e19f26`
+  (volume `jebao-raw-anchor-20260921`)
+- 시작 `2026-09-21T01:40Z`, 864표본 × 300초 = 72시간
+- 표본마다 장비별 **`raw.frame` 462바이트** = 정확한 Gizwits wire frame + `sample.json`
+- transport policy `reply_or_report`, collector commit 고정
+
+### 현재 가동 중인 관측 둘
+
+| | 대상 | 간격 | 장비 세션 | 남기는 것 |
+|---|---|---|---|---|
+| `pro-pair-full-state-recorder-20260920.01` | 6장비 98토픽 | 변화 즉시 | **0** | 디코드 전량의 모든 값 변화 |
+| `JFS-7974c178ad369a750f63417429e19f26` | Pro 2대 | 5분 | 2/표본 | **462바이트 raw wire frame** |
+
+- **이 덧붙임으로 새로 확정된 사실:** 저장소의 write-free collector를 배포 환경에서 실제로
+  돌릴 수 있고, 그 전제(clean tree attestation, dry-run·write-lock 설정)를 만족시키는 방법이
+  확정됐다. raw wire frame 보존이 다시 가능하다.
+- 확정하지 못한 것: 2026-09-18T11:36:31Z의 방아쇠. 다음 발생 때 두 관측을 대조해 판정한다.
