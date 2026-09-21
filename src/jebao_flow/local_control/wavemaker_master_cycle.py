@@ -307,7 +307,7 @@ async def _close_source_async_role(owner, source, endpoints, permit, cycle):
         context = owner._context(record)
         if not owner._awaiting_operator(record, context):
             return
-        role = staged_layout(context).async_role
+        role = staged_layout(context, len(record.actions)).async_role
         slave = endpoints[1]
         action = record.actions[role]
         if action.target != slave.target or action.phase is ActionPhase.VERIFIED:

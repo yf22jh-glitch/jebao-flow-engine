@@ -52,14 +52,29 @@ class StagedLayout(NamedTuple):
     count: int
 
 
-def staged_layout(context) -> StagedLayout:
-    sequence = context.activation_sequence
-    if sequence not in STAGED_SEQUENCES:
+def staged_layout(context, action_count: int | None = None) -> StagedLayout:
+    """Positions for one staged plan, read from the record's own action count when given.
+
+    ``staged_roles_v2`` was written to the journal with two different shapes during the
+    withdrawn manual-repair attempts, so the sequence name alone does not identify a stored
+    record's layout. The count does: the plan is either the plain role order or that order
+    plus one slave manual frame at position 8. New plans are always the plain order.
+    """
+
+    if context.activation_sequence not in STAGED_SEQUENCES:
         raise ValueError("단계별 활성화 원본이 아닙니다")
-    manual = _SLAVE_MANUAL if sequence == STAGED_ROLES_V2 else None
+    asynchronous = context.plan.mode == "async"
+    plain = _SYNC_ROLE + 1 + (1 if asynchronous else 0)
+    if action_count is None or action_count == plain:
+        manual = None
+    elif action_count == plain + 1:
+        manual = _SLAVE_MANUAL
+    else:
+        raise ValueError("단계별 원본 action 수가 다릅니다")
     last = _SYNC_ROLE if manual is None else manual
-    async_role = last + 1 if context.plan.mode == "async" else None
-    return StagedLayout(sequence, manual, async_role, (async_role if async_role else last) + 1)
+    async_role = last + 1 if asynchronous else None
+    count = (async_role if async_role else last) + 1
+    return StagedLayout(context.activation_sequence, manual, async_role, count)
 _CONTROL = DeviceControlConfig()
 # Existing schedule_flow_experiment._ROLE_PREFLIGHT_SETTLE_SECONDS; no harness import.
 _ROLE_SETTLE_SECONDS = 1.0
@@ -144,7 +159,7 @@ def _persist_frames(controller, record, writer, stage):
     return controller._save_final(controller._required(record.request_id), rows)
 
 
-def staged_controls(context):
+def staged_controls(context, layout: StagedLayout | None = None):
     names = [item.target.logical_member for item in context.originals]
     plan = context.plan
     timers = [
@@ -169,7 +184,7 @@ def staged_controls(context):
         # stops the pump is the slave later losing TimerON, which the slave timer rearm
         # repairs. The v2 frame below is reproduced only so stored v2 records still validate.
         roles.append((name, {"Linkage": "sync_slave"}))
-        if context.activation_sequence == STAGED_ROLES_V2:
+        if layout is not None and layout.manual is not None:
             roles.append((name, {"Mode": "constant", "Frequency": plan.preparation_frequency}))
         if plan.mode == "async":
             roles.append((name, {"Linkage": "async_slave"}))
@@ -180,7 +195,7 @@ def validate_staged_assistance_source(controller, source, context):
     """Recognize this owned staged plan, not an arbitrary eight/nine-action record."""
     if context.kind != "attach":
         raise ValueError("단계별 활성화 원본이 아닙니다")
-    layout = staged_layout(context)
+    layout = staged_layout(context, len(source.actions))
     if len(context.originals) != 2 or source.phase is not TransactionPhase.RECOVERY_REQUIRED:
         raise ValueError("지원할 단계별 Pro pair 원본이 아닙니다")
     names = [o.target.logical_member for o in context.originals]
@@ -188,7 +203,9 @@ def validate_staged_assistance_source(controller, source, context):
     targets = {o.target.logical_member: o.target for o in context.originals}
     expected = [(name, "native_controls", controller._safe(context.plan, name)) for name in names]
     expected += [(name, "native_image", images[name]) for name in names]
-    expected += [(name, "native_controls", values) for name, values in staged_controls(context)]
+    expected += [
+        (name, "native_controls", values) for name, values in staged_controls(context, layout)
+    ]
     if len(source.actions) != len(expected):
         raise ValueError("단계별 원본 action 수가 다릅니다")
     for action, (name, function, values) in zip(source.actions, expected, strict=True):
@@ -212,7 +229,7 @@ def validate_staged_assistance_source(controller, source, context):
 async def advance_staged_roles(controller, record, context, endpoints, permit):
     """Journaled writes, staged TimerON, then role deltas on verified pair connections."""
     writers, captures, last_send = {}, {}, {}
-    layout = staged_layout(context)
+    layout = staged_layout(context, len(record.actions))
     by_name = {e.target.logical_member: e for e in endpoints}
     index = None
     started = failure_clock_ns()

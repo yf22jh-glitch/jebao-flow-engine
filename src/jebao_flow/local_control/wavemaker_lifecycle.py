@@ -278,17 +278,24 @@ class NativeWavemakerController(LocalControlCoordinator):
                 record.phase is TransactionPhase.VERIFIED
                 and context.await_operator_observation is not True
             )
-            or len(record.actions) != staged_layout(context).count
-            or any(
-                a.phase not in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
-                for a in record.actions[: staged_layout(context).async_role]
-            )
-            or record.actions[staged_layout(context).async_role].phase
-            not in {ActionPhase.UNCERTAIN, ActionPhase.FORWARD_ATTEMPTING, ActionPhase.VERIFIED}
         ):
             return False
+        try:
+            # A stored record is read from its own shape; an unknown one is simply not ours.
+            layout = staged_layout(context, len(record.actions))
+        except ValueError:
+            return False
+        if any(
+            a.phase not in {ActionPhase.VERIFIED, ActionPhase.NO_CHANGE}
+            for a in record.actions[: layout.async_role]
+        ) or record.actions[layout.async_role].phase not in {
+            ActionPhase.UNCERTAIN,
+            ActionPhase.FORWARD_ATTEMPTING,
+            ActionPhase.VERIFIED,
+        }:
+            return False
         # Reuse the exact owned plan comparison, not just the action count or last field.
-        role = staged_layout(context).async_role
+        role = layout.async_role
         actions = record.actions
         if actions[role].phase is ActionPhase.FORWARD_ATTEMPTING:
             # A crash at the send boundary also means unknown delivery, not permission
@@ -817,8 +824,13 @@ class NativeWavemakerController(LocalControlCoordinator):
 
     def _can_reconcile_async(self, record, context, index):
         """Only the final role delta after this pair's verified Sync, never qualification."""
-        staged = context.activation_sequence in STAGED_SEQUENCES
-        layout = staged_layout(context) if staged else None
+        # A detach or child context inherits the attach's activation_sequence, so the kind is
+        # part of the question, and an unknown action count simply is not one of ours.
+        staged = context.kind == "attach" and context.activation_sequence in STAGED_SEQUENCES
+        try:
+            layout = staged_layout(context, len(record.actions)) if staged else None
+        except ValueError:
+            return False
         sync = index - 1
         return (
             context.kind == "attach"

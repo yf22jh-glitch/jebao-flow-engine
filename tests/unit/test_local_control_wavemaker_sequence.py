@@ -361,16 +361,25 @@ def test_a_stored_v2_record_keeps_its_own_action_layout(mode):
     legacy = SimpleNamespace(activation_sequence=STAGED_ROLES, plan=plan, originals=members)
     stored_v2 = SimpleNamespace(activation_sequence=STAGED_ROLES_V2, plan=plan, originals=members)
 
+    plain = 9 if mode == "async" else 8
+    # A new plan, with no stored record to read from, is always the plain role order.
     assert staged_layout(legacy).manual is None
-    assert staged_layout(stored_v2).manual == 8
-    assert staged_layout(legacy).count == (9 if mode == "async" else 8)
-    assert staged_layout(stored_v2).count == staged_layout(legacy).count + 1
+    assert staged_layout(legacy).count == plain
     assert staged_layout(legacy).async_role == (8 if mode == "async" else None)
-    assert staged_layout(stored_v2).async_role == (9 if mode == "async" else None)
+
+    # The name alone does not identify the shape: v2 was written with both. The count does.
+    assert staged_layout(stored_v2, plain).manual is None
+    assert staged_layout(stored_v2, plain + 1).manual == 8
+    assert staged_layout(stored_v2, plain + 1).count == plain + 1
+    assert staged_layout(stored_v2, plain + 1).async_role == (9 if mode == "async" else None)
+    with pytest.raises(ValueError):
+        staged_layout(stored_v2, plain + 2)
 
     manual = {"Mode": "constant", "Frequency": 21}
     assert manual not in [values for _n, values in staged_controls(legacy)]
-    assert manual in [values for _n, values in staged_controls(stored_v2)]
+    assert manual in [
+        values for _n, values in staged_controls(stored_v2, staged_layout(stored_v2, plain + 1))
+    ]
 
 
 @pytest.mark.asyncio
