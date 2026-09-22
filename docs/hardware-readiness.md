@@ -266,6 +266,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 | 각 native mode 설정값의 물리 유량·파형 효과가 계측됐는가 | **UNKNOWN / OUT OF CURRENT MEASUREMENT SCOPE** |
 | (Q2-narrow) ASYNC 상태에서 slave의 staged B Flow가 master와 다르게 보고됐는가 | **CONFIRMED (2026-08-30, 이 Pro pair·고정 계획·하네스 direct `0→3` role 전환 범위)** — slave 32→40, master 31→35와 상이; 900초 epoch와 exact restore 완료 |
 | (Q2-target) slave가 master Mode·timing을 따르면서 자기 모드별 Flow를 적용하는가 | **UNKNOWN / 교정 단회 실행 소진 (2026-09-01)** — master 반대 Mode 전환은 raw 91개로 확인했지만 slave pair read가 90회 모두 실패해 slave raw가 없음; [실행 기록](runs/2026-09-01-q2-target-corrected-a3adb738.md) 참조 |
+| 이 Pro pair의 Pulse 슬롯에서 하단 feed 정지가 Async 결속에 의존하는가 | **CONFIRMED — Async 결속에 의존 (2026-09-22)** — 동일 image·TimerON에서 independent 하단은 `AutoMode=pulse/Flow45/F70`, master/Async 재결속 뒤 Auto Pulse는 유지되지만 하단 manual `Mode=feed` 재현. 송신은 Linkage-only, image 불변·fault0·원 topology 복구. 물리 파형 계측은 별도. [실행 기록](runs/2026-09-22-pro-pulse-independent-causal-ab.md) |
 | (Q2-slotflow) 같은 Mode·경계에서 slave가 자기 슬롯별 `Flow 35→47`을 적용하는가 | **UNKNOWN / 앱-sequence 단회 실행 소진 (2026-09-02)** — 앱과 같은 Sync 단계에서 master·sync-slave 지정, 양쪽 `TimerON`, 장비별 temporary schedule image 보존과 bounded active state를 확인했지만 runtime schedule 소유권은 판별하지 못했고 inactive manual `Mode/Frequency` drift gate가 ASYNC write 전에 중단; [실행 기록](runs/2026-09-02-q2-slotflow-appseq-sync-gate-ced43a9.md) 참조 |
 | (Q1) ASYNC에서 slave가 마스터와 다른 manual `Flow`를 유지하는가 | **UNKNOWN (PARKED / OUT OF CURRENT SCOPE, 2026-08-28)** — 아래 §park 참조 |
 | 세 펌프의 물리 배치와 운영 gain/phase가 확정됐는가 | BLOCKED FOR PRODUCTION GROUPING |
