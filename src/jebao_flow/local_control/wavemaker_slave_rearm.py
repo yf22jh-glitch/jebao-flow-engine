@@ -32,6 +32,7 @@ from jebao_flow.local_control.device_writer import (
 )
 from jebao_flow.local_control.journal import LocalControlJournalRecord, TransactionPhase
 from jebao_flow.local_control.models import LocalControlIntent
+from jebao_flow.local_control.wavemaker_sequence import planned_images
 from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_MODES
 
@@ -64,7 +65,7 @@ def _json(value) -> bytes:
 
 
 def _require_bounded_plan(context) -> dict[str, bytes]:
-    images = context.plan.compile_images()
+    images = planned_images(context)
     for member, image in images.items():
         for index in range(48):
             slot = image[index * 9 : (index + 1) * 9]
@@ -250,9 +251,10 @@ async def rearm_slave_locked(owner, source, source_context, endpoints, permit):
                 owner._catalog.validate_intent(intent)
                 scalar = writer.prepare_scalar(intent, status)
                 expected = json.loads(scalar.expected_readback)
-                if set(expected) != _expected_fields(function) or expected != _EXPECTED_BY_STEP[
-                    step
-                ]:
+                if (
+                    set(expected) != _expected_fields(function)
+                    or expected != _EXPECTED_BY_STEP[step]
+                ):
                     raise ValueError("Async slave 재진입 scalar 필드 shape가 다릅니다")
                 owned = writer.prepare_native_controls(expected, status)
                 if (

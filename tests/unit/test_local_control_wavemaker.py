@@ -70,8 +70,7 @@ def test_bar_geometry_and_shared_flow_feed_byte(mode):
     assert decoded.entries[0].parameters["feed_time" if mode == "feed" else "flow"] == image[5]
 
 
-@pytest.mark.parametrize("mode", ("sync", "async"))
-def test_native_inherits_every_non_flow_byte_and_all_slots(mode):
+def _native_plan(mode):
     schedule = WavemakerSchedule(
         family="pro",
         slots=[
@@ -80,7 +79,7 @@ def test_native_inherits_every_non_flow_byte_and_all_slots(mode):
             _slot(slot_index=47, start="12:00", mode="feed", feed_time=20, flow=0),
         ],
     )
-    plan = NativeWavemakerPlan(
+    return NativeWavemakerPlan(
         mode=mode,
         master="master",
         schedule=schedule,
@@ -95,17 +94,38 @@ def test_native_inherits_every_non_flow_byte_and_all_slots(mode):
             }
         ],
     )
+
+
+@pytest.mark.parametrize("mode", ("sync", "async"))
+def test_legacy_native_image_inherits_every_non_flow_byte(mode):
+    plan = _native_plan(mode)
     images = plan.compile_images()
+    schedule = plan.schedule
     assert images["master"] == schedule.compile_image()
     assert [
         i for i, (a, b) in enumerate(zip(images["master"], images["slave"], strict=True)) if a != b
     ] == [5, 158]
     assert images["slave"][17 * 9 + 8] == 31
+
+
+@pytest.mark.parametrize("mode", ("sync", "async"))
+def test_new_native_image_keeps_each_slot_flow_without_cloning_waveform(mode):
+    plan = _native_plan(mode)
+    images = plan.compile_flow_carrier_images()
+    master, slave = images["master"], images["slave"]
+    constant = LOCAL_WAVEMAKER_PRO_MODES.index("constant")
+    feed = LOCAL_WAVEMAKER_PRO_MODES.index("feed")
+
+    assert master == plan.schedule.compile_image()
+    assert slave[9 : 17 * 9] == b"\xee" * (16 * 9)
+    assert slave[18 * 9 : 47 * 9] == b"\xee" * (29 * 9)
+    assert slave[:4] == master[:4]
+    assert slave[:9] == bytes((*master[:4], constant, 30, 0, 0, 0))
+    assert slave[17 * 9 : 18 * 9] == bytes((*master[17 * 9 : 17 * 9 + 4], constant, 40, 0, 0, 0))
+    assert slave[47 * 9 :] == bytes((*master[47 * 9 : 47 * 9 + 4], feed, 0, 0, 20, 0))
     assert plan.preview()["hardware_write"] is False
-    assert (
-        plan.preview()["images"]["slave"]["image_sha256"]
-        == hashlib.sha256(images["slave"]).hexdigest()
-    )
+    assert plan.preview()["slave_image_contract"] == "per_slot_flow_carrier"
+    assert plan.preview()["images"]["slave"]["image_sha256"] == hashlib.sha256(slave).hexdigest()
 
 
 @pytest.mark.parametrize(

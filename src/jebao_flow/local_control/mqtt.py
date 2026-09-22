@@ -509,7 +509,7 @@ class LocalControlMqttRouter:
         record_id = request_id
         if operation in {"preview", "attach"}:
             plan = NativeWavemakerPlan.model_validate(request["plan"])
-            plan.compile_images()
+            plan.compile_flow_carrier_images()
             if plan.mode != "async" and (
                 request.get("await_operator_observation", False)
                 or request.get("master_cycle_on_async_failure", False)

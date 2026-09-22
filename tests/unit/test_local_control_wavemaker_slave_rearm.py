@@ -89,9 +89,7 @@ async def test_rearm_releases_the_master_then_repairs_the_timer_and_rebinds(tmp_
     assert len(master_actions) == 2 and len(slave_actions) == 3
     for group in (master_actions, slave_actions):
         assert {a.baseline_status_sha256 for a in group} == {group[0].baseline_status_sha256}
-    assert (
-        master_actions[0].baseline_status_sha256 != slave_actions[0].baseline_status_sha256
-    )
+    assert master_actions[0].baseline_status_sha256 != slave_actions[0].baseline_status_sha256
 
     sent = len(rig.sent)
     replay = await rig.controller().rearm_async_slave_schedule(

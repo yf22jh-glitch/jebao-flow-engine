@@ -279,8 +279,9 @@ async def test_both_roles_wire_journal_original_restore_and_cached_requests(tmp_
     assert result["accepted"] and result["current_state_verified"]
     assert all(d["complete"] for d in result["verification"]["devices"])
     assert SCHEMA.decode_status(rig.states["slave"])["Linkage"] == mode + "_slave"
-    assert rig.states["master"][11:443] == _plan(mode).compile_images()["master"]
-    assert rig.states["slave"][11:443] == _plan(mode).compile_images()["slave"]
+    expected_images = _plan(mode).compile_flow_carrier_images()
+    assert rig.states["master"][11:443] == expected_images["master"]
+    assert rig.states["slave"][11:443] == expected_images["slave"]
     assert [s[0] for s in rig.sent[:2]] == ["master", "slave"]
     assert all(s[1]["TimerON"] is False and s[1]["Linkage"] == "independent" for s in rig.sent[:2])
     assert rig.sent[0][1]["Flow"] == 32 and rig.sent[0][1]["Frequency"] == 21
@@ -980,8 +981,7 @@ async def test_failed_last_async_and_detach_can_restore_owned_original_without_r
     assert recovered.native_context_sha256 == source.native_context_sha256
     assert recovered.actions[STAGED_ASYNC_ROLE].acknowledgement_sha256 is None
     assert (
-        recovered.actions[STAGED_ASYNC_ROLE].native_evidence_sha256
-        == failed.native_evidence_sha256
+        recovered.actions[STAGED_ASYNC_ROLE].native_evidence_sha256 == failed.native_evidence_sha256
     )
     assert (
         recovered.actions[STAGED_ASYNC_ROLE].diagnostic
@@ -1065,7 +1065,5 @@ async def test_pre_async_pair_read_failure_sends_no_async_and_restores(tmp_path)
     with pytest.raises(LocalControlExecutionError, match="자기 원본 복원 확인"):
         await rig.attach("async")
     assert all(row[1].get("Linkage") != "async_slave" for row in rig.sent)
-    assert (
-        rig.store.load("attach_0001").actions[STAGED_ASYNC_ROLE].acknowledgement_sha256 is None
-    )
+    assert rig.store.load("attach_0001").actions[STAGED_ASYNC_ROLE].acknowledgement_sha256 is None
     assert rig.states == rig.originals

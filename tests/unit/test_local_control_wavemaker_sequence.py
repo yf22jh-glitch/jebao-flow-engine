@@ -12,9 +12,11 @@ from jebao_flow.local_control.install import current_protocol_schema_sha256
 from jebao_flow.local_control.journal import ActionPhase, TransactionPhase, native_detach_request_id
 from jebao_flow.local_control.wavemaker_lifecycle import NativeContext, NativeOriginal
 from jebao_flow.local_control.wavemaker_sequence import (
+    FLOW_CARRIER_ROLES,
     STAGED_ROLES,
     STAGED_ROLES_V2,
     SequenceDeviceWriter,
+    planned_images,
     staged_controls,
     staged_layout,
 )
@@ -182,7 +184,7 @@ async def test_staged_sync_stage_failure_has_owned_assistance_and_immutable_cont
     controller = rig.controller()
     context = controller._context(source)
     sync_role = STAGED_ASYNC_ROLE - 1
-    assert context.activation_sequence == STAGED_ROLES
+    assert context.activation_sequence == FLOW_CARRIER_ROLES
     assert source.actions[sync_role].phase is ActionPhase.UNCERTAIN
     assert all(a.phase is ActionPhase.PREPARED for a in source.actions[sync_role + 1 :])
     controller._require_assistance_source(source, context)
@@ -355,8 +357,7 @@ def test_a_stored_v2_record_keeps_its_own_action_layout(mode):
 
     plan = _plan(mode)
     members = tuple(
-        SimpleNamespace(target=SimpleNamespace(logical_member=name))
-        for name in ("master", "slave")
+        SimpleNamespace(target=SimpleNamespace(logical_member=name)) for name in ("master", "slave")
     )
     legacy = SimpleNamespace(activation_sequence=STAGED_ROLES, plan=plan, originals=members)
     stored_v2 = SimpleNamespace(activation_sequence=STAGED_ROLES_V2, plan=plan, originals=members)
@@ -380,6 +381,19 @@ def test_a_stored_v2_record_keeps_its_own_action_layout(mode):
     assert manual in [
         values for _n, values in staged_controls(stored_v2, staged_layout(stored_v2, plain + 1))
     ]
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_stored_sequence_rebuilds_its_own_image_contract(mode):
+    plan = _plan(mode)
+    legacy = SimpleNamespace(activation_sequence=STAGED_ROLES, plan=plan)
+    pre_sequence = SimpleNamespace(activation_sequence=None, plan=plan)
+    current = SimpleNamespace(activation_sequence=FLOW_CARRIER_ROLES, plan=plan)
+
+    assert planned_images(legacy) == plan.compile_images()
+    assert planned_images(pre_sequence) == plan.compile_images()
+    assert planned_images(current) == plan.compile_flow_carrier_images()
+    assert planned_images(current)["slave"] != planned_images(legacy)["slave"]
 
 
 @pytest.mark.asyncio

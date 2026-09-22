@@ -30,6 +30,7 @@ from jebao_flow.local_control.journal import (
     TransactionPhase,
 )
 from jebao_flow.local_control.models import LocalControlIntent
+from jebao_flow.local_control.wavemaker_sequence import planned_images
 from jebao_flow.protocol.profiles import get_product_schema
 from jebao_flow.protocol.session import RawStateCapture
 
@@ -99,13 +100,15 @@ _CYCLE_SHAPES = {
     3: (_RELEASE, _REPAIR, _REARM),
     5: (_RELEASE, _STEP_OUT, _REPAIR, _STEP_BACK, _REARM),
 }
+
+
 def _expected_cycle_steps(_context):
     return _CYCLE_SHAPES[2]
 
 
 async def _pair(owner, record, context, endpoints, permit, *, released):
     rows = []
-    images = context.plan.compile_images()
+    images = planned_images(context)
     for index, endpoint in enumerate(endpoints):
         # Reply-only while independent; after rearm, retain selected frame provenance.
         capture_id, status = await owner._read(endpoint, permit, reports=not released)

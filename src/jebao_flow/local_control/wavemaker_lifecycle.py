@@ -37,10 +37,11 @@ from jebao_flow.local_control.wavemaker_restore import (
     compare_restore_readback,
 )
 from jebao_flow.local_control.wavemaker_sequence import (
-    STAGED_ROLES,
+    FLOW_CARRIER_ROLES,
     STAGED_SEQUENCES,
     SequenceDeviceWriter,
     advance_staged_roles,
+    planned_images,
     staged_controls,
     staged_layout,
     validate_staged_assistance_source,
@@ -102,9 +103,11 @@ class NativeContext(BaseModel):
     plan: NativeWavemakerPlan
     originals: tuple[NativeOriginal, ...] = Field(min_length=2)
     assisted_record_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    # v1 records keep their own eight/nine-action layout forever; v2 adds the slave manual
-    # re-assert between the two role writes. Reading an old record must never need new code.
-    activation_sequence: Literal["staged_roles_v1", "staged_roles_v2"] | None = None
+    # Stored records keep their own image/action layout forever. Reading an old record must
+    # never reinterpret its owned bytes through the newest attachment contract.
+    activation_sequence: (
+        Literal["staged_roles_v1", "staged_roles_v2", "flow_carrier_roles_v1"] | None
+    ) = None
     await_operator_observation: Literal[True] | None = None
     master_cycle_on_async_failure: Literal[True] | None = None
     power_cycle_basis_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -225,7 +228,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 plan=plan,
                 schema_sha256=current_protocol_schema_sha256(),
                 originals=tuple(originals),
-                activation_sequence=STAGED_ROLES,
+                activation_sequence=FLOW_CARRIER_ROLES,
                 await_operator_observation=True if await_operator_observation else None,
                 master_cycle_on_async_failure=True if master_cycle_on_async_failure else None,
             )
@@ -300,9 +303,10 @@ class NativeWavemakerController(LocalControlCoordinator):
         if actions[role].phase is ActionPhase.FORWARD_ATTEMPTING:
             # A crash at the send boundary also means unknown delivery, not permission
             # to resend. This is a validation view; the stored phase stays untouched.
-            actions = (*actions[:role], actions[role].model_copy(
-                update={"phase": ActionPhase.UNCERTAIN}
-            ))
+            actions = (
+                *actions[:role],
+                actions[role].model_copy(update={"phase": ActionPhase.UNCERTAIN}),
+            )
         validate_staged_assistance_source(
             self,
             record.model_copy(
@@ -614,7 +618,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 )
             )
         images = (
-            context.plan.compile_images()
+            planned_images(context)
             if context.kind == "attach"
             else {name: snapshot.image for name, snapshot in snapshots.items()}
         )
@@ -965,7 +969,7 @@ class NativeWavemakerController(LocalControlCoordinator):
                 if context.kind in {"master_power_cycle_v1", "slave_timer_rearm_v1"}
                 else self._snapshots(context)
             )
-            images = context.plan.compile_images()
+            images = planned_images(context)
             for index, endpoint in enumerate(endpoints):
                 if captures is None:
                     reports = context.kind == "attach" or (

@@ -16,6 +16,7 @@ from jebao_flow.local_control.models import LocalControlIntent
 from jebao_flow.local_control.wavemaker import NativeWavemakerPlan
 from jebao_flow.local_control.wavemaker_lifecycle import native_master_cycle_request_id
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO as SCHEMA
+from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_MODES
 from tests.unit.test_local_control_wavemaker_lifecycle import (
     STAGED_ASYNC_ROLE,
     Rig,
@@ -196,7 +197,7 @@ async def test_no_opt_in_and_other_unfinished_are_not_bypassed(tmp_path):
         await rig.attach(request_id="unrelated_01")
 
 
-def test_user_daily_plan_exact_16_slots_and_only_flow_differs():
+def test_user_daily_plan_keeps_exact_per_slot_slave_flows_in_carrier_image():
     plan = NativeWavemakerPlan.model_validate_json(
         Path("config/examples/pro-pair-daily-async.json").read_bytes()
     )
@@ -242,11 +243,19 @@ def test_user_daily_plan_exact_16_slots_and_only_flow_differs():
     ]
     assert [s.frequency for s in slots] == [70, 70, 0, 50, 0, 0, 50, 0, 30, 50, 0, 0, 0, 60, 70, 70]
     assert slots[8].mode == "circulation"
-    images = plan.compile_images()
+    images = plan.compile_flow_carrier_images()
     master, slave = images.values()
     assert len(master) == len(slave) == 432
     assert master[144:] == slave[144:] == b"\xee" * 288
-    assert all(i % 9 == 5 for i, (a, b) in enumerate(zip(master, slave, strict=True)) if a != b)
+    assert [slave[index * 9 + 5] for index in range(16)] == [
+        item.flow for item in plan.slaves[0].flows
+    ]
+    assert [slave[index * 9 + 4] for index in range(16)] == [
+        LOCAL_WAVEMAKER_PRO_MODES.index("feed")
+        if slot.mode == "feed"
+        else LOCAL_WAVEMAKER_PRO_MODES.index("constant")
+        for slot in slots
+    ]
 
 
 @pytest.mark.asyncio

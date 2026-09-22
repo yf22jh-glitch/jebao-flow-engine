@@ -33,10 +33,12 @@ from jebao_flow.protocol.profiles import get_product_schema
 # (2026-09-20 03:00:33 send, no ACK, still unapplied at 03:00:40), and the value cannot be kept
 # while the pair is linked at all (09:30:24.477 master rearmed, 09:30:26.015 back to `feed`).
 # The name is kept because one 10-action record was written with it and stored records are read
-# from their own layout; new attachments use v1, whose positions never changed.
+# from their own layout. New attachments use the flow-carrier sequence; the action positions
+# remain unchanged while legacy v1/v2 contexts continue to rebuild their original images.
 STAGED_ROLES = "staged_roles_v1"
 STAGED_ROLES_V2 = "staged_roles_v2"
-STAGED_SEQUENCES = (STAGED_ROLES, STAGED_ROLES_V2)
+FLOW_CARRIER_ROLES = "flow_carrier_roles_v1"
+STAGED_SEQUENCES = (STAGED_ROLES, STAGED_ROLES_V2, FLOW_CARRIER_ROLES)
 _TIMERS = (4, 5)
 _MASTER_ROLE = 6
 _SYNC_ROLE = 7
@@ -75,6 +77,18 @@ def staged_layout(context, action_count: int | None = None) -> StagedLayout:
     async_role = last + 1 if asynchronous else None
     count = (async_role if async_role else last) + 1
     return StagedLayout(context.activation_sequence, manual, async_role, count)
+
+
+def planned_images(context) -> dict[str, bytes]:
+    """Rebuild the image layout owned by this context's immutable sequence version."""
+
+    if context.activation_sequence == FLOW_CARRIER_ROLES:
+        return context.plan.compile_flow_carrier_images()
+    if context.activation_sequence in {None, STAGED_ROLES, STAGED_ROLES_V2}:
+        return context.plan.compile_images()
+    raise ValueError("단계별 활성화 원본이 아닙니다")
+
+
 _CONTROL = DeviceControlConfig()
 # Existing schedule_flow_experiment._ROLE_PREFLIGHT_SETTLE_SECONDS; no harness import.
 _ROLE_SETTLE_SECONDS = 1.0
@@ -199,7 +213,7 @@ def validate_staged_assistance_source(controller, source, context):
     if len(context.originals) != 2 or source.phase is not TransactionPhase.RECOVERY_REQUIRED:
         raise ValueError("지원할 단계별 Pro pair 원본이 아닙니다")
     names = [o.target.logical_member for o in context.originals]
-    images = context.plan.compile_images()
+    images = planned_images(context)
     targets = {o.target.logical_member: o.target for o in context.originals}
     expected = [(name, "native_controls", controller._safe(context.plan, name)) for name in names]
     expected += [(name, "native_image", images[name]) for name in names]

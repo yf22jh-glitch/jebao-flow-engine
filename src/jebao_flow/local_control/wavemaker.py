@@ -192,6 +192,14 @@ class NativeWavemakerPlan(BaseModel):
         return self
 
     def compile_images(self) -> dict[str, bytes]:
+        """Compile the legacy dual-schedule layout kept for stored operation recovery.
+
+        This was the original product implementation: every non-Flow byte from the master
+        image was copied into every slave image.  Existing durable native contexts own those
+        exact bytes, so detach/recovery must be able to reproduce them forever.  New native
+        attachments use :meth:`compile_flow_carrier_images` instead.
+        """
+
         master = self.schedule.compile_image()
         images = {self.master: master}
         for slave in self.slaves:
@@ -201,8 +209,46 @@ class NativeWavemakerPlan(BaseModel):
             images[slave.logical_member] = bytes(image)
         return images
 
+    def compile_flow_carrier_images(self) -> dict[str, bytes]:
+        """Keep slave Flow per slot without cloning the master's waveform bytes.
+
+        The audited Pro app exposes schedule/mode editing on the master and a Flow control on
+        linked slaves.  A slave image produced here therefore carries only the common slot
+        boundaries and that slave's declared Flow table.  Non-feeding slots use ``constant``
+        as a neutral stored carrier; feeding slots retain the requested feeding interval so a
+        locally evaluated fallback still stops for the declared interval.
+
+        This is an encoding contract, not a claim that firmware applies the master's physical
+        waveform or phase.  It specifically prevents the old implementation from silently
+        copying Pulse/Frequency/custom bytes into the slave while preserving every requested
+        per-slot Flow value.
+        """
+
+        master = self.schedule.compile_image()
+        images = {self.master: master}
+        constant_code = LOCAL_WAVEMAKER_PRO_MODES.index("constant")
+        feed_code = LOCAL_WAVEMAKER_PRO_MODES.index("feed")
+        active = {item.slot_index: item for item in self.schedule.slots}
+        for slave in self.slaves:
+            flows = {item.slot_index: item.flow for item in slave.flows}
+            image = bytearray(b"\xee" * len(master))
+            for slot_index, slot in active.items():
+                start = slot_index * 9
+                master_wire = master[start : start + 9]
+                carrier = bytearray(9)
+                carrier[:4] = master_wire[:4]
+                carrier[5] = flows[slot_index]
+                if slot.mode == "feed":
+                    carrier[4] = feed_code
+                    carrier[7] = slot.feed_time
+                else:
+                    carrier[4] = constant_code
+                image[start : start + 9] = carrier
+            images[slave.logical_member] = bytes(image)
+        return images
+
     def preview(self) -> dict[str, object]:
-        images = self.compile_images()
+        images = self.compile_flow_carrier_images()
         master = images[self.master]
         return {
             "mode": self.mode,
@@ -212,6 +258,7 @@ class NativeWavemakerPlan(BaseModel):
             "preparation_flows": {member: self.preparation_flow_for(member) for member in images},
             "schedule": self.schedule.model_dump(mode="json"),
             "slaves": [slave.model_dump(mode="json") for slave in self.slaves],
+            "slave_image_contract": "per_slot_flow_carrier",
             "images": {
                 member: {
                     "image_bytes": len(image),
