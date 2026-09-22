@@ -93,3 +93,51 @@ Pulse 전달/변환 동작**으로 좁혀졌다. 내부 펌웨어 코드의 어�
 확인했다. 다만 복구 상태에서도 Pulse 구간의 하단은 `Mode=feed`를 다시 보고하므로, 원상복귀는
 운영 topology 복구이지 결함 제거가 아니다. 물리 파형·유량은 계측하지 않았으며 raw datapoint
 판정과 사용자의 기존 물리 정지 관측을 구분한다.
+
+## 추가 대조 — 이전 기록과 apparent recovery
+
+위 실행을 커밋한 뒤 기존 durable 기록을 write 없이 다시 대조했다.
+
+9월 21일 운영 attach `kaga_daily_async_20260921_01`은 이번 복구와 반대 순서였다. action 6은
+상단 `Linkage=master`, action 7은 하단 `sync_slave`, action 8은 하단 `async_slave`였고, 모두
+최종 readback `VERIFIED`다. 즉 **master-first 앱 순서에서도** 02:11 UTC 구조화 sample에서 하단
+manual `Mode constant → feed`, `Frequency 32 → 70`과 `AutoMode=pulse/Flow40/F70`이 함께
+관측됐다. 이번 async-first 복구에서도 같은 결과였으므로 역할 적용 순서가 원인은 아니다.
+
+full-state recorder의 9월 21일 02:11–12:00 UTC 구간을 전수 재계산하면 하단이 `Mode=feed`를
+보고한 누적은 27,726.895초(약 7.70시간)다. 의도한 3분 Feeding 구간을 제외한 모든 feed 진입은
+Pulse 구간 시작과 일치했고, Constant·Tidal·Nutrient Transport 경계에서는 해당 모드로
+빠져나왔다. 12:00:20 UTC(21:00 KST)에는 같은 sample에서
+`AutoMode pulse → tidal`, manual `Mode feed → tidal`, `Frequency 80 → 5`가 함께 바뀌었다.
+
+따라서 운영자가 본 “자동 복구”는 별도 복구 write가 아니라 **21:00 schedule 경계에서 Pulse가
+Tidal로 끝나며 native link가 다음 모드를 다시 전달한 것**이다. slave timer watchdog의 보존
+디렉터리에는 plan 한 개뿐이고 실행 산출물은 0개였으며, 이 구간에서 watchdog write는 없었다.
+
+2026-09-20 선행 실기는 linked slave의 manual Mode를 세 위치에서 고치려 했지만 모두 배제했다.
+결속 중 write는 적용되지 않았고, 하단을 independent로 풀어 `constant`를 적용해도 상단이 master를
+다시 잡은 1.5초 뒤 `feed`로 되돌아갔다. 그러므로 Pulse 구간마다 단순히 하단 `Mode=pulse`를
+재전송하는 것은 지속 가능한 수정이 아니다. 당시 코드는 “manual feed는 latent이고 TimerON을
+잃을 때만 정지한다”고 해석했지만, 이번 운영자 관측과 TimerON=true raw는 그 해석이 이 pair의
+Pulse 구간에는 성립하지 않음을 새로 보여준다. 9월 18일의 `TimerON=false` 장시간 정지는 별개의
+사건으로 유지하며 이번 원인에 합치지 않는다.
+
+## 추가 대조 — 활성 앱의 Linkage wire 계약
+
+활성 Pro template(`com.jiebao.rn.aquariumPumpPro.1`, 배포 결속 digest `c1ed7f76…`)의 모든
+`sendCmd` 호출을 write 없이 정적 추적했다. master, sync slave, async slave와 independent를
+선택하는 경로는 모두 공통 handler `onSelectLinkage(e)`를 거쳐 정확히 `{Linkage:e}` 한 필드만
+보낸다. 특히 async 선택은 `{Linkage:3}` 뒤에 `Mode`, `TimerON`, `AutoMode`, `AutoFlow` 또는
+`AutoFreq`를 추가로 보내지 않는다.
+
+이 활성 template에는 `Linkage+TimerON+Auto*` 형태의 program-save compound 명령도 없다.
+시간표 저장은 `AutoTime00..47`을 별도 `dataPoint.update` 경로로 갱신하며 Linkage 명령과 결합되지
+않는다. 따라서 이번 실행의 role-only payload는 활성 앱의 wire 계약과 동일하며, 우리 코드가 앱의
+필수 동반 필드를 빠뜨려 하단을 `feed`로 만든 가능성은 배제된다.
+
+보존 raw가 증명하는 동작 경계는 다음과 같다. 같은 schedule image와 TimerON에서 하단은
+independent Pulse를 정상 보고하지만, native master/async 결속이 성립하면 Auto Pulse 값은 유지된
+채 하단 manual Mode가 `feed`로 바뀌고 Frequency가 활성 Pulse 슬롯 값으로 바뀐다. 이는 앱도 같은
+role-only 명령으로 유발하는 장치 결속 동작이다. 내부 펌웨어의 정확한 코드 분기는 확보하지
+않았으므로 그 구현 세부까지 단정하지 않지만, 역할 적용 순서·watchdog·schedule writer·누락된 앱
+compound·이번 local-control payload는 원인 후보에서 제외한다.
