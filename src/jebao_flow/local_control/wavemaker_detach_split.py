@@ -66,8 +66,19 @@ def _planned_independent_status(schema, status: bytes) -> bytes:
     return bytes(planned)
 
 
-def _require_stalled_records(owner, child, support, source_context) -> None:
-    owner._require_stalled_first_slave(child, source_context)
+def _require_stalled_records(
+    owner,
+    child,
+    support,
+    source_context,
+    *,
+    allow_terminal_child: bool = False,
+) -> None:
+    if allow_terminal_child and child.phase is TransactionPhase.VERIFIED:
+        if owner._context(child).kind != "detach":
+            raise ValueError("분리 지원 child가 자기 detach 기록이 아닙니다")
+    else:
+        owner._require_stalled_first_slave(child, source_context)
     if (
         support.phase is not TransactionPhase.RECOVERY_REQUIRED
         or len(support.actions) != 5
@@ -135,7 +146,13 @@ def validate_detach_split(owner, record, context) -> None:
     source = owner._required(context.attach_request_id)
     source_context = owner._context(source)
     child = owner._required(native_detach_request_id(context.attach_request_id))
-    _require_stalled_records(owner, child, support, source_context)
+    _require_stalled_records(
+        owner,
+        child,
+        support,
+        source_context,
+        allow_terminal_child=True,
+    )
 
     statuses: dict[str, bytes] = {}
     for index, original in enumerate(context.originals):
@@ -213,14 +230,15 @@ async def split_detach_locked(
 
     if source_context.kind != "attach" or source_context.plan.mode != "async":
         raise ValueError("분리 지원은 자기 Async source 전용입니다")
-    _require_stalled_records(owner, child, support, source_context)
     request_id = native_split_assistance_request_id(source.request_id)
     record = owner._journal.load(request_id)
     if record is not None:
         split_context = owner._context(record)
         if record.phase is TransactionPhase.VERIFIED:
             return owner._public(record, current=False)
+        _require_stalled_records(owner, child, support, source_context)
     else:
+        _require_stalled_records(owner, child, support, source_context)
         originals = []
         statuses: dict[str, bytes] = {}
         for index, endpoint in enumerate(endpoints):

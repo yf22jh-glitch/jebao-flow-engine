@@ -957,6 +957,12 @@ async def test_split_assistance_uses_two_distinct_frames_then_finishes_exact_det
     )
     assert rig.store.load(child.request_id).phase is TransactionPhase.VERIFIED
     assert rig.store.unfinished_records() == ()
+    writes = len(rig.sent)
+    replay = await rig.controller().assist_detach_split(
+        request_id="attach_0001", targets=rig.targets
+    )
+    assert replay["accepted"] and len(rig.sent) == writes
+    rig.controller()._require_available(rig.targets, allowed=())
 
 
 @pytest.mark.asyncio
