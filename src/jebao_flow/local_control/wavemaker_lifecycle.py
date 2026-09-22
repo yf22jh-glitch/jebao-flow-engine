@@ -53,6 +53,7 @@ from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_MODES, LOCAL_WAVEMA
 _TERMINAL = {TransactionPhase.VERIFIED, TransactionPhase.ROLLED_BACK}
 _REPLY_WITHOUT_ACK = "native_async_reply_verified_delivery_unknown"
 _AWAIT_OPERATOR = "operator_requested_no_automatic_restore"
+_DETACH_SPLIT_SETTLE_SECONDS = 5
 
 
 def _json(value) -> bytes:
@@ -63,6 +64,10 @@ def _json(value) -> bytes:
 
 def native_assistance_request_id(attach_id: str) -> str:
     return "wm_assist_" + hashlib.sha256(attach_id.encode("ascii")).hexdigest()
+
+
+def native_split_assistance_request_id(attach_id: str) -> str:
+    return "wm_split_" + hashlib.sha256(attach_id.encode("ascii")).hexdigest()
 
 
 def native_master_cycle_request_id(attach_id: str) -> str:
@@ -93,6 +98,7 @@ class NativeContext(BaseModel):
         "attach",
         "detach",
         "detach_assist",
+        "detach_assist_split_v1",
         "master_link_cycle_v1",
         "master_power_cycle_v1",
         "slave_timer_rearm_v1",
@@ -435,6 +441,57 @@ class NativeWavemakerController(LocalControlCoordinator):
                 await self._advance(record, assist_context, endpoints, permit)
             return await self._detach_locked(source, context, endpoints, permit)
 
+    async def assist_detach_split(self, *, request_id, targets):
+        """Split a stalled slave compound into two distinct app-shaped owned frames.
+
+        The original detach and assistance payloads remain immutable and are never resent.
+        This child exists only for the observed state where the master role-only release was
+        acknowledged but the bound slave did not acknowledge or apply the compound timer-off.
+        """
+
+        from jebao_flow.local_control.wavemaker_detach_split import split_detach_locked
+
+        source = self._required(request_id)
+        context = self._context(source)
+        if context.kind != "attach":
+            raise ValueError("분리 지원에는 자기 attach 원본이 필요합니다")
+        self._require_current_targets(context, targets)
+        child_id = native_detach_request_id(request_id)
+        assist_id = native_assistance_request_id(request_id)
+        split_id = native_split_assistance_request_id(request_id)
+        with self._lease.acquire(tuple(t.physical_identity_key for t in targets)) as permit:
+            child = self._required(child_id)
+            support = self._required(assist_id)
+            self._context(child)
+            self._context(support)
+            self._require_available(
+                targets,
+                allowed=(
+                    request_id,
+                    child_id,
+                    assist_id,
+                    split_id,
+                    *self._owned_cycle_ids(context),
+                ),
+            )
+            endpoints = await self._resolver.resolve_many(
+                tuple(o.target for o in context.originals)
+            )
+            self._validate_endpoints(tuple(o.target for o in context.originals), endpoints)
+            self._qualify(split_id, context.plan, endpoints)
+            result = await split_detach_locked(
+                self,
+                source,
+                context,
+                child,
+                support,
+                endpoints,
+                permit,
+            )
+        if result["accepted"]:
+            return await self.assist_detach(request_id=request_id, targets=targets)
+        return result
+
     def _owned_cycle_ids(self, context):
         if context.master_cycle_on_async_failure is not True:
             return ()
@@ -718,6 +775,20 @@ class NativeWavemakerController(LocalControlCoordinator):
                         await self._sequence_sleep(remaining)
                     permit.require_permitted()
                 if (
+                    context.kind == "detach_assist_split_v1"
+                    and index == 1
+                    and action.phase is ActionPhase.PREPARED
+                ):
+                    if record.actions[0].phase not in {
+                        ActionPhase.VERIFIED,
+                        ActionPhase.NO_CHANGE,
+                    }:
+                        raise LocalControlExecutionError(
+                            "slave role-only 해제가 검증되지 않아 timer-off를 보내지 않습니다"
+                        )
+                    await self._sequence_sleep(_DETACH_SPLIT_SETTLE_SECONDS)
+                    permit.require_permitted()
+                if (
                     context.kind == "attach"
                     and context.plan.mode == "async"
                     and action.phase is ActionPhase.PREPARED
@@ -966,14 +1037,24 @@ class NativeWavemakerController(LocalControlCoordinator):
         try:
             snapshots = (
                 None
-                if context.kind in {"master_power_cycle_v1", "slave_timer_rearm_v1"}
+                if context.kind
+                in {
+                    "master_power_cycle_v1",
+                    "slave_timer_rearm_v1",
+                    "detach_assist_split_v1",
+                }
                 else self._snapshots(context)
             )
             images = planned_images(context)
             for index, endpoint in enumerate(endpoints):
                 if captures is None:
                     reports = context.kind == "attach" or (
-                        context.kind in {"master_power_cycle_v1", "slave_timer_rearm_v1"}
+                        context.kind
+                        in {
+                            "master_power_cycle_v1",
+                            "slave_timer_rearm_v1",
+                            "detach_assist_split_v1",
+                        }
                         and index != 0
                     )
                     capture, status = await self._read(
@@ -999,6 +1080,16 @@ class NativeWavemakerController(LocalControlCoordinator):
                             else self._safe(context.plan, name)
                         )
                         if context.kind == "detach_assist"
+                        else (
+                            {"Linkage": "independent"}
+                            if index == 0
+                            else {
+                                "SwitchON": True,
+                                "TimerON": False,
+                                "Linkage": "independent",
+                            }
+                        )
+                        if context.kind == "detach_assist_split_v1"
                         else {
                             "SwitchON": True,
                             "TimerON": True,
@@ -1160,6 +1251,9 @@ class NativeWavemakerController(LocalControlCoordinator):
             "attach": context.attach_request_id,
             "detach": native_detach_request_id(context.attach_request_id),
             "detach_assist": native_assistance_request_id(context.attach_request_id),
+            "detach_assist_split_v1": native_split_assistance_request_id(
+                context.attach_request_id
+            ),
             "master_link_cycle_v1": native_master_cycle_request_id(context.attach_request_id),
             "master_power_cycle_v1": native_master_power_cycle_request_id(
                 context.attach_request_id
@@ -1171,6 +1265,7 @@ class NativeWavemakerController(LocalControlCoordinator):
         if context.kind in {
             "detach",
             "detach_assist",
+            "detach_assist_split_v1",
             "master_link_cycle_v1",
             "master_power_cycle_v1",
             "slave_timer_rearm_v1",
@@ -1193,7 +1288,12 @@ class NativeWavemakerController(LocalControlCoordinator):
                 or source_context.master_cycle_on_async_failure
                 != context.master_cycle_on_async_failure
                 or (
-                    context.kind in {"master_power_cycle_v1", "slave_timer_rearm_v1"}
+                    context.kind
+                    in {
+                        "master_power_cycle_v1",
+                        "slave_timer_rearm_v1",
+                        "detach_assist_split_v1",
+                    }
                     and (
                         not stable_child_originals
                         or source_context.schema_sha256 != context.schema_sha256
@@ -1201,7 +1301,12 @@ class NativeWavemakerController(LocalControlCoordinator):
                     )
                 )
                 or (
-                    context.kind not in {"master_power_cycle_v1", "slave_timer_rearm_v1"}
+                    context.kind
+                    not in {
+                        "master_power_cycle_v1",
+                        "slave_timer_rearm_v1",
+                        "detach_assist_split_v1",
+                    }
                     and not same_originals
                 )
             ):
@@ -1219,6 +1324,10 @@ class NativeWavemakerController(LocalControlCoordinator):
             if self._context(stalled).kind != "detach":
                 raise ValueError("자기 detach 기록만 지원할 수 있습니다")
             self._require_stalled_first_slave(stalled, context)
+        elif context.kind == "detach_assist_split_v1":
+            from jebao_flow.local_control.wavemaker_detach_split import validate_detach_split
+
+            validate_detach_split(self, record, context)
         elif context.kind == "master_link_cycle_v1":
             from jebao_flow.local_control.wavemaker_master_cycle import validate_cycle
 
@@ -1237,7 +1346,11 @@ class NativeWavemakerController(LocalControlCoordinator):
             original = next((o for o in context.originals if o.target == action.target), None)
             if original is None or action.baseline_status_sha256 != original.status_sha256:
                 raise ValueError("native action의 원본 결속이 다릅니다")
-        if context.kind not in {"master_power_cycle_v1", "slave_timer_rearm_v1"}:
+        if context.kind not in {
+            "master_power_cycle_v1",
+            "slave_timer_rearm_v1",
+            "detach_assist_split_v1",
+        }:
             self._snapshots(context)
         return context
 
@@ -1392,6 +1505,9 @@ class NativeWavemakerController(LocalControlCoordinator):
             "attach_request_id": context.attach_request_id,
             "detach_request_id": native_detach_request_id(context.attach_request_id),
             "assistance_request_id": native_assistance_request_id(context.attach_request_id),
+            "split_assistance_request_id": native_split_assistance_request_id(
+                context.attach_request_id
+            ),
             **(
                 {
                     "master_cycle_request_id": native_master_cycle_request_id(

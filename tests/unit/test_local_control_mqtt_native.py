@@ -295,6 +295,11 @@ async def test_native_routes_image_free_async_slave_timer_rearm(tmp_path):
     assert len(rig.sent) == writes + 5
 
 
+def test_native_api_advertises_split_detach_assistance(tmp_path):
+    projection, _router = _setup(Rig(tmp_path))
+    assert "assist_detach_split" in projection.native_wavemaker_api["operations"]
+
+
 async def test_native_group_conflict_never_reaches_controller(tmp_path):
     rig = Rig(tmp_path)
     ownership = _OwnershipService(

@@ -565,6 +565,10 @@ class LocalControlMqttRouter:
                 result = await controller.detach(attachment_id=record_id, targets=targets)
             elif operation == "assist_detach":
                 result = await controller.assist_detach(request_id=record_id, targets=targets)
+            elif operation == "assist_detach_split":
+                result = await controller.assist_detach_split(
+                    request_id=record_id, targets=targets
+                )
             elif operation == "cycle_master":
                 result = await controller.cycle_master(request_id=record_id, targets=targets)
             elif operation == "cycle_master_power":
@@ -1247,6 +1251,7 @@ def _parse_native_request(payload: bytes | str) -> dict:
         "status",
         "recover",
         "assist_detach",
+        "assist_detach_split",
         "cycle_master",
         "cycle_master_power",
         "rearm_async_slave_schedule",

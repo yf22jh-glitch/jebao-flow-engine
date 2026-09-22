@@ -541,6 +541,7 @@ class HomeAssistantProjection:
                 "recover",
                 "status",
                 "assist_detach",
+                "assist_detach_split",
                 "cycle_master",
                 "cycle_master_power",
                 "rearm_async_slave_schedule",

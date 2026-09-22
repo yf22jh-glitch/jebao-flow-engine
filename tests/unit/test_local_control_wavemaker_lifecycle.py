@@ -823,8 +823,8 @@ async def test_corrupt_context_still_directs_generic_recover_to_dedicated_path(
     assert caught.value.detach_id is None
 
 
-async def _stalled_detach(rig):
-    await rig.attach()
+async def _stalled_detach(rig, mode="sync"):
+    await rig.attach(mode)
     rig.fail_ack = rig.reject_send = len(rig.sent) + 1
     with pytest.raises(TimeoutError):
         await rig.detach()
@@ -904,6 +904,93 @@ async def test_assistance_failure_never_rolls_back_or_resends_attempted_scalar(t
     with pytest.raises(NativeRecoveryRequiredError):
         await LocalControlCoordinator.recover(rig.controller(), support.request_id)
     assert len(rig.sent) == count + 2
+
+
+@pytest.mark.asyncio
+async def test_split_assistance_uses_two_distinct_frames_then_finishes_exact_detach(tmp_path):
+    from jebao_flow.local_control.wavemaker_lifecycle import (
+        native_assistance_request_id,
+        native_split_assistance_request_id,
+    )
+
+    rig = Rig(tmp_path)
+    child = await _stalled_detach(rig, "async")
+    count = len(rig.sent)
+    rig.fail_ack = rig.reject_send = count + 2
+    with pytest.raises(TimeoutError):
+        await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    support = rig.store.load(native_assistance_request_id("attach_0001"))
+    assert support.actions[1].phase is ActionPhase.UNCERTAIN
+    attempted = {
+        (
+            child.actions[0].target.logical_member,
+            rig.store.load_blob(child.actions[0].forward_payload_sha256),
+        ),
+        (
+            support.actions[1].target.logical_member,
+            rig.store.load_blob(support.actions[1].forward_payload_sha256),
+        ),
+    }
+
+    rig.fail_ack = rig.reject_send = None
+    writes = len(rig.sent)
+    result = await rig.controller().assist_detach_split(
+        request_id="attach_0001", targets=rig.targets
+    )
+
+    assert result["accepted"] and result["current_state_verified"]
+    assert rig.states == rig.originals
+    split = rig.store.load(native_split_assistance_request_id("attach_0001"))
+    assert split.phase is TransactionPhase.VERIFIED
+    assert [action.function for action in split.actions] == [
+        "linkage_role",
+        "schedule_enable",
+    ]
+    continuation = rig.sent[writes:]
+    assert continuation[0][0:2] == ("slave", {"Linkage": "independent"})
+    assert continuation[1][0:2] == ("slave", {"SwitchON": True, "TimerON": False})
+    assert rig.sleeps[-1] == 5
+    assert all((row[0], row[4]) not in attempted for row in continuation)
+    assert rig.store.load(native_assistance_request_id("attach_0001")).phase is (
+        TransactionPhase.VERIFIED
+    )
+    assert rig.store.load(child.request_id).phase is TransactionPhase.VERIFIED
+    assert rig.store.unfinished_records() == ()
+
+
+@pytest.mark.asyncio
+async def test_split_timer_ack_loss_is_observed_without_resending_then_detaches(tmp_path):
+    from jebao_flow.local_control.wavemaker_lifecycle import native_split_assistance_request_id
+
+    rig = Rig(tmp_path)
+    await _stalled_detach(rig, "async")
+    count = len(rig.sent)
+    rig.fail_ack = rig.reject_send = count + 2
+    with pytest.raises(TimeoutError):
+        await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    rig.fail_ack = rig.reject_send = None
+
+    count = len(rig.sent)
+    rig.fail_ack = count + 2
+    with pytest.raises(TimeoutError):
+        await rig.controller().assist_detach_split(
+            request_id="attach_0001", targets=rig.targets
+        )
+    split = rig.store.load(native_split_assistance_request_id("attach_0001"))
+    assert [action.phase for action in split.actions] == [
+        ActionPhase.VERIFIED,
+        ActionPhase.UNCERTAIN,
+    ]
+    timer_payload = rig.store.load_blob(split.actions[1].forward_payload_sha256)
+    assert sum(row[4] == timer_payload for row in rig.sent) == 1
+
+    rig.fail_ack = None
+    result = await rig.controller().assist_detach_split(
+        request_id="attach_0001", targets=rig.targets
+    )
+    assert result["accepted"] and rig.states == rig.originals
+    assert sum(row[4] == timer_payload for row in rig.sent) == 1
+    assert rig.store.unfinished_records() == ()
 
 
 @pytest.mark.asyncio

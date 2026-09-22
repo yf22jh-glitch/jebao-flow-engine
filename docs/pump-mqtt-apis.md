@@ -35,6 +35,7 @@ RECOVERY_REQUIRED 거래는 여전히 새 write를 막는다.
 | `detach` | `attachment_id` | 결속 전 자기 원본 시간표·제어값 복원 |
 | `recover` | `record_id` | `recover_native` 호출. generic recover 사용 안 함 |
 | `assist_detach` | `record_id` | 기존 소유 해제 지원 계약. 임의 강제 해제 아님 |
+| `assist_detach_split` | `record_id` | master role-only 해제 뒤에도 slave compound가 미적용인 보존된 stalled assist를 서로 다른 role-only·timer-off 프레임으로 이어서 exact detach |
 | `cycle_master` | `record_id` | 원래 source의 명시 승인 옵션을 요구하는 기존 master cycle |
 
 `attach`에만 선택적 boolean `await_operator_observation`,
