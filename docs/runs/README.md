@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-22 Pro Pulse→Tidal 운영 시간표](2026-09-22-pro-pulse-to-tidal-schedule.md) — Pulse 10구간만 Tidal로 교체, Master/Async·Feeding/Constant 복귀·Flow 유지; exact image·18:03 Constant35 전환 확인.
+
 - [2026-09-22 Pro Pulse independent 인과 A/B](2026-09-22-pro-pulse-independent-causal-ab.md) — 동일 image에서 independent Pulse45/F70 정상, master/Async 재결속 직후 하단 manual feed 재현; role-only 4write·원상 topology 복구·raw8 frame 보존.
 
 - [2026-09-18 Async slave Timer 재활성화 master power cycle](2026-09-18-async-slave-timer-rearm-master-power-cycle.md) — master OFF→10초→ON은 검증·원상복귀했으나 slave TimerOFF 유지; 양쪽 image exact·slave write0.
