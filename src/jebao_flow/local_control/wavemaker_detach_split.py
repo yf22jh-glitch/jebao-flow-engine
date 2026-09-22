@@ -141,7 +141,7 @@ def validate_detach_split(owner, record, context) -> None:
     for index, original in enumerate(context.originals):
         capture = json.loads(owner._journal.load_blob(original.capture_sha256))
         if (
-            capture["action"] != (3 if index == 0 else 4)
+            capture["action"] not in ({3}, {3, 4})[index]
             or capture["status_sha256"] != original.status_sha256
         ):
             raise ValueError("분리 지원 원본은 fresh pair capture여야 합니다")

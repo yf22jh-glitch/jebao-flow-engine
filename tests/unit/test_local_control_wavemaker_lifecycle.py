@@ -154,7 +154,7 @@ class MemoryTransport:
         status = rig.states[self.address]
         if rig.read_transform is not None:
             status = rig.read_transform(self.address, status, accept_reports)
-        action = 4 if accept_reports else 3
+        action = 4 if accept_reports and not rig.reply_when_reports else 3
         capture = RawStateCapture(b"synthetic-wire" + bytes([action]) + status, action, status)
         if state_frame_observer is not None:
             state_frame_observer(capture, True)
@@ -238,6 +238,7 @@ class Rig:
         self.sent, self.reads = [], []
         self.fail_ack = self.cancel_ack = self.reject_send = None
         self.reject_final_reply = False
+        self.reply_when_reports = False
         self.before_send = None
         self.read_transform = None
         self.virtual_time = 0.0
@@ -990,6 +991,28 @@ async def test_split_timer_ack_loss_is_observed_without_resending_then_detaches(
     )
     assert result["accepted"] and rig.states == rig.originals
     assert sum(row[4] == timer_payload for row in rig.sent) == 1
+    assert rig.store.unfinished_records() == ()
+
+
+@pytest.mark.asyncio
+async def test_split_accepts_explicit_slave_reply_when_reports_are_also_allowed(tmp_path):
+    """The device returned this shape in the preserved 2026-09-22 prewrite run."""
+
+    rig = Rig(tmp_path)
+    await _stalled_detach(rig, "async")
+    count = len(rig.sent)
+    rig.fail_ack = rig.reject_send = count + 2
+    with pytest.raises(TimeoutError):
+        await rig.controller().assist_detach(request_id="attach_0001", targets=rig.targets)
+    rig.fail_ack = rig.reject_send = None
+    rig.reply_when_reports = True
+
+    result = await rig.controller().assist_detach_split(
+        request_id="attach_0001", targets=rig.targets
+    )
+
+    assert result["accepted"] and result["current_state_verified"]
+    assert rig.states == rig.originals
     assert rig.store.unfinished_records() == ()
 
 
