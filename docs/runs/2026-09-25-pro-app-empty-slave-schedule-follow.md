@@ -115,3 +115,15 @@ Master·TimerON·Auto Sine35/F80·31슬롯·fault 0, 하단은 Async·TimerOFF·
 Sine40/F80·0슬롯·fault 0으로 유지됐다. 원본 frame SHA-256은 상단
 `7a50070bf0d1f033710117dc973d325910b15f2855207e65489aa755fd509780`, 하단
 `b31dee2804977a489ded0f8cf18d1f9b228f5f1d5ee2513fb8778067d323a2d4`다.
+
+## 추가 판독 — 리셋 전 31슬롯 raw 전수
+
+기존 raw anchor 두 series의 2026-09-22 13:39:24–09-24 14:34:56 UTC에서, 상단 Master·하단
+Async이고 하단 image가 원 31슬롯 SHA `aaa0f308…`인 accepted pair **589개**를 다시 셌다.
+상단 `AutoMode`와 하단 manual `Mode`의 교차표는 Sine→Sine 366, Tidal→Tidal 159,
+Pulse→Feed 45, 의도된 Feeding→Feed 18, Pulse→Tidal 1이었다. 마지막 한 건은 선행 기록의
+14:00 슬롯 경계 직전 표본이다. 상단 `AutoFlow`는 Sine 구간에 35·37·38·40, Tidal 구간에
+40·42·43·45, Pulse 구간에 40·42·43으로 달라졌지만, 같은 pair들에서 하단 manual `Flow`와
+non-feed `AutoFlow` 보고는 40으로 유지됐다. 이 표는 **상단 파형 변화와 하단 manual Mode
+보고의 반복 관계**를 보여준다. 하단 물리 유량의 슬롯별 독립 적용이나 Pulse→Feed의 내부
+펌웨어 분기까지 증명하지는 않는다.
