@@ -35,3 +35,6 @@ jebao-flow-linked-flow --master-member <상단 논리멤버> --slave-member <하
 이 도구는 동결된 `devices/*` ASYNC 하네스를 사용하지 않는다. 새 CLI가
 포함된 이미지로 설치하기 전에는 명령 이름이 운영 컨테이너에 없을 수
 있으므로, 설치 여부와 source generation을 확인해야 한다.
+
+사용자 일일 표의 하단 Flow를 시간별로 다루는 별도 계획은
+[Pro Async 하단 수동 Flow 일일 시간표](pro-linked-flow-daily-schedule.md)를 따른다.
