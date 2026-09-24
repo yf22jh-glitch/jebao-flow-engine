@@ -1,5 +1,9 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-25 Pro 하단 Flow44 터미널 3단계 적용](2026-09-25-pro-linked-flow-cli-44.md) — 상단 해제→하단 Flow44→재결속 각 1send/VERIFIED, 역할·시간표 유지.
+
+- [2026-09-25 Pro 하단 Flow45 터미널 3단계 복귀](2026-09-25-pro-linked-flow-cli-45-restore.md) — Flow44→45 왕복 완료, Master/Async·시간표 유지·추가 읽기 전용 조회 일치.
+
 - [2026-09-25 상단 Master 유지 중 하단 역할 단독 변경](2026-09-25-pro-lower-role-only-while-master-attempt.md) — Linkage 단독 LAN 전달·TCP ACK 확인, 제어 ACK/역할 변화 없음·무송신 복구.
 
 - [2026-09-25 결속 하단 Linkage+Flow 복합 단회 시험](2026-09-25-pro-linked-linkage-flow-compound-attempt.md) — 한 프레임 ACK timeout·후속 Flow45, 무송신 복구 종결; 결속 중 직접 변경 미확인.
