@@ -55,3 +55,22 @@ digest는 `16c554f0c53e143cf710a2b20341924df229d5401782d62889da8adc57c178cb`.
 따라서 **이 compound 방식으로 결속 중 Flow를 직접 바꾸는 방법은 확인되지
 않았다.** 이미 확인된 상단 Master 해제→하단 Flow 변경→상단 재결속 경로와
 구분한다. 물리 유량 변화 여부와 장비 내부의 거부 이유는 미확정이다.
+
+## 추가 증거: LAN 패킷과 지속 보고
+
+같은 실행의 private owner-only PCAP `pro-router-netcap-20260924-01`에서
+원본 패킷을 다시 읽었다(파일 0600, 디렉터리 0700; 반출·커밋 없음).
+16:58:20.252703Z의 TCP `SERIAL_CONTROL_REQUEST`(0x0093) 한 건은
+Gizwits 전송 헤더 네 바이트 뒤가 위 forward payload SHA-256과 **축자 일치**했다.
+해당 PCAP record offset은 `32646032`, 원 record SHA-256은
+`ba7ce70697d1a2d2e0c840963facf31391635aa563cbf29a4647fe6d5abc807d`.
+이 패킷은 서버에서 장비 방향으로 실제 전송된 바이트의 **등급 (a)** 근거다.
+
+같은 연결에서 16:58:21.233518–16:58:25.432169Z에 받은 다섯
+`SERIAL_TRANSMIT_RESPONSE`(0x0091) action 0x04의 Linkage는 모두 3(Async),
+Flow는 모두 45였다. 첫 후속 보고의 PCAP record offset은 `32646715`,
+원 record SHA-256은
+`6dd7da75e2d64806bdbe4b2b168c8bb6c94edf77d29383d2427c13aecb06da42`.
+해당 구간에 `SERIAL_CONTROL_RESPONSE`(0x0094)는 0건이었다. 이는 장비가
+보고한 값이 바뀌지 않았다는 **등급 (a)** 근거이며, 장비 내부가 요청을
+왜 수용하지 않았는지까지 증명하지는 않는다.
