@@ -36,3 +36,7 @@
 ## 이 실행으로 새로 확정된 사실
 
 현재 31구간 계획이 상단 Pulse를 다시 포함했고, 같은 계획이 활성인 이틀 연속 하단은 정해진 급여 종료 뒤에도 상단 Pulse 창 동안 `Mode=feed`를 보고했다. 9월 24일에는 같은 창의 원본 raw에서 하단 `AutoMode=constant/Flow40`, TimerON·Async와 image exact가 함께 보존됐다. 하단 날짜 필드는 Independent/action `0x03`에서 날짜를 갱신한 뒤 Async/action `0x04`에서 다음 두 자정을 지나도 그대로였다. 로컬 MQTT 입력·결과 기록 공백은 새 수신 전용 기록기로 닫았다. 다만 펌웨어 내부 선택 규칙과 날짜의 최종 시간원은 아직 확정하지 않았다.
+
+## 후속 원본 전수 대조 (같은 읽기 전용 실행)
+
+두 raw-anchor series의 유효한 master/async_slave·양쪽 TimerON pair를 전수 교차했다. 상단 AutoMode가 Pulse인 218개에서 하단 manual `Mode=feed`는 **217개**였다. 그 217개 중 하단 자기 AutoMode가 Pulse인 표본은 172개, **Constant인 표본도 45개**였다. 나머지 한 표본은 9월 24일 `04:59:56Z`의 14:00 경계 직전으로, 하단 보고 Mode가 Tide로 먼저 바뀌고 상단 AutoMode는 다음 5분 표본에서 Tide가 됐다. 같은 조건의 상단 Sine 314개에서는 하단 Mode=Sine, 상단 Tide 369개에서는 하단 Mode=Tide였다. 이 교차표는 **하단 시간표를 Constant carrier로 만드는 것만으로 상단 Pulse 중의 Feed 보고가 없어지지 않는다**는 관측 근거다. 실제 위상·유량 계측이나 펌웨어 내부 분기 증명은 아니다.
