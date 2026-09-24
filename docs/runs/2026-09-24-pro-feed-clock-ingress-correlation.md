@@ -40,3 +40,7 @@
 ## 후속 원본 전수 대조 (같은 읽기 전용 실행)
 
 두 raw-anchor series의 유효한 master/async_slave·양쪽 TimerON pair를 전수 교차했다. 상단 AutoMode가 Pulse인 218개에서 하단 manual `Mode=feed`는 **217개**였다. 그 217개 중 하단 자기 AutoMode가 Pulse인 표본은 172개, **Constant인 표본도 45개**였다. 나머지 한 표본은 9월 24일 `04:59:56Z`의 14:00 경계 직전으로, 하단 보고 Mode가 Tide로 먼저 바뀌고 상단 AutoMode는 다음 5분 표본에서 Tide가 됐다. 같은 조건의 상단 Sine 314개에서는 하단 Mode=Sine, 상단 Tide 369개에서는 하단 Mode=Tide였다. 이 교차표는 **하단 시간표를 Constant carrier로 만드는 것만으로 상단 Pulse 중의 Feed 보고가 없어지지 않는다**는 관측 근거다. 실제 위상·유량 계측이나 펌웨어 내부 분기 증명은 아니다.
+
+## 후속 날짜 경계 재대조
+
+날짜가 `09-21→09-22`로 바뀐 하단 raw 전후에 수행된 승인된 A/B operation 기록을 확인했다. `2026-09-22T06:36:05–06:36:06Z`의 하단 write는 **`Linkage=independent` 단일 필드**였고 `YMDData`·`HMSData` write가 아니었다([선행 A/B run](2026-09-22-pro-pulse-independent-causal-ab.md)). 그 전 raw ordinal `000347`(하단 async/action `0x04`)은 전날 날짜, 뒤 `000348`(하단 independent/action `0x03`)은 당일 날짜였다. 따라서 이 날짜 점프를 **우리 코드가 시계를 재설정한 결과**로 볼 수 없다. 역할 변화와 reply/report action 변화가 동시에 일어나므로, 어느 쪽이 실제 날짜 레지스터를 갱신했는지는 아직 분리되지 않는다.
