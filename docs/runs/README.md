@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-24 Pro Feed·날짜 로깅 코드 감사](2026-09-24-pro-feed-date-logging-code-audit.md) — 무명령 구간 수신 기록기 heartbeat, Feed·날짜 전이 index와 기록기 생존 교차 확인; 장비 write 0·원인 미확정.
+
 - [2026-09-24 Pro Feed·날짜 입력 경로 대조](2026-09-24-pro-feed-clock-ingress-correlation.md) — 이틀 연속 계획 밖 하단 Feed 지속과 linked 날짜 정체 raw 대조, 로컬 MQTT 명령·결과 수신 전용 기록 추가.
 
 - [2026-09-24 Pro Feed·날짜 읽기 전용 로깅](2026-09-24-pro-feed-clock-readonly-logging.md) — 만료된 전량 MQTT 기록 재개, 기존 raw/PCAP·자동복구 기록과 두 Pro 전용 라우터 수동 캡처를 다음 날짜 전환까지 병행.

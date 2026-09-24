@@ -17,14 +17,10 @@ import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 
-import aiomqtt
-
-from jebao_flow.config import load_config
-
-
 ROOT = Path("/data") / os.environ["JEBAO_AUDIT_ARTIFACT"]
 DEADLINE = datetime.fromisoformat(os.environ["JEBAO_AUDIT_UNTIL"])
 CONFIG = Path(os.environ.get("JEBAO_AUDIT_CONFIG", "/data/local-control/config.yaml"))
+HEARTBEAT_SECONDS = 60
 
 
 def _write_exclusive(name: str, record: dict[str, object]) -> None:
@@ -58,7 +54,39 @@ def _kind(topic: str, local_prefix: str) -> str | None:
     return None
 
 
-async def _run(config, *, next_sequence: int) -> int:
+def _write_heartbeat(health: dict[str, object]) -> None:
+    """Record collector health even when no command is sent for hours."""
+
+    now = datetime.now(UTC)
+    _write_exclusive(
+        f"heartbeat-{now.strftime('%Y%m%dT%H%M%S%f')}-{secrets.token_hex(4)}.json",
+        {
+            "kind": "heartbeat",
+            "observed_at": now.isoformat(),
+            **health,
+            "hardware_write": False,
+            "mqtt_publish_count": 0,
+            "device_session_count": 0,
+        },
+    )
+
+
+def _source_digest() -> str:
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+async def _heartbeat_loop(health: dict[str, object], stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        _write_heartbeat(health)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_SECONDS)
+        except TimeoutError:
+            pass
+
+
+async def _run(config, *, next_sequence: int, health: dict[str, object]) -> int:
+    import aiomqtt
+
     local_prefix = f"{config.mqtt.topic_prefix}/local/"
     while datetime.now(UTC) < DEADLINE:
         try:
@@ -70,6 +98,8 @@ async def _run(config, *, next_sequence: int) -> int:
                 identifier=f"local-ingress-audit-{secrets.token_hex(6)}",
             ) as client:
                 await client.subscribe(f"{local_prefix}#", qos=1)
+                health["connected"] = True
+                _write_heartbeat(health)
                 async with asyncio.timeout(max(1, (DEADLINE - datetime.now(UTC)).total_seconds())):
                     async for message in client.messages:
                         topic = str(message.topic)
@@ -95,9 +125,15 @@ async def _run(config, *, next_sequence: int) -> int:
                             },
                         )
                         next_sequence += 1
+                        health["last_message_at"] = datetime.now(UTC).isoformat()
+                        health["message_count"] = next_sequence - 1
+                raise RuntimeError("MQTT message stream ended")
         except TimeoutError:
+            health["connected"] = False
             break
         except Exception as error:
+            health["connected"] = False
+            health["last_error_type"] = type(error).__name__
             _write_exclusive(
                 f"connection-error-{secrets.token_hex(8)}.json",
                 {
@@ -109,11 +145,15 @@ async def _run(config, *, next_sequence: int) -> int:
                     "device_session_count": 0,
                 },
             )
+            _write_heartbeat(health)
             await asyncio.sleep(5)
+    health["connected"] = False
     return next_sequence
 
 
 async def main() -> None:
+    from jebao_flow.config import load_config
+
     if DEADLINE.tzinfo is None or DEADLINE.utcoffset() is None:
         raise ValueError("audit deadline must be timezone-aware")
     ROOT.mkdir(mode=0o700, parents=False, exist_ok=True)
@@ -132,7 +172,8 @@ async def main() -> None:
             "command_result",
             "command_status",
         ],
-        "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "script_sha256": _source_digest(),
+        "heartbeat_seconds": HEARTBEAT_SECONDS,
         "hardware_write": False,
         "mqtt_publish_count": 0,
         "device_session_count": 0,
@@ -152,7 +193,32 @@ async def main() -> None:
         int(path.name.split("-", 1)[0])
         for path in ROOT.glob("[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-message.json")
     ]
-    next_sequence = await _run(config, next_sequence=max(sequences, default=0) + 1)
+    health: dict[str, object] = {
+        "connected": False,
+        "message_count": max(sequences, default=0),
+        "last_message_at": None,
+        "last_error_type": None,
+    }
+    stop_heartbeat = asyncio.Event()
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(health, stop_heartbeat))
+    collector_task = asyncio.create_task(
+        _run(config, next_sequence=max(sequences, default=0) + 1, health=health)
+    )
+    try:
+        done, _ = await asyncio.wait(
+            {heartbeat_task, collector_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if heartbeat_task in done:
+            heartbeat_task.result()
+            raise RuntimeError("audit heartbeat stopped before collection ended")
+        next_sequence = collector_task.result()
+    finally:
+        stop_heartbeat.set()
+        if not collector_task.done():
+            collector_task.cancel()
+            await asyncio.gather(collector_task, return_exceptions=True)
+        if not heartbeat_task.done():
+            await heartbeat_task
     _write_exclusive(
         "complete.json",
         {
