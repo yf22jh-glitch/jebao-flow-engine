@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-25 결속 하단 Flow45 단일 송신](2026-09-25-pro-linked-common-flow-single-attempt.md) — 0x04 baseline Flow50, 단회 송신 ACK 없음·후속 Flow50, 보고 기반 무송신 복구로 종결.
+
 - [2026-09-25 Pro Async 별도 Flow50·원격 45 조회 timeout](2026-09-25-pro-async-common-flow-50-and-service-timeout.md) — 앱 해제·재결속 뒤 하단 Flow50 유지, local-control 45 두 요청은 journal 전 timeout으로 장비 write 0.
 
 - [2026-09-25 Pro 앱 결속·빈 하단 시간표 파형 대조](2026-09-25-pro-app-empty-slave-schedule-follow.md) — 앱 재결속만으로 432B 시간표 불변; 하단 0슬롯·TimerOFF에서 Master 재결속 시 manual Constant45→Sine40, 실제 위상·Pulse 조건은 미판정.
