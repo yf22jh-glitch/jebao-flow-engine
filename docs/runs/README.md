@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-24 Pro Feed·날짜 읽기 전용 로깅](2026-09-24-pro-feed-clock-readonly-logging.md) — 만료된 전량 MQTT 기록 재개, 기존 raw/PCAP·자동복구 기록과 두 Pro 전용 라우터 수동 캡처를 다음 날짜 전환까지 병행.
+
 - [2026-09-22 Pro Pulse→Tidal 운영 시간표](2026-09-22-pro-pulse-to-tidal-schedule.md) — Pulse 10구간만 Tidal로 교체, Master/Async·Feeding/Constant 복귀·Flow 유지; exact image·18:03 Constant35 전환 확인.
 
 - [2026-09-22 Pro Pulse independent 인과 A/B](2026-09-22-pro-pulse-independent-causal-ab.md) — 동일 image에서 independent Pulse45/F70 정상, master/Async 재결속 직후 하단 manual feed 재현; role-only 4write·원상 topology 복구·raw8 frame 보존.
