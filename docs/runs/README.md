@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-25 Pro Async 별도 Flow50·원격 45 조회 timeout](2026-09-25-pro-async-common-flow-50-and-service-timeout.md) — 앱 해제·재결속 뒤 하단 Flow50 유지, local-control 45 두 요청은 journal 전 timeout으로 장비 write 0.
+
 - [2026-09-25 Pro 앱 결속·빈 하단 시간표 파형 대조](2026-09-25-pro-app-empty-slave-schedule-follow.md) — 앱 재결속만으로 432B 시간표 불변; 하단 0슬롯·TimerOFF에서 Master 재결속 시 manual Constant45→Sine40, 실제 위상·Pulse 조건은 미판정.
 
 - [2026-09-24 Pro Feed·날짜 로깅 코드 감사](2026-09-24-pro-feed-date-logging-code-audit.md) — 무명령 구간 수신 기록기 heartbeat, Feed·날짜 전이 index와 기록기 생존 교차 확인; 장비 write 0·원인 미확정.
