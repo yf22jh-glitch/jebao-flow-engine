@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-25 상단 Master 유지 중 하단 역할 단독 변경](2026-09-25-pro-lower-role-only-while-master-attempt.md) — Linkage 단독 LAN 전달·TCP ACK 확인, 제어 ACK/역할 변화 없음·무송신 복구.
+
 - [2026-09-25 결속 하단 Linkage+Flow 복합 단회 시험](2026-09-25-pro-linked-linkage-flow-compound-attempt.md) — 한 프레임 ACK timeout·후속 Flow45, 무송신 복구 종결; 결속 중 직접 변경 미확인.
 
 - [2026-09-25 하단 Flow45 직접 적용·Master 재결속](2026-09-25-pro-lower-flow45-master-release-relink.md) — 상단 해제→하단 Flow45→상단 재결속 각 1send/VERIFIED, 최종 Master/Async·하단45·시간표 exact.
