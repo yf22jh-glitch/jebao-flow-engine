@@ -26,6 +26,11 @@ jebao-flow-linked-flow --master-member <상단 논리멤버> --slave-member <하
 양쪽 fresh 상태를 확인해 미완료 child를 기존 복구 경로로 종결한 뒤
 현장 운영자가 재결속 여부를 결정한다.
 
+2026-09-25 실기에서 읽기 lock과 부딪혀 release만 끝난 뒤 flow child가
+저널 생성 전 멈춘 사례가 있었다. 이제 **저널이 없는 lock 충돌에 한해서만**
+잠깐 기다리고 Master/Async 역할·Flow·두 image를 fresh로 재확인한다.
+저널이 생겼거나 결과가 불확실한 child는 어떤 경우에도 재전송하지 않는다.
+
 각 단계는 현행 identity/물리 binding, 설정 출력 범위와 한 번에 5 이하
 변경, single-send, durable journal, ACK/readback 및 두 시간표 이미지
 불변 검사를 사용한다. 목표 Flow는 현행 설정 범위와 시험 상한 45를

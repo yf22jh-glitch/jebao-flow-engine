@@ -23,7 +23,7 @@ from jebao_flow.local_control.device_writer import (
 )
 from jebao_flow.local_control.install import load_current_private_config
 from jebao_flow.local_control.journal import LocalControlJournalStore
-from jebao_flow.local_control.lease import LocalControlLease
+from jebao_flow.local_control.lease import LocalControlLease, LocalControlLeaseBusyError
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.qualification import load_current_qualifications
 from jebao_flow.local_control.qualification_producer import load_current_install_manifest
@@ -130,6 +130,44 @@ def _emit_progress(phase: str, journal_sha256: str) -> None:
     print(json.dumps({"phase": phase, "journal_sha256": journal_sha256}), flush=True)
 
 
+async def _execute_after_read_lock(
+    coordinator: LocalControlCoordinator,
+    journal: LocalControlJournalStore,
+    intent: LocalControlIntent,
+    *,
+    config,
+    resolver,
+    master: LocalDeviceBinding,
+    slave: LocalDeviceBinding,
+    master_role: str,
+    expected_flow: int,
+    expected_images: tuple[str, str],
+):
+    """Wait only for a pre-journal device lock collision, never for an uncertain send."""
+
+    for attempt in range(8):
+        if journal.load(intent.request_id) is not None:
+            raise ValueError("a child request id already exists; inspect its durable outcome")
+        try:
+            return await coordinator.execute(intent)
+        except LocalControlLeaseBusyError:
+            # Lease acquisition precedes journal creation and the first physical send.
+            # A record appearing here is not an admissible retry, even if the exception
+            # looked like ordinary read/write lock contention.
+            if journal.load(intent.request_id) is not None or attempt == 7:
+                raise
+            current_master, current_slave = await _fresh_pair(config, resolver, master, slave)
+            _require_pair(
+                current_master,
+                current_slave,
+                master_role=master_role,
+                expected_flow=expected_flow,
+                expected_images=expected_images,
+            )
+            await asyncio.sleep(1)
+    raise AssertionError("bounded lease wait must return or raise")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--master-member", required=True)
@@ -214,7 +252,18 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("a child request id already exists; inspect its durable outcome")
 
     results = []
-    result = await coordinator.execute(intents[0])
+    result = await _execute_after_read_lock(
+        coordinator,
+        journal,
+        intents[0],
+        config=config,
+        resolver=resolver,
+        master=master,
+        slave=slave,
+        master_role="master",
+        expected_flow=initial_slave.flow,
+        expected_images=images,
+    )
     if not result.accepted:
         raise ValueError("master release did not verify")
     results.append(result)
@@ -229,7 +278,18 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     if abs(args.flow - released_slave.flow) > 5:
         raise ValueError("post-release Flow requires a step larger than five")
 
-    result = await coordinator.execute(intents[1])
+    result = await _execute_after_read_lock(
+        coordinator,
+        journal,
+        intents[1],
+        config=config,
+        resolver=resolver,
+        master=master,
+        slave=slave,
+        master_role="independent",
+        expected_flow=released_slave.flow,
+        expected_images=images,
+    )
     if not result.accepted:
         raise ValueError("slave Flow did not verify")
     results.append(result)
@@ -243,7 +303,18 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         expected_images=images,
     )
 
-    result = await coordinator.execute(intents[2])
+    result = await _execute_after_read_lock(
+        coordinator,
+        journal,
+        intents[2],
+        config=config,
+        resolver=resolver,
+        master=master,
+        slave=slave,
+        master_role="independent",
+        expected_flow=args.flow,
+        expected_images=images,
+    )
     if not result.accepted:
         raise ValueError("master relink did not verify")
     results.append(result)

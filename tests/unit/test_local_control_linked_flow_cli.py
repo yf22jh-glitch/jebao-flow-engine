@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from jebao_flow.local_control.lease import LocalControlLeaseBusyError
 
 from jebao_flow import local_control_linked_flow_cli as cli
 
@@ -95,3 +96,119 @@ def test_main_hides_library_exception_text(monkeypatch: pytest.MonkeyPatch, caps
     output = capsys.readouterr().out
     assert "private-endpoint-marker" not in output
     assert '"error": "RuntimeError"' in output
+
+
+@pytest.mark.asyncio
+async def test_read_lock_collision_rechecks_pair_before_first_send(monkeypatch) -> None:
+    calls = []
+
+    class Coordinator:
+        async def execute(self, _intent):
+            calls.append("execute")
+            if len([call for call in calls if call == "execute"]) == 1:
+                raise LocalControlLeaseBusyError("device read lock")
+            return "verified"
+
+    class Journal:
+        def load(self, _request_id):
+            calls.append("journal")
+            return None
+
+    async def fresh(*_args):
+        calls.append("fresh")
+        return _state(linkage="independent"), _state(
+            linkage="async_slave", flow=45, timer=False, image="b" * 64
+        )
+
+    async def no_wait(_seconds):
+        calls.append("wait")
+
+    monkeypatch.setattr(cli, "_fresh_pair", fresh)
+    monkeypatch.setattr(cli.asyncio, "sleep", no_wait)
+    result = await cli._execute_after_read_lock(
+        Coordinator(),
+        Journal(),
+        SimpleNamespace(request_id="linked_20260925_flow"),
+        config=object(),
+        resolver=object(),
+        master=object(),
+        slave=object(),
+        master_role="independent",
+        expected_flow=45,
+        expected_images=("a" * 64, "b" * 64),
+    )
+    assert result == "verified"
+    assert calls == ["journal", "execute", "journal", "fresh", "wait", "journal", "execute"]
+
+
+@pytest.mark.asyncio
+async def test_existing_journal_after_lock_error_is_never_retried(monkeypatch) -> None:
+    attempts = 0
+    reads = 0
+
+    class Coordinator:
+        async def execute(self, _intent):
+            nonlocal attempts
+            attempts += 1
+            raise LocalControlLeaseBusyError("device read lock")
+
+    class Journal:
+        def load(self, _request_id):
+            nonlocal reads
+            reads += 1
+            return None if reads == 1 else object()
+
+    async def forbidden(*_args):
+        raise AssertionError("a journaled child must not be recaptured or resent")
+
+    monkeypatch.setattr(cli, "_fresh_pair", forbidden)
+    with pytest.raises(LocalControlLeaseBusyError):
+        await cli._execute_after_read_lock(
+            Coordinator(),
+            Journal(),
+            SimpleNamespace(request_id="linked_20260925_flow"),
+            config=object(),
+            resolver=object(),
+            master=object(),
+            slave=object(),
+            master_role="independent",
+            expected_flow=45,
+            expected_images=("a" * 64, "b" * 64),
+        )
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_read_lock_wait_stops_if_pair_changed(monkeypatch) -> None:
+    attempts = 0
+
+    class Coordinator:
+        async def execute(self, _intent):
+            nonlocal attempts
+            attempts += 1
+            raise LocalControlLeaseBusyError("device read lock")
+
+    class Journal:
+        def load(self, _request_id):
+            return None
+
+    async def changed(*_args):
+        return _state(linkage="master"), _state(
+            linkage="async_slave", flow=45, timer=False, image="b" * 64
+        )
+
+    monkeypatch.setattr(cli, "_fresh_pair", changed)
+    with pytest.raises(ValueError, match="required powered scheduled role"):
+        await cli._execute_after_read_lock(
+            Coordinator(),
+            Journal(),
+            SimpleNamespace(request_id="linked_20260925_flow"),
+            config=object(),
+            resolver=object(),
+            master=object(),
+            slave=object(),
+            master_role="independent",
+            expected_flow=45,
+            expected_images=("a" * 64, "b" * 64),
+        )
+    assert attempts == 1
