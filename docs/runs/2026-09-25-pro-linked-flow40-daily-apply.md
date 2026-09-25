@@ -63,3 +63,23 @@ report 허용 read로 재확인했다. 이 추가 조회들은 장비 write 0회
    중간 중단 처리가 필요하다.
 3. 일일 반복 송신기는 아직 운영에 설치·활성화되지 않았다. 이번 결과로 Feeding
    경계 또는 장기 자동 실행을 검증했다고 주장하지 않는다.
+
+## 추가 — 2026-09-25 01:35 UTC 읽기 전용 일정 준비
+
+실기 뒤 관측한 잠금 충돌에 대해서는 별도 commit `48be597`에서 저널 생성 전
+충돌만 bounded 대기하고 pair를 재검사하도록 수정했다. 관련 99개 회귀가 통과했고
+프로토콜 스키마 digest는 변하지 않았다. 이 새 소스의 image
+`sha256:c785579a321d778bd14c83aaaf3a5c93dfa2c2f27837009dbea608893b911bef`를
+별도로 빌드했지만 기존 운영 제어 컨테이너는 재시작·교체하지 않았다.
+
+31행 JSON 파일 SHA-256은
+`9d6418bb83d0d72b55c502714a6cc8c321acd34ec0ba8077c02e02a2a20b850c`이고,
+운영 데이터 볼륨에 올린 사본과 일치했다. 새 image의 one-shot preview는 현재
+`10:33 / Flow40`, 다음 경계 `11:40`, 장비 write 0을 출력했다.
+별도 `jebao-linked-flow-schedule-preview-20260925` 컨테이너는
+**network none·데이터 볼륨 read-only·write_enabled false**로 기동했다.
+따라서 이 컨테이너는 장비 명령을 보낼 수 없고 live 일정은 아직 활성화되지 않았다.
+
+10:33 Feeding 복귀 뒤 하단의 report 허용 조회는 Async·Flow40·TimerOFF·
+전원 ON·fault 0이었다. 이 조회 raw를 별도 파일로 남기지 않았으므로 등급 (c)다.
+반복 자동 write의 현장 감시 종료 시각은 확인되지 않아, 지속 송신을 켜지 않았다.
