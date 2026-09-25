@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-25 Pro 하단 Flow40 일일 목표 단회 적용](2026-09-25-pro-linked-flow40-daily-apply.md) — lock 충돌 뒤 미시도 child만 이어서 3send/VERIFIED, Master/Async·Flow40·이미지 유지; 반복 일정 미활성.
+
 - [2026-09-25 Pro 하단 Flow44 터미널 3단계 적용](2026-09-25-pro-linked-flow-cli-44.md) — 상단 해제→하단 Flow44→재결속 각 1send/VERIFIED, 역할·시간표 유지.
 
 - [2026-09-25 Pro 하단 Flow45 터미널 3단계 복귀](2026-09-25-pro-linked-flow-cli-45-restore.md) — Flow44→45 왕복 완료, Master/Async·시간표 유지·추가 읽기 전용 조회 일치.
