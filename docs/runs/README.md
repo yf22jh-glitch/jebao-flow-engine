@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-28 Pro 수동 Pulse 실제 cloud 명령 캡처](2026-09-28-pro-manual-pulse-cloud-command-capture.md) — Mode-only P0·ACK 원문 및 인코더 byte 동일, 빈 시간표/TimerOFF Master·Async 양쪽 Pulse 유지; 전 포트 수동 캡처·장비 제어 송신0.
+
 - [2026-09-27 Pro 초기화 뒤 수동 Sync·Async 관측](2026-09-27-pro-reset-manual-sync-async-observation.md) — 빈 시간표·TimerOFF·Constant40에서 Master 해제 후 Async 선택·재결속 유지 확인; 장비 제어 송신0, Pulse·실제 위상 미판정.
 
 - [2026-09-25 Pro 하단 Flow40 일일 목표 단회 적용](2026-09-25-pro-linked-flow40-daily-apply.md) — lock 충돌 뒤 미시도 child만 이어서 3send/VERIFIED, Master/Async·Flow40·이미지 유지; 반복 일정 미활성.
