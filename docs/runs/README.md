@@ -1,5 +1,9 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-28 결속 상단 Flow30 단독 송신](2026-09-28-pro-upper-linked-flow30-direct-attempt.md) — `{Flow:30}` 1회 ACK timeout, 후속 Async·Flow37 유지, 재송신·복구 0; 미완료 저널 보존.
+
+- [2026-09-28 Pro 역방향 Async 상단 Flow37 적용](2026-09-28-pro-reverse-linked-flow37.md) — 하단 Master 해제→상단 Flow45→37→하단 재결속 각 1send/VERIFIED, image 불변·직후 Tide/fault0; 현장 조건 재확인 누락 기록.
+
 - [2026-09-28 Jebao 세 장비 전용 공유기·서버 캡처](2026-09-28-jebao-target-only-router-host-capture.md) — IP·MAC 세 binding만 전 포트 기록, 공유기·서버 고정 PCAP에서 대상 밖 0; 구형 전체망 수집과 LG 경로의 구형 Jebao 캡처 제거, 장비 write 0.
 
 - [2026-09-28 Pro 공유기 전 포트 상시 캡처](2026-09-28-pro-router-continuous-all-port-capture.md) — 최초 AP·IoT bridge 수집. 이후 전역 포트 필터 혼입이 확인돼 해당 원본을 삭제했으며, 보존 증거 등급은 파일 하단 정정 절 참조.
