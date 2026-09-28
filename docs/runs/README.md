@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-28 Pro Async 수동 Sine 다중채널 관측](2026-09-28-pro-async-sine-multichannel-linkpath-observation.md) — 상단 Mode-only Sine 뒤 하단 1.146초 후 Sine 보고, 하단 별도 IP 제어0; 두 Wi-Fi monitor가 펌프 송신 본문을 놓쳐 실제 전달 매체는 UNKNOWN/PARKED.
+
 - [2026-09-28 Pro Async 수동 Pulse RF·bridge 관측](2026-09-28-pro-async-manual-pulse-rf-observation.md) — 앱 상단 Mode-only Pulse 뒤 하단 약 1.25초 후 Pulse 보고, 하단 별도 IP 제어0; 무선 매체는 캡처 누락으로 미확정.
 
 - [2026-09-28 Pro AP·브리지 Sine 연동 관측](2026-09-28-pro-ap-bridge-sine-linkpath-observation.md) — 상단 Mode-only Sine 뒤 하단 Sine 보고, AP·브리지 10초 71프레임 차집합0·하단 별도 제어0; 무선 원본 경로는 미확정.
