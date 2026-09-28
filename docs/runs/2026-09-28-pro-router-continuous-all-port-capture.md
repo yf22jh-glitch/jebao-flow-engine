@@ -29,3 +29,9 @@
 공유기 AP와 IoT 브리지에서 세 장비가 포함된 전 포트 IP/Ethernet 스트림을 기존 LG 대용량 볼륨에 지속 기록할 수 있고, 위 고정 구간에는 실제 TCP/1883·12416과 UDP/12414 패킷이 있다. 이전 [앱 Pulse cloud 제어 원문](2026-09-28-pro-manual-pulse-cloud-command-capture.md)은 장비측 TCP/1883의 MQTT/P0 명령이 복호화 없이 해독된다는 별도 직접 근거다.
 
 이 수집기는 라우터·장비 사이의 **Ethernet/IP 관측**이지 투명 제어 프록시가 아니다. 앱→cloud 상행의 원문, AP 드라이버에 드러나지 않는 802.11 원본·Bluetooth·장비 내부 신호, Master→Slave 전달 매체와 실제 물리 위상은 이 사본으로 확정하지 못했다. 순환 보존이므로 각 인터페이스에서 약 4 GB 이후 오래된 원본은 덮인다. DHCP 바인딩이 바뀌면 실행 중인 IP 필터는 자동 재계산되지 않지만, AP의 장비 MAC 필터는 남는다. 다음 단계는 제어 조작의 정확한 UTC 창을 이 원본과 MQTT ingress/journal 기록에 함께 대조하는 것이다.
+
+## 정정 — 2026-09-28T11:30Z
+
+이 실행 당시의 필터에는 세 장비 IP·MAC 외에 `port 12416 or port 12414 or arp`가 전역으로 포함돼 있었다. 따라서 위 사본의 전체 패킷이 세 장비에만 속한다는 주장은 성립하지 않는다. 사용자 지시에 따라 이 실행의 live PCAP과 `jebao-router-allports-20260928-01/initial` 고정 사본을 삭제했고, 후속의 같은 범위 임시 캡처도 삭제했다. 위 SHA-256은 당시 파일을 검사한 기록일 뿐 **현재 재검증 가능한 preserved raw artifact가 아니다**. 부재 확인은 private 저장소에서 해당 캡처 디렉터리들이 없음을 확인한 2026-09-28T11:30Z의 목록 검사에 근거한다. 원본을 다시 해독할 수 없으므로 이 실행의 기존 수치와 패킷 분류는 현재 (c) reconstructed operator observation으로만 읽는다.
+
+세 장비만 남긴 후속 수집과 새 (a) 고정 사본은 [별도 실행 기록](2026-09-28-jebao-target-only-router-host-capture.md)에 남긴다. 옛 파일 삭제는 복구할 수 없다.

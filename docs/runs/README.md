@@ -1,6 +1,8 @@
 # 실기 실행 기록 (append-only)
 
-- [2026-09-28 Pro 공유기 전 포트 상시 캡처](2026-09-28-pro-router-continuous-all-port-capture.md) — AP·IoT bridge 상시 수집, 세 장비 포함 10분 고정 원본 2개 보존·TCP 누락 세그먼트 0; 장비 write 0, RF·앱→cloud 원문은 범위 밖.
+- [2026-09-28 Jebao 세 장비 전용 공유기·서버 캡처](2026-09-28-jebao-target-only-router-host-capture.md) — IP·MAC 세 binding만 전 포트 기록, 공유기·서버 고정 PCAP에서 대상 밖 0; 구형 전체망 수집과 LG 경로의 구형 Jebao 캡처 제거, 장비 write 0.
+
+- [2026-09-28 Pro 공유기 전 포트 상시 캡처](2026-09-28-pro-router-continuous-all-port-capture.md) — 최초 AP·IoT bridge 수집. 이후 전역 포트 필터 혼입이 확인돼 해당 원본을 삭제했으며, 보존 증거 등급은 파일 하단 정정 절 참조.
 
 - [2026-09-28 Pro 링크 무선 수신기 포착률 사전검증](2026-09-28-pro-link-sniffer-coverage-preflight.md) — 앱·장비write0; AP 상단16/하단56 송신에 비해 두 monitor의 송신본문 포착이 크게 부족하여 다음 live 전환 NO-GO.
 
