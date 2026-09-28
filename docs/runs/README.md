@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-28 Pro Async 수동 Pulse RF·bridge 관측](2026-09-28-pro-async-manual-pulse-rf-observation.md) — 앱 상단 Mode-only Pulse 뒤 하단 약 1.25초 후 Pulse 보고, 하단 별도 IP 제어0; 무선 매체는 캡처 누락으로 미확정.
+
 - [2026-09-28 Pro AP·브리지 Sine 연동 관측](2026-09-28-pro-ap-bridge-sine-linkpath-observation.md) — 상단 Mode-only Sine 뒤 하단 Sine 보고, AP·브리지 10초 71프레임 차집합0·하단 별도 제어0; 무선 원본 경로는 미확정.
 
 - [2026-09-28 Pro 수동 Pulse 실제 cloud 명령 캡처](2026-09-28-pro-manual-pulse-cloud-command-capture.md) — Mode-only P0·ACK 원문 및 인코더 byte 동일, 빈 시간표/TimerOFF Master·Async 양쪽 Pulse 유지; 전 포트 수동 캡처·장비 제어 송신0.
