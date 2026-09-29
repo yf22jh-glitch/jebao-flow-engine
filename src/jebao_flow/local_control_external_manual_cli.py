@@ -353,7 +353,7 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--at", help="timezone-aware ISO-8601 time")
     sub.add_parser("status")
     sub.add_parser("pause")
-    for name in ("activate", "activate-and-run", "resume-relink", "run"):
+    for name in ("activate", "activate-and-run", "resume-relink", "resume-verified", "run"):
         command = sub.add_parser(name)
         if name != "run":
             command.add_argument("--schedule-sha256", required=True)
@@ -428,6 +428,11 @@ async def _main_async(args: argparse.Namespace) -> dict[str, object]:
                 datetime.now(ZONE), current_time=lambda: datetime.now(ZONE)
             )
             return {"outcome": "resumed", "schedule_sha256": plan.sha256, **result}
+        if args.command == "resume-verified":
+            result = await scheduler.resume_verified_row(
+                datetime.now(ZONE), current_time=lambda: datetime.now(ZONE)
+            )
+            return {"outcome": "resumed_verified", "schedule_sha256": plan.sha256, **result}
         if args.command != "run":
             result = await scheduler.activate(
                 datetime.now(ZONE),

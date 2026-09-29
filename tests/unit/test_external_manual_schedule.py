@@ -25,6 +25,7 @@ from jebao_flow.local_control.resolver import (
     CurrentEndpointResolutionError,
     ResolvedEndpoint,
 )
+from jebao_flow.protocol.errors import ProtocolTimeoutError
 
 _FILE = Path(__file__).resolve().parents[2] / "config/examples/pro-external-manual-daily.json"
 _KST = timezone(timedelta(hours=9))
@@ -468,6 +469,87 @@ async def test_duplicate_boundary_never_sends_and_external_drift_pauses(tmp_path
     with pytest.raises(ValueError, match="external control"):
         await scheduler.verify_idle()
     assert store.active()["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_idle_auth_timeout_retries_read_only_once_without_pausing(tmp_path, monkeypatch):
+    scheduler, backend, store = _scheduler(tmp_path, slave_timer=False)
+    await scheduler.activate(_at(7, 5))
+    sent_before = list(backend.sent)
+    original = backend.fresh_pair
+    attempts = 0
+
+    async def transient(*, preserve_raw=True):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ProtocolTimeoutError("login response was not received")
+        return await original(preserve_raw=preserve_raw)
+
+    monkeypatch.setattr(backend, "fresh_pair", transient)
+    await scheduler.verify_idle()
+    assert attempts == 2
+    assert backend.sent == sent_before
+    assert store.active()["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_two_idle_auth_timeouts_pause_without_any_write(tmp_path, monkeypatch):
+    scheduler, backend, store = _scheduler(tmp_path, slave_timer=False)
+    await scheduler.activate(_at(7, 5))
+    sent_before = list(backend.sent)
+    attempts = 0
+
+    async def timeout(*, preserve_raw=True):
+        nonlocal attempts
+        attempts += 1
+        raise ProtocolTimeoutError("login response was not received")
+
+    monkeypatch.setattr(backend, "fresh_pair", timeout)
+    with pytest.raises(ProtocolTimeoutError):
+        await scheduler.verify_idle()
+    assert attempts == 2
+    assert backend.sent == sent_before
+    assert store.active()["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_verified_current_row_resumes_without_replaying_children(tmp_path):
+    scheduler, backend, store = _scheduler(tmp_path, slave_timer=False)
+    await scheduler.activate(_at(7, 5))
+    key = scheduler.plan.event_key(_at(7, 5))
+    sent_before = list(backend.sent)
+    active = store.active()
+    active["status"] = "paused"
+    store.set_active(active)
+
+    result = await scheduler.resume_verified_row(_at(7, 6), current_time=lambda: _at(7, 6))
+    assert result["writes"] == 0
+    assert backend.sent == sent_before
+    assert store.operation(key)["phase"] == "verified"
+    assert store.active()["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_verified_resume_rejects_drift_and_stale_row_without_write(tmp_path):
+    scheduler, backend, store = _scheduler(tmp_path, slave_timer=False)
+    await scheduler.activate(_at(7, 5))
+    active = store.active()
+    active["status"] = "paused"
+    store.set_active(active)
+    sent_before = list(backend.sent)
+    original_pair = backend.pair
+    backend.pair = replace(backend.pair, slave=replace(backend.pair.slave, flow=41))
+    with pytest.raises(ValueError, match="external control"):
+        await scheduler.resume_verified_row(_at(7, 6))
+    assert store.active()["status"] == "paused"
+    assert backend.sent == sent_before
+
+    backend.pair = original_pair
+    with pytest.raises(ValueError, match="scheduled row changed"):
+        await scheduler.resume_verified_row(_at(7, 6), current_time=lambda: _at(8, 40))
+    assert store.active()["status"] == "paused"
+    assert backend.sent == sent_before
 
 
 @pytest.mark.asyncio

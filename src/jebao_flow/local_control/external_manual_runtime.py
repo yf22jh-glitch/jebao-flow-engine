@@ -25,6 +25,7 @@ from jebao_flow.local_control.external_manual_schedule import (
     local_time,
     parse_schedule,
 )
+from jebao_flow.protocol.errors import ProtocolTimeoutError
 
 _MAX_RECORD = 64 * 1024
 
@@ -827,11 +828,102 @@ class ExternalManualScheduler:
         self.store.set_active(state)
         return {"event": row.label, "operation": key, "writes": writes, "mode": row.mode}
 
+    async def resume_verified_row(
+        self, now: datetime, *, current_time: Callable[[], datetime] | None = None
+    ) -> dict[str, object]:
+        """Re-arm an already verified current row without replaying any device write."""
+        local = local_time(now)
+        self._require_plan_binding()
+        state = self.store.active()
+        if (
+            state is None
+            or state.get("status") != "paused"
+            or state.get("schedule_sha256") != self.plan.sha256
+            or state.get("master_identity") != self.backend.master_identity
+            or state.get("slave_identity") != self.backend.slave_identity
+            or state.get("upper_is_master") is not self.backend.upper_is_master
+        ):
+            raise ValueError("there is no matching paused schedule to re-arm")
+        row = self.plan.current(local)
+        key = self.plan.event_key(local, row)
+        record = self.store.operation(key)
+        steps = record.get("steps") if record is not None else None
+        verified = record.get("verified") if record is not None else None
+        if (
+            state.get("last_event") != key
+            or record is None
+            or record.get("kind") != "row"
+            or record.get("phase") != "verified"
+            or not isinstance(record.get("after"), dict)
+            or not isinstance(steps, list)
+            or not isinstance(verified, list)
+            or len(steps) != len(verified)
+            or state.get("next_boundary_at") != self.plan.boundary(local).isoformat()
+            or state.get("expected", {}).get("mode") != row.mode
+            or (row.feeding and state.get("feed_exit_at") != self.plan.boundary(local).isoformat())
+        ):
+            raise ValueError("the current row was not completely verified")
+        if self.backend.unfinished():
+            raise ValueError("a Pro child journal is unfinished")
+        for index, (step, item) in enumerate(zip(steps, verified, strict=True)):
+            if not isinstance(step, dict) or not isinstance(item, dict):
+                raise ValueError("verified child record is invalid")
+            request_id = f"{key}_{step.get('suffix')}"
+            if (
+                item.get("index") != index
+                or item.get("request_id") != request_id
+                or self.backend.child_record(request_id) != ("verified", item.get("journal_sha256"))
+            ):
+                raise ValueError("verified child journal changed")
+        await self.backend.validate_plan(self.plan)
+        pair = await self.backend.fresh_pair()
+        images = state.get("images")
+        if not isinstance(images, list):
+            raise ValueError("scheduled image baseline is invalid")
+        self._require_manual_pair(pair, images)
+        if row.feeding:
+            if pair.master.mode != "feed" or pair.slave.mode != "feed":
+                raise ValueError("current Feeding row changed")
+        else:
+            self._require_previous(pair, state)
+            master_flow, slave_flow = self._row_flows(row)
+            if (
+                pair.master.mode != row.mode
+                or pair.slave.mode != row.mode
+                or pair.master.flow != master_flow
+                or pair.slave.flow != slave_flow
+                or (
+                    row.frequency is not None
+                    and (
+                        pair.master.frequency != row.frequency
+                        or pair.slave.frequency != row.frequency
+                    )
+                )
+            ):
+                raise ValueError("fresh pair does not match the current row")
+        if current_time is not None and self.plan.event_key(current_time()) != key:
+            raise ValueError("scheduled row changed during no-write resume")
+        state["status"] = "active"
+        self.store.set_active(state)
+        return {"event": row.label, "operation": key, "writes": 0, "mode": row.mode}
+
     async def verify_idle(self) -> None:
         """Detect app/HA changes between boundaries without issuing a control frame."""
         state = self._active_state()
         try:
-            pair = await self.backend.fresh_pair(preserve_raw=False)
+            for attempt in (1, 2):
+                try:
+                    pair = await self.backend.fresh_pair(preserve_raw=False)
+                    break
+                except ProtocolTimeoutError:
+                    if attempt == 2:
+                        raise
+                    print(
+                        json.dumps(
+                            {"outcome": "idle_read_timeout", "attempt": attempt, "device_writes": 0}
+                        ),
+                        flush=True,
+                    )
             images = state["images"]
             if not isinstance(images, list):
                 raise ValueError("scheduler image baseline is invalid")
