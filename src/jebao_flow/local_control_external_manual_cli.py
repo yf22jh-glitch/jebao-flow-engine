@@ -311,6 +311,7 @@ async def _main_async(args: argparse.Namespace) -> dict[str, object]:
             "next_boundary": plan.boundary(now).isoformat(),
             "device_writes": 0,
         }
+    _activate_current_hardware_safety_volume_identity()
     store = SchedulerStore()
     if args.command == "save":
         plan = load_schedule(args.file)

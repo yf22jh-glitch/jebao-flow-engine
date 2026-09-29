@@ -335,12 +335,42 @@ async def test_preview_cli_never_builds_a_live_backend(monkeypatch):
 
     monkeypatch.setattr(scheduler_cli, "SchedulerStore", forbidden)
     monkeypatch.setattr(scheduler_cli, "LiveBackend", forbidden)
+    monkeypatch.setattr(
+        scheduler_cli, "_activate_current_hardware_safety_volume_identity", forbidden
+    )
     args = type(
         "Args", (), {"command": "preview", "file": _FILE, "at": "2026-09-29T13:41:00+09:00"}
     )()
     result = await scheduler_cli._main_async(args)
     assert result["current"] == "13:40"
     assert result["device_writes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_status_loads_volume_identity_before_opening_store(monkeypatch):
+    events: list[str] = []
+
+    def activate_identity():
+        events.append("identity")
+
+    class Store:
+        def __init__(self):
+            events.append("store")
+
+        def active(self):
+            return None
+
+        def runner_running(self):
+            return False
+
+    monkeypatch.setattr(
+        scheduler_cli, "_activate_current_hardware_safety_volume_identity", activate_identity
+    )
+    monkeypatch.setattr(scheduler_cli, "SchedulerStore", Store)
+    args = type("Args", (), {"command": "status"})()
+    result = await scheduler_cli._main_async(args)
+    assert result["device_writes"] == 0
+    assert events == ["identity", "store"]
 
 
 @pytest.mark.asyncio
