@@ -1,7 +1,4 @@
 services:
-  jebao-flow-local:
-    image: sha256:2d02c549bfbdc47b617a1489e3ba816f35f59dea1e155c5e27492de4cafc9c88
-
   jebao-flow-pro-manual-schedule:
     extends:
       file: compose.yaml
