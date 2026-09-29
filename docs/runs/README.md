@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-29 Pro 외부 수동 시간표 첫 활성화 중단](2026-09-29-pro-external-manual-activation-first-stop.md) — 31행 저장·권한 PASS 후 결속 상단 TimerOFF 단회 ACK 미확인, 사후 baseline 동일·후속 송신0·실행기 미기동.
+
 - [2026-09-29 Pro Mode·Flow 1단계 5분 시험](2026-09-29-pro-mode-flow-one-step-five-minute-trial.md) — 역방향 Master/Async에서 Pulse→Sine·Flow38→39, 5분 뒤 Sine→Pulse·Flow39→40; 8send/8ACK·각 구간 5분 보고 유지·image 불변.
 
 - [2026-09-29 상단 Flow30 미확인 저널 종결](2026-09-29-pro-upper-flow30-uncertain-disposition.md) — 현장 미적용 확인과 fresh raw Flow38로 원문 보존형 `ABANDONED`; 제어 송신0·상단 미종결0.
