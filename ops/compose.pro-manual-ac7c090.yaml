@@ -1,0 +1,22 @@
+services:
+  jebao-flow-local:
+    image: sha256:2d02c549bfbdc47b617a1489e3ba816f35f59dea1e155c5e27492de4cafc9c88
+
+  jebao-flow-pro-manual-schedule:
+    extends:
+      file: compose.yaml
+      service: jebao-flow-local
+    image: sha256:2d02c549bfbdc47b617a1489e3ba816f35f59dea1e155c5e27492de4cafc9c88
+    container_name: jebao-flow-pro-manual-schedule
+    entrypoint: ["jebao-flow-pro-manual-schedule"]
+    command:
+      - run
+      - --master-member
+      - flow_pro_d7a8
+      - --slave-member
+      - flow_pro_d0a4
+      - --upper-member
+      - flow_pro_d0a4
+      - --lower-member
+      - flow_pro_d7a8
+      - --write-enabled
