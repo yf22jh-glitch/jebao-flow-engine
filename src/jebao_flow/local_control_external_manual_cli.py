@@ -147,6 +147,7 @@ class LiveBackend:
             ("master", "linkage_role", "master"),
             ("master", "schedule_enable", False),
             ("slave", "schedule_enable", False),
+            ("slave", "linkage_role", "independent"),
             ("slave", "linkage_role", "async_slave"),
             ("master", "manual_mode", "feed"),
         }
