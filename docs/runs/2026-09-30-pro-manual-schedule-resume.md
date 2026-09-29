@@ -23,3 +23,10 @@
 - 증거 등급 (a): 대상 한정 host packet capture의 UTC 22:34:30–22:34:36 구간에서 하단 Master의 인증·462B 상태 응답은 완료됐다. 이어 상단 Async의 새 TCP 연결에서 passcode 교환 뒤 login 요청을 보냈으나, 462B 비동기 상태 보고만 수신하고 login 응답은 5초 안에 관측되지 않았다. 연결 종료 시각은 오류 로그와 일치한다. 이 자료는 캡처된 인증 응답의 부재를 보일 뿐 장비가 응답을 생성하지 않았다는 증명은 아니다.
 - 코드 대조: `LiveBackend.fresh_pair()`가 순차로 두 장비를 인증·조회하며, `GizwitsSession.authenticate()`의 login 응답 timeout이 `ProtocolTimeoutError`를 낸다. `ExternalManualScheduler.verify_idle()`은 읽기 실패도 즉시 영구 paused로 바꾸므로 한 차례 실패만으로 다음 행을 잃는다. 이는 제어 송신 재시도 문제가 아니라 읽기 전용 idle 확인의 실패 처리 결함이다.
 - 후속 조치 전 판정: 현재 행의 부모 operation은 이미 `verified`이므로 같은 행에 `activate --replace-paused`를 다시 실행하면 안 된다. 재송신 없는 현재 행 검증·재개 경로와 한정된 읽기 전용 재시도를 마련한 뒤 별도 결과를 덧붙인다.
+
+## 후속 조치 결과 — 완료 행의 무송신 재개
+
+- 보존 raw artifact id `idle-auth-timeout-20260929T2234Z.pcapng`: UTC 2026-09-29 22:34:26–22:34:40, 152패킷, SHA-256 `a9a98f211dde0b7bdd98a82787b203b42cd81f421f41c854e310a8f552523a26`. 홈서버 private capture에만 보관하고 저장소에는 넣지 않았다.
+- source `640e253`, image `sha256:76b90f503384351b8c25b0530793a30a306b36e6b9d69a40580d88ea787c3d7e`에서 2026-09-29 22:45:23–22:45:46 UTC `resume-verified`로 `07:03` 행을 재개했다. 같은 물리 binding·계획·verified parent와 3개 child digest·fresh roles/TimerOFF/power/mode/Flow/Frequency/image를 확인한 뒤 `writes=0`으로 active 상태를 복구했다. 기존 parent journal SHA-256은 `3403f771a222621e35370015dc08f476d6aa7af06da3154bf4b82cbf2b7cbd17`로 불변이었다.
+- 22:49:02 UTC 재확인에서 실행기는 시작 22:45:46 이후 restart 0, `runner_running=true`, `status=active`, 마지막 `07:03` 행, 다음 `08:40 KST` 경계를 유지했다. active-state artifact SHA-256 `d0b80c27ef9ee4036720e2d5aeecacc52de67b2807492cc6e696c01040d605f3`; 보고 기대값은 하단 Master Sine40/F80, 상단 Async Sine35/F80이다. 이 3분여 관측은 **08:40 자동 경계 성공이나 장기 안정성을 아직 증명하지 않는다.**
+- 이 후속 조치에서 새로 확인한 것: 읽기 전용 idle 인증 timeout과 이미 완료한 물리 child 재전송은 분리할 수 있다. 실패 회차의 장비 제어 송신은 없었고, 같은 행의 완료된 child를 재실행하지 않고 현재 상태를 검증해 반복 실행을 다시 시작했다.
