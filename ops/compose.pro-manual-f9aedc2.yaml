@@ -3,7 +3,7 @@ services:
     extends:
       file: compose.yaml
       service: jebao-flow-local
-    image: sha256:22370c07146c83e3143a11a245522e2b201bfbd9565078d403c163c9a1e72931
+    image: sha256:11ec428023e0969c6dc81c668fc3a614863b63a61a58d3e0d6e456ce649aad69
     container_name: jebao-flow-pro-manual-schedule
     entrypoint: ["jebao-flow-pro-manual-schedule"]
     command:
