@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-29 상단 Flow30 미확인 저널 종결](2026-09-29-pro-upper-flow30-uncertain-disposition.md) — 현장 미적용 확인과 fresh raw Flow38로 원문 보존형 `ABANDONED`; 제어 송신0·상단 미종결0.
+
 - [2026-09-28 결속 상단 Flow30 단독 송신](2026-09-28-pro-upper-linked-flow30-direct-attempt.md) — `{Flow:30}` 1회 ACK timeout, 후속 Async·Flow37 유지, 재송신·복구 0; 미완료 저널 보존.
 
 - [2026-09-28 Pro 역방향 Async 상단 Flow37 적용](2026-09-28-pro-reverse-linked-flow37.md) — 하단 Master 해제→상단 Flow45→37→하단 재결속 각 1send/VERIFIED, image 불변·직후 Tide/fault0; 현장 조건 재확인 누락 기록.
