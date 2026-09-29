@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-29 Pro 외부 수동 시간표 전환 중 잠금 중단](2026-09-29-pro-external-manual-transition-lock-stop.md) — 역할 분리·상단 TimerOFF 5단계와 현행 Tide/Flow 4단계 ACK 확인, 마지막 Master 재결속은 잠금 충돌로 미전송·실행 일시정지.
+
 - [2026-09-29 Pro 외부 수동 시간표 첫 활성화 중단](2026-09-29-pro-external-manual-activation-first-stop.md) — 31행 저장·권한 PASS 후 결속 상단 TimerOFF 단회 ACK 미확인, 사후 baseline 동일·후속 송신0·실행기 미기동.
 
 - [2026-09-29 Pro Mode·Flow 1단계 5분 시험](2026-09-29-pro-mode-flow-one-step-five-minute-trial.md) — 역방향 Master/Async에서 Pulse→Sine·Flow38→39, 5분 뒤 Sine→Pulse·Flow39→40; 8send/8ACK·각 구간 5분 보고 유지·image 불변.
