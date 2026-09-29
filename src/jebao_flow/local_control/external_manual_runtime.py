@@ -465,12 +465,17 @@ class ExternalManualScheduler:
         self.store.set_active(state)
         try:
             transition: list[Child] = []
+            if pair.slave.timer or pair.master.timer:
+                transition.append(Child("master", "linkage_role", "independent", "release"))
             if pair.slave.timer:
+                transition.append(Child("slave", "linkage_role", "independent", "slave_release"))
                 transition.append(Child("slave", "schedule_enable", False, "slave_timer_off"))
             if pair.master.timer:
                 transition.append(Child("master", "schedule_enable", False, "master_timer_off"))
             if pair.slave.timer:
                 transition.append(Child("slave", "linkage_role", "async_slave", "slave_relink"))
+            if pair.slave.timer or pair.master.timer:
+                transition.append(Child("master", "linkage_role", "master", "master_relink"))
             if transition:
                 key = f"pro_prep_{local:%Y%m%d%H%M%S}_{self.plan.sha256[:16]}"
                 pair = await self._execute_steps(

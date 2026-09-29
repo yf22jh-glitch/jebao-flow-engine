@@ -146,11 +146,17 @@ def test_duplicate_keys_are_rejected():
 
 
 @pytest.mark.asyncio
-async def test_activation_turns_slave_timer_off_before_current_row(tmp_path):
+async def test_activation_releases_master_before_slave_timer_off_and_relinks_before_row(tmp_path):
     scheduler, backend, store = _scheduler(tmp_path)
     state = await scheduler.activate(_at(12, 30))
     assert state["status"] == "active"
-    assert [child.suffix for child, _ in backend.sent] == ["slave_timer_off", "slave_relink"]
+    assert [child.suffix for child, _ in backend.sent] == [
+        "release",
+        "slave_release",
+        "slave_timer_off",
+        "slave_relink",
+        "master_relink",
+    ]
     assert backend.pair.slave.timer is False
     assert backend.pair.slave.role == "async_slave"
     assert backend.pair.master.image_sha256 == _IMAGE_MASTER
@@ -164,11 +170,30 @@ async def test_activation_turns_both_timers_off_before_relink(tmp_path):
     backend.pair = replace(backend.pair, master=replace(backend.pair.master, timer=True))
     await scheduler.activate(_at(12, 30))
     assert [child.suffix for child, _ in backend.sent] == [
+        "release",
+        "slave_release",
         "slave_timer_off",
         "master_timer_off",
         "slave_relink",
+        "master_relink",
     ]
     assert not backend.pair.master.timer and not backend.pair.slave.timer
+
+
+@pytest.mark.asyncio
+async def test_failed_slave_timer_off_stops_before_any_relink(tmp_path):
+    scheduler, backend, store = _scheduler(tmp_path)
+    backend.fail_on = "slave_timer_off"
+    with pytest.raises(ValueError, match="child did not verify"):
+        await scheduler.activate(_at(12, 30))
+    assert [child.suffix for child, _ in backend.sent] == [
+        "release",
+        "slave_release",
+        "slave_timer_off",
+    ]
+    assert backend.pair.master.role == "independent"
+    assert backend.pair.slave.role == "independent"
+    assert store.active()["status"] == "paused"
 
 
 @pytest.mark.asyncio

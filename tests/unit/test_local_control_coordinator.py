@@ -76,6 +76,12 @@ def _status(
     return bytes(raw)
 
 
+def _pro_linked_status(*, timer: bool, linkage: int) -> bytes:
+    raw = bytearray(_status(enabled=True, flow=40))
+    raw[0] = 1 | (int(timer) << 1) | (linkage << 2)
+    return bytes(raw)
+
+
 class _Resolver:
     def __init__(self, endpoints: tuple[ResolvedEndpoint, ...]) -> None:
         self.endpoints = endpoints
@@ -188,6 +194,73 @@ def _uncertain_slave_flow(tmp_path: Path, *, current_flow: int):
     )
     journal.save(record, uncertain)
     return coordinator, journal, uncertain, session
+
+
+def _uncertain_pro_timer_off(tmp_path: Path, *, current: bytes):
+    target = _binding("wavemaker_slave", "a")
+    endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
+    session = _Session([current])
+    coordinator, journal = _coordinator(
+        tmp_path,
+        qualifications=(),
+        resolver=_Resolver((endpoint,)),
+        sessions=_SessionFactory({"current-address": [session]}),
+    )
+    writer = ConnectedDeviceWriter(endpoint, control_flow_bounds=(30, 100))
+    intent = LocalControlIntent(
+        request_id="uncertain_pro_timer_off_01",
+        target=target,
+        function="schedule_enable",
+        value=False,
+    )
+    prepared = writer.prepare_scalar(intent, _pro_linked_status(timer=True, linkage=3))
+    record = coordinator._create_record(
+        request_id=intent.request_id,
+        intent_sha256="f" * 64,
+        prepared=(prepared,),
+    )
+    uncertain = record.evolve(
+        phase=TransactionPhase.RECOVERY_REQUIRED,
+        actions=(record.actions[0].model_copy(update={"phase": ActionPhase.UNCERTAIN}),),
+    )
+    journal.save(record, uncertain)
+    return coordinator, journal, uncertain, session
+
+
+@pytest.mark.asyncio
+async def test_uncertain_pro_timer_off_can_be_retired_without_write_at_fresh_baseline(
+    tmp_path: Path,
+) -> None:
+    coordinator, journal, uncertain, session = _uncertain_pro_timer_off(
+        tmp_path, current=_pro_linked_status(timer=True, linkage=3)
+    )
+    result = await coordinator.abandon_uncertain_pro_timer_off_at_baseline(uncertain.request_id)
+
+    abandoned = journal.load(uncertain.request_id)
+    assert abandoned is not None
+    assert result.phase is TransactionPhase.ABANDONED
+    assert result.physical_write_count == 0
+    assert session.sent == []
+    assert journal.unfinished_for((uncertain.actions[0].target.physical_identity_key,)) == ()
+    assert abandoned.actions[0].phase is ActionPhase.ABANDONED
+    assert abandoned.actions[0].diagnostic == "timer_baseline_observed_after_no_ack"
+    assert journal.load_blob(abandoned.actions[0].external_observation_sha256 or "")
+    prior = json.loads(journal.load_blob(abandoned.abandoned_prior_record_sha256 or ""))
+    assert prior["phase"] == "recovery_required"
+    assert prior["actions"][0]["phase"] == "uncertain"
+
+
+@pytest.mark.asyncio
+async def test_uncertain_pro_timer_off_is_not_retired_when_forward_state_is_present(
+    tmp_path: Path,
+) -> None:
+    coordinator, journal, uncertain, session = _uncertain_pro_timer_off(
+        tmp_path, current=_pro_linked_status(timer=False, linkage=0)
+    )
+    with pytest.raises(LocalControlExecutionError, match="not the owned baseline"):
+        await coordinator.abandon_uncertain_pro_timer_off_at_baseline(uncertain.request_id)
+    assert journal.load(uncertain.request_id) == uncertain
+    assert session.sent == []
 
 
 @pytest.mark.asyncio

@@ -50,6 +50,7 @@ from jebao_flow.local_control.schedule import (
 )
 from jebao_flow.operator_capture.schedule_model import NativeLinkageMode
 from jebao_flow.protocol.profiles import get_product_schema
+from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
 
 
 class LocalControlExecutionError(RuntimeError):
@@ -546,6 +547,98 @@ class LocalControlCoordinator:
                     **action.model_dump(),
                     "phase": ActionPhase.ABANDONED,
                     "diagnostic": "operator_adopted_current_flow",
+                    "external_observation_sha256": observation_sha256,
+                }
+            )
+            replacement = LocalControlJournalRecord.model_validate(
+                {
+                    **record.model_dump(),
+                    "phase": TransactionPhase.ABANDONED,
+                    "actions": (abandoned_action,),
+                    "revision": record.revision + 1,
+                    "updated_at": datetime.now(UTC),
+                    "abandoned_prior_record_sha256": prior_sha256,
+                }
+            )
+            self._journal.save(record, replacement)
+            return self._result(replacement, physical_write_count=0)
+
+    async def abandon_uncertain_pro_timer_off_at_baseline(
+        self, request_id: str
+    ) -> LocalControlResult:
+        """Retire one unacknowledged Pro TimerOFF only when fresh raw is its baseline.
+
+        This does not infer that the frame never arrived.  It records the current
+        baseline and original uncertain journal without sending a control frame.
+        """
+
+        record = self._journal.load(request_id)
+        if record is None:
+            raise KeyError("local-control transaction does not exist")
+        if record.phase is not TransactionPhase.RECOVERY_REQUIRED or len(record.actions) != 1:
+            raise LocalControlExecutionError("only one uncertain TimerOFF can be retired")
+        action = record.actions[0]
+        if (
+            action.target.product_key != LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
+            or action.function != "schedule_enable"
+            or action.phase is not ActionPhase.UNCERTAIN
+            or action.acknowledgement_sha256 is not None
+            or action.verification_kind != "scalar_fields"
+            or action.recovery_policy != "restore_baseline"
+            or not action.restore_on_recovery
+            or record.native_context_sha256 is not None
+            or record.recovery_order is not None
+        ):
+            raise LocalControlExecutionError("request is not one unacknowledged Pro TimerOFF")
+        expected = json.loads(self._journal.load_blob(action.expected_readback_sha256))
+        baseline = json.loads(self._journal.load_blob(action.baseline_readback_sha256))
+        if (
+            expected.get("TimerON") is not False
+            or baseline.get("TimerON") is not True
+            or set(expected) != set(baseline)
+        ):
+            raise LocalControlExecutionError(
+                "request does not own a true-to-false Timer transition"
+            )
+
+        endpoint = await self._resolver.resolve(action.target)
+        if endpoint.target != action.target:
+            raise LocalControlExecutionError("current endpoint changed its physical binding")
+        key = action.target.physical_identity_key
+        with self._lease.acquire((key,)):
+            self._require_no_other_unfinished(request_id, (key,))
+            if self._journal.load(request_id) != record:
+                raise LocalControlExecutionError("journal changed before observation")
+            writer = self._writer_factory(endpoint)
+            try:
+                capture = await writer.connect_and_capture(accept_reports=True)
+            finally:
+                await writer.close()
+            prepared = self._forward_prepared(action, endpoint)
+            if (
+                verify_prepared_readback(prepared, capture.status_payload)
+                or not verify_prepared_baseline(prepared, capture.status_payload)
+            ):
+                raise LocalControlExecutionError("fresh Timer state is not the owned baseline")
+
+            observation_sha256 = self._journal.install_blob(capture.wire_frame)
+            old_record_bytes = (
+                json.dumps(
+                    record.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("ascii")
+                + b"\n"
+            )
+            prior_sha256 = self._journal.install_blob(old_record_bytes)
+            if prior_sha256 != self._journal.record_digest(record):
+                raise LocalControlExecutionError("prior journal evidence changed")
+            abandoned_action = JournalAction.model_validate(
+                {
+                    **action.model_dump(),
+                    "phase": ActionPhase.ABANDONED,
+                    "diagnostic": "timer_baseline_observed_after_no_ack",
                     "external_observation_sha256": observation_sha256,
                 }
             )

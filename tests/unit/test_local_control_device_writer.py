@@ -427,6 +427,46 @@ def test_pro_schedule_enable_matches_the_audited_multi_field_app_command() -> No
     )
 
 
+def test_pro_timer_off_after_role_release_omits_linkage_from_the_frame() -> None:
+    writer = ConnectedDeviceWriter(
+        ResolvedEndpoint(_binding(), "runtime-address"),
+        session_factory=_Session,
+    )
+    # Both states have TimerON, but only the linked command owns Linkage.
+    linked = writer.prepare_scalar(
+        LocalControlIntent(
+            request_id="request_linked_timer_off",
+            target=_binding(),
+            function="schedule_enable",
+            value=False,
+        ),
+        _status(flags=0b00001111),
+    )
+    independent = writer.prepare_scalar(
+        LocalControlIntent(
+            request_id="request_independent_timer_off",
+            target=_binding(),
+            function="schedule_enable",
+            value=False,
+        ),
+        _status(flags=0b00000011),
+    )
+
+    assert json.loads(linked.expected_readback) == {
+        "TimerON": False,
+        "SwitchON": True,
+        "Linkage": "independent",
+    }
+    assert json.loads(independent.expected_readback) == {
+        "TimerON": False,
+        "SwitchON": True,
+    }
+    assert linked.forward_payload != independent.forward_payload
+    assert independent.forward_payload == build_control_payload(
+        LOCAL_WAVEMAKER_PRO, {"TimerON": False, "SwitchON": True}
+    )
+
+
 def test_pro_cross_flow_app_label_maps_to_the_stable_protocol_identity() -> None:
     writer = ConnectedDeviceWriter(
         ResolvedEndpoint(_binding(), "runtime-address"),
