@@ -1,0 +1,3 @@
+services:
+  jebao-flow-pro-manual-schedule:
+    image: sha256:76b90f503384351b8c25b0530793a30a306b36e6b9d69a40580d88ea787c3d7e
