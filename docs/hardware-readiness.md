@@ -4,6 +4,11 @@
 Capability 문서, 홈서버의 private 설정, 읽기 전용 discovery/probe 결과와 현장 확인을 함께
 대조합니다. 어느 한 자료만으로 장비 역할이나 쓰기 권한을 추정하지 않습니다.
 
+현재 local-control 운용에서는 사용자가 구체적인 시험을 지시하고 원격 IoT 전원 차단 수단을
+이미 알렸다면, 매 operation마다 현장 체류·전원 차단 가능 여부를 다시 묻는 절차를 적용하지
+않습니다. 즉시 중단 수단과 사용자 중단 우선 원칙은 유지하며, 아래 동결된 native 하네스의
+역사적 체크리스트는 새 local-control 실기의 추가 admission gate로 사용하지 않습니다.
+
 공개 저장소에는 MAC, Gizwits device ID, 사설 IP, passcode와 MQTT 비밀번호를 기록하지
 않습니다. 실제 값은 홈서버의 gitignored private 설정에만 두고, 이 문서에는 논리 역할과 검증
 결과만 남깁니다.
