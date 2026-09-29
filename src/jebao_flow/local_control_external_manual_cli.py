@@ -30,7 +30,7 @@ from jebao_flow.local_control.external_manual_runtime import (
 from jebao_flow.local_control.external_manual_schedule import ZONE, ManualSchedule, load_schedule
 from jebao_flow.local_control.install import load_current_private_config
 from jebao_flow.local_control.journal import LocalControlJournalStore
-from jebao_flow.local_control.lease import LocalControlLease
+from jebao_flow.local_control.lease import LocalControlLease, LocalControlLeaseBusyError
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.qualification import load_current_qualifications
 from jebao_flow.local_control.qualification_producer import load_current_install_manifest
@@ -121,6 +121,10 @@ class LiveBackend:
 
     def unfinished(self) -> bool:
         return bool(self.journal.unfinished_for((self.master_identity, self.slave_identity)))
+
+    def child_record(self, request_id: str) -> tuple[str, str] | None:
+        record = self.journal.load(request_id)
+        return None if record is None else (record.phase.value, self.journal.record_digest(record))
 
     async def validate_plan(self, plan: ManualSchedule) -> None:
         bounds = {item.id: item.limits for item in self.config.devices}
@@ -229,7 +233,16 @@ class LiveBackend:
         intent = LocalControlIntent(
             request_id=request_id, target=target, function=child.function, value=child.value
         )
-        result = await self.coordinator.execute(intent)
+        for attempt in range(10):
+            try:
+                result = await self.coordinator.execute(intent)
+                break
+            except LocalControlLeaseBusyError:
+                # The lease was refused before journal creation and before a send.  An
+                # existing child record, including an uncertain one, must never replay.
+                if self.journal.load(request_id) is not None or attempt == 9:
+                    raise
+                await asyncio.sleep(0.5)
         return result.accepted, result.physical_write_count, result.journal_sha256
 
 
@@ -285,7 +298,7 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--at", help="timezone-aware ISO-8601 time")
     sub.add_parser("status")
     sub.add_parser("pause")
-    for name in ("activate", "activate-and-run", "run"):
+    for name in ("activate", "activate-and-run", "resume-relink", "run"):
         command = sub.add_parser(name)
         if name != "run":
             command.add_argument("--schedule-sha256", required=True)
@@ -355,6 +368,11 @@ async def _main_async(args: argparse.Namespace) -> dict[str, object]:
     )
     scheduler = ExternalManualScheduler(plan=plan, store=store, backend=backend)
     with store.lock():
+        if args.command == "resume-relink":
+            result = await scheduler.resume_unattempted_relink(
+                datetime.now(ZONE), current_time=lambda: datetime.now(ZONE)
+            )
+            return {"outcome": "resumed", "schedule_sha256": plan.sha256, **result}
         if args.command != "run":
             result = await scheduler.activate(
                 datetime.now(ZONE),

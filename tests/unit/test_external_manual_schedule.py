@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,7 @@ from jebao_flow.local_control.external_manual_runtime import (
     SchedulerStore,
 )
 from jebao_flow.local_control.external_manual_schedule import load_schedule, parse_schedule
+from jebao_flow.local_control.lease import LocalControlLeaseBusyError
 
 _FILE = Path(__file__).resolve().parents[2] / "config/examples/pro-external-manual-daily.json"
 _KST = timezone(timedelta(hours=9))
@@ -51,6 +53,8 @@ class FakeBackend:
         )
         self.sent: list[tuple[Child, str]] = []
         self.fail_on: str | None = None
+        self.busy_on: str | None = None
+        self.child_records: dict[str, tuple[str, str]] = {}
         self.copy_on_relink = True
 
     async def validate_plan(self, _plan) -> None:
@@ -59,13 +63,19 @@ class FakeBackend:
     def unfinished(self) -> bool:
         return False
 
+    def child_record(self, request_id: str) -> tuple[str, str] | None:
+        return self.child_records.get(request_id)
+
     async def fresh_pair(self, *, preserve_raw: bool = True) -> PairState:
         return self.pair
 
     async def execute(self, child: Child, request_id: str) -> tuple[bool, int, str]:
+        if child.suffix == self.busy_on:
+            raise LocalControlLeaseBusyError("pre-send physical lock is busy")
         self.sent.append((child, request_id))
         if child.suffix == self.fail_on:
             return False, 1, "f" * 64
+        self.child_records[request_id] = ("verified", "f" * 64)
         master, slave = self.pair.master, self.pair.slave
         if child.target == "master":
             if child.function == "linkage_role":
@@ -146,6 +156,58 @@ def test_duplicate_keys_are_rejected():
 
 
 @pytest.mark.asyncio
+async def test_live_backend_retries_only_pre_journal_lease_collision(monkeypatch):
+    backend = scheduler_cli.LiveBackend.__new__(scheduler_cli.LiveBackend)
+    backend.master = SimpleNamespace(product_key="pro", physical_identity_key=_MASTER)
+    backend.slave = SimpleNamespace(product_key="pro", physical_identity_key=_SLAVE)
+    attempts = 0
+
+    async def execute(_intent):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise LocalControlLeaseBusyError("read lease held")
+        return SimpleNamespace(accepted=True, physical_write_count=1, journal_sha256="f" * 64)
+
+    async def no_sleep(_seconds):
+        return None
+
+    backend.coordinator = SimpleNamespace(execute=execute)
+    backend.journal = SimpleNamespace(load=lambda _request_id: None)
+    monkeypatch.setattr(
+        scheduler_cli, "LocalControlIntent", lambda **values: SimpleNamespace(**values)
+    )
+    monkeypatch.setattr(scheduler_cli.asyncio, "sleep", no_sleep)
+    result = await backend.execute(
+        Child("master", "linkage_role", "master", "relink"), "req_12345678"
+    )
+    assert result == (True, 1, "f" * 64)
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_live_backend_does_not_retry_busy_collision_after_journal_exists(monkeypatch):
+    backend = scheduler_cli.LiveBackend.__new__(scheduler_cli.LiveBackend)
+    backend.master = SimpleNamespace(product_key="pro", physical_identity_key=_MASTER)
+    backend.slave = SimpleNamespace(product_key="pro", physical_identity_key=_SLAVE)
+    attempts = 0
+
+    async def execute(_intent):
+        nonlocal attempts
+        attempts += 1
+        raise LocalControlLeaseBusyError("read lease held")
+
+    backend.coordinator = SimpleNamespace(execute=execute)
+    backend.journal = SimpleNamespace(load=lambda _request_id: object())
+    monkeypatch.setattr(
+        scheduler_cli, "LocalControlIntent", lambda **values: SimpleNamespace(**values)
+    )
+    with pytest.raises(LocalControlLeaseBusyError):
+        await backend.execute(Child("master", "linkage_role", "master", "relink"), "req_12345678")
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_activation_releases_master_before_slave_timer_off_and_relinks_before_row(tmp_path):
     scheduler, backend, store = _scheduler(tmp_path)
     state = await scheduler.activate(_at(12, 30))
@@ -194,6 +256,66 @@ async def test_failed_slave_timer_off_stops_before_any_relink(tmp_path):
     assert backend.pair.master.role == "independent"
     assert backend.pair.slave.role == "independent"
     assert store.active()["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_pre_send_busy_final_relink_resumes_only_the_unattempted_child(tmp_path):
+    scheduler, backend, store = _scheduler(tmp_path, slave_timer=False)
+    backend.busy_on = "relink"
+    with pytest.raises(LocalControlLeaseBusyError):
+        await scheduler.activate(_at(14, 22))
+    prefix = list(backend.sent)
+    assert [child.suffix for child, _ in prefix] == ["release", "slave_flow", "mode"]
+    assert store.active()["status"] == "paused"
+
+    backend.busy_on = None
+    result = await scheduler.resume_unattempted_relink(_at(14, 25))
+    assert result["writes"] == 1
+    assert backend.sent[: len(prefix)] == prefix
+    assert backend.sent[-1] == (
+        Child("master", "linkage_role", "master", "relink"),
+        f"{scheduler.plan.event_key(_at(14, 25))}_relink",
+    )
+    assert len(backend.sent) == len(prefix) + 1
+    assert backend.pair.master.role == "master"
+    assert backend.pair.slave.mode == "tidal"
+    assert store.active()["status"] == "active"
+    assert store.operation(scheduler.plan.event_key(_at(14, 25)))["phase"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_resume_relink_refuses_drifted_pair_without_sending(tmp_path):
+    scheduler, backend, store = _scheduler(tmp_path, slave_timer=False)
+    backend.busy_on = "relink"
+    with pytest.raises(LocalControlLeaseBusyError):
+        await scheduler.activate(_at(14, 22))
+    prefix = list(backend.sent)
+    backend.busy_on = None
+    backend.pair = replace(backend.pair, slave=replace(backend.pair.slave, flow=44))
+
+    with pytest.raises(ValueError, match="fresh pair changed"):
+        await scheduler.resume_unattempted_relink(_at(14, 25))
+    assert backend.sent == prefix
+    assert store.active()["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_resume_relink_adopts_verified_child_without_resending(tmp_path):
+    scheduler, backend, store = _scheduler(tmp_path, slave_timer=False)
+    backend.busy_on = "relink"
+    with pytest.raises(LocalControlLeaseBusyError):
+        await scheduler.activate(_at(14, 22))
+    prefix = list(backend.sent)
+    backend.busy_on = None
+    request_id = f"{scheduler.plan.event_key(_at(14, 25))}_relink"
+    await backend.execute(Child("master", "linkage_role", "master", "relink"), request_id)
+    sent_with_child = list(backend.sent)
+
+    result = await scheduler.resume_unattempted_relink(_at(14, 25))
+    assert result["writes"] == 0
+    assert backend.sent == sent_with_child
+    assert len(backend.sent) == len(prefix) + 1
+    assert store.active()["status"] == "active"
 
 
 @pytest.mark.asyncio

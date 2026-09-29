@@ -73,6 +73,8 @@ class SchedulerBackend(Protocol):
 
     def unfinished(self) -> bool: ...
 
+    def child_record(self, request_id: str) -> tuple[str, str] | None: ...
+
 
 def _canonical(value: dict[str, object]) -> bytes:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -673,6 +675,157 @@ class ExternalManualScheduler:
             state["status"] = "paused"
             self.store.set_active(state)
             raise
+
+    async def resume_unattempted_relink(
+        self, now: datetime, *, current_time: Callable[[], datetime] | None = None
+    ) -> dict[str, object]:
+        """Finish only a pre-send-busy final Master relink; never replay a verified child."""
+
+        local = local_time(now)
+        self._require_plan_binding()
+        state = self.store.active()
+        if (
+            state is None
+            or state.get("status") != "paused"
+            or state.get("schedule_sha256") != self.plan.sha256
+            or state.get("master_identity") != self.backend.master_identity
+            or state.get("slave_identity") != self.backend.slave_identity
+            or state.get("upper_is_master") is not self.backend.upper_is_master
+        ):
+            raise ValueError("there is no matching paused schedule to complete")
+        row = self.plan.current(local)
+        if row.feeding:
+            raise ValueError("a Feeding row cannot resume a Master relink")
+        key = self.plan.event_key(local, row)
+        record = self.store.operation(key)
+        if record is None or record.get("kind") != "row":
+            raise ValueError("the current row has no durable parent operation")
+        steps = record.get("steps")
+        verified = record.get("verified")
+        final_step = {
+            "target": "master",
+            "function": "linkage_role",
+            "value": "master",
+            "suffix": "relink",
+        }
+        if (
+            record.get("phase") != "stopped"
+            or record.get("failure_type") != "LocalControlLeaseBusyError"
+            or not isinstance(steps, list)
+            or not isinstance(verified, list)
+            or len(steps) < 2
+            or len(verified) != len(steps) - 1
+            or record.get("attempting_index") != len(steps) - 1
+            or steps[-1] != final_step
+        ):
+            raise ValueError("only an unattempted final Master relink can be completed")
+        if self.backend.unfinished():
+            raise ValueError("a Pro child journal is unfinished")
+        await self.backend.validate_plan(self.plan)
+        for index, item in enumerate(verified):
+            if not isinstance(item, dict) or item.get("index") != index:
+                raise ValueError("verified child ordering changed")
+            request_id = f"{key}_{steps[index]['suffix']}"
+            if item.get("request_id") != request_id or self.backend.child_record(request_id) != (
+                "verified",
+                item.get("journal_sha256"),
+            ):
+                raise ValueError("verified child journal changed")
+        images = state.get("images")
+        if not isinstance(images, list):
+            raise ValueError("scheduled image baseline is invalid")
+        if current_time is not None and self.plan.event_key(current_time()) != key:
+            raise ValueError("current row changed before final Master relink")
+
+        request_id = f"{key}_relink"
+        prior_child = self.backend.child_record(request_id)
+        if prior_child is None:
+            previous_pair = verified[-1].get("after")
+            if not isinstance(previous_pair, dict):
+                raise ValueError("last verified pair is missing")
+            pair = await self.backend.fresh_pair()
+            for name, pump in (("master", pair.master), ("slave", pair.slave)):
+                expected = previous_pair.get(name)
+                if not isinstance(expected, dict):
+                    raise ValueError("fresh pair changed since the last verified child")
+                for field in (
+                    "identity",
+                    "role",
+                    "timer",
+                    "power",
+                    "mode",
+                    "flow",
+                    "frequency",
+                    "image_sha256",
+                    "faults",
+                ):
+                    expected_value = expected[field]
+                    if field == "faults":
+                        expected_value = tuple(expected_value)
+                    if getattr(pump, field) != expected_value:
+                        raise ValueError("fresh pair changed since the last verified child")
+            self._require_pair(pair, master_role="independent", images=images)
+            if pair.master.timer or pair.slave.timer:
+                raise ValueError("TimerON appeared before final Master relink")
+            accepted, writes, digest = await self.backend.execute(
+                Child("master", "linkage_role", "master", "relink"), request_id
+            )
+            if not accepted or writes != 1:
+                raise ValueError("final Master relink did not verify as one send")
+        elif prior_child[0] == "verified":
+            digest = prior_child[1]
+            writes = 0
+        else:
+            raise ValueError("final Master relink is unfinished and must not be replayed")
+        final = await self.backend.fresh_pair()
+        self._require_manual_pair(final, images)
+        master_flow, slave_flow = self._row_flows(row)
+        if (
+            final.master.mode != row.mode
+            or final.slave.mode != row.mode
+            or final.master.flow != master_flow
+            or final.slave.flow != slave_flow
+            or (
+                row.frequency is not None
+                and (
+                    final.master.frequency != row.frequency
+                    or final.slave.frequency != row.frequency
+                )
+            )
+        ):
+            raise ValueError("final Pro pair did not match the current scheduled row")
+        if current_time is not None and self.plan.event_key(current_time()) != key:
+            raise ValueError("current row changed before final verification")
+        verified.append(
+            {
+                "index": len(steps) - 1,
+                "request_id": request_id,
+                "journal_sha256": digest,
+                "after": asdict(final),
+            }
+        )
+        record["phase"] = "verified"
+        record["after"] = asdict(final)
+        record["last_result"] = {
+            "index": len(steps) - 1,
+            "accepted": True,
+            "physical_write_count": writes,
+            "journal_sha256": digest,
+        }
+        record.pop("attempting_index", None)
+        record.pop("failure_type", None)
+        self.store.set_operation(key, record)
+        state["last_event"] = key
+        state["next_boundary_at"] = self.plan.boundary(local).isoformat()
+        state["feed_exit_at"] = None
+        state["expected"] = {
+            "mode": row.mode,
+            "flows": [master_flow, slave_flow],
+            "frequency": row.frequency,
+        }
+        state["status"] = "active"
+        self.store.set_active(state)
+        return {"event": row.label, "operation": key, "writes": writes, "mode": row.mode}
 
     async def verify_idle(self) -> None:
         """Detect app/HA changes between boundaries without issuing a control frame."""
