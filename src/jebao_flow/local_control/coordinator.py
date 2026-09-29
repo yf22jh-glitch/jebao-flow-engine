@@ -49,6 +49,7 @@ from jebao_flow.local_control.schedule import (
     compile_slave_schedules,
 )
 from jebao_flow.operator_capture.schedule_model import NativeLinkageMode
+from jebao_flow.protocol.profiles import get_product_schema
 
 
 class LocalControlExecutionError(RuntimeError):
@@ -459,6 +460,108 @@ class LocalControlCoordinator:
                 await slave_writer.close()
                 await master_writer.close()
 
+    async def abandon_uncertain_slave_flow(
+        self,
+        request_id: str,
+        *,
+        observed_flow: int,
+        operator_confirmed_not_applied: bool,
+    ) -> LocalControlResult:
+        """Retire one timed-out slave Flow attempt after the operator adopts a different value.
+
+        This is not a claim that the old frame never reached the device. Its original
+        durable record and one fresh raw observation remain content-addressed. No control
+        frame or historical rollback is sent.
+        """
+
+        if type(observed_flow) is not int or not operator_confirmed_not_applied:
+            raise ValueError("an exact observed Flow and operator confirmation are required")
+        record = self._journal.load(request_id)
+        if record is None:
+            raise KeyError("local-control transaction does not exist")
+        if record.phase is not TransactionPhase.RECOVERY_REQUIRED or len(record.actions) != 1:
+            raise LocalControlExecutionError("only one unfinished Flow action can be abandoned")
+        action = record.actions[0]
+        if (
+            action.function != "slave_common_flow"
+            or action.phase is not ActionPhase.UNCERTAIN
+            or action.acknowledgement_sha256 is not None
+            or action.verification_kind != "scalar_fields"
+            or action.recovery_policy != "restore_baseline"
+            or not action.restore_on_recovery
+            or record.native_context_sha256 is not None
+            or record.recovery_order is not None
+        ):
+            raise LocalControlExecutionError("request is not one unacknowledged slave Flow")
+        expected = json.loads(self._journal.load_blob(action.expected_readback_sha256))
+        baseline = json.loads(self._journal.load_blob(action.baseline_readback_sha256))
+        if (
+            set(expected) != {"Flow"}
+            or set(baseline) != {"Flow"}
+            or type(expected["Flow"]) is not int
+            or type(baseline["Flow"]) is not int
+            or observed_flow in {expected["Flow"], baseline["Flow"]}
+        ):
+            raise LocalControlExecutionError("current Flow must differ from both old outcomes")
+
+        endpoint = await self._resolver.resolve(action.target)
+        if endpoint.target != action.target:
+            raise LocalControlExecutionError("current endpoint changed its physical binding")
+        key = action.target.physical_identity_key
+        with self._lease.acquire((key,)):
+            self._require_no_other_unfinished(request_id, (key,))
+            if self._journal.load(request_id) != record:
+                raise LocalControlExecutionError("journal changed before observation")
+            writer = self._writer_factory(endpoint)
+            try:
+                capture = await writer.connect_and_capture(accept_reports=True)
+            finally:
+                await writer.close()
+            current_flow = get_product_schema(action.target.product_key).decode_status(
+                capture.status_payload
+            )["Flow"]
+            prepared = self._forward_prepared(action, endpoint)
+            if (
+                current_flow != observed_flow
+                or verify_prepared_readback(prepared, capture.status_payload)
+                or verify_prepared_baseline(prepared, capture.status_payload)
+            ):
+                raise LocalControlExecutionError("fresh Flow did not confirm the adopted value")
+
+            observation_sha256 = self._journal.install_blob(capture.wire_frame)
+            old_record_bytes = (
+                json.dumps(
+                    record.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("ascii")
+                + b"\n"
+            )
+            prior_sha256 = self._journal.install_blob(old_record_bytes)
+            if prior_sha256 != self._journal.record_digest(record):
+                raise LocalControlExecutionError("prior journal evidence changed")
+            abandoned_action = JournalAction.model_validate(
+                {
+                    **action.model_dump(),
+                    "phase": ActionPhase.ABANDONED,
+                    "diagnostic": "operator_adopted_current_flow",
+                    "external_observation_sha256": observation_sha256,
+                }
+            )
+            replacement = LocalControlJournalRecord.model_validate(
+                {
+                    **record.model_dump(),
+                    "phase": TransactionPhase.ABANDONED,
+                    "actions": (abandoned_action,),
+                    "revision": record.revision + 1,
+                    "updated_at": datetime.now(UTC),
+                    "abandoned_prior_record_sha256": prior_sha256,
+                }
+            )
+            self._journal.save(record, replacement)
+            return self._result(replacement, physical_write_count=0)
+
     async def recover(self, request_id: str) -> LocalControlResult:
         """Restore fresh pre-write baselines without replaying a forward frame."""
 
@@ -493,6 +596,10 @@ class LocalControlCoordinator:
         if record.phase is TransactionPhase.SUPERSEDED:
             raise LocalControlExecutionError(
                 "superseded transaction is terminal and must not be rolled back"
+            )
+        if record.phase is TransactionPhase.ABANDONED:
+            raise LocalControlExecutionError(
+                "abandoned transaction is terminal and must not be rolled back"
             )
         if record.phase is TransactionPhase.ROLLED_BACK:
             return self._result(record, physical_write_count=0)
@@ -981,6 +1088,7 @@ class LocalControlCoordinator:
             TransactionPhase.VERIFIED,
             TransactionPhase.ROLLED_BACK,
             TransactionPhase.SUPERSEDED,
+            TransactionPhase.ABANDONED,
         }:
             return self._result(record, physical_write_count=0)
         raise LocalControlExecutionError("request has unfinished durable state; recover it first")

@@ -14,6 +14,7 @@ from jebao_flow.local_control.coordinator import (
     LocalControlCoordinator,
     LocalControlExecutionError,
 )
+from jebao_flow.local_control.device_writer import ConnectedDeviceWriter
 from jebao_flow.local_control.install import current_protocol_schema_sha256
 from jebao_flow.local_control.journal import (
     ActionPhase,
@@ -33,6 +34,7 @@ from jebao_flow.operator_capture.schedule_model import NativeLinkageMode, SlaveF
 from jebao_flow.protocol.errors import ProtocolTimeoutError
 from jebao_flow.protocol.profiles import LOCAL_WAVEMAKER_PRO
 from jebao_flow.protocol.schedule_wire import LOCAL_WAVEMAKER_PRO_SCHEDULE_STATUS_OFFSET
+from jebao_flow.protocol.session import RawStateCapture
 
 
 def _binding(member: str, identity: str) -> LocalDeviceBinding:
@@ -118,6 +120,13 @@ class _Session:
         assert accept_reports is False
         return self.statuses.pop(0)
 
+    async def read_raw_state_capture(self, *, accept_reports: bool = False) -> RawStateCapture:
+        assert accept_reports is True
+        status = self.statuses.pop(0)
+        return RawStateCapture(
+            wire_frame=b"captured-raw-" + status, action=4, status_payload=status
+        )
+
     async def send_raw_control(self, control_payload: bytes) -> bytes:
         self.sent.append(bytes(control_payload))
         if self.send_error is not None:
@@ -148,6 +157,109 @@ def _lease(tmp_path: Path) -> LocalControlLease:
         device_lock_directory=tmp_path / "physical-locks",
         legacy_workflows_idle_probe=lambda: True,
     )
+
+
+def _uncertain_slave_flow(tmp_path: Path, *, current_flow: int):
+    target = _binding("wavemaker_slave", "a")
+    endpoint = ResolvedEndpoint(target, "current-address", wifi_firmware_version="wifi-current")
+    session = _Session([_status(flow=current_flow)])
+    coordinator, journal = _coordinator(
+        tmp_path,
+        qualifications=(),
+        resolver=_Resolver((endpoint,)),
+        sessions=_SessionFactory({"current-address": [session]}),
+    )
+    writer = ConnectedDeviceWriter(endpoint, control_flow_bounds=(30, 100))
+    intent = LocalControlIntent(
+        request_id="uncertain_slave_flow_01",
+        target=target,
+        function="slave_common_flow",
+        value=30,
+    )
+    prepared = writer.prepare_scalar(intent, _status(flow=37))
+    record = coordinator._create_record(
+        request_id=intent.request_id,
+        intent_sha256="f" * 64,
+        prepared=(prepared,),
+    )
+    uncertain = record.evolve(
+        phase=TransactionPhase.RECOVERY_REQUIRED,
+        actions=(record.actions[0].model_copy(update={"phase": ActionPhase.UNCERTAIN}),),
+    )
+    journal.save(record, uncertain)
+    return coordinator, journal, uncertain, session
+
+
+@pytest.mark.asyncio
+async def test_operator_can_abandon_one_uncertain_slave_flow_after_other_value_is_observed(
+    tmp_path: Path,
+) -> None:
+    coordinator, journal, uncertain, session = _uncertain_slave_flow(tmp_path, current_flow=38)
+
+    result = await coordinator.abandon_uncertain_slave_flow(
+        uncertain.request_id,
+        observed_flow=38,
+        operator_confirmed_not_applied=True,
+    )
+
+    abandoned = journal.load(uncertain.request_id)
+    assert abandoned is not None
+    assert result.phase is TransactionPhase.ABANDONED
+    assert result.physical_write_count == 0
+    assert result.accepted is False
+    assert session.sent == []
+    assert journal.unfinished_for((uncertain.actions[0].target.physical_identity_key,)) == ()
+    assert abandoned.actions[0].phase is ActionPhase.ABANDONED
+    assert abandoned.actions[0].diagnostic == "operator_adopted_current_flow"
+    assert journal.load_blob(abandoned.actions[0].external_observation_sha256 or "")
+    prior = json.loads(journal.load_blob(abandoned.abandoned_prior_record_sha256 or ""))
+    assert prior["phase"] == "recovery_required"
+    assert prior["actions"][0]["phase"] == "uncertain"
+    with pytest.raises(LocalControlExecutionError, match="must not be rolled back"):
+        await coordinator.recover(uncertain.request_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current_flow", [30, 37])
+async def test_uncertain_flow_matching_forward_or_baseline_cannot_be_abandoned(
+    tmp_path: Path, current_flow: int
+) -> None:
+    coordinator, journal, uncertain, session = _uncertain_slave_flow(
+        tmp_path, current_flow=current_flow
+    )
+
+    with pytest.raises(LocalControlExecutionError, match="current Flow must differ"):
+        await coordinator.abandon_uncertain_slave_flow(
+            uncertain.request_id,
+            observed_flow=current_flow,
+            operator_confirmed_not_applied=True,
+        )
+
+    assert session.sent == []
+    assert journal.load(uncertain.request_id) == uncertain
+
+
+@pytest.mark.asyncio
+async def test_uncertain_flow_requires_operator_confirmation_and_exact_value(
+    tmp_path: Path,
+) -> None:
+    coordinator, journal, uncertain, session = _uncertain_slave_flow(tmp_path, current_flow=38)
+
+    with pytest.raises(ValueError, match="operator confirmation"):
+        await coordinator.abandon_uncertain_slave_flow(
+            uncertain.request_id,
+            observed_flow=38,
+            operator_confirmed_not_applied=False,
+        )
+    with pytest.raises(LocalControlExecutionError, match="fresh Flow"):
+        await coordinator.abandon_uncertain_slave_flow(
+            uncertain.request_id,
+            observed_flow=39,
+            operator_confirmed_not_applied=True,
+        )
+
+    assert session.sent == []
+    assert journal.load(uncertain.request_id) == uncertain
 
 
 def _coordinator(

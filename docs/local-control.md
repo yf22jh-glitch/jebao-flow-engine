@@ -966,7 +966,7 @@ path is idle only when absent or when its owner-only file is the exact version-2
 legacy workflow is still in flight; it does not qualify the old operation or replace the existing
 archive/replay verification. Malformed, non-terminal, unsafe-metadata, or future-version files stay
 blocked. The tombstone is never consumed or changed by local control. Any other unfinished
-local-control transaction blocks a new request until recovery terminalizes it.
+local-control transaction blocks a new request until a reviewed terminal disposition is recorded.
 
 Each forward frame is preceded by a fresh baseline read and durable `PREPARED` state. The journal is
 advanced to `FORWARD_ATTEMPTING` before send. A missing ACK or readback never causes an automatic
@@ -975,6 +975,14 @@ for ordinary settings. A `power=false` action is the explicit exception: it is c
 readback without sending a rollback frame, because turning a stopped pump back on is not recovery to
 a safe state. This policy covers both single-device and group power-off operations. A `VERIFIED`
 transaction is already terminal and cannot be repurposed as an undo request through `recover`.
+
+For one unacknowledged `slave_common_flow` attempt, an on-site operator may instead adopt a
+different, freshly reported Flow using `jebao-flow-local abandon-uncertain-slave-flow` with the
+original request id, exact observed Flow, and explicit confirmation that the attempted value did
+not appear on the physical controller. This sends no control or rollback frame. It preserves the
+original uncertain journal bytes and one raw observation as private digest-bound blobs, then marks
+the request `ABANDONED` so it no longer blocks that device. It does **not** infer that every
+ACK-less send failed, nor claim the old frame could never have reached the device.
 
 MQTT retained and duplicate-marked command messages are rejected. Command discovery and
 subscription use QoS 0 deliberately, so a broker cannot replay an older command after a newer

@@ -44,6 +44,7 @@ class ActionPhase(StrEnum):
     ROLLED_BACK = "rolled_back"
     ROLLBACK_UNCERTAIN = "rollback_uncertain"
     SUPERSEDED = "superseded"
+    ABANDONED = "abandoned"
 
 
 class TransactionPhase(StrEnum):
@@ -53,6 +54,7 @@ class TransactionPhase(StrEnum):
     RECOVERY_REQUIRED = "recovery_required"
     ROLLED_BACK = "rolled_back"
     SUPERSEDED = "superseded"
+    ABANDONED = "abandoned"
 
 
 class JournalAction(BaseModel):
@@ -74,6 +76,7 @@ class JournalAction(BaseModel):
     recovery_policy: Literal["restore_baseline", "observe_clock"] = "restore_baseline"
     restore_on_recovery: StrictBool = True
     native_evidence_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    external_observation_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     phase: ActionPhase = ActionPhase.PREPARED
     acknowledgement_sha256: str | None = Field(
         default=None,
@@ -92,6 +95,15 @@ class JournalAction(BaseModel):
             raise ValueError("clock recovery policy requires a clock action")
         if not self.restore_on_recovery and self.function != "power":
             raise ValueError("only power actions may retain a safer forward state")
+        if self.phase is ActionPhase.ABANDONED:
+            if (
+                self.external_observation_sha256 is None
+                or self.acknowledgement_sha256 is not None
+                or self.verification_kind != "scalar_fields"
+            ):
+                raise ValueError("abandoned scalar action requires an observation and no ACK")
+        elif self.external_observation_sha256 is not None:
+            raise ValueError("external observation requires an abandoned action")
         return self
 
     @model_serializer(mode="wrap")
@@ -99,6 +111,8 @@ class JournalAction(BaseModel):
         value = handler(self)
         if self.native_evidence_sha256 is None:
             value.pop("native_evidence_sha256", None)
+        if self.external_observation_sha256 is None:
+            value.pop("external_observation_sha256", None)
         if self.recovery_policy == "restore_baseline":
             value.pop("recovery_policy", None)
         return value
@@ -119,13 +133,20 @@ class LocalControlJournalRecord(BaseModel):
     actions: tuple[JournalAction, ...] = Field(min_length=1)
     native_context_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     native_final_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    abandoned_prior_record_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     recovery_order: tuple[int, ...] | None = None
     recovery_prerequisites: tuple[int, ...] = ()
 
     @model_serializer(mode="wrap")
     def omit_native_defaults(self, handler):
         value = handler(self)
-        for name in ("native_context_sha256", "native_final_sha256"):
+        for name in (
+            "native_context_sha256",
+            "native_final_sha256",
+            "abandoned_prior_record_sha256",
+        ):
             if getattr(self, name) is None:
                 value.pop(name, None)
         if self.recovery_order is None:
@@ -191,6 +212,19 @@ class LocalControlJournalRecord(BaseModel):
                 for action in self.actions
             ):
                 raise ValueError("superseded action cannot contain an acknowledgement")
+        if self.phase is TransactionPhase.ABANDONED:
+            if (
+                len(self.actions) != 1
+                or self.actions[0].phase is not ActionPhase.ABANDONED
+                or self.native_context_sha256 is not None
+                or self.recovery_order is not None
+                or self.abandoned_prior_record_sha256 is None
+            ):
+                raise ValueError("only one non-native abandoned scalar action is terminal")
+        elif any(action.phase is ActionPhase.ABANDONED for action in self.actions):
+            raise ValueError("abandoned action requires an abandoned transaction")
+        elif self.abandoned_prior_record_sha256 is not None:
+            raise ValueError("prior-record evidence requires an abandoned transaction")
         return self
 
     def evolve(
@@ -343,6 +377,7 @@ class LocalControlJournalStore:
                 TransactionPhase.VERIFIED,
                 TransactionPhase.ROLLED_BACK,
                 TransactionPhase.SUPERSEDED,
+                TransactionPhase.ABANDONED,
             }
         )
 
@@ -396,7 +431,11 @@ class LocalControlJournalStore:
         _fsync_directory(self.root)
 
     def _require_referenced_blobs(self, record: LocalControlJournalRecord) -> None:
-        for digest in (record.native_context_sha256, record.native_final_sha256):
+        for digest in (
+            record.native_context_sha256,
+            record.native_final_sha256,
+            record.abandoned_prior_record_sha256,
+        ):
             if digest is not None:
                 self.load_blob(digest)
         for action in record.actions:
@@ -412,6 +451,8 @@ class LocalControlJournalStore:
                 self.load_blob(action.acknowledgement_sha256)
             if action.native_evidence_sha256 is not None:
                 self.load_blob(action.native_evidence_sha256)
+            if action.external_observation_sha256 is not None:
+                self.load_blob(action.external_observation_sha256)
 
 
 def _canonical_record(record: LocalControlJournalRecord) -> bytes:

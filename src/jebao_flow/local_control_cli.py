@@ -251,6 +251,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_install_arguments(recover)
     recover.add_argument("--compose-generation", help=argparse.SUPPRESS)
     recover.add_argument("request_id")
+    abandon_flow = subparsers.add_parser(
+        "abandon-uncertain-slave-flow",
+        help="record an operator-confirmed non-applied Flow attempt without device write",
+    )
+    _add_install_arguments(abandon_flow)
+    abandon_flow.add_argument("--compose-generation", help=argparse.SUPPRESS)
+    abandon_flow.add_argument("request_id")
+    abandon_flow.add_argument("--observed-flow", type=int, required=True)
+    abandon_flow.add_argument("--operator-confirmed-not-applied", action="store_true")
     stage_compose = subparsers.add_parser(
         "stage-compose-inputs",
         help="stage one generated Compose input generation inside its private data volume",
@@ -374,7 +383,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "stage-compose-inputs":
         _print_json(stage_compose_inputs(args.expected_generation).public_dict())
         return 0
-    if args.command in {"serve", "recover"}:
+    if args.command in {"serve", "recover", "abandon-uncertain-slave-flow"}:
         _validate_current_compose_generation(args.compose_generation)
         _activate_current_hardware_safety_volume_identity()
     service_volume_id = (
@@ -480,6 +489,17 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "recover":
         coordinator = _coordinator(prepared.config, build_local_control_catalog())
         result = asyncio.run(coordinator.recover(args.request_id))
+        _print_json(result.public_dict())
+        return 0
+    if args.command == "abandon-uncertain-slave-flow":
+        coordinator = _coordinator(prepared.config, build_local_control_catalog())
+        result = asyncio.run(
+            coordinator.abandon_uncertain_slave_flow(
+                args.request_id,
+                observed_flow=args.observed_flow,
+                operator_confirmed_not_applied=args.operator_confirmed_not_applied,
+            )
+        )
         _print_json(result.public_dict())
         return 0
     if args.command in {"ha-schema", "serve"}:

@@ -191,6 +191,47 @@ def test_superseded_action_cannot_hide_inside_a_nonterminal_record(tmp_path: Pat
         )
 
 
+def test_abandoned_record_is_terminal_only_with_prior_record_and_raw_evidence(
+    tmp_path: Path,
+) -> None:
+    store = LocalControlJournalStore.for_test(tmp_path / "journal")
+    record = _record(store)
+    store.create(record)
+    old_digest = store.install_blob(b"old-record")
+    observation_digest = store.install_blob(b"fresh-wire-frame")
+    abandoned_action = JournalAction.model_validate(
+        {
+            **record.actions[0].model_dump(),
+            "phase": ActionPhase.ABANDONED,
+            "external_observation_sha256": observation_digest,
+        }
+    )
+    replacement = LocalControlJournalRecord.model_validate(
+        {
+            **record.model_dump(),
+            "phase": TransactionPhase.ABANDONED,
+            "actions": (abandoned_action,),
+            "abandoned_prior_record_sha256": old_digest,
+            "revision": record.revision + 1,
+        }
+    )
+    store.save(record, replacement)
+
+    assert store.unfinished_records() == ()
+    assert store.load(record.request_id) == replacement
+    with pytest.raises(ValueError, match="prior-record evidence"):
+        LocalControlJournalRecord.model_validate(
+            {**record.model_dump(), "abandoned_prior_record_sha256": old_digest}
+        )
+    with pytest.raises(ValueError, match="observation and no ACK"):
+        JournalAction.model_validate(
+            {
+                **record.actions[0].model_dump(),
+                "phase": ActionPhase.ABANDONED,
+            }
+        )
+
+
 def test_request_id_is_no_clobber_and_raw_record_has_no_runtime_endpoint(tmp_path: Path) -> None:
     store = LocalControlJournalStore.for_test(tmp_path / "journal")
     record = _record(store)
