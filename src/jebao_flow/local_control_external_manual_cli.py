@@ -34,6 +34,10 @@ from jebao_flow.local_control.lease import LocalControlLease, LocalControlLeaseB
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.qualification import load_current_qualifications
 from jebao_flow.local_control.qualification_producer import load_current_install_manifest
+from jebao_flow.local_control.resolver import (
+    CurrentEndpointResolutionError,
+    ResolvedEndpoint,
+)
 from jebao_flow.local_control_cli import (
     _activate_current_hardware_safety_volume_identity,
     _resolver,
@@ -126,6 +130,57 @@ class LiveBackend:
         record = self.journal.load(request_id)
         return None if record is None else (record.phase.value, self.journal.record_digest(record))
 
+    async def _resolve_pair(self) -> tuple[ResolvedEndpoint, ResolvedEndpoint]:
+        """Retry one missing UDP discovery reply without weakening identity matching.
+
+        The 2026-09-29 idle pause captured one missing Master response; the next
+        discovery found both Pro devices.  Ambiguous identity remains an immediate
+        stop, and neither observation sends a device control frame.
+        """
+        targets = (self.master, self.slave)
+        for attempt in (1, 2):
+            master, slave = await self.resolver.observe_many(targets)
+            observations = (master, slave)
+            ambiguous = [
+                observation.target.logical_member
+                for observation in observations
+                if observation.diagnostic_reason == "current_endpoint_ambiguous"
+            ]
+            if ambiguous:
+                raise CurrentEndpointResolutionError("current discovery has ambiguous Pro identity")
+            if master.endpoint is not None and slave.endpoint is not None:
+                if attempt > 1:
+                    print(
+                        json.dumps(
+                            {
+                                "outcome": "endpoint_discovery_recovered",
+                                "attempt": attempt,
+                                "device_writes": 0,
+                            }
+                        ),
+                        flush=True,
+                    )
+                return (master.endpoint, slave.endpoint)
+            missing = [
+                observation.target.logical_member
+                for observation in observations
+                if observation.endpoint is None
+            ]
+            print(
+                json.dumps(
+                    {
+                        "outcome": "endpoint_discovery_missing",
+                        "attempt": attempt,
+                        "members": missing,
+                        "device_writes": 0,
+                    }
+                ),
+                flush=True,
+            )
+        raise CurrentEndpointResolutionError(
+            "current discovery did not find both Pro identities in two observations"
+        )
+
     async def validate_plan(self, plan: ManualSchedule) -> None:
         bounds = {item.id: item.limits for item in self.config.devices}
         upper_member = (
@@ -142,7 +197,7 @@ class LiveBackend:
                 limits = bounds[member]
                 if not limits.min_power <= flow <= min(limits.max_power, 45):
                     raise ValueError("a scheduled Flow exceeds its physical device bounds")
-        endpoints = await self.resolver.resolve_many((self.master, self.slave))
+        endpoints = await self._resolve_pair()
         endpoint_by_identity = {
             endpoint.target.physical_identity_key: endpoint for endpoint in endpoints
         }
@@ -214,7 +269,7 @@ class LiveBackend:
         )
 
     async def fresh_pair(self, *, preserve_raw: bool = True) -> PairState:
-        endpoints = await self.resolver.resolve_many((self.master, self.slave))
+        endpoints = await self._resolve_pair()
         master_writer = self.writer_factory(endpoints[0])
         slave_writer = self.writer_factory(endpoints[1])
         try:

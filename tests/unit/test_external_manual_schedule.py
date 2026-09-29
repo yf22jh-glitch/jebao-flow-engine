@@ -20,6 +20,11 @@ from jebao_flow.local_control.external_manual_runtime import (
 )
 from jebao_flow.local_control.external_manual_schedule import load_schedule, parse_schedule
 from jebao_flow.local_control.lease import LocalControlLeaseBusyError
+from jebao_flow.local_control.resolver import (
+    CurrentEndpointObservation,
+    CurrentEndpointResolutionError,
+    ResolvedEndpoint,
+)
 
 _FILE = Path(__file__).resolve().parents[2] / "config/examples/pro-external-manual-daily.json"
 _KST = timezone(timedelta(hours=9))
@@ -153,6 +158,77 @@ def test_unsafe_or_incomplete_row_is_rejected(change):
 def test_duplicate_keys_are_rejected():
     with pytest.raises(ValueError, match="duplicate"):
         parse_schedule(b'{"schema_version":1,"schema_version":1}')
+
+
+@pytest.mark.asyncio
+async def test_live_backend_recovers_one_missing_discovery_without_a_control_send(capsys):
+    backend = scheduler_cli.LiveBackend.__new__(scheduler_cli.LiveBackend)
+    backend.master = SimpleNamespace(logical_member="lower_master")
+    backend.slave = SimpleNamespace(logical_member="upper_async")
+    master_endpoint = ResolvedEndpoint(backend.master, "192.0.2.1")
+    slave_endpoint = ResolvedEndpoint(backend.slave, "192.0.2.2")
+    observations = iter(
+        (
+            (
+                CurrentEndpointObservation(
+                    backend.master, diagnostic_reason="current_endpoint_absent"
+                ),
+                CurrentEndpointObservation(backend.slave, endpoint=slave_endpoint),
+            ),
+            (
+                CurrentEndpointObservation(backend.master, endpoint=master_endpoint),
+                CurrentEndpointObservation(backend.slave, endpoint=slave_endpoint),
+            ),
+        )
+    )
+    calls = 0
+
+    async def observe_many(targets):
+        nonlocal calls
+        calls += 1
+        assert targets == (backend.master, backend.slave)
+        return next(observations)
+
+    backend.resolver = SimpleNamespace(observe_many=observe_many)
+    assert await backend._resolve_pair() == (master_endpoint, slave_endpoint)
+    assert calls == 2
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [event["outcome"] for event in events] == [
+        "endpoint_discovery_missing",
+        "endpoint_discovery_recovered",
+    ]
+    assert events[0]["members"] == ["lower_master"]
+    assert all(event["device_writes"] == 0 for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason,expected_calls",
+    [
+        ("current_endpoint_absent", 2),
+        ("current_endpoint_ambiguous", 1),
+    ],
+)
+async def test_live_backend_still_stops_for_unresolved_identity(reason, expected_calls):
+    backend = scheduler_cli.LiveBackend.__new__(scheduler_cli.LiveBackend)
+    backend.master = SimpleNamespace(logical_member="lower_master")
+    backend.slave = SimpleNamespace(logical_member="upper_async")
+    slave_endpoint = ResolvedEndpoint(backend.slave, "192.0.2.2")
+    calls = 0
+
+    async def observe_many(targets):
+        nonlocal calls
+        calls += 1
+        assert targets == (backend.master, backend.slave)
+        return (
+            CurrentEndpointObservation(backend.master, diagnostic_reason=reason),
+            CurrentEndpointObservation(backend.slave, endpoint=slave_endpoint),
+        )
+
+    backend.resolver = SimpleNamespace(observe_many=observe_many)
+    with pytest.raises(CurrentEndpointResolutionError):
+        await backend._resolve_pair()
+    assert calls == expected_calls
 
 
 @pytest.mark.asyncio
