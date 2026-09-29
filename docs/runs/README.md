@@ -1,5 +1,7 @@
 # 실기 실행 기록 (append-only)
 
+- [2026-09-29 Pro 외부 수동 시간표 첫 Feeding 왕복](2026-09-29-pro-external-manual-first-feeding-cycle.md) — 14:57 Feed 1send/VERIFIED, 15:03 Tide 복귀 3send/VERIFIED, Master/Async·Flow40/45·image 유지·반복 실행기 active.
+
 - [2026-09-29 Pro 외부 수동 시간표 활성화](2026-09-29-pro-external-manual-schedule-activation.md) — 미시도 Master 재결속 1send/VERIFIED, 14:00 Tide·상단45/하단40 fresh 일치, 31행 반복 실행기 active; 첫 자동 경계는 추후 관측.
 
 - [2026-09-29 Pro 외부 수동 시간표 전환 중 잠금 중단](2026-09-29-pro-external-manual-transition-lock-stop.md) — 역할 분리·상단 TimerOFF 5단계와 현행 Tide/Flow 4단계 ACK 확인, 마지막 Master 재결속은 잠금 충돌로 미전송·실행 일시정지.
