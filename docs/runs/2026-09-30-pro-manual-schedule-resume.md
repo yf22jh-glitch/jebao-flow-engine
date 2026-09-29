@@ -16,3 +16,10 @@
 - **이 실행으로 새로 확정된 사실:** 일시정지 뒤 같은 계획의 현재 Sine/F80/상단35/하단40 행을 새 이미지에서 3개의 검증된 child로 적용하고, Master/Async·TimerOFF 상태의 반복 실행기를 기동했다.
 - 이 실행으로 확정하지 못한 것: 08:40 이후 경계 실행의 성공 여부, 장기 운전 안정성, 실제 물리 유량·위상.
 - 다음에 이 지점을 다시 만나지 않으려면 필요한 것: 새 discovery 재시도 결과와 08:40 경계의 durable operation·fresh report를 대조해 반복 실행 안정성을 확인한다.
+
+## 후속 관측 정정 — 반복 실행 유지 실패
+
+- UTC 2026-09-29 22:34:36.146에 반복 실행기가 `ProtocolTimeoutError`로 종료되고 `active.status=paused`가 됐다. 위의 `runner_running=true`는 22:32:17 시점의 관측이며 장기 유지 결과가 아니다. Docker 재시작은 paused 상태에서 `ValueError`로 반복 종료되어 실행기를 정지했다. 다음 `08:40 KST` 행은 아직 시작되지 않았고 장비 제어 재전송은 없었다.
+- 증거 등급 (a): 대상 한정 host packet capture의 UTC 22:34:30–22:34:36 구간에서 하단 Master의 인증·462B 상태 응답은 완료됐다. 이어 상단 Async의 새 TCP 연결에서 passcode 교환 뒤 login 요청을 보냈으나, 462B 비동기 상태 보고만 수신하고 login 응답은 5초 안에 관측되지 않았다. 연결 종료 시각은 오류 로그와 일치한다. 이 자료는 캡처된 인증 응답의 부재를 보일 뿐 장비가 응답을 생성하지 않았다는 증명은 아니다.
+- 코드 대조: `LiveBackend.fresh_pair()`가 순차로 두 장비를 인증·조회하며, `GizwitsSession.authenticate()`의 login 응답 timeout이 `ProtocolTimeoutError`를 낸다. `ExternalManualScheduler.verify_idle()`은 읽기 실패도 즉시 영구 paused로 바꾸므로 한 차례 실패만으로 다음 행을 잃는다. 이는 제어 송신 재시도 문제가 아니라 읽기 전용 idle 확인의 실패 처리 결함이다.
+- 후속 조치 전 판정: 현재 행의 부모 operation은 이미 `verified`이므로 같은 행에 `activate --replace-paused`를 다시 실행하면 안 된다. 재송신 없는 현재 행 검증·재개 경로와 한정된 읽기 전용 재시도를 마련한 뒤 별도 결과를 덧붙인다.
