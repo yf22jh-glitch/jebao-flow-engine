@@ -58,3 +58,52 @@ ProtocolTimeoutError 하나에 한정되어 있다.
 수정한다. 변경 명령 재송신, qualification 계약 변경, 운영 일정 재활성화는 하지 않는다.
 ACK 부재만으로 물리 명령이 실행되지 않았다고 증명하지 않으며, 장비 응답이 없다는 사실만으로
 장비 전원/물리 고장을 판정하지 않는다.
+
+## 추가 — 구현과 오프라인 검증
+
+위 `현재 처리` 절은 수정 전 감사 결과다. 그 절의 일본어 기술을 한국어로 덧붙이면,
+기존 Coordinator는 송신 오류를 UNCERTAIN/RECOVERY_REQUIRED로 보존하고 재송신하지 않았으며,
+전날 Flow30 드롭은 특정 명령의 수동 종결이었다. 일반적인 timeout→조회→드롭은 아니었다.
+
+사용자 계약에 따라 외부 수동 시간표의 ACK 없는 단일 scalar child에 읽기 전용 종결을 추가했다.
+공유 저널 스키마는 그대로 두고 ABANDONED의 diagnostic/관측/원 기록을 보존하여 운영상의
+`readback_confirmed`와 드롭을 구분한다. ACK를 받았다는 주장이나 qualification 영수증은 만들지 않는다.
+조회 오류는 제한 횟수 없이 1/2/5초 backoff로 재시도하며, identity 응답 시각과 조회 오류를
+별도로 표시한다. 수동 일시정지와 종료는 조회만 중단할 수 있다. 재시작은 원 명령의 조회만
+완료하며 같은 시도나 부분 실행된 행을 재송신하지 않는다.
+
+네트워크와 실제 장비 설정·자격·안전 볼륨을 연결하지 않은 read-only 테스트 컨테이너에서
+관련 253개 테스트가 통과했다. 이 수치는 코드의 오류 주입/순서/저널/표시 검증이며 실제
+장비의 ACK 누락 처리 실기 결과가 아니다.
+
+- 일반 read retry, ACK 없는 child, crash 이후 관측, 수동 pause 큐, 오래된 행 송신 차단.
+- 공유 journal, Coordinator, 기존 제어 service/MQTT/catalog/qualification/install 회귀 검사.
+- ruff 검사, 두 HA 카드의 `node --check`, `git diff --check` 통과.
+- 동결된 native ASYNC 하네스와 공유 저널 enum/필드 변경 없음.
+- 소스는 기존 격리된 작업트리와 함께 보존했다. 전체 prototype 병합·운영 배포·일정 재활성화 없음.
+
+## 추가 — 현재 장비의 읽기 전용 확인
+
+조회 완료 UTC 시각은 `2026-10-01T04:26:19.637502Z`다. 정확한 시작 시각이나 query latency는
+별도로 계측하지 않았다. 성공 시각/시도 횟수는 도구 실행 관측(c)이며, 아래 CAS 상태 bytes는
+실제로 다시 읽어 digest를 확인한 보존 raw artifact(a)다. 두 종류의 증거를 혼동하지 않는다.
+
+조회 전 운영 일정이 `paused`임을 확인했다. 새 제어 명령이나 서비스 재시작 없이 현재
+설치된 exact-identity 로컬 조회 경로를 사용했고, 두 장비 모두 첫 시도에 응답했다.
+
+| 논리 역할 | 상태 프레임 action | 장치 보고 Mode / Flow / Frequency | 보고 fault |
+|---|---:|---|---|
+| Master | 3 | Sine / 40 / 80 | 없음 |
+| Async Slave | 4 | Sine / 35 / 80 | 없음 |
+
+보존 상태 프레임은 각 462 bytes다.
+
+- opaque artifact id: `readonly-state-20261001T042619Z-master`.
+  digest: `75c95b17a110b2924c786338f0965ff333f9f05484105d99eb6510a76c8abe3d`.
+  binding SHA-256: `ab311068d7799581ef4daaba151ad071009d7013ca70a6048a1ddf7af6b5a62e`.
+- opaque artifact id: `readonly-state-20261001T042619Z-slave`.
+  digest: `052627c0da005a58f776580924c8009013d1d4efa6d70bf21db6f2f4e4262abc`.
+  binding SHA-256: `6f9253c2b3055326aafa70b5ecfdc5b197b37d52b0b980dd0c5e1385377bd7ec`.
+
+현재 두 장비의 조회 가능 여부는 확인했다. 과거 pause가 물리 고장이었다거나, 이번 코드가
+실제 누락 ACK를 처리한 결과라고 주장하지 않는다. 운영 일정은 paused로 유지했다.
