@@ -75,3 +75,12 @@ HA 화면 → MQTT 생성 요청 → 운영 서버의 정확한 정수량·시�
 명시적으로 해제하고 확인해야 한다. 공유 hardware-safety 데이터와 별도 수류 실행기는
 삭제·재생성하지 않는다. UI는 최초 artifact의 원래 도징 view와 module resource를 HA API로
 복원한다. 최신 모바일 보완 artifact는 기능 도입 이전 백업이 아니라는 점을 구분한다.
+
+## 최종 브라우저 확인 추가
+
+최종 asset 재진입에서 HA 셸과 module은 로드됐으나 Orca 탭의 HA view 선택이 지연되어
+빈 view container가 관측됐다. 브라우저 안의 도징 view만 다시 선택해 렌더링을 확인했다.
+서버 설정이나 장비 명령은 변경하지 않았으며, 이 현상의 원인을 도징 코드로 판정하지 않았다.
+최종 카드의 보완된 모바일 CSS, status idle, active null을 확인했다.
+최종 실제 화면은 같은 최종 UI artifact의 `ha-live-dosing-final.png`로 보존했다.
+SHA-256은 `5f90152bc3c3d3a76d97718c63d71138dc6cc0cdd10c9d01a75323dc48b51d20`이다.
