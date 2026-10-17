@@ -6,6 +6,7 @@ orders children and prevents replay across restarts; it is not a replacement wri
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import json
 import os
@@ -1034,6 +1035,12 @@ class ExternalManualScheduler:
             self._require_manual_pair(pair, images)
             if state.get("expected", {}).get("mode") != "feed":
                 self._require_previous(pair, state)
+        except asyncio.CancelledError:
+            # Service shutdown cancels read-only observation, not an in-flight
+            # device command. Preserve the verified row for startup validation.
+            print(json.dumps({"outcome": "idle_read_cancelled", "device_writes": 0,
+                              "schedule_status": state["status"]}), flush=True)
+            raise
         except BaseException:
             state["status"] = "paused"
             self.store.set_active(state)

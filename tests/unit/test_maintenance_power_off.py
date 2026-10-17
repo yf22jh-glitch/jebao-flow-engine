@@ -6,6 +6,7 @@ independent; no test assumes a master power command also changes its slave.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 from dataclasses import replace
@@ -276,6 +277,43 @@ async def test_ordinary_scheduler_still_rejects_power_off(rig):
     wrong = PairState(pair.master, replace(pair.slave, identity="0" * 64))
     with pytest.raises(ValueError):
         scheduler._require_manual_pair(wrong, images, require_power=False)
+
+
+async def test_shutdown_during_idle_read_keeps_verified_schedule_for_restart(rig, monkeypatch):
+    before = rig.store.active()
+    original = rig.backend.fresh_pair
+
+    async def cancelled(**_kwargs):
+        raise asyncio.CancelledError("service shutdown")
+
+    monkeypatch.setattr(rig.backend, "fresh_pair", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await rig.editor._scheduler(rig.plan.sha256).verify_idle()
+    assert rig.store.active() == before
+    monkeypatch.setattr(rig.backend, "fresh_pair", original)
+    restarted = ScheduleEditor(rig.store, rig.backend, clock=lambda: rig.clock[0])
+    await restarted.initialize(rig.clock[0])
+    assert rig.store.active() == before
+    assert rig.backend.sent == []
+
+
+async def test_shutdown_during_maintenance_read_cannot_clear_override(rig, monkeypatch):
+    await request(rig, "maintenance_on")
+    rig.backend.sent.clear()
+    original = rig.backend.fresh_pair
+
+    async def cancelled(**_kwargs):
+        raise asyncio.CancelledError("service shutdown")
+
+    monkeypatch.setattr(rig.backend, "fresh_pair", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await rig.editor.maintenance.hold(force=True)
+    monkeypatch.setattr(rig.backend, "fresh_pair", original)
+    restarted = ScheduleEditor(rig.store, rig.backend, clock=lambda: rig.clock[0])
+    await restarted.initialize(rig.clock[0])
+    assert rig.store.active()["status"] == "paused"
+    assert restarted.maintenance.state()["enabled"]
+    assert rig.backend.sent == []
 
 
 @pytest.mark.parametrize("product", ["pro", "bar"])
