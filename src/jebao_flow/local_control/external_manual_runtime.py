@@ -43,6 +43,7 @@ class PumpState:
     image_sha256: str
     raw_sha256: str
     faults: tuple[str, ...]
+    custom_frequency: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +202,15 @@ class SchedulerStore:
             raise ValueError("parent operation was not durably created")
         self._replace(self._operation_path(key), _canonical(record))
 
+    def set_communication(self, status: dict | None) -> None:
+        self._replace(self.root / "communication.json", _canonical({
+            "sampled_at": datetime.now(UTC).isoformat(), "query": status,
+        }))
+
+    def communication(self) -> dict | None:
+        path = self.root / "communication.json"
+        return json.loads(self._read(path)) if path.exists() else None
+
     def _operation_path(self, key: str) -> Path:
         allowed = "abcdefghijklmnopqrstuvwxyz0123456789_"
         if not key or len(key) > 128 or any(char not in allowed for char in key):
@@ -342,6 +352,7 @@ class ExternalManualScheduler:
         before: PairState,
         images: list[str],
         master_role: str = "master",
+        current_time: Callable[[], datetime] | None = None,
     ) -> PairState:
         record: dict[str, object] = {
             "key": key,
@@ -357,6 +368,8 @@ class ExternalManualScheduler:
         slave_role = "async_slave"
         try:
             for index, child in enumerate(steps):
+                if current_time is not None and self.plan.event_key(current_time()) != key:
+                    raise ValueError("scheduled row changed while querying; no stale child write")
                 self._require_pair(
                     current, master_role=master_role, slave_role=slave_role, images=images
                 )
@@ -368,14 +381,25 @@ class ExternalManualScheduler:
                 accepted, writes, journal_sha256 = await self.backend.execute(
                     child, f"{key}_{child.suffix}"
                 )
+                child_record = self.backend.child_record(f"{key}_{child.suffix}")
+                readback_confirmed = child_record is not None and child_record[0] == (
+                    "readback_confirmed"
+                )
+                dropped = child_record is not None and child_record[0] == "abandoned"
                 record["last_result"] = {
                     "index": index,
                     "accepted": accepted,
-                    "physical_write_count": writes,
+                    "physical_write_count": None if readback_confirmed or dropped else writes,
+                    "additional_device_writes": writes,
+                    "confirmation": "readback" if readback_confirmed else (
+                        "dropped" if dropped else "ack_and_readback"
+                    ),
                     "journal_sha256": journal_sha256,
                 }
                 self.store.set_operation(key, record)
-                if not accepted or writes != 1:
+                if dropped:
+                    raise ValueError("child was dropped: fresh state did not match its target")
+                if not accepted or not (writes == 1 or (writes == 0 and readback_confirmed)):
                     raise ValueError("child did not verify as exactly one physical send")
                 current = await self.backend.fresh_pair()
                 master_role = (
@@ -406,6 +430,12 @@ class ExternalManualScheduler:
                     pump = current.master if child.target == "master" else current.slave
                     if pump.frequency != child.value:
                         raise ValueError("Frequency child did not persist in fresh pair")
+                if child.function == "custom_wave_frequency":
+                    pump = current.master if child.target == "master" else current.slave
+                    if pump.custom_frequency != child.value:
+                        raise ValueError(
+                            "Custom Wave Frequency child did not persist in fresh pair"
+                        )
                 if child.function == "schedule_enable":
                     pump = current.master if child.target == "master" else current.slave
                     if pump.timer:
@@ -417,6 +447,7 @@ class ExternalManualScheduler:
                         "index": index,
                         "request_id": f"{key}_{child.suffix}",
                         "journal_sha256": journal_sha256,
+                        "confirmation": "readback" if readback_confirmed else "ack_and_readback",
                         "after": asdict(current),
                     }
                 )
@@ -520,6 +551,11 @@ class ExternalManualScheduler:
             or pair.slave.frequency != expected["frequency"]
         ):
             raise ValueError("external control changed the previous manual Frequency")
+        if expected.get("custom_frequency") is not None and (
+            pair.master.custom_frequency != expected["custom_frequency"]
+            or pair.slave.custom_frequency != expected["custom_frequency"]
+        ):
+            raise ValueError("external control changed the previous Custom Wave Frequency")
 
     async def _apply_row(
         self,
@@ -561,12 +597,22 @@ class ExternalManualScheduler:
             slave_frequency_change = (
                 row.frequency is not None and pair.slave.frequency != row.frequency
             )
+            master_custom_change = (
+                row.custom_frequency is not None
+                and pair.master.custom_frequency != row.custom_frequency
+            )
+            slave_custom_change = (
+                row.custom_frequency is not None
+                and pair.slave.custom_frequency != row.custom_frequency
+            )
             mode_change = pair.master.mode != row.mode
             if (
                 slave_change
                 or master_flow_change
                 or slave_frequency_change
                 or master_frequency_change
+                or slave_custom_change
+                or master_custom_change
                 or mode_change
             ):
                 steps.append(Child("master", "linkage_role", "independent", "release"))
@@ -577,16 +623,25 @@ class ExternalManualScheduler:
                     steps.append(
                         Child("slave", "manual_frequency", row.frequency, "slave_frequency")
                     )
+                if slave_custom_change:
+                    assert row.custom_frequency is not None
+                    steps.append(Child("slave", "custom_wave_frequency", row.custom_frequency,
+                                       "slave_custom_frequency"))
                 if master_flow_change:
                     steps.append(Child("master", "manual_flow", target_master, "master_flow"))
                 if master_frequency_change:
                     assert row.frequency is not None
                     steps.append(Child("master", "manual_frequency", row.frequency, "frequency"))
+                if master_custom_change:
+                    assert row.custom_frequency is not None
+                    steps.append(Child("master", "custom_wave_frequency", row.custom_frequency,
+                                       "custom_frequency"))
                 if mode_change:
                     steps.append(Child("master", "manual_mode", row.mode, "mode"))
                 steps.append(Child("master", "linkage_role", "master", "relink"))
         final = await self._execute_steps(
-            key, kind="row", steps=tuple(steps), before=pair, images=images
+            key, kind="row", steps=tuple(steps), before=pair, images=images,
+            current_time=current_time,
         )
         record = self.store.operation(key)
         assert record is not None
@@ -610,6 +665,13 @@ class ExternalManualScheduler:
                             or final.slave.frequency != row.frequency
                         )
                     )
+                    or (
+                        row.custom_frequency is not None
+                        and (
+                            final.master.custom_frequency != row.custom_frequency
+                            or final.slave.custom_frequency != row.custom_frequency
+                        )
+                    )
                 ):
                     raise ValueError("final Pro pair did not match the scheduled manual row")
                 expected_flows = [target_master, target_slave]
@@ -627,9 +689,18 @@ class ExternalManualScheduler:
             "mode": row.mode,
             "flows": expected_flows,
             "frequency": row.frequency,
+            **(
+                {"custom_frequency": row.custom_frequency}
+                if row.custom_frequency is not None else {}
+            ),
         }
         self.store.set_active(state)
-        return {"event": row.label, "operation": key, "writes": len(steps), "mode": row.mode}
+        observed = any(item.get("confirmation") == "readback" for item in record["verified"])
+        return {
+            "event": row.label, "operation": key,
+            "writes": None if observed else len(steps),
+            "send_attempts": len(steps), "mode": row.mode,
+        }
 
     async def apply_boundary(
         self, now: datetime, *, current_time: Callable[[], datetime] | None = None
@@ -728,7 +799,7 @@ class ExternalManualScheduler:
                 raise ValueError("verified child ordering changed")
             request_id = f"{key}_{steps[index]['suffix']}"
             if item.get("request_id") != request_id or self.backend.child_record(request_id) != (
-                "verified",
+                "readback_confirmed" if item.get("confirmation") == "readback" else "verified",
                 item.get("journal_sha256"),
             ):
                 raise ValueError("verified child journal changed")
@@ -765,15 +836,23 @@ class ExternalManualScheduler:
                         expected_value = tuple(expected_value)
                     if getattr(pump, field) != expected_value:
                         raise ValueError("fresh pair changed since the last verified child")
+                if row.custom_frequency is not None and (
+                    pump.custom_frequency != expected.get("custom_frequency")
+                ):
+                    raise ValueError("Custom Wave Frequency changed since the last verified child")
             self._require_pair(pair, master_role="independent", images=images)
             if pair.master.timer or pair.slave.timer:
                 raise ValueError("TimerON appeared before final Master relink")
             accepted, writes, digest = await self.backend.execute(
                 Child("master", "linkage_role", "master", "relink"), request_id
             )
-            if not accepted or writes != 1:
+            observed_child = self.backend.child_record(request_id)
+            if not accepted or not (writes == 1 or (
+                writes == 0 and observed_child is not None
+                and observed_child[0] == "readback_confirmed"
+            )):
                 raise ValueError("final Master relink did not verify as one send")
-        elif prior_child[0] == "verified":
+        elif prior_child[0] in {"verified", "readback_confirmed"}:
             digest = prior_child[1]
             writes = 0
         else:
@@ -793,6 +872,13 @@ class ExternalManualScheduler:
                     or final.slave.frequency != row.frequency
                 )
             )
+            or (
+                row.custom_frequency is not None
+                and (
+                    final.master.custom_frequency != row.custom_frequency
+                    or final.slave.custom_frequency != row.custom_frequency
+                )
+            )
         ):
             raise ValueError("final Pro pair did not match the current scheduled row")
         if current_time is not None and self.plan.event_key(current_time()) != key:
@@ -802,6 +888,8 @@ class ExternalManualScheduler:
                 "index": len(steps) - 1,
                 "request_id": request_id,
                 "journal_sha256": digest,
+                "confirmation": "readback" if self.backend.child_record(request_id)[0]
+                == "readback_confirmed" else "ack_and_readback",
                 "after": asdict(final),
             }
         )
@@ -823,6 +911,10 @@ class ExternalManualScheduler:
             "mode": row.mode,
             "flows": [master_flow, slave_flow],
             "frequency": row.frequency,
+            **(
+                {"custom_frequency": row.custom_frequency}
+                if row.custom_frequency is not None else {}
+            ),
         }
         state["status"] = "active"
         self.store.set_active(state)
@@ -872,7 +964,10 @@ class ExternalManualScheduler:
             if (
                 item.get("index") != index
                 or item.get("request_id") != request_id
-                or self.backend.child_record(request_id) != ("verified", item.get("journal_sha256"))
+                or self.backend.child_record(request_id) != (
+                    "readback_confirmed" if item.get("confirmation") == "readback" else "verified",
+                    item.get("journal_sha256"),
+                )
             ):
                 raise ValueError("verified child journal changed")
         await self.backend.validate_plan(self.plan)
@@ -897,6 +992,13 @@ class ExternalManualScheduler:
                     and (
                         pair.master.frequency != row.frequency
                         or pair.slave.frequency != row.frequency
+                    )
+                )
+                or (
+                    row.custom_frequency is not None
+                    and (
+                        pair.master.custom_frequency != row.custom_frequency
+                        or pair.slave.custom_frequency != row.custom_frequency
                     )
                 )
             ):

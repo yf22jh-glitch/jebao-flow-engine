@@ -11,13 +11,15 @@ import asyncio
 import hashlib
 import json
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
-from jebao_flow.local_control.coordinator import LocalControlCoordinator
+from jebao_flow.local_control.catalog import public_function_value
+from jebao_flow.local_control.coordinator import LocalControlCoordinator, LocalControlExecutionError
 from jebao_flow.local_control.device_writer import (
     configured_writer_factory,
     extract_current_pro_schedule_image,
+    extract_current_schedule_image,
 )
 from jebao_flow.local_control.external_manual_runtime import (
     Child,
@@ -29,11 +31,16 @@ from jebao_flow.local_control.external_manual_runtime import (
 )
 from jebao_flow.local_control.external_manual_schedule import ZONE, ManualSchedule, load_schedule
 from jebao_flow.local_control.install import load_current_private_config
-from jebao_flow.local_control.journal import LocalControlJournalStore
+from jebao_flow.local_control.journal import (
+    ActionPhase,
+    LocalControlJournalStore,
+    TransactionPhase,
+)
 from jebao_flow.local_control.lease import LocalControlLease, LocalControlLeaseBusyError
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.qualification import load_current_qualifications
 from jebao_flow.local_control.qualification_producer import load_current_install_manifest
+from jebao_flow.local_control.read_retry import ReadRetry, ReadUnavailableError
 from jebao_flow.local_control.resolver import (
     CurrentEndpointResolutionError,
     ResolvedEndpoint,
@@ -44,6 +51,7 @@ from jebao_flow.local_control_cli import (
     _runtime_catalog,
 )
 from jebao_flow.protocol.profiles import get_product_schema
+from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRODUCT_KEY
 from jebao_flow.protocol.schedule_wire import LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
 
 
@@ -64,6 +72,13 @@ class _ReportAwareWriter:
 
 
 class LiveBackend:
+    @property
+    def read_retry(self) -> ReadRetry:
+        # Some offline adapter tests deliberately construct an unconnected backend.
+        if not hasattr(self, "_read_retry"):
+            self._read_retry = ReadRetry()
+        return self._read_retry
+
     def __init__(
         self, *, master_member: str, slave_member: str, upper_member: str, lower_member: str
     ) -> None:
@@ -87,6 +102,10 @@ class LiveBackend:
             raise ValueError("upper/lower must name the two distinct fixed Master/Async members")
         self.master = members[master_member]
         self.slave = members[slave_member]
+        bar_member = os.environ.get("JEBAO_FLOW_MAINTENANCE_BAR_MEMBER")
+        self.bar = members[bar_member] if bar_member else None
+        if self.bar is not None and self.bar.product_key != LOCAL_WAVEMAKER_PRODUCT_KEY:
+            raise ValueError("maintenance Bar binding must be a Bar wavemaker")
         if (
             self.master.product_key != LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
             or self.slave.product_key != LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
@@ -126,9 +145,25 @@ class LiveBackend:
     def unfinished(self) -> bool:
         return bool(self.journal.unfinished_for((self.master_identity, self.slave_identity)))
 
+    def maintenance_unfinished(self) -> bool:
+        identities = (self.master_identity, self.slave_identity)
+        bar = getattr(self, "bar", None)
+        if bar is not None:
+            identities += (bar.physical_identity_key,)
+        return bool(self.journal.unfinished_for(identities))
+
     def child_record(self, request_id: str) -> tuple[str, str] | None:
         record = self.journal.load(request_id)
-        return None if record is None else (record.phase.value, self.journal.record_digest(record))
+        if record is None:
+            return None
+        confirmed = record.phase is TransactionPhase.ABANDONED and (
+            len(record.actions) == 1
+            and record.actions[0].diagnostic == "target_observed_without_ack"
+        )
+        return (
+            "readback_confirmed" if confirmed else record.phase.value,
+            self.journal.record_digest(record),
+        )
 
     async def _resolve_pair(self) -> tuple[ResolvedEndpoint, ResolvedEndpoint]:
         """Retry one missing UDP discovery reply without weakening identity matching.
@@ -149,6 +184,7 @@ class LiveBackend:
             if ambiguous:
                 raise CurrentEndpointResolutionError("current discovery has ambiguous Pro identity")
             if master.endpoint is not None and slave.endpoint is not None:
+                self.read_retry.identity_responded()
                 if attempt > 1:
                     print(
                         json.dumps(
@@ -177,11 +213,14 @@ class LiveBackend:
                 ),
                 flush=True,
             )
-        raise CurrentEndpointResolutionError(
+        raise ReadUnavailableError(
             "current discovery did not find both Pro identities in two observations"
         )
 
     async def validate_plan(self, plan: ManualSchedule) -> None:
+        await self.read_retry.run(lambda: self._validate_plan_once(plan), stage="plan_discovery")
+
+    async def _validate_plan_once(self, plan: ManualSchedule) -> None:
         bounds = {item.id: item.limits for item in self.config.devices}
         upper_member = (
             self.master.logical_member if self.upper_is_master else self.slave.logical_member
@@ -229,13 +268,16 @@ class LiveBackend:
             if row.frequency is not None:
                 values.add(("master", "manual_frequency", row.frequency))
                 values.add(("slave", "manual_frequency", row.frequency))
+            if row.custom_frequency is not None:
+                values.add(("master", "custom_wave_frequency", row.custom_frequency))
+                values.add(("slave", "custom_wave_frequency", row.custom_frequency))
         for target_name, function, value in values:
             target = self.master if target_name == "master" else self.slave
             intent = LocalControlIntent(
                 request_id="pro_manual_preflight_00000000",
                 target=target,
                 function=function,
-                value=value,
+                value=public_function_value(target.product_key, function, value),
             )
             descriptor = self.catalog.validate_intent(intent)
             self.coordinator._require_current_control_authority(
@@ -266,9 +308,15 @@ class LiveBackend:
                     name for name, value in values.items() if name.startswith("Fault_") and value
                 )
             ),
+            custom_frequency=values["Cust_Wav_Freq"],
         )
 
     async def fresh_pair(self, *, preserve_raw: bool = True) -> PairState:
+        return await self.read_retry.run(
+            lambda: self._fresh_pair_once(preserve_raw=preserve_raw), stage="state_query"
+        )
+
+    async def _fresh_pair_once(self, *, preserve_raw: bool = True) -> PairState:
         endpoints = await self._resolve_pair()
         master_writer = self.writer_factory(endpoints[0])
         slave_writer = self.writer_factory(endpoints[1])
@@ -284,9 +332,13 @@ class LiveBackend:
             await master_writer.close()
 
     async def execute(self, child: Child, request_id: str) -> tuple[bool, int, str]:
-        target = self.master if child.target == "master" else self.slave
+        target = {"master": self.master, "slave": self.slave,
+                  "bar": getattr(self, "bar", None)}[child.target]
+        if target is None:
+            raise ValueError("maintenance Bar is not configured")
         intent = LocalControlIntent(
-            request_id=request_id, target=target, function=child.function, value=child.value
+            request_id=request_id, target=target, function=child.function,
+            value=public_function_value(target.product_key, child.function, child.value),
         )
         for attempt in range(10):
             try:
@@ -298,7 +350,122 @@ class LiveBackend:
                 if self.journal.load(request_id) is not None or attempt == 9:
                     raise
                 await asyncio.sleep(0.5)
-        return result.accepted, result.physical_write_count, result.journal_sha256
+            except LocalControlExecutionError as error:
+                if isinstance(error.__cause__, asyncio.CancelledError):
+                    cancellation = error.__cause__
+                    raise cancellation from None
+                record = self.journal.load(request_id)
+                if (
+                    record is None or record.phase is not TransactionPhase.RECOVERY_REQUIRED
+                    or len(record.actions) != 1
+                    or record.actions[0].phase is not ActionPhase.UNCERTAIN
+                    or record.actions[0].acknowledgement_sha256 is not None
+                ):
+                    raise
+
+                async def observe():
+                    if child.target == "bar":
+                        endpoint = await self._resolve_bar()
+                    else:
+                        endpoints = await self._resolve_pair()
+                        endpoint = endpoints[0 if child.target == "master" else 1]
+                    return await self.coordinator.observe_unacknowledged_scalar(
+                        request_id, endpoint=endpoint
+                    )
+
+                result = await self.read_retry.run(observe, stage="command_readback")
+                print(json.dumps({
+                    "outcome": self.child_record(request_id)[0], "request_id": request_id,
+                    "ack_received": False, "additional_device_writes": 0,
+                    "journal_sha256": result.journal_sha256,
+                }), flush=True)
+                break
+        completion = self.child_record(request_id)
+        return (
+            result.accepted or (completion is not None and completion[0] == "readback_confirmed"),
+            result.physical_write_count, result.journal_sha256,
+        )
+
+    async def reconcile_pending_commands(self) -> None:
+        """After restart, finish observations only; never resume a partial physical row."""
+        bar = getattr(self, "bar", None)
+        identities = (self.master_identity, self.slave_identity)
+        if bar is not None:
+            identities += (bar.physical_identity_key,)
+        records = self.journal.unfinished_for(identities)
+        for record in records:
+            if (
+                not record.request_id.startswith("pro_manual_") or len(record.actions) != 1
+                or record.native_context_sha256 is not None or record.recovery_order is not None
+                or (record.phase, record.actions[0].phase) not in {
+                    (TransactionPhase.RECOVERY_REQUIRED, ActionPhase.UNCERTAIN),
+                    (TransactionPhase.EXECUTING, ActionPhase.FORWARD_ATTEMPTING),
+                }
+                or record.actions[0].acknowledgement_sha256 is not None
+            ):
+                continue
+            target = record.actions[0].target
+            if target not in (self.master, self.slave, bar):
+                continue
+
+            async def observe(record=record, target=target):
+                if record.actions[0].phase is ActionPhase.FORWARD_ATTEMPTING:
+                    # A crash can precede timeout persistence. Honour the original ACK
+                    # window before reading; this never repeats its possible send.
+                    age = (datetime.now(UTC) - record.updated_at).total_seconds()
+                    await self.read_retry.wait(max(0.0, min(5.0, 5.0 - age)))
+                if bar is not None and target == bar:
+                    endpoint = await self._resolve_bar()
+                else:
+                    endpoints = await self._resolve_pair()
+                    endpoint = endpoints[0 if target == self.master else 1]
+                return await self.coordinator.observe_unacknowledged_scalar(
+                    record.request_id, endpoint=endpoint
+                )
+
+            await self.read_retry.run(observe, stage="restart_command_readback")
+
+    async def _resolve_bar(self):
+        if self.bar is None:
+            raise ValueError("maintenance Bar is not configured")
+        observation, = await self.resolver.observe_many((self.bar,))
+        if observation.diagnostic_reason == "current_endpoint_ambiguous":
+            raise CurrentEndpointResolutionError("ambiguous maintenance Bar identity")
+        if observation.endpoint is None:
+            raise ReadUnavailableError("maintenance Bar did not answer discovery")
+        self.read_retry.identity_responded()
+        return observation.endpoint
+
+    async def fresh_bar(self) -> dict:
+        async def read():
+            endpoint = await self._resolve_bar()
+            writer = self.writer_factory(endpoint)
+            try:
+                capture = await writer.connect_and_capture(accept_reports=False)
+                values = get_product_schema(self.bar.product_key).decode_status(capture.status_payload)
+                return {
+                    "identity": self.bar.physical_identity_key,
+                    "timer": values["TimerON"], "feeding": values["FeedSwitch"],
+                    "role": values["Linkage"], "power": values["SwitchON"],
+                    "image_sha256": hashlib.sha256(extract_current_schedule_image(
+                        self.bar.product_key, capture.status_payload)).hexdigest(),
+                    "faults": sorted(k for k, v in values.items() if k.startswith("Fault_") and v),
+                    "raw_sha256": self.journal.install_blob(capture.wire_frame),
+                }
+            finally:
+                await writer.close()
+        return await self.read_retry.run(read, stage="maintenance_bar_query")
+
+    async def validate_maintenance(self) -> None:
+        endpoint = await self.read_retry.run(self._resolve_bar, stage="maintenance_bar_discovery")
+        for function, value in (("feed_switch", True), ("feed_switch", False),
+                                ("schedule_enable", False), ("schedule_enable", True)):
+            intent = LocalControlIntent(request_id="pro_manual_maintenance_preflight",
+                                        target=self.bar, function=function, value=value)
+            descriptor = self.catalog.validate_intent(intent)
+            self.coordinator._require_current_control_authority(descriptor, endpoint)
+        if self.journal.unfinished_for((self.bar.physical_identity_key,)):
+            raise ValueError("maintenance Bar has an unfinished command")
 
 
 async def _run_loop(scheduler: ExternalManualScheduler) -> None:
@@ -353,9 +520,16 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--at", help="timezone-aware ISO-8601 time")
     sub.add_parser("status")
     sub.add_parser("pause")
-    for name in ("activate", "activate-and-run", "resume-relink", "resume-verified", "run"):
+    for name in (
+        "activate",
+        "activate-and-run",
+        "resume-relink",
+        "resume-verified",
+        "run",
+        "serve",
+    ):
         command = sub.add_parser(name)
-        if name != "run":
+        if name not in {"run", "serve"}:
             command.add_argument("--schedule-sha256", required=True)
             command.add_argument("--replace-paused", action="store_true")
         command.add_argument("--master-member", required=True)
@@ -407,7 +581,7 @@ async def _main_async(args: argparse.Namespace) -> dict[str, object]:
         return {"outcome": "paused", "device_writes": 0}
     if not args.write_enabled:
         raise ValueError("live scheduler requires explicit --write-enabled")
-    if args.command == "run":
+    if args.command in {"run", "serve"}:
         active = store.active()
         if active is None or not isinstance(active.get("schedule_sha256"), str):
             raise ValueError("no saved active schedule")
@@ -423,6 +597,12 @@ async def _main_async(args: argparse.Namespace) -> dict[str, object]:
     )
     scheduler = ExternalManualScheduler(plan=plan, store=store, backend=backend)
     with store.lock():
+        if args.command == "serve":
+            from jebao_flow.local_control.external_manual_editor import ScheduleEditor
+            from jebao_flow.local_control.external_manual_service import run_editor_service
+
+            await run_editor_service(ScheduleEditor(store, backend), backend.config.mqtt)
+            return {"outcome": "editor_service_stopped"}
         if args.command == "resume-relink":
             result = await scheduler.resume_unattempted_relink(
                 datetime.now(ZONE), current_time=lambda: datetime.now(ZONE)

@@ -50,7 +50,7 @@ from jebao_flow.local_control.schedule import (
 )
 from jebao_flow.operator_capture.schedule_model import NativeLinkageMode
 from jebao_flow.protocol.profiles import get_product_schema
-from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
+from jebao_flow.protocol.schedule import LOCAL_WAVEMAKER_PRODUCT_KEY, LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
 
 
 class LocalControlExecutionError(RuntimeError):
@@ -561,6 +561,96 @@ class LocalControlCoordinator:
                 }
             )
             self._journal.save(record, replacement)
+            return self._result(replacement, physical_write_count=0)
+
+    async def observe_unacknowledged_scalar(
+        self, request_id: str, *, endpoint: ResolvedEndpoint
+    ) -> LocalControlResult:
+        """Resolve one external manual child by fresh state, never by another write.
+
+        A matching state is not an ACK or a qualification receipt. Preserve the original
+        failed record and raw observation before terminalizing either disposition.
+        """
+        record = self._journal.load(request_id)
+        if record is None:
+            raise KeyError("local-control transaction does not exist")
+        if (
+            not request_id.startswith("pro_manual_")
+            or len(record.actions) != 1
+            or record.native_context_sha256 is not None
+            or record.recovery_order is not None
+        ):
+            raise LocalControlExecutionError("observation is limited to an external manual child")
+        action = record.actions[0]
+        if endpoint.target != action.target:
+            raise LocalControlExecutionError("observation endpoint changed its physical binding")
+        if record.phase is TransactionPhase.ABANDONED:
+            return self._result(record, physical_write_count=0)
+        if (
+            (record.phase, action.phase) not in {
+                (TransactionPhase.RECOVERY_REQUIRED, ActionPhase.UNCERTAIN),
+                (TransactionPhase.EXECUTING, ActionPhase.FORWARD_ATTEMPTING),
+            }
+            or action.acknowledgement_sha256 is not None
+            or action.verification_kind != "scalar_fields"
+            or not (
+                (action.target.product_key == LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
+                 and action.function in {
+                     "linkage_role", "schedule_enable", "manual_mode", "manual_flow",
+                     "slave_common_flow", "manual_frequency", "custom_wave_frequency",
+                 })
+                or (request_id.startswith("pro_manual_maintenance_")
+                    and action.target.product_key == LOCAL_WAVEMAKER_PRODUCT_KEY
+                    and action.function in {"feed_switch", "schedule_enable"})
+            )
+        ):
+            raise LocalControlExecutionError("child is not one unacknowledged manual scalar")
+        with self._lease.acquire((action.target.physical_identity_key,)):
+            self._require_no_other_unfinished(request_id, (action.target.physical_identity_key,))
+            if self._journal.load(request_id) != record:
+                raise LocalControlExecutionError("journal changed before observation")
+            writer = self._writer_factory(endpoint)
+            try:
+                capture = await writer.connect_and_capture(accept_reports=True)
+            finally:
+                await writer.close()
+            prepared = self._forward_prepared(action, endpoint)
+            applied = verify_prepared_readback(prepared, capture.status_payload)
+            observation_sha256 = self._journal.install_blob(capture.wire_frame)
+            prior = json.dumps(
+                record.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("ascii") + b"\n"
+            prior_sha256 = self._journal.install_blob(prior)
+            if prior_sha256 != self._journal.record_digest(record):
+                raise LocalControlExecutionError("prior journal evidence changed")
+            # Retire the unacknowledged original attempt using the existing wire schema.
+            # Only its fresh observation, not ACK-backed execution, can be confirmed.
+            phase = TransactionPhase.ABANDONED
+            observed_action = JournalAction.model_validate({
+                **action.model_dump(),
+                "phase": ActionPhase.ABANDONED,
+                "diagnostic": (
+                    "target_observed_without_ack" if applied else "target_not_observed_drop"
+                ),
+                "external_observation_sha256": observation_sha256,
+            })
+            replacement = LocalControlJournalRecord.model_validate({
+                **record.model_dump(), "phase": phase, "actions": (observed_action,),
+                "revision": record.revision + 1, "updated_at": datetime.now(UTC),
+                "abandoned_prior_record_sha256": prior_sha256,
+            })
+            self._journal.save(record, replacement)
+            values = get_product_schema(action.target.product_key).decode_status(
+                capture.status_payload
+            )
+            expected = json.loads(prepared.expected_readback)
+            print(json.dumps({
+                "outcome": "readback_confirmed" if applied else "abandoned",
+                "function": action.function,
+                "expected": expected, "observed": {key: values[key] for key in expected},
+                "ack_received": False, "additional_device_writes": 0,
+            }), flush=True)
             return self._result(replacement, physical_write_count=0)
 
     async def abandon_uncertain_pro_timer_off_at_baseline(

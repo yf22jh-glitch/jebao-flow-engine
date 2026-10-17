@@ -12,9 +12,13 @@ from zoneinfo import ZoneInfo
 
 ZONE = ZoneInfo("Asia/Seoul")
 _MAX_BYTES = 32 * 1024
-_MODES_WITH_FREQUENCY = frozenset({"pulse", "sine"})
-_MODES_WITHOUT_FREQUENCY = frozenset({"tidal", "constant"})
-_MODES = _MODES_WITH_FREQUENCY | _MODES_WITHOUT_FREQUENCY | {"feed"}
+# Pro app enum and option contract: docs/capabilities/registered-device-app-analysis.md.
+MANUAL_MODES = (
+    "pulse", "sine", "constant", "random", "tidal", "nutrient_transport",
+    "circulation", "feed", "custom",
+)
+_MODES_WITH_FREQUENCY = frozenset({"pulse", "sine", "random", "circulation", "custom"})
+_MODES = frozenset(MANUAL_MODES)
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -39,6 +43,7 @@ class ManualRow:
     upper_flow: int | None
     lower_flow: int | None
     frequency: int | None
+    custom_frequency: int | None = None
 
     @property
     def label(self) -> str:
@@ -129,6 +134,8 @@ def parse_schedule(payload: bytes) -> ManualSchedule:
         )
         if mode in _MODES_WITH_FREQUENCY:
             required.add("frequency")
+        if mode == "custom":
+            required.add("custom_frequency")
         if set(entry) != required:
             raise ValueError("manual schedule row fields do not match its mode")
         label = entry["time"]
@@ -149,6 +156,7 @@ def parse_schedule(payload: bytes) -> ManualSchedule:
         upper = entry.get("upper_flow")
         lower = entry.get("lower_flow")
         frequency = entry.get("frequency")
+        custom_frequency = entry.get("custom_frequency")
         if mode != "feed":
             for flow in (upper, lower):
                 if type(flow) is not int or not 30 <= flow <= 45:
@@ -156,8 +164,12 @@ def parse_schedule(payload: bytes) -> ManualSchedule:
         if mode in _MODES_WITH_FREQUENCY and (
             type(frequency) is not int or not 5 <= frequency <= 100
         ):
-            raise ValueError("pulse and sine require Frequency in 5..100")
-        rows.append(ManualRow(minute_of_day, mode, upper, lower, frequency))
+            raise ValueError("this mode requires Frequency in 5..100")
+        if mode == "custom" and (
+            type(custom_frequency) is not int or not 5 <= custom_frequency <= 100
+        ):
+            raise ValueError("Custom Wave requires Custom Wave Frequency in 5..100")
+        rows.append(ManualRow(minute_of_day, mode, upper, lower, frequency, custom_frequency))
     if rows[0].minute != 0 or rows[0].feeding:
         raise ValueError("00:00 must begin with a running row")
     for index, row in enumerate(rows):
