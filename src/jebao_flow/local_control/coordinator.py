@@ -595,13 +595,14 @@ class LocalControlCoordinator:
             or action.verification_kind != "scalar_fields"
             or not (
                 (action.target.product_key == LOCAL_WAVEMAKER_PRO_PRODUCT_KEY
-                 and action.function in {
+                 and (action.function in {
                      "linkage_role", "schedule_enable", "manual_mode", "manual_flow",
                      "slave_common_flow", "manual_frequency", "custom_wave_frequency",
-                 })
+                 } or (request_id.startswith("pro_manual_maintenance_")
+                       and action.function == "power")))
                 or (request_id.startswith("pro_manual_maintenance_")
                     and action.target.product_key == LOCAL_WAVEMAKER_PRODUCT_KEY
-                    and action.function in {"feed_switch", "schedule_enable"})
+                    and action.function in {"feed_switch", "schedule_enable", "power", "linkage_role"})
             )
         ):
             raise LocalControlExecutionError("child is not one unacknowledged manual scalar")

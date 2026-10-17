@@ -606,7 +606,7 @@ class AquaOverviewCard extends HTMLElement {
 
   _proTarget(position, e) {
     const scheduler = this._scheduleState();
-    if (scheduler.label === "청소·환수 · 시간표 보류") return `<div class="pump-schedule"><span class="schedule-head">청소·환수 · Feeding 유지 요청</span><small>종료 시 현재 시간표로 복귀</small></div>`;
+    if (scheduler.label === "청소·환수 · 시간표 보류") return `<div class="pump-schedule"><span class="schedule-head">청소·환수 · 전원 OFF 요청</span><small>종료 버튼을 누르면 현재 시간표로 복귀</small></div>`;
     if (!scheduler.data) return `<div class="pump-schedule"><span class="schedule-head">시간표 목표 · 조회 불가</span></div>`;
     const comparison = scheduler.data.health === "normal" ? this._proComparison(position, e, scheduler.data)
       : { kind: scheduler.kind, label: scheduler.label.replace("스케줄러 ", "") };
@@ -659,6 +659,7 @@ class AquaOverviewCard extends HTMLElement {
   }
 
   _barTarget(e, mode, flow, frequency, cross) {
+    if (this._scheduleState().label === "청소·환수 · 시간표 보류") return `<div class="pump-schedule"><span class="schedule-head">청소·환수 · 전원 OFF 요청</span><small>종료 버튼을 누르면 기존 시간표 설정으로 복귀</small></div>`;
     const schedule = this._observed(e.schedule);
     if (!schedule || !Array.isArray(schedule.entries)) return `<div class="pump-schedule"><span class="schedule-head">시간표 목표 · 조회 불가</span></div>`;
     const local = new Intl.DateTimeFormat("en-GB", { timeZone: this._hass.config?.time_zone || "Asia/Seoul", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date());

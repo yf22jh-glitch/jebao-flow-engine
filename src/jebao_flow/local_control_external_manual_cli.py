@@ -457,15 +457,22 @@ class LiveBackend:
         return await self.read_retry.run(read, stage="maintenance_bar_query")
 
     async def validate_maintenance(self) -> None:
-        endpoint = await self.read_retry.run(self._resolve_bar, stage="maintenance_bar_discovery")
-        for function, value in (("feed_switch", True), ("feed_switch", False),
-                                ("schedule_enable", False), ("schedule_enable", True)):
-            intent = LocalControlIntent(request_id="pro_manual_maintenance_preflight",
-                                        target=self.bar, function=function, value=value)
-            descriptor = self.catalog.validate_intent(intent)
-            self.coordinator._require_current_control_authority(descriptor, endpoint)
-        if self.journal.unfinished_for((self.bar.physical_identity_key,)):
-            raise ValueError("maintenance Bar has an unfinished command")
+        pair = await self.read_retry.run(self._resolve_pair, stage="maintenance_pair_discovery")
+        bar = await self.read_retry.run(self._resolve_bar, stage="maintenance_bar_discovery")
+        for endpoint in (*pair, bar):
+            functions = [("power", False), ("power", True)]
+            if endpoint.target == self.bar:
+                functions += [("feed_switch", False), ("schedule_enable", False),
+                              ("schedule_enable", True), ("linkage_role", "independent")]
+            for function, value in functions:
+                intent = LocalControlIntent(
+                    request_id="pro_manual_maintenance_preflight", target=endpoint.target,
+                    function=function, value=value,
+                )
+                descriptor = self.catalog.validate_intent(intent)
+                self.coordinator._require_current_control_authority(descriptor, endpoint)
+        if self.maintenance_unfinished():
+            raise ValueError("maintenance has an unfinished command")
 
 
 async def _run_loop(scheduler: ExternalManualScheduler) -> None:

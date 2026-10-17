@@ -144,7 +144,7 @@ def test_user_table_has_exact_31_rows_nine_six_minute_feeds_and_no_tidal_frequen
         lambda d: d["rows"][8].update({"frequency": 80}),
         lambda d: d["rows"][2].update({"time": "06:04"}),
         lambda d: d["rows"][18].update({"upper_flow": 46}),
-        lambda d: d["rows"][0].update({"mode": "random"}),
+        lambda d: d["rows"][0].update({"mode": "unsupported"}),
         lambda d: d["rows"][0].update({"frequency": True}),
         lambda d: d.update({"upper_identity_sha256": d["lower_identity_sha256"]}),
     ],
@@ -683,21 +683,12 @@ async def test_running_loop_dispatches_one_new_boundary(tmp_path, monkeypatch):
     scheduler, backend, _store = _scheduler(tmp_path, slave_timer=False)
     await scheduler.activate(_at(13, 35))
     backend.sent.clear()
-    moments = iter(
-        (
-            _at(13, 39, 59),
-            _at(13, 39, 59),
-            _at(13, 40),
-            _at(13, 40),
-            _at(13, 40, 1),
-            _at(13, 40, 1),
-        )
-    )
+    moment = [_at(13, 39, 59)]
 
     class Clock(datetime):
         @classmethod
         def now(cls, _zone):
-            return next(moments)
+            return moment[0]
 
     class Finished(Exception):
         pass
@@ -707,6 +698,7 @@ async def test_running_loop_dispatches_one_new_boundary(tmp_path, monkeypatch):
     async def sleep_once(_seconds):
         nonlocal sleeps
         sleeps += 1
+        moment[0] = _at(13, 40)
         if sleeps == 2:
             raise Finished
 

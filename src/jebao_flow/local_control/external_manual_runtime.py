@@ -301,6 +301,7 @@ class ExternalManualScheduler:
         master_role: str,
         images: list[str],
         slave_role: str = "async_slave",
+        require_power: bool = True,
     ) -> None:
         if (
             pair.master.identity != self.backend.master_identity
@@ -309,8 +310,7 @@ class ExternalManualScheduler:
             or pair.slave.action not in (3, 4)
             or pair.master.role != master_role
             or pair.slave.role != slave_role
-            or not pair.master.power
-            or not pair.slave.power
+            or (require_power and (not pair.master.power or not pair.slave.power))
             or pair.master.faults
             or pair.slave.faults
             or self._images(pair) != images
@@ -329,8 +329,10 @@ class ExternalManualScheduler:
             if not allowed:
                 raise ValueError("reported manual Flow is outside its configured output range")
 
-    def _require_manual_pair(self, pair: PairState, images: list[str]) -> None:
-        self._require_pair(pair, master_role="master", images=images)
+    def _require_manual_pair(
+        self, pair: PairState, images: list[str], *, require_power: bool = True
+    ) -> None:
+        self._require_pair(pair, master_role="master", images=images, require_power=require_power)
         if pair.master.timer or pair.slave.timer:
             raise ValueError("external manual schedule requires TimerOFF on both Pro devices")
 
