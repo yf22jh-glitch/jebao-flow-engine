@@ -738,6 +738,37 @@ class AquaOverviewCard extends HTMLElement {
     return String(light.state);
   }
 
+  _patchMarkup(markup) {
+    if (this._markup === markup) return;
+    this._markup = markup;
+    const template = document.createElement('template');
+    template.innerHTML = markup;
+    // Retain mounted controls and links when unrelated HA states refresh. In
+    // particular, never detach a maintenance button between pointerdown/up.
+    const children = (current, next) => {
+      [...next.childNodes].forEach((node, index) => {
+        const existing = current.childNodes[index];
+        if (!existing) { current.append(document.importNode(node, true)); return; }
+        if (existing.nodeType !== node.nodeType || existing.nodeName !== node.nodeName) {
+          existing.replaceWith(document.importNode(node, true)); return;
+        }
+        if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.COMMENT_NODE) {
+          if (existing.nodeValue !== node.nodeValue) existing.nodeValue = node.nodeValue;
+          return;
+        }
+        for (const name of existing.getAttributeNames()) {
+          if (!node.hasAttribute(name)) existing.removeAttribute(name);
+        }
+        for (const attribute of node.attributes) {
+          if (existing.getAttribute(attribute.name) !== attribute.value) existing.setAttribute(attribute.name, attribute.value);
+        }
+        children(existing, node);
+      });
+      while (current.childNodes.length > next.childNodes.length) current.lastChild.remove();
+    };
+    children(this.shadowRoot, template.content);
+  }
+
   _render() {
     if (!this._config || !this._hass) return;
     const e = this._config.entities;
@@ -768,7 +799,7 @@ class AquaOverviewCard extends HTMLElement {
           <div class="kpi"><div class="kpi-icon">◉</div><div><div class="label">리턴 전원</div><strong>${returnPowers.filter((value) => value === "on").length}/2</strong><small>ON</small></div></div>
           <div class="kpi"><div class="kpi-icon">☼</div><div><div class="label">NP 조명 모드</div><strong>${aquaEscape(aquaKnown(lightMode) ? lightMode.toUpperCase() : "미확인")}</strong></div></div>
           <div class="kpi"><div class="kpi-icon">◇</div><div><div class="label">장치 경고</div><strong>${aquaEscape(warningLabel)}</strong></div></div>`;
-    this.shadowRoot.innerHTML = `<style>${AQUA_STYLES}</style><ha-card><main class="page">
+    this._patchMarkup(`<style>${AQUA_STYLES}</style><ha-card><main class="page">
       <section class="hero"><div class="hero-head"><div class="hero-icon">◈</div>
         <div><div class="eyebrow">Reef overview</div><h1>우리집 해수어항</h1>
           <div class="subtitle">${inkbird ? "수온 · 수류 · 리턴 · 조명 · 도징 현황" : "수류 · 리턴 · 조명 · 도징 현황"}</div></div>
@@ -805,7 +836,7 @@ class AquaOverviewCard extends HTMLElement {
         </section>
       </div>
       <div class="foot">표시값은 HA의 장치 보고·상태 엔티티에서 읽습니다. 청소·환수 버튼은 실제 수류모터를 제어합니다.${inkbird ? " 수온 그래프는 HA에 저장된 지난 24시간 기록입니다." : " 수온은 Inkbird 연동 후 추가됩니다."}</div>
-    </main></ha-card>`;
+    </main></ha-card>`);
     const bindMaintenance = () => {
       const control = this.shadowRoot.querySelector?.("aqua-maintenance-control");
       if (control) control.hass = this._hass;

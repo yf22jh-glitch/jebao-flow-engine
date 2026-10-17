@@ -898,13 +898,15 @@ class AquaMaintenanceControl extends HTMLElement {
       <span>상단 GMP <b>${powerText(d?.upper_role==="master" ? observed.master_power : observed.slave_power)}</b></span>
       <span>하단 GMP <b>${powerText(d?.lower_role==="master" ? observed.master_power : observed.slave_power)}</b></span>
       <span>바형 <b>${powerText(observed.bar_power)}</b></span></div><small>마지막 장치 응답 기준 · 응답이 없으면 정지를 확인할 수 없어요.</small>` : "";
-    this.shadowRoot.innerHTML=`<style>
+    // Keep controls mounted during HA updates and freshness checks.
+    if (!this.shadowRoot.querySelector('.box')) this.shadowRoot.innerHTML=`<style>
       :host{display:block;margin:14px 0 22px;color:#e9f6fc;font-family:inherit}
-      .box{display:flex;align-items:center;gap:22px;padding:20px 22px;border:1px solid ${enabled?"#54877b":"#2c4c60"};
-        border-radius:18px;background:${enabled?"linear-gradient(110deg,#173c3c,#122b34)":"#122a38"}}
+      .box{display:flex;align-items:center;gap:22px;padding:20px 22px;border:1px solid #2c4c60;
+        border-radius:18px;background:#122a38}
+      .box.enabled{border-color:#54877b;background:linear-gradient(110deg,#173c3c,#122b34)}
       .heading{display:flex;align-items:center;gap:10px;font-size:17px;font-weight:700}
       ha-icon{color:#5fcebc;--mdc-icon-size:23px}.copy{flex:1;min-width:0}
-      .status{font-size:12px;color:${enabled?"#8ce3c7":"#a1bccb"};margin:8px 0}
+      .status{font-size:12px;color:#a1bccb;margin:8px 0}.enabled .status{color:#8ce3c7}
       small{display:block;font-size:11px;color:#8eaaba;line-height:1.7}
       .targets{display:flex;flex-wrap:wrap;gap:8px;margin:9px 0 4px}.targets span{border:1px solid #365969;border-radius:7px;padding:4px 8px;font-size:11px}.targets b{margin-left:5px}
       .buttons{display:flex;gap:8px;flex-shrink:0}button{min-height:44px;padding:11px 17px;
@@ -914,12 +916,21 @@ class AquaMaintenanceControl extends HTMLElement {
       @media(max-width:760px){.box{align-items:stretch;flex-direction:column;gap:14px;padding:16px}.buttons button{flex:1}}
     </style><section class="box" aria-label="청소·환수 모드"><div class="copy">
       <div class="heading"><ha-icon icon="mdi:water-sync"></ha-icon>청소·환수 모드</div>
-      <div class="status" role="status" aria-live="polite">● ${scheduleEscape(label)}</div>
-      ${powerRows}
-      <small>${scheduleEscape(note)}</small>
+      <div class="status" role="status" aria-live="polite"></div>
+      <div data-power-rows></div>
+      <small data-note></small>
       <small>장치의 전원 OFF 명령이며, 전원 공급 자체를 차단하지는 않아요.</small>
-    </div><div class="buttons"><button class="on" data-maintenance="maintenance_on" ${startDisabled?"disabled":""}>${enabled&&m?.phase==="error"?"전원 OFF 다시 확인":"환수 시작 · 세 모터 끄기"}</button>
-    <button data-maintenance="maintenance_off" ${endDisabled?"disabled":""}>환수 종료 · 전원·시간표 복귀</button></div></section>`;
+    </div><div class="buttons"><button class="on" data-maintenance="maintenance_on"></button>
+    <button data-maintenance="maintenance_off">환수 종료 · 전원·시간표 복귀</button></div></section>`;
+    const root=this.shadowRoot;
+    root.querySelector('.box').classList.toggle('enabled',enabled);
+    const text=(selector,value)=>{const element=root.querySelector(selector);if(element.textContent!==value)element.textContent=value;};
+    text('.status',`● ${label}`);text('[data-note]',note);
+    const powers=root.querySelector('[data-power-rows]');
+    if (powers.innerHTML!==powerRows) powers.innerHTML=powerRows;
+    text('[data-maintenance="maintenance_on"]',enabled&&m?.phase==="error"?"전원 OFF 다시 확인":"환수 시작 · 세 모터 끄기");
+    root.querySelector('[data-maintenance="maintenance_on"]').disabled=!!startDisabled;
+    root.querySelector('[data-maintenance="maintenance_off"]').disabled=!!endDisabled;
   }
 }
 if (!customElements.get("aqua-maintenance-control")) customElements.define("aqua-maintenance-control",AquaMaintenanceControl);

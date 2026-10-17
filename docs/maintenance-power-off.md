@@ -37,7 +37,10 @@ GMP 두 대와 바형의 `power=false`를 각각 요청하고 세 장비의 fres
 ## 소스와 배포
 
 삭제된 작업 폴더 대신 실제 scheduler 이미지의 Python과 두 대시보드 JS를
-`35cc537`에 보존했다. 변경은 `fix/maintenance-power-off` 브랜치로 보존한다.
+`35cc537`에 보존했다. 최초 JS 회수 대상은 canonical 파일이었다. 배포 전 API 대조에서
+실제로 사용 중인 별도 release 파일의 DOM 보존 수정도 확인해 유지했다. HA 갱신이
+pointerdown/up 사이에 발생하는 클릭과 키보드 focus 유지도 브라우저에서 검증했다.
+변경은 `fix/maintenance-power-off` 브랜치로 보존한다.
 기존 controller/dosing 이미지와 동결된 native ASYNC 하네스는 배포 대상이 아니다.
 
 `deploy/maintenance-power-off.Dockerfile`은 검증한 기존 scheduler 이미지에 변경된

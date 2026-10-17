@@ -75,7 +75,16 @@ async def main():
         assert await page.get_by_role("button", name="전원 OFF 다시 확인").is_enabled()
         assert await finish.is_enabled()
         await page.evaluate("setState('off')")
-        await start.click()
+        await start.focus()
+        await page.evaluate(
+            "window.pressed=control.shadowRoot.querySelector('button');setState('off')"
+        )
+        assert await page.evaluate("pressed===control.shadowRoot.activeElement")
+        position = await start.bounding_box()
+        await page.mouse.move(position["x"] + 20, position["y"] + 20)
+        await page.mouse.down()
+        await page.evaluate("setState('off')")
+        await page.mouse.up()
         await page.evaluate("control._send('maintenance_on')")
         assert await page.evaluate("calls.length") == 1
         args = await page.evaluate("calls[0]")
@@ -98,6 +107,16 @@ async def main():
             json.loads((await page.evaluate("calls[1]"))[2]["payload"])["operation"]
             == "maintenance_off"
         )
+        await page.add_script_tag(
+            path=str(Path(__file__).parents[2] / "ha_cards/aqua-overview-card.js")
+        )
+        assert await page.evaluate("""() => {
+          const outer=document.createElement('aqua-overview-card');
+          outer._patchMarkup('<section><p>before</p><aqua-maintenance-control></aqua-maintenance-control></section>');
+          const child=outer.shadowRoot.querySelector('aqua-maintenance-control');
+          outer._patchMarkup('<section><p>after</p><aqua-maintenance-control></aqua-maintenance-control></section>');
+          return child===outer.shadowRoot.querySelector('aqua-maintenance-control');
+        }""")
         assert errors == [], errors
         await browser.close()
     print(
