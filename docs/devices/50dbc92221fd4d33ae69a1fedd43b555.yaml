@@ -11,6 +11,10 @@ protocol:
   packet_version: "0x00000004"
   schema_type: standard
   raw_status_size_bytes: 452
+  schedule_slot_count: 48
+  schedule_slot_size_bytes: 9
+  schedule_raw_offset: 11
+  schedule_image_size_bytes: 432
   discovery_transport: udp
   discovery_port: 12414
   control_transport: tcp
@@ -35,21 +39,29 @@ power:
   zero_equals_off: unknown
 
 capabilities:
-  observed_readable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime]
+  observed_readable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime, AutoMode, AutoFlow, AutoFreq, AutoFeedTime, NowTime]
   schema_declared_writable: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency, Cust_Wav_Freq, FeedTime]
   write_validated: [SwitchON, TimerON, Linkage, Mode, Flow, Frequency]
-  native_mode_values: [pulse, sine, constant, random, tidal, nutrient_transport, circulation, feed, custom]
-  linkage_values: [independent, master, sync_slave, async_slave]
+  schema_declared_native_mode_values: [pulse, sine, constant, random, tidal, nutrient_transport, circulation, feed, custom]
+  live_write_validated_native_mode_values: [pulse, sine, constant]
+  schema_declared_linkage_values: [independent, master, sync_slave, async_slave]
+  live_write_validated_linkage_values: [independent, master, sync_slave, async_slave]
   faults_present: [overcurrent, overvoltage, overtemperature, undervoltage, locked_rotor, no_live_load, UART]
 
+timing:
+  configured_minimum_command_interval_ms: 1000
+  fresh_session_read_latency_seconds: unknown
+  related_datapoints_update_atomically: false
+  observed_now_time_batch_lag_seconds: [22, 25]
+
 evidence:
-  captured_at: 2026-08-27
+  captured_at: 2026-08-28
   capture_environment: isolated IoT VLAN through home server and router
   notes:
     - Two devices returned complete 452-byte status payloads.
     - Both live reads decoded as powered on and independent linkage.
     - Bounded low-power register writes and exact restoration were read back on both devices.
-    - An async-slave-only Flow change did not persist; physical water flow was not validated.
+    - An async-slave-only Flow change was attempted, but delivery and full-state read-back were not proven; independent Flow remains unqualified.
     - An up-to-150-second TimerON Async run stopped safely shortly after the planned slave Flow change.
     - The run issued zero of two qualification receipts and did not authorize schedule-linkage.
     - Automatic exact restore remained incomplete; a fresh attended recovery restored both snapshots.
@@ -61,3 +73,6 @@ evidence:
     - The Async intent recorded no typed primary failure, so independent slave Flow remains unqualified.
     - A version-2 repeat proved only that the slave-38 write path was attempted; adapter and full-state verification both remained absent.
     - Attended recovery restored the original TimerON values, and fresh Observer reads matched all 14 valid schedule slots and both saved fingerprints.
+    - Retry4 reached both native roles and showed Mode, Frequency, AutoMode, AutoFlow, and AutoFreq converging across separate reports; the 300-second independent slave result was not proven.
+    - Retry5 stopped before its first Linkage write because a newly sampled pair NowTime exceeded the two-second skew gate; exact controls and both 432-byte images were restored.
+    - Timing and retry4/retry5 details are reconstructed operator observations (grade c), not preserved raw captures; see docs/runs/2026-08-26--2026-08-28-native-linkage-history.md.

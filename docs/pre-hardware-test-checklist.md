@@ -1,5 +1,10 @@
 # 실기 제어 안전 체크리스트
 
+네이티브 ASYNC write 하네스는 [AGENTS.md의 동결 규칙](../AGENTS.md)에 따라 동결 중입니다.
+아래 기존 절차는 재실행 승인이 아닙니다. 현재 GO/NO-GO와 복원 조건은
+[실기·설치 환경 준비 기준](hardware-readiness.md), 전체 이력과 증거 등급은
+[실기 기록](runs/README.md)을 따릅니다.
+
 이 문서는 실제 펌프의 제한된 control/write 검증을 반복하거나 다음 실기 단계를 진행하기 전에
 확인할 중단 지점입니다. 2026-08-27 Pro 두 대의 TimerON Async 장기 시험은 slave 출력 변경 구간
 직후 안전 실패했고 자동 exact restore가 완료되지 않았습니다. 새 확인 토큰의 attended recovery와
@@ -362,4 +367,7 @@ Emergency latch는 자동으로 지워지지 않습니다. 펌프 전원과 수�
 시간표나 다른 제어기를 다시 켜지 않습니다. Observer를 다시 시작한 뒤 두 장비 모두 원래
 `TimerON/independent/mode/power/frequency`, schedule enabled, 14 slots, invalid 0과 snapshot
 schedule fingerprint가 일치하는지 교차 확인합니다. 마지막으로 private 설정을 반드시 다시
-`dry_run: true`로 잠급니다.
+`dry_run: true`와 모든 장비 `allow_hardware_writes: false`로 잠급니다. write-ready recovery
+구성을 해제하고 Observer에서 6대 identity·online·health를 다시 확인해야 종료입니다.
+이 Observer 복귀는 읽기 전용 재발견이며 control-mode Desired/Actual 재적용이나 앱 없는 Wi-Fi
+provisioning을 의미하지 않습니다.

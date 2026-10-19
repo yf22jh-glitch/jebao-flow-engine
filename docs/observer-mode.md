@@ -41,7 +41,7 @@ worker를 만듭니다.
 ```yaml
 observer:
   targets:
-    - 192.168.20.255
+    - 192.0.2.255
   poll_interval_seconds: 5
   publish_heartbeat_seconds: 300
   rediscovery_interval_seconds: 30
@@ -99,6 +99,10 @@ DC Pump Pro, Local Wavemaker, Local Wavemaker Pro, Aquarium Pump의 제품별 �
 
 신호 단절, 공유기 재부팅 또는 DHCP 주소 변경은 장비가 기존 Wi-Fi에 다시 연결한 뒤 Observer가
 stable identity로 새 주소를 찾아 자동 복구합니다. 이 경우 Jebao 앱 재등록은 필요하지 않습니다.
+이 자동 복구는 **읽기 전용 Observer 연결**에만 해당합니다. control mode에서 Desired State를
+장비에 다시 적용하는 reconciler와 `restore_on_reconnect` 실행 경로는 아직 구현하지
+않았습니다. 설정 필드가 존재해도 현재 버전에서 재연결 write를 허용하는 영수증으로
+해석하면 안 됩니다.
 
 공장 초기화, SSID·비밀번호 변경 또는 장비의 Wi-Fi 설정 소실은 LAN 밖에서 발생하므로 현재
 데몬이 복구할 수 없습니다. Jebao 앱은 삭제하지 않고 provisioning·비상복구 용도로 유지합니다.
@@ -111,7 +115,12 @@ stable identity로 새 주소를 찾아 자동 복구합니다. 이 경우 Jebao
 
 IoT SSID와 비밀번호를 안정적으로 유지하고 DHCP 예약을 사용하면 복구 빈도를 줄일 수 있습니다.
 로컬 AP provisioning 도구는 프로토콜과 credential 저장 방식을 별도 검증한 뒤 후속 단계에서만
-검토합니다.
+검토합니다. 따라서 공장 초기화나 SSID credential 소실 후에는 현재 Jebao 앱을
+대체할 수 없습니다.
+
+실기 write 진단을 끝낸 뒤에는 private 설정을 `dry_run: true`와 모든 장비
+`allow_hardware_writes: false`로 다시 잠그고 write-ready recovery 구성을 해제한 뒤에만
+Observer를 재시작합니다.
 
 ## Home Assistant 표시
 

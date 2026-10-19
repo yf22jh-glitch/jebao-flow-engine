@@ -4,7 +4,8 @@ instance:
   timezone: Asia/Seoul
 
 mqtt:
-  host: 192.168.0.10
+  # RFC 5737 documentation address. Replace only in a private, gitignored config.
+  host: 192.0.2.10
   port: 1883
   username: jebao_flow
   password_env: MQTT_PASSWORD
@@ -47,7 +48,8 @@ devices:
       max_power: 80
     control:
       minimum_command_interval_ms: 1000
-      restore_on_reconnect: true
+      # Reserved for a future control-mode reconciler; no reconnect-write path exists yet.
+      restore_on_reconnect: false
       # Keep false until a reviewed low-output hardware test.
       allow_hardware_writes: false
       readback_delay_ms: 500
@@ -62,7 +64,7 @@ devices:
       max_power: 75
     control:
       minimum_command_interval_ms: 1000
-      restore_on_reconnect: true
+      restore_on_reconnect: false
       allow_hardware_writes: false
       readback_delay_ms: 500
       readback_attempts: 3
@@ -76,7 +78,7 @@ devices:
       max_power: 75
     control:
       minimum_command_interval_ms: 1000
-      restore_on_reconnect: true
+      restore_on_reconnect: false
       allow_hardware_writes: false
       readback_delay_ms: 500
       readback_attempts: 3
@@ -89,6 +91,7 @@ devices:
       min_power: 30
       max_power: 80
     control:
+      restore_on_reconnect: false
       allow_hardware_writes: false
 
   - id: return_aux
@@ -99,6 +102,7 @@ devices:
       min_power: 30
       max_power: 80
     control:
+      restore_on_reconnect: false
       allow_hardware_writes: false
 
   - id: dosing_main
@@ -106,6 +110,7 @@ devices:
     type: dosing_pump
     discovery: auto
     control:
+      restore_on_reconnect: false
       allow_hardware_writes: false
 
 groups:

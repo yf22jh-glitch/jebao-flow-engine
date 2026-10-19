@@ -1,5 +1,10 @@
 # TimerON schedule-linkage diagnostic
 
+The native ASYNC write harness is frozen under [AGENTS.md](../AGENTS.md).
+The historical procedure below does not authorize another hardware run. See
+[hardware readiness](hardware-readiness.md) for the current decision and
+[run records](runs/README.md) for the complete history and evidence grades.
+
 `jebao-flow-schedule-test` is a separate, attended diagnostic for checking whether two qualified
 Local Wavemaker Pro controllers continue to advance their own local schedules while assigned
 native `master` and `async_slave` roles.
@@ -168,3 +173,12 @@ mismatched, safety-related, or incomplete terminal state requires attended confi
 An intent in `STARTED` with no journal is closed without connecting to a device: `STARTED` is
 persisted before writable connection, the journal precedes every role write, and terminal intent
 is persisted before journal removal.
+
+Operational cleanup is complete only after the outer-control, temporary-schedule, and role journals
+are absent; the latch is clear; and two independent fresh sessions match the original controls and
+both exact images. The private configuration must then return to `dry_run=true` with
+`allow_hardware_writes=false` for every device, the write-ready recovery configuration must be
+withdrawn, and read-only Observer must rediscover all six expected identities as online and healthy.
+If exact restoration fails, retain the journal and do not restart Observer, the Jebao app, or another
+controller. Observer reconnection is read-only discovery; it is not control-mode Desired/Actual
+restoration or app-free Wi-Fi provisioning.

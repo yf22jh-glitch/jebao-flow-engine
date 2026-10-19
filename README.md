@@ -4,27 +4,10 @@ Jebao Flow Engine은 제바오 수류모터와 리턴펌프를 클라우드 없�
 여러 펌프를 하나의 논리적인 수류 그룹으로 운전하기 위한 프로젝트입니다. 실행 데몬의
 이름은 `jebao-flowd`입니다.
 
-> 현재 상태: 실제 장비의 읽기 전용 검증과 지속 Observer, 오프라인 control 프레임 생성,
-> MQTT 상태 계약과 Home Assistant 커스텀 통합 뼈대까지 구현했습니다. 기본 실행 모드는
-> `observer`이며 모든 제어 명령과 실제 write를 거부합니다. 현장 전용 경로에서는 Pro 두 대의
-> 제한된 저출력 Sync와 자동 exact restore가 성공해 qualification 영수증 2/2를 발급했습니다.
-> 다만 Async 슬레이브 출력 변경과 TimerON 슬롯별 출력 전환은 아직 성공으로 인정할 수 없습니다.
-> 2026-08-28의 첫 단일 시험은 `master` 적용 뒤 `async_slave`까지 도달했지만, 역할 적용 시
-> 슬레이브의 manual Frequency가 지속적으로 바뀌는 펌웨어 동작을 명시적 응답에서 확인하고 A→B
-> 시간표 경계 전에 안전 중단했습니다. 자동 rollback, 두 번의 새 연결 원상태 비교, Observer 복귀는
-> 모두 성공했습니다. 이어 `da62b73`으로 실행한 새 `_08`은 write 없는 preflight를 통과하고 임시
-> Constant 31%/32% → Sine 35%/40% 계획을 staged했지만, native 역할 실행과 Linkage write 및
-> A→B 관찰 전 `role_preflight`에서 fail-closed로 종료됐습니다. 자동 outer rollback 완료 뒤 세
-> journal은 모두 `none`이었고, 서로 독립적인 두 번의 fresh read-only 확인에서 원래 controls와
-> 두 장비의 전체 432-byte schedule image가 정확히 일치했습니다. 설정은 `dry_run: true`로 다시
-> 잠겼고 Observer와 recovery 서비스가 정상 복귀했으며 `_08`은 재실행하지 않았습니다. 따라서 핵심
-> slave 슬롯별 `AutoFlow` 질문은 계속 미검증입니다. 후속 `_09`는 같은 임시 저출력 계획의
-> preflight·schedule stage·TimerON arm·role preflight까지 완료했지만, role run의 첫 fresh capture가
-> 약 0.43초 만에 실패해 역할 journal·Linkage write·A→B 관찰 전에 종료됐습니다. 자동 outer
-> rollback 뒤 세 journal은 `none`이었고, 독립 세션 두 번에서 원 controls와 두 432-byte schedule
-> image의 exact 일치를 확인했습니다. 실패 원인은 당시 generic `fresh_capture`보다 좁혀지지 않았으며
-> slave 슬롯별 `AutoFlow` 질문도 여전히 미검증입니다. 네이티브 Linkage는 운영 기능으로 잠겨 있고
-> 일반 데몬·MQTT·HA에 시험 기능을 노출하지 않습니다.
+> 현재 판정과 실기 조건은 [실기·설치 환경 준비 기준](docs/hardware-readiness.md),
+> 전체 실행 이력은 [실기 기록](docs/runs/README.md)을 따릅니다.
+> 네이티브 ASYNC write 하네스는 [동결 규칙](AGENTS.md#1-동결--네이티브-async-write-하네스)의
+> 적용을 받으며, 미검증 프로토타입은 현재 구현이나 실기 자격으로 취급하지 않습니다.
 
 ## 구조
 
@@ -81,6 +64,8 @@ Home Assistant는 UI와 고수준 자동화를 담당하고, `jebao-flowd`는 �
 [검증된 장비 카탈로그](docs/devices/README.md)에 정리했습니다. 제한 실기 절차는
 [실기 제어 안전 체크리스트](docs/pre-hardware-test-checklist.md), VorTech 모드 대응은
 [VorTech 계열 패턴](docs/vortech-inspired-modes.md)을 참고하세요.
+장비·통신 규격·홈서버/격리망을 한 번에 대조하는 GO/NO-GO 기준은
+[실기·설치 환경 준비 기준](docs/hardware-readiness.md)을 사용합니다.
 Home Assistant 설치와 카드는
 [Home Assistant 연동 가이드](docs/home-assistant.md)를 참고하세요.
 기존 스케줄을 write 없이 관찰하는 방법과 한계는
@@ -145,7 +130,9 @@ UDP 브로드캐스트 검색을 사용할 수 있도록 host network를 기본�
 - 빠른 펄스는 장비 내장 모드를 사용합니다.
 - 출력은 그룹과 장비 양쪽 제한을 통과해야 합니다.
 - 동일 값 중복 전송과 과도한 명령 전송을 막습니다.
-- 재접속 후에는 저장 상태를 단계적으로 복원합니다.
+- 읽기 전용 Observer는 identity 기반 재연결을 수행합니다. control-mode Desired State 복원은
+  아직 구현되지 않았으므로 운영 write는 잠급니다.
+- 공장 초기화나 Wi-Fi credential 소실 뒤 앱 없는 provisioning은 아직 지원하지 않습니다.
 - MQTT 또는 Home Assistant가 중단돼도 현재 패턴은 계속 실행합니다.
 - 비상 정지는 자동으로 해제하지 않습니다.
 

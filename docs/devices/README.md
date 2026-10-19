@@ -4,36 +4,14 @@
 공개 저장소이므로 개별 장비의 MAC 주소, device id, 사설 IP와 passcode는 포함하지 않습니다.
 `product_key`는 Gizwits 스키마를 선택하는 제품군 식별자이며 장비별 인증 정보가 아닙니다.
 
-2026-08-25에는 격리된 IoT VLAN에 홈서버를 통해 접속해 UDP discovery, TCP 12416 연결,
-로컬 인증과 raw 상태 읽기를 수행했습니다. 2026-08-26에는 Local Wavemaker Pro 두 대에만
-제한된 저출력 레지스터 write/read-back과 attended exact recovery를 수행했습니다. 2026-08-27
-TimerON Async 장기 시험은 슬레이브 출력 변경 구간 직후 안전 실패했고, 새 토큰의 attended
-recovery 뒤 Observer가 시험 전 상태를 재확인했습니다. 영수증은 0/2이므로 네이티브·스케줄
-Linkage는 아직 qualified 기능이 아닙니다. 다른 제품군의 쓰기 가능 항목은 여전히 스키마 선언일
-뿐이며, Pro에서도 물리 유량과 파형은 검증하지 않았습니다. 뒤이은 저출력 Sync 세 건도 영수증
-0/2였고, 마지막 slave detach 실패는 attended recovery로 원복한 뒤 rollback의 slave-first fresh
-session 경계를 코드와 시뮬레이터에 추가했습니다. 수정 뒤 네 번째 저출력 Sync는 자동 exact
-restore와 영수증 2/2까지 성공했습니다. 후속 Async slave 38% 진단은 자동 rollback 실패 뒤
-attended recovery로 원복됐습니다. version 2 evidence를 적용한 한 번의 재진단도 write 시도만
-남고 adapter/full-state 검증 0건으로 끝났으며, attended recovery와 Observer가 원래 TimerON
-상태·14개 스케줄·지문을 확인했습니다. Async 독립 출력과 물리 파형은 계속 미검증입니다.
-2026-08-28 TimerON Constant→Sine 단일 시험은 두 역할 적용 뒤 슬레이브 manual Frequency의
-지속적인 역할 유발 변경을 fresh explicit reply에서 확인해 A→B 경계 전에 안전 중단했습니다.
-자동 rollback과 두 번의 새 연결 원상태 비교가 성공했으므로 장비는 다시 Observer 운전 중이지만,
-슬롯별 slave `AutoFlow` 전환과 물리 파형은 여전히 미검증입니다.
-이어 `da62b73`으로 한 번 실행한 새 `_08`은 write 없는 preflight를 통과하고 임시 Constant
-31%/32% → Sine 35%/40% 계획을 staged했지만, native 역할 실행·Linkage write와 A→B 관찰 전에
-`role_preflight`에서 fail-closed로 종료됐습니다. 자동 outer rollback 뒤 세 journal은 모두
-`none`이었고, 서로 독립적인 두 fresh read-only 확인에서 원래 controls와 두 장비의 전체
-432-byte schedule image가 exact였습니다. private 설정은 `dry_run: true`로 복귀했고 Observer와
-recovery 서비스도 정상이며 `_08`은 재실행하지 않았습니다. 슬롯별 slave `AutoFlow`와 물리 파형은
-계속 미검증입니다.
-후속 `_09`는 동일 저출력 계획의 TimerON arm과 role preflight까지 완료했지만 role run의 첫
-fresh capture에서 약 0.43초 만에 중단되어 role journal·Linkage write·A→B sample이 없었습니다.
-자동 outer rollback 뒤 세 journal은 `none`이었고, 독립 세션 두 번에서 원 controls와 두 장비의
-전체 432-byte schedule image가 exact였습니다. 설정과 서비스도 안전 상태로 복귀했고 `_09`는
-재실행하지 않았습니다. generic `fresh_capture` 하위 원인은 확정하지 않았으며, 슬롯별 slave
-`AutoFlow`와 물리 파형은 계속 미검증입니다.
+제한 write와 원복 관측의 전체 이력은 [실기 기록](../runs/README.md),
+현재 판정은 [실기·설치 환경 준비 기준](../hardware-readiness.md)을 따릅니다.
+8월 네이티브 Linkage 기록은 [재구성 이력](../runs/2026-08-26--2026-08-28-native-linkage-history.md)의
+증거 등급 (c)이며, 보존된 원본 프레임이나 물리 유량 검증으로 해석하지 않습니다.
+
+실기 종료 뒤에는 private 설정을 `dry_run: true`와 모든 장비
+`allow_hardware_writes: false`로 잠그고 write-ready recovery를 해제한 뒤,
+읽기 전용 Observer의 identity·online·health를 확인합니다.
 
 | 제품군 | 수량 | 분류 | 상태 읽기 | 제한 레지스터 write |
 |---|---:|---|---|---|
