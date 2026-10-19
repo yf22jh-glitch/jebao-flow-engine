@@ -244,6 +244,7 @@ worktree prototype)**이며 현재 구현이 아닙니다. 실기에 한 번도 
 
 | 질문 | 판정 |
 |---|---|
+| 외부 수동 시간표를 현재 장비 상태에서 복귀하고 같은 구간의 서비스 재시작 후 유지했는가 | **PASS — 2026-10-20 무송신 복귀·서비스 재시작 범위**, 장비 보고와 현재 행 일치, active 불변·새 제어 journal 0. 경계를 넘긴 부팅은 오프라인 검증이며 전체 서버 재부팅 재검증은 미실시. [실행 기록](runs/2026-10-20-scheduler-boot-resume-deployment.md) |
 | 새0cb schema 자격으로 Bar timer·schedule과 기존 Pro 제어를 HA에 배포했는가 | **PASS — 조작17·시간표API3**, 새40receipt/20pair·HA86/86·fresh6/6·기동write0·기록 불변. Bar 원Random100은 상한50으로 ON 거부되며 실제 운영 시간표 재적용은 별도. [2026-09-16 활성화](runs/2026-09-16-bar-timer-ha-activation.md) |
 | 새 자격으로 두 Pro의 HA 실제 제어 표면을 배포했는가 | **PASS — Pro scalar16·시간표2/native API**, HA86/86·fresh6/6·기동 추가write0. 다른4장비·Async 재결속은 별도. [2026-09-16 활성화](runs/2026-09-16-pro-ha-control-activation.md) |
 | 새3e6 schema에서 두 Pro9기능의 실장 자격을 갱신했는가 | **PASS —18pair/36receipt·자기 원복 exact**, 다른 장비와 새 native 결속은 별도. [2026-09-16 자격](runs/2026-09-16-pro-control-qualification.md) |

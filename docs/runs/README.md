@@ -269,6 +269,8 @@ raw·구조화 산출물은 사설 주소를 포함하므로 저장소에 넣지
 | [2026-09-14 HA Core update read-only postcheck](2026-09-14-ha-core-update-readonly-postcheck.md) | discovery90 exact / fresh6 / command0 | 사용자 업데이트 완료 뒤 새 poll batch·비무장·전후 tree 불변 확인; 새 배포·실기 승인은 별개 |
 | [2026-09-14 Bar OFF-state Flow diagnostic](2026-09-14-local-bar-off-flow-diagnostic.md) | direct record3/rev4×3 / Flow1·power2 / post-ON3 cycle | Bar OFF31→OFF30→ON30 단회 PASS·앱 원복·exact prior 복귀; D1u group FAIL·원인 UNKNOWN 유지 |
 | [2026-09-14 group power diagnostic retest](2026-09-14-m4-group-power-diagnostic-retest.md) | group record2/rev10·19 / Flow3·power6 / post-ON3 cycle | 동일 member 순서의 단회 PASS·second TimerON/latent30 수용·exact prior 복귀; D1u 원인 UNKNOWN 유지 |
+| [2026-10-20 서버 재부팅 후 시간표 보류 진단](2026-10-20-scheduler-reboot-paused.md) | 부팅 로그·저장 상태 조회 / 제어 송신 0 | 컨테이너 자동 시작 성공, 자정 경계 누락 후 paused 확인 |
+| [2026-10-20 현재 구간 복귀 수정 배포](2026-10-20-scheduler-boot-resume-deployment.md) | 무송신 복귀·서비스 재시작 / 제어 송신 0 | active·현재 구간 검증 유지, 전체 서버 재부팅 재검증은 별도 |
 
 ## 새 실행 기록 템플릿
 
