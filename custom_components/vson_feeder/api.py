@@ -13,8 +13,11 @@ import time
 from typing import Any
 
 from aiohttp import (
-    ClientConnectionError, ClientConnectorDNSError, ClientError,
-    ClientResponseError, ClientSession,
+    ClientConnectionError,
+    ClientConnectorDNSError,
+    ClientError,
+    ClientResponseError,
+    ClientSession,
 )
 from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
 from cryptography.hazmat.primitives import padding
@@ -79,6 +82,7 @@ class VsonFeederApi:
         self.device_id = device_id
         self.token = token
         self._feed_lock = asyncio.Lock()
+        self._schedule_lock = asyncio.Lock()
         self._last_feed_request = float("-inf")
 
     async def _request(
@@ -110,7 +114,9 @@ class VsonFeederApi:
                 f"{endpoint}: HTTP {error.status}", kind="http", http_status=error.status
             ) from error
         except ClientConnectionError as error:
-            raise VsonTransportError(f"{endpoint}: connection failure", kind="connection") from error
+            raise VsonTransportError(
+                f"{endpoint}: connection failure", kind="connection"
+            ) from error
         except ValueError as error:
             raise VsonTransportError(f"{endpoint}: invalid JSON", kind="parse") from error
         except ClientError as error:
@@ -224,6 +230,23 @@ class VsonFeederApi:
         frequency: int,
         enabled: bool,
     ) -> None:
+        # Allocation and its write must share one lock with edits/deletions.
+        # Do not retry an ambiguous write: the cloud may have accepted it.
+        async with self._schedule_lock:
+            await self._upsert_schedule(
+                number=number, open_time=open_time, week=week,
+                frequency=frequency, enabled=enabled,
+            )
+
+    async def _upsert_schedule(
+        self,
+        *,
+        number: str | None,
+        open_time: str,
+        week: str,
+        frequency: int,
+        enabled: bool,
+    ) -> None:
         fields = {
             "id": self._require_device_id(),
             "type": "1" if number is not None else "0",
@@ -246,8 +269,9 @@ class VsonFeederApi:
         await self._post("updateBleySub", fields, authenticated=True)
 
     async def delete_schedule(self, number: str) -> None:
-        await self._post(
-            "deleteTimeBley",
-            {"id": self._require_device_id(), "number": number},
-            authenticated=True,
-        )
+        async with self._schedule_lock:
+            await self._post(
+                "deleteTimeBley",
+                {"id": self._require_device_id(), "number": number},
+                authenticated=True,
+            )
