@@ -1,0 +1,55 @@
+set_schedule:
+  name: Set native feeding schedule
+  description: Add or modify a schedule stored by the VSON cloud. Requires a configured device ID.
+  fields:
+    entity_id:
+      name: Native schedule sensor
+      required: true
+      selector:
+        entity:
+          integration: vson_feeder
+          domain: sensor
+    number:
+      name: Existing slot number
+      description: Omit to add a new slot.
+      selector:
+        text:
+    open_time:
+      name: Time
+      required: true
+      selector:
+        time:
+    week:
+      name: VSON week code
+      description: "0=once; 1&2&3&4&5&6&7=every day."
+      required: true
+      selector:
+        text:
+    frequency:
+      name: Portions
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 31
+          mode: box
+    enabled:
+      name: Enabled
+      selector:
+        boolean:
+delete_schedule:
+  name: Delete native feeding schedule
+  description: Delete a schedule slot stored by the VSON cloud. Requires a configured device ID.
+  fields:
+    entity_id:
+      name: Native schedule sensor
+      required: true
+      selector:
+        entity:
+          integration: vson_feeder
+          domain: sensor
+    number:
+      name: Slot number
+      required: true
+      selector:
+        text:

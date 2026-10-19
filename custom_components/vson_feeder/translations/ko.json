@@ -1,0 +1,49 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "VSON 자동 급여기",
+        "description": "급여기 MAC을 입력하세요. VSON 장비 ID는 기기 자체 시간표 관리에만 필요합니다.",
+        "data": {
+          "mac": "급여기 MAC",
+          "device_id": "VSON 장비 ID (선택)"
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "MAC 형식이 올바르지 않아요",
+      "cannot_connect": "VSON 클라우드에서 급여기를 조회하지 못했어요"
+    },
+    "abort": {"already_configured": "이미 등록한 급여기예요"}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "VSON 기기 시간표 연결",
+        "menu_options": {
+          "account": "VSON 계정으로 급여기 찾기",
+          "manual_id": "장비 ID 직접 입력"
+        }
+      },
+      "account": {
+        "title": "VSON 계정으로 급여기 찾기",
+        "description": "VSON SMART 앱 계정을 입력하세요. 비밀번호는 조회에 한 번만 사용하고 저장하지 않습니다. 기기 시간표 접근용 계정 토큰은 HA에 저장됩니다.",
+        "data": {
+          "username": "VSON 계정 (이메일 또는 전화번호)",
+          "password": "VSON 비밀번호"
+        }
+      },
+      "manual_id": {
+        "title": "VSON 장비 ID",
+        "data": {"device_id": "VSON 장비 ID"}
+      }
+    },
+    "error": {
+      "invalid_device_id": "이 ID로 기기 시간표를 조회하지 못했어요",
+      "invalid_auth": "VSON 계정 로그인이 실패했어요",
+      "cannot_connect": "VSON 로그인 서버에 연결하지 못했어요",
+      "device_not_found": "이 계정에서 등록된 급여기를 찾지 못했어요",
+      "cannot_read_schedules": "급여기는 찾았지만 기기 시간표를 조회하지 못했어요"
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "VSON Smart Feeder",
+        "description": "Enter the feeder MAC. The cloud device ID is optional and needed only for native schedules.",
+        "data": {
+          "mac": "Feeder MAC",
+          "device_id": "VSON cloud device ID (optional)"
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Invalid MAC address",
+      "cannot_connect": "Cannot read the feeder from VSON cloud"
+    },
+    "abort": {
+      "already_configured": "This feeder is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Connect VSON native schedules",
+        "menu_options": {
+          "account": "Find feeder with VSON account",
+          "manual_id": "Enter cloud device ID manually"
+        }
+      },
+      "account": {
+        "title": "Find feeder with VSON account",
+        "description": "Use the VSON SMART app login. The password is used once and is not saved. Home Assistant stores the returned account token for native-schedule access.",
+        "data": {
+          "username": "VSON account (email or phone)",
+          "password": "VSON password"
+        }
+      },
+      "manual_id": {
+        "title": "VSON cloud device ID",
+        "data": {"device_id": "VSON cloud device ID"}
+      }
+    },
+    "error": {
+      "invalid_device_id": "Could not read native schedules with this ID",
+      "invalid_auth": "VSON account login failed",
+      "cannot_connect": "Could not reach the VSON login service",
+      "device_not_found": "This account does not contain the configured feeder",
+      "cannot_read_schedules": "Feeder was found, but native schedules could not be read"
+    }
+  }
+}

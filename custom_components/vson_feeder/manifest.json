@@ -1,0 +1,10 @@
+{
+  "domain": "vson_feeder",
+  "name": "VSON Smart Feeder",
+  "config_flow": true,
+  "documentation": "https://github.com/yf22jh-glitch/jebao-flow-engine",
+  "integration_type": "device",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "0.1.1"
+}
