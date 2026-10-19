@@ -322,9 +322,16 @@ class ScheduleEditor:
                 scheduler = self._scheduler(active["schedule_sha256"])
                 try:
                     await self.backend.validate_plan(scheduler.plan)
-                    await scheduler.apply_boundary(now, current_time=self.clock)
+                    # Discovery can wait through boot/network recovery. Select the
+                    # current row after it completes, not the row from process start.
+                    now = self.clock()
+                    result = await scheduler.apply_boundary(
+                        now, current_time=self.clock, catch_up=True
+                    )
                     await scheduler.verify_idle()
-                    self._last_idle_at = now
+                    self._last_idle_at = self.clock()
+                    print(json.dumps({"outcome": "scheduler_started", "row_result": result}),
+                          flush=True)
                 except Exception as error:
                     self._pause_for_error(error)
 
@@ -338,8 +345,11 @@ class ScheduleEditor:
             "code": "scheduler_paused",
             "error_type": type(error).__name__,
             "at": self.clock().astimezone(UTC).isoformat(),
+            "last_event": active.get("last_event") if active else None,
+            "next_boundary_at": active.get("next_boundary_at") if active else None,
         }
         self._set_meta(meta)
+        print(json.dumps({"outcome": "scheduler_paused", **meta["last_error"]}), flush=True)
 
     async def tick(self, now: datetime) -> None:
         async with self.operation_lock:

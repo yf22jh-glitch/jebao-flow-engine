@@ -706,9 +706,10 @@ class ExternalManualScheduler:
         }
 
     async def apply_boundary(
-        self, now: datetime, *, current_time: Callable[[], datetime] | None = None
+        self, now: datetime, *, current_time: Callable[[], datetime] | None = None,
+        catch_up: bool = False,
     ) -> dict[str, object]:
-        """Apply only a new boundary or a missed six-minute Feeding exit."""
+        """Apply a new row once; startup may catch up directly to the current row."""
         local = local_time(now)
         state = self._active_state()
         row = self.plan.current(local)
@@ -733,14 +734,21 @@ class ExternalManualScheduler:
         next_due = datetime.fromisoformat(next_boundary)
         if local < next_due:
             raise ValueError("next scheduler boundary has not begun")
-        if scheduled != next_due and not rescue:
+        if scheduled != next_due and not (rescue or catch_up):
             state["status"] = "paused"
             self.store.set_active(state)
             raise ValueError("one or more schedule boundaries were missed")
-        if delay > 30 and not rescue:
+        if delay > 30 and not (rescue or catch_up):
             state["status"] = "paused"
             self.store.set_active(state)
             raise ValueError("schedule boundary was missed; no stale row replay")
+        if catch_up and (scheduled != next_due or delay > 30):
+            print(json.dumps({
+                "outcome": "startup_catch_up_attempt",
+                "previous_event": state.get("last_event"), "current_event": key,
+                "missed_boundary_at": next_boundary, "resumed_at": local.isoformat(),
+                "current_row_delay_seconds": delay,
+            }), flush=True)
         try:
             result = await self._apply_row(local, state, current_time=current_time)
             state["status"] = "active"

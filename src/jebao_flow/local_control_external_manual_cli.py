@@ -27,7 +27,6 @@ from jebao_flow.local_control.external_manual_runtime import (
     PairState,
     PumpState,
     SchedulerStore,
-    feed_exit_overdue,
 )
 from jebao_flow.local_control.external_manual_schedule import ZONE, ManualSchedule, load_schedule
 from jebao_flow.local_control.install import load_current_private_config
@@ -476,22 +475,13 @@ class LiveBackend:
 
 
 async def _run_loop(scheduler: ExternalManualScheduler) -> None:
-    state = scheduler._active_state()
+    scheduler._active_state()
     await scheduler.backend.validate_plan(scheduler.plan)
     now = datetime.now(ZONE)
-    current_key = scheduler.plan.event_key(now)
-    if current_key != state.get("last_event"):
-        row = scheduler.plan.current(now)
-        scheduled = now.replace(
-            hour=row.minute // 60, minute=row.minute % 60, second=0, microsecond=0
-        )
-        if feed_exit_overdue(state, now) or (now - scheduled).total_seconds() <= 30:
-            result = await scheduler.apply_boundary(now, current_time=lambda: datetime.now(ZONE))
-            print(json.dumps({"outcome": "startup_boundary", **result}), flush=True)
-        else:
-            state["status"] = "paused"
-            scheduler.store.set_active(state)
-            raise ValueError("a boundary was missed while the runner was offline")
+    result = await scheduler.apply_boundary(
+        now, current_time=lambda: datetime.now(ZONE), catch_up=True
+    )
+    print(json.dumps({"outcome": "startup_boundary", **result}), flush=True)
     await scheduler.verify_idle()
     previous = now
     while True:
