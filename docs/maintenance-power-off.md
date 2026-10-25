@@ -3,14 +3,19 @@
 GMP 두 대와 바형의 `power=false`를 각각 요청하고 세 장비의 fresh 전원 응답과
 바형 TimerOFF를 확인한다. 장치 명령이며 전기 공급 차단은 아니다.
 
-시작 전에 원래 시간표, native image digest, 장비 identity와 바형 Timer 설정을
+시작 전에 원래 시간표, native image digest, 장비 identity, GMP 원래 역할과 바형 Timer 설정을
 보존한다. durable maintenance override를 먼저 저장하고 외부 시간표를 보류한 뒤
-바형 TimerOFF → 바형 OFF → 상단 OFF → 하단 OFF 순서로 처리한다.
+바형 TimerOFF → 바형 OFF → GMP 마스터 independent → GMP 슬레이브 independent →
+GMP 마스터 OFF → GMP 슬레이브 OFF 순서로 처리한다. 현재 실제 배치는 하단이 마스터,
+상단이 슬레이브다. 연결된 슬레이브는 마스터 OFF 뒤에도 자기 OFF에 ACK하지 않았으므로
+역할 해제를 생략하지 않는다.
 저장된 시간표 내용이나 GMP의 Mode/Flow를 정지 수단으로 바꾸지 않는다.
 
-종료 버튼만 전원 ON과 복귀를 요청한다. 원래 identity/image를 확인한 뒤 각 장비를
-켜고 GMP의 현재 시간 구간과 바형의 기존 Timer 설정을 복구한다. 지나간 구간을
-재생하지 않는다. 바형 role만 달라진 경우 같은 image를 확인하고 원래 independent로
+대시보드의 **환수 종료 · 전원·시간표 복귀** 버튼만 전원 ON과 복귀를 요청한다.
+원래 identity/image와 저장한 역할 전환을 확인하고, 독립 상태에서 각 장비를 켠다.
+그다음 슬레이브를 원래 async_slave로, 마스터를 원래 master로 복구한다. GMP의 현재
+시간 구간과 바형의 기존 Timer 설정까지 검증한 뒤에만 환수 override를 해제한다.
+지나간 구간을 재생하지 않는다. 바형 role만 달라진 경우 같은 image를 확인하고 원래 independent로
 복구한다. 근거 관측은 [10월 17일 복구 기록](runs/2026-10-17-schedule-maintenance-resume.md)이다.
 
 재시작, 통신 실패, 부분 송신 중단으로 override를 자동 해제하지 않는다. 미확정 송신은
@@ -32,9 +37,16 @@ GMP 두 대와 바형의 `power=false`를 각각 요청하고 세 장비의 fres
 - 서비스 종료로 read-only idle 조회가 취소되면 검증된 시간표 상태를 유지하고 재시작 때
   검증한다. 통신 오류·상태 불일치는 계속 보류하며 환수 override는 취소로 해제하지 않는다.
 
-이 검증은 코드의 orchestration과 실패 처리를 검증하며 펌웨어의 전원 전파 동작을
-가정하지 않는다. 새로운 전체 환수 OFF/ON 실기 왕복은 이 문서의 테스트 결과에 포함하지 않는다.
-배포 결과와 운전 관측은 별도 실행 기록으로 남긴다.
+위 10월 18일 검증은 코드의 orchestration과 실패 처리 근거이며 펌웨어 전원 전파나
+새 전체 환수 OFF/ON 실기를 증명하지 않았다. 10월 25일 연결된 슬레이브 OFF 실패가
+실제로 확인돼 역할 해제/복구 경로를 추가했다.
+
+10월 26일 후보는 관련 Python 80개와 실제 등록된 JS의 종료 버튼·중복 클릭·재연결·
+모바일 화면 검사를 통과했다. 운영에서 독립 전환/OFF, 사용자가 누른 종료 버튼에 따른
+ON/원래 역할/현재 시간표 복귀가 확인됐고, 사용자가 세 모터의 정상 동작도 확인했다.
+이후 정상 운전에서 새 환수 시작까지 세 장비 OFF가 다시 확인됐다.
+역할 전환 직전의 기대 상태와 목표를 저장해 부분 송신/재시작을 복구한다.
+전체 실기 범위와 관측 기간은 [역할 복구 실행 기록](runs/2026-10-26-maintenance-role-resume-result.md)을 따른다.
 
 ## 소스와 배포
 
@@ -48,3 +60,7 @@ pointerdown/up 사이에 발생하는 클릭과 키보드 focus 유지도 브라
 `deploy/maintenance-power-off.Dockerfile`은 검증한 기존 scheduler 이미지에 변경된
 네 Python 파일만 덮는다. BASE_IMAGE를 정확한 기존 이미지에 묶고 기존 compose 설정과
 volume을 유지해야 한다. HA JS 리소스 버전은 Lovelace API로 갱신한다.
+
+10월 26일 역할 복구 수정은 `fix/maintenance-role-resume` 브랜치다. 운영에는 기존
+scheduler 이미지 위에 `local_control/maintenance.py` 한 파일만 교체했다. 대시보드의
+기존 종료 명령 `maintenance_off`와 등록된 release JS는 그대로 사용한다.

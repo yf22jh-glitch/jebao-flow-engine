@@ -191,3 +191,43 @@ async def test_unresolved_role_journal_blocks_even_an_explicit_retry(linked):
     assert (await request(r, "maintenance_on"))["outcome"] == "error"
     assert (await request(r, "maintenance_off"))["outcome"] == "error"
     assert r.backend.sent == sent
+
+
+async def test_dashboard_finish_interrupts_read_only_hold_then_restores_pair(linked):
+    # Actual 2026-10-26 finish arrived during hold's read. The real ReadRetry
+    # interruption releases the actor lock for the queued user request; it must
+    # not cancel a control send, repeat ON, or strand the saved role transition.
+    from jebao_flow.local_control.read_retry import ReadRetry
+
+    r = linked
+    await request(r, "maintenance_on")
+    r.backend.sent.clear()
+    retry = ReadRetry()
+    r.backend.read_retry = retry
+    original = r.backend.fresh_pair
+    entered = asyncio.Event()
+    delayed = False
+
+    async def fresh_pair(**kwargs):
+        async def read():
+            nonlocal delayed
+            if not delayed:
+                delayed = True
+                entered.set()
+                await retry.wait(1)
+            return await original(**kwargs)
+        return await retry.run(read, stage="maintenance_pair_query")
+
+    r.backend.fresh_pair = fresh_pair
+    r.clock[0] += timedelta(seconds=20)
+    hold = asyncio.create_task(r.editor.tick(r.clock[0]))
+    await asyncio.wait_for(entered.wait(), 2)
+    result = await asyncio.wait_for(request(r, "maintenance_off"), 3)
+    await hold
+    assert result["outcome"] == "maintenance_off"
+    assert not r.editor.maintenance.state()["enabled"]
+    assert r.store.active()["status"] == "active"
+    assert r.backend.pair.master.role == "master" and r.backend.pair.slave.role == "async_slave"
+    assert [(c.target, c.value) for c, _ in r.backend.sent if c.function == "power"] == [
+        ("master", True), ("slave", True), ("bar", True),
+    ]
