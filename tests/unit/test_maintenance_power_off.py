@@ -400,3 +400,37 @@ async def test_linked_stop_orders_master_before_slave_without_changing_roles(rig
     assert rig.backend.pair.slave.role == before.slave.role == "async_slave"
     assert not any(c.function == "linkage_role" for c, _ in rig.backend.sent)
     assert not rig.backend.pair.master.power and not rig.backend.pair.slave.power
+
+
+async def test_captured_master_first_slave_rejection_stays_failed_without_replay(rig):
+    # Actual master-first attempt, 2026-10-25 14:44–14:45 UTC:
+    # master ACK/OFF, slave action-4 ON/feed reports without ACK; no role writes.
+    execute = rig.backend.execute
+
+    async def captured_behavior(child, request_id):
+        if child.target == "slave" and child.function == "power" and child.value is False:
+            rig.backend.sent.append((child, request_id))
+            return False, 1, "f" * 64
+        result = await execute(child, request_id)
+        if child.target == "master" and child.function == "power" and child.value is False:
+            rig.backend.pair = replace(
+                rig.backend.pair, slave=replace(rig.backend.pair.slave, mode="feed")
+            )
+        return result
+
+    rig.backend.execute = captured_behavior
+    result = await request(rig, "maintenance_on")
+    assert result["outcome"] == "error"
+    assert rig.editor.maintenance.state()["failure_stage"] == "slave_power_off"
+    assert not rig.backend.pair.master.power and rig.backend.pair.slave.power
+    assert rig.backend.pair.master.role == "master"
+    assert rig.backend.pair.slave.role == "async_slave"
+    assert rig.backend.pair.slave.mode == "feed"
+    sent = list(rig.backend.sent)
+    await rig.editor.tick(rig.clock[0] + timedelta(minutes=25))
+    restarted = ScheduleEditor(rig.store, rig.backend, clock=lambda: rig.clock[0])
+    await restarted.initialize(rig.clock[0])
+    assert rig.backend.sent == sent
+    assert rig.store.active()["status"] == "paused"
+    assert not any(c.function == "linkage_role" for c, _ in sent)
+    assert not any(c.function == "power" and c.value is True for c, _ in sent)
