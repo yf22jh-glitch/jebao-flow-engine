@@ -116,6 +116,8 @@ async def test_start_sends_power_off_to_each_device_and_preserves_modes_and_imag
     assert commands == [
         ("bar", "schedule_enable", False),
         ("bar", "power", False),
+        ("master", "linkage_role", "independent"),
+        ("slave", "linkage_role", "independent"),
         ("master", "power", False),
         ("slave", "power", False),
     ]
@@ -380,7 +382,7 @@ async def test_uncertain_power_is_reconciled_by_one_read_without_replaying(
     assert session.sent == []
 
 
-async def test_linked_stop_orders_master_before_slave_without_changing_roles(rig):
+async def test_stop_preserves_original_roles_before_releasing_pair(rig):
     # Real 2026-10-25 capture: slave-first OFF has no ACK while master is ON.
     # This models that observed failure only; master-first firmware behavior is
     # established separately by the authorized real-device attempt.
@@ -396,15 +398,22 @@ async def test_linked_stop_orders_master_before_slave_without_changing_roles(rig
     before = rig.backend.pair
     result = await request(rig, "maintenance_on")
     assert result["outcome"] == "maintenance_on"
-    assert rig.backend.pair.master.role == before.master.role == "master"
-    assert rig.backend.pair.slave.role == before.slave.role == "async_slave"
-    assert not any(c.function == "linkage_role" for c, _ in rig.backend.sent)
+    assert rig.editor.maintenance.state()["roles_before"] == {
+        "master": before.master.role, "slave": before.slave.role,
+    }
+    assert rig.backend.pair.master.role == rig.backend.pair.slave.role == "independent"
     assert not rig.backend.pair.master.power and not rig.backend.pair.slave.power
 
 
 async def test_captured_master_first_slave_rejection_stays_failed_without_replay(rig):
     # Actual master-first attempt, 2026-10-25 14:44–14:45 UTC:
     # master ACK/OFF, slave action-4 ON/feed reports without ACK; no role writes.
+    # Retain the captured legacy flow as a failure fixture; the new release path
+    # is covered separately by test_maintenance_roles.
+    async def legacy_linked_pair(state, pair, bar):
+        return pair, bar
+
+    rig.editor.maintenance.release_pair = legacy_linked_pair
     execute = rig.backend.execute
 
     async def captured_behavior(child, request_id):

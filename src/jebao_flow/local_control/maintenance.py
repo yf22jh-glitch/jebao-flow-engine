@@ -105,6 +105,8 @@ class Maintenance:
         state["observed"] = {
             "master_power": pair.master.power,
             "slave_power": pair.slave.power,
+            "master_role": pair.master.role,
+            "slave_role": pair.slave.role,
             "bar_power": bar["power"],
             "master": pair.master.mode,
             "slave": pair.slave.mode,
@@ -116,11 +118,20 @@ class Maintenance:
         self.save(state)
         # Keep identity, images, roles and output bounds checked while SwitchON is OFF.
         # Normal scheduler calls still require both Pro power flags to be ON.
-        self.editor._scheduler(state["resume_sha256"])._require_manual_pair(
+        original_roles = {"master": "master", "slave": "async_slave"}
+        expected = state.get("roles_expected", original_roles)
+        actual = {"master": pair.master.role, "slave": pair.slave.role}
+        if actual not in (expected, state.get("role_transition")):
+            raise ValueError("maintenance Pro roles changed outside its pending transition")
+        self.editor._scheduler(state["resume_sha256"])._require_pair(
             pair,
-            state["images"],
+            master_role=actual["master"],
+            slave_role=actual["slave"],
+            images=state["images"],
             require_power=False,
         )
+        if pair.master.timer or pair.slave.timer:
+            raise ValueError("maintenance requires TimerOFF on both Pro devices")
         before = state["bar_before"]
         if (
             bar["identity"] != before["identity"]
@@ -128,7 +139,36 @@ class Maintenance:
             or bar["faults"]
         ):
             raise ValueError("maintenance Bar binding, schedule or faults changed")
+        # Legacy overrides have no role record. Adopt only after the original
+        # master/async pair, bindings, images, timers and bounds have verified.
+        state.setdefault("roles_before", dict(original_roles))
+        state["roles_expected"] = actual
+        state["role_transition"] = None
+        self.save(state)
         return pair, bar
+
+    async def set_role(self, state, pair, bar, target, role):
+        if getattr(pair, target).role == role:
+            return pair, bar
+        # A crash/uncertain send may leave either this verified pair or precisely
+        # this intended next pair. Reconciliation never accepts arbitrary roles.
+        state["role_transition"] = {**state["roles_expected"], target: role}
+        self.save(state)
+        await self.send(target, "linkage_role", role, state, f"{target}_role_{role}")
+        pair, bar = await self.read(state)
+        if getattr(pair, target).role != role:
+            raise ValueError("maintenance role change did not verify")
+        return pair, bar
+
+    async def release_pair(self, state, pair, bar):
+        pair, bar = await self.set_role(state, pair, bar, "master", "independent")
+        return await self.set_role(state, pair, bar, "slave", "independent")
+
+    def expect_scheduler_release(self, state):
+        # The existing scheduler can release/relink the master while applying a
+        # row. Keep that owned intermediate state recoverable if it is interrupted.
+        state["role_transition"] = {**state["roles_expected"], "master": "independent"}
+        self.save(state)
 
     async def send(self, target, function, value, state, label):
         # Parent persistence precedes coordinator persistence and its single physical send.
@@ -221,16 +261,19 @@ class Maintenance:
         if self.unfinished():
             raise ValueError("unfinished maintenance command")
         pair, bar = await self.read(state)
-        changed = bar["power"] or pair.master.power or pair.slave.power or bar["timer"]
+        changed = (
+            bar["power"] or pair.master.power or pair.slave.power or bar["timer"]
+            or pair.master.role != "independent" or pair.slave.role != "independent"
+        )
         if bar["timer"]:
             # Preserve the image, but prevent a native boundary from changing the stopped state.
             await self.send("bar", "schedule_enable", False, state, "bar_timer_off")
-        # Stop the master before the linked slave: the captured slave-first OFF
-        # receives no ACK while the master remains ON. Preserve both linkage roles.
-        # Each device still needs its own qualified intent and verified readback;
-        # do not assume that the master's power command propagates to its slave.
+        if bar["power"]:
+            await self.send("bar", "power", False, state, "bar_power_off")
+        # Both captured linked orders failed at slave OFF, even with master OFF.
+        # Release the master then the slave before independent power commands.
+        pair, bar = await self.release_pair(state, pair, bar)
         for target, powered in (
-            ("bar", bar["power"]),
             ("master", pair.master.power),
             ("slave", pair.slave.power),
         ):
@@ -274,6 +317,8 @@ class Maintenance:
         state.update(phase="resuming", stage="power_resume", verified_at=None, error_type=None)
         self.save(state)
         self.pause_schedule()
+        # Also supports an explicit recovery of the legacy partial-OFF error.
+        pair, bar = await self.release_pair(state, pair, bar)
         # Timer/role commands do not constitute power ON. Restore the explicit
         # power flags before asking the normal scheduler to activate its current row.
         for target, powered in (
@@ -292,6 +337,12 @@ class Maintenance:
         pair, bar = await self.read(state)
         if not (pair.master.power and pair.slave.power and bar["power"]):
             raise ValueError("power ON did not verify on all three pumps")
+        # Reattach the slave before restoring the master as the source. The
+        # normal scheduler then applies the current row using its existing logic.
+        for target in ("slave", "master"):
+            pair, bar = await self.set_role(
+                state, pair, bar, target, state["roles_before"][target]
+            )
         state["stage"] = "gmp_resume"
         self.save(state)
         document = json.loads(self.store.load_plan(state["resume_sha256"]).canonical)
@@ -299,6 +350,7 @@ class Maintenance:
         run = parse_schedule(json.dumps(document).encode())
         self.store.save_plan(run)
         # This is an explicit new epoch, not an old boundary or uncertain child replay.
+        self.expect_scheduler_release(state)
         await self.editor._scheduler(run.sha256).activate(
             self.editor.clock(), replace_paused=True, current_time=self.editor.clock
         )
@@ -322,8 +374,11 @@ class Maintenance:
             raise ValueError("Bar resume did not verify")
         # Bar I/O can cross a GMP boundary. Never label the earlier row as resumed now.
         scheduler = self.editor._scheduler(run.sha256)
+        self.expect_scheduler_release(state)
         await scheduler.apply_boundary(self.editor.clock(), current_time=self.editor.clock)
         await scheduler.verify_idle()
+        state["roles_expected"] = dict(state["roles_before"])
+        state["role_transition"] = None
         meta = self.editor._meta()
         meta.update(
             active_template_id=state["template_id"],
