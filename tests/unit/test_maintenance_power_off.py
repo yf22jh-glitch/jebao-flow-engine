@@ -116,8 +116,8 @@ async def test_start_sends_power_off_to_each_device_and_preserves_modes_and_imag
     assert commands == [
         ("bar", "schedule_enable", False),
         ("bar", "power", False),
-        ("slave", "power", False),
         ("master", "power", False),
+        ("slave", "power", False),
     ]
     assert rig.backend.pair.master.mode == pair.master.mode
     assert rig.backend.pair.slave.mode == pair.slave.mode
@@ -378,3 +378,25 @@ async def test_uncertain_power_is_reconciled_by_one_read_without_replaying(
     assert journal.unfinished_for((target.physical_identity_key,)) == ()
     await coordinator.observe_unacknowledged_scalar(intent.request_id, endpoint=endpoint)
     assert session.sent == []
+
+
+async def test_linked_stop_orders_master_before_slave_without_changing_roles(rig):
+    # Real 2026-10-25 capture: slave-first OFF has no ACK while master is ON.
+    # This models that observed failure only; master-first firmware behavior is
+    # established separately by the authorized real-device attempt.
+    execute = rig.backend.execute
+
+    async def observed_failure(child, request_id):
+        if (child.target == "slave" and child.function == "power"
+                and child.value is False and rig.backend.pair.master.power):
+            return False, 1, "f" * 64
+        return await execute(child, request_id)
+
+    rig.backend.execute = observed_failure
+    before = rig.backend.pair
+    result = await request(rig, "maintenance_on")
+    assert result["outcome"] == "maintenance_on"
+    assert rig.backend.pair.master.role == before.master.role == "master"
+    assert rig.backend.pair.slave.role == before.slave.role == "async_slave"
+    assert not any(c.function == "linkage_role" for c, _ in rig.backend.sent)
+    assert not rig.backend.pair.master.power and not rig.backend.pair.slave.power

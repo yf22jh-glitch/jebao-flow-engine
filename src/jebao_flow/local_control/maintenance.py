@@ -225,12 +225,14 @@ class Maintenance:
         if bar["timer"]:
             # Preserve the image, but prevent a native boundary from changing the stopped state.
             await self.send("bar", "schedule_enable", False, state, "bar_timer_off")
-        # Each physical device gets its own qualified intent. Do not assume that a
-        # master's power command propagates to its linked slave.
+        # Stop the master before the linked slave: the captured slave-first OFF
+        # receives no ACK while the master remains ON. Preserve both linkage roles.
+        # Each device still needs its own qualified intent and verified readback;
+        # do not assume that the master's power command propagates to its slave.
         for target, powered in (
             ("bar", bar["power"]),
-            ("slave", pair.slave.power),
             ("master", pair.master.power),
+            ("slave", pair.slave.power),
         ):
             if powered:
                 await self.send(target, "power", False, state, f"{target}_power_off")
