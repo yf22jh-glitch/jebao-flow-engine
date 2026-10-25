@@ -61,3 +61,12 @@ The original user's work branch remains unchanged; the fix has its own review br
 run: aqua-maintenance-roles-20261025
 decision: accept demonstrated OFF and explicit finish role/current-schedule restoration; preserve time-boundary and restart limitations
 unfreeze: n/a
+
+## User acceptance and Git synchronization
+
+At 2026-10-26 KST the user confirmed the function and requested Git synchronization
+and temporary-file cleanup: “기능 확인했어 깃 동기화 하고 임시파일 정리해”.
+This confirms acceptance of the maintenance behavior. It does not retroactively
+observe the next schedule boundary or a live process-restart trial.
+The reviewed fix branch is synchronized separately from the user's feeder work branch.
+Raw device evidence, persistent journals and recovery backups remain preserved.
