@@ -49,7 +49,7 @@ async def test_detach_off_and_explicit_on_restore_original_pair_and_images(linke
 
 async def test_legacy_partial_off_error_adopts_original_roles_only_after_validation(linked):
     r = linked
-    async def interrupted(_state):
+    async def interrupted(_state, **_kwargs):
         raise RuntimeError("old slave-first failure")
     original = r.editor.maintenance.ensure_power_off
     r.editor.maintenance.ensure_power_off = interrupted

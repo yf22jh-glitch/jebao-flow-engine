@@ -435,30 +435,44 @@ class LiveBackend:
         self.read_retry.identity_responded()
         return observation.endpoint
 
+    def _decode_bar(self, capture) -> dict:
+        values = get_product_schema(self.bar.product_key).decode_status(capture.status_payload)
+        return {
+            "identity": self.bar.physical_identity_key,
+            "timer": values["TimerON"], "feeding": values["FeedSwitch"],
+            "role": values["Linkage"], "power": values["SwitchON"],
+            "image_sha256": hashlib.sha256(extract_current_schedule_image(
+                self.bar.product_key, capture.status_payload)).hexdigest(),
+            "faults": sorted(k for k, v in values.items() if k.startswith("Fault_") and v),
+            "raw_sha256": self.journal.install_blob(capture.wire_frame),
+        }
+
     async def fresh_bar(self) -> dict:
         async def read():
             endpoint = await self._resolve_bar()
             writer = self.writer_factory(endpoint)
             try:
                 capture = await writer.connect_and_capture(accept_reports=False)
-                values = get_product_schema(self.bar.product_key).decode_status(capture.status_payload)
-                return {
-                    "identity": self.bar.physical_identity_key,
-                    "timer": values["TimerON"], "feeding": values["FeedSwitch"],
-                    "role": values["Linkage"], "power": values["SwitchON"],
-                    "image_sha256": hashlib.sha256(extract_current_schedule_image(
-                        self.bar.product_key, capture.status_payload)).hexdigest(),
-                    "faults": sorted(k for k, v in values.items() if k.startswith("Fault_") and v),
-                    "raw_sha256": self.journal.install_blob(capture.wire_frame),
-                }
+                return self._decode_bar(capture)
             finally:
                 await writer.close()
         return await self.read_retry.run(read, stage="maintenance_bar_query")
 
-    async def validate_maintenance(self) -> None:
-        pair = await self.read_retry.run(self._resolve_pair, stage="maintenance_pair_discovery")
-        bar = await self.read_retry.run(self._resolve_bar, stage="maintenance_bar_discovery")
-        for endpoint in (*pair, bar):
+    async def _resolve_maintenance(self):
+        if self.bar is None:
+            raise ValueError("maintenance Bar is not configured")
+        observations = await self.resolver.observe_many((self.master, self.slave, self.bar))
+        # One complete discovery window still includes late/conflicting replies.
+        # No address or device state survives into a subsequent snapshot.
+        if any(o.diagnostic_reason == "current_endpoint_ambiguous" for o in observations):
+            raise CurrentEndpointResolutionError("ambiguous maintenance device identity")
+        if any(o.endpoint is None for o in observations):
+            raise ReadUnavailableError("maintenance devices did not all answer discovery")
+        self.read_retry.identity_responded()
+        return tuple(o.endpoint for o in observations)
+
+    def _validate_maintenance_endpoints(self, endpoints) -> None:
+        for endpoint in endpoints:
             functions = [("power", False), ("power", True)]
             if endpoint.target == self.bar:
                 functions += [("feed_switch", False), ("schedule_enable", False),
@@ -472,6 +486,47 @@ class LiveBackend:
                 self.coordinator._require_current_control_authority(descriptor, endpoint)
         if self.maintenance_unfinished():
             raise ValueError("maintenance has an unfinished command")
+
+    async def validate_maintenance(self) -> None:
+        endpoints = await self.read_retry.run(
+            self._resolve_maintenance, stage="maintenance_discovery"
+        )
+        self._validate_maintenance_endpoints(endpoints)
+
+    async def fresh_maintenance(self, *, validate: bool = False) -> tuple[PairState, dict]:
+        """Read all three devices from one fresh discovery; never send a control.
+
+        Each read owns/closes its own session. A failure/cancellation drains all
+        sibling reads before retry/return, so no abandoned reader can race a write.
+        """
+        async def read():
+            endpoints = await self._resolve_maintenance()
+            if validate:
+                self._validate_maintenance_endpoints(endpoints)
+
+            async def capture(endpoint):
+                writer = self.writer_factory(endpoint)
+                try:
+                    result = await writer.connect_and_capture(
+                        accept_reports=endpoint.target == self.slave
+                    )
+                    if endpoint.target == self.bar:
+                        return self._decode_bar(result)
+                    return self._decode(result, endpoint.target, preserve_raw=True)
+                finally:
+                    await writer.close()
+
+            tasks = [asyncio.create_task(capture(endpoint)) for endpoint in endpoints]
+            try:
+                master, slave, bar = await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            return PairState(master, slave), bar
+
+        return await self.read_retry.run(read, stage="maintenance_state_query")
 
 
 async def _run_loop(scheduler: ExternalManualScheduler) -> None:

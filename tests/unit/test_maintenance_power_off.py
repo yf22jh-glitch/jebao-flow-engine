@@ -233,7 +233,7 @@ async def test_resume_restores_manual_bar_even_if_timer_was_changed_externally(r
 
 
 async def test_crash_after_override_persistence_does_not_resume_or_send_on_restart(rig):
-    async def interrupted(_state):
+    async def interrupted(_state, **_kwargs):
         raise SystemExit("process interrupted before first power command")
 
     rig.editor.maintenance.ensure_power_off = interrupted

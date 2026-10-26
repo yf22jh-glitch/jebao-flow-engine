@@ -95,13 +95,26 @@ class Maintenance:
             await self.hold(force=True)
         return True
 
-    async def read(self, state: dict):
+    async def snapshot(self, *, validate=False, state=None):
+        fresh = getattr(self.backend, "fresh_maintenance", None)
+        if fresh is not None:
+            return await asyncio.wait_for(fresh(validate=validate), timeout=30)
+        # Compatibility for existing adapters: the same validations remain required.
+        if validate:
+            await asyncio.wait_for(self.backend.validate_maintenance(), timeout=30)
+        pair = await asyncio.wait_for(self.backend.fresh_pair(), timeout=30)
+        if state is not None:
+            state["stage"] = "bar_state_query"
+            self.save(state)
+        bar = await asyncio.wait_for(self.backend.fresh_bar(), timeout=30)
+        return pair, bar
+
+    async def read(self, state: dict, *, validate=False, snapshot=None):
         state["stage"] = "pair_state_query"
         self.save(state)
-        pair = await asyncio.wait_for(self.backend.fresh_pair(), timeout=30)
-        state["stage"] = "bar_state_query"
-        self.save(state)
-        bar = await asyncio.wait_for(self.backend.fresh_bar(), timeout=30)
+        pair, bar = snapshot if snapshot is not None else await self.snapshot(
+            validate=validate, state=state
+        )
         state["observed"] = {
             "master_power": pair.master.power,
             "slave_power": pair.slave.power,
@@ -205,6 +218,7 @@ class Maintenance:
 
     async def start(self, now: datetime) -> dict:
         state = self.state()
+        snapshot = None
         if state["enabled"]:
             # A new explicit ON can retry a completed failure after reconciliation;
             # an unresolved coordinator journal still forbids a new physical write.
@@ -220,16 +234,14 @@ class Maintenance:
             active = self.store.active()
             if active["status"] not in {"active", "paused"}:
                 raise ValueError("schedule transition is incomplete")
-            await asyncio.wait_for(self.backend.validate_maintenance(), timeout=30)
             await asyncio.wait_for(
                 self.backend.validate_plan(self.store.load_plan(active["schedule_sha256"])),
                 timeout=30,
             )
-            pair = await asyncio.wait_for(self.backend.fresh_pair(), timeout=30)
+            pair, bar = snapshot = await self.snapshot(validate=True)
             self.editor._scheduler(active["schedule_sha256"])._require_manual_pair(
                 pair, active["images"]
             )
-            bar = await asyncio.wait_for(self.backend.fresh_bar(), timeout=30)
             if not bar["power"] or bar["faults"] or bar["role"] != "independent":
                 raise ValueError("maintenance Bar must be powered and independent without faults")
             state = {
@@ -254,13 +266,16 @@ class Maintenance:
         )
         self.save(state)  # Override first: a crash can never resume the ordinary schedule.
         self.pause_schedule()
-        await self.ensure_power_off(state)
+        if snapshot is None:
+            await self.ensure_power_off(state)
+        else:
+            await self.ensure_power_off(state, snapshot=snapshot)
         return {"outcome": "maintenance_on"}
 
-    async def ensure_power_off(self, state: dict) -> None:
+    async def ensure_power_off(self, state: dict, *, snapshot=None) -> None:
         if self.unfinished():
             raise ValueError("unfinished maintenance command")
-        pair, bar = await self.read(state)
+        pair, bar = await self.read(state, snapshot=snapshot)
         changed = (
             bar["power"] or pair.master.power or pair.slave.power or bar["timer"]
             or pair.master.role != "independent" or pair.slave.role != "independent"
@@ -279,7 +294,9 @@ class Maintenance:
         ):
             if powered:
                 await self.send(target, "power", False, state, f"{target}_power_off")
-        pair, bar = await self.read(state)
+        if changed:
+            pair, bar = await self.read(state)
+        # An unchanged hold already has a fresh, fully validated all-OFF snapshot.
         if pair.master.power or pair.slave.power or bar["power"] or bar["timer"]:
             raise ValueError("power OFF did not verify on all three pumps")
         state.update(
@@ -312,8 +329,7 @@ class Maintenance:
         await self.backend.reconcile_pending_commands()
         if self.unfinished():
             raise ValueError("unfinished maintenance command")
-        await asyncio.wait_for(self.backend.validate_maintenance(), timeout=30)
-        pair, bar = await self.read(state)  # Check original identities/images before any power ON.
+        pair, bar = await self.read(state, validate=True)  # Fresh identities/images before ON.
         state.update(phase="resuming", stage="power_resume", verified_at=None, error_type=None)
         self.save(state)
         self.pause_schedule()
