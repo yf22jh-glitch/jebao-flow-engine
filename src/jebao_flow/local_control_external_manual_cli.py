@@ -40,6 +40,7 @@ from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBindi
 from jebao_flow.local_control.qualification import load_current_qualifications
 from jebao_flow.local_control.qualification_producer import load_current_install_manifest
 from jebao_flow.local_control.read_retry import ReadRetry, ReadUnavailableError
+from jebao_flow.local_control.fixed_endpoint import FixedAddressEndpointResolver
 from jebao_flow.local_control.resolver import (
     CurrentEndpointResolutionError,
     ResolvedEndpoint,
@@ -127,6 +128,17 @@ class LiveBackend:
         self.catalog = catalog
         self.journal = LocalControlJournalStore()
         self.resolver = _resolver(config)
+        fixed_addresses = {
+            target.logical_member: config_by_member[target.logical_member].address
+            for target in (self.master, self.slave, self.bar)
+            if target is not None and config_by_member[target.logical_member].address is not None
+        }
+        if fixed_addresses:
+            self.resolver = FixedAddressEndpointResolver(
+                self.resolver, fixed_addresses, raw_store=self.journal.install_blob,
+                bind_address=config.observer.bind_address,
+                timeout_seconds=config.observer.discovery_timeout_seconds,
+            )
         normal_factory = configured_writer_factory(config)
         self.writer_factory = lambda endpoint: (
             _ReportAwareWriter(normal_factory(endpoint))
