@@ -103,7 +103,11 @@ class _BorrowedSession:
             if buffered:
                 self.raw_store(buffered)
                 await self._replace()
-        except (ProtocolConnectionError, AuthenticationError):
+        except (ProtocolConnectionError, AuthenticationError) as transport_error:
+            # A transport timeout must not erase an earlier raw-storage failure.
+            if errors:
+                session.quarantine()
+                raise errors[0] from transport_error
             # Only the read-only reuse barrier may reconnect automatically.
             # Nothing from a send/readback is replayed here.
             await self._replace()

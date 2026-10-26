@@ -218,3 +218,18 @@ async def test_report_buffered_after_heartbeat_is_not_a_fresh_reply(stream, rig)
         assert (await capture(stream, reports=True)).status_payload == b"2"
         assert stream.auth == 2
     assert encode_frame(C.SERIAL_TRANSMIT_RESPONSE, b"\x04late-old") in rig.raw
+
+
+async def test_raw_storage_error_survives_simultaneous_heartbeat_timeout(stream):
+    async with stream.scope():
+        await capture(stream)
+
+        def fail(_):
+            raise OSError("raw store failed while peer also timed out")
+
+        stream.backend._maintenance_sessions._raw_store = fail
+        stream.ignore_heartbeat = True
+        with pytest.raises(OSError, match="raw store failed"):
+            await capture(stream)
+        assert stream.reads == 1 and stream.writes == 0
+    assert all(not s.connected for s in stream.sessions)
