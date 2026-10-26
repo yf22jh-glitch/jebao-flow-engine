@@ -99,3 +99,23 @@ scheduler 이미지 위에 `local_control/maintenance.py` 한 파일만 교체�
 주소3개만 넣어 `JEBAO_FLOW_CONFIG`로 지정한다. 다른 controller의 설정/이미지는 그대로다.
 `deploy/maintenance-fixed-ip.Dockerfile`은 이전 검증 이미지 위에 새 resolver와
 호출자2개 파일을 포함한다. baseline/result 실행 문서와 HA 작업공간의 측정을 참조한다.
+
+
+## Request-scoped connections and parallel pair reads (2026-10-26)
+
+The fixed-IP backend now reads both Pro devices concurrently. Each failed or
+cancelled read drains the sibling before returning/retrying. The editor owns a
+connection scope only while executing one maintenance start or finish request;
+normal idle checks keep fresh sessions. Sequential writers within that scope
+reuse authentication, but each writer still resolves the current device identity
+and reads a fresh baseline before the original qualified command transaction.
+A heartbeat boundary preserves preceding raw traffic. Buffered bytes after the
+heartbeat are preserved and cause a fresh connection; they cannot satisfy the
+next report-aware read. A failed read-only reuse check may reconnect. Controls
+and uncertain sends are never replayed by this pool. All connections close when
+the request succeeds, fails or is cancelled. Existing role/power/timer/schedule
+checks, journal ordering and command payloads remain unchanged.
+
+The baseline record is `docs/runs/2026-10-26-pair-session-latency-baseline.md`.
+Two real four-read sequences improved from9.104/9.391s to5.569/4.224s with identical
+semantic state and no control writes. This is not a full maintenance-cycle time.

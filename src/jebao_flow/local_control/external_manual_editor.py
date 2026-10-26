@@ -8,6 +8,7 @@ import json
 import re
 import secrets
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import UTC, datetime
 
 from jebao_flow.local_control.external_manual_runtime import (
@@ -502,9 +503,11 @@ class ScheduleEditor:
         if operation.startswith("maintenance_"):
             if request["expected_maintenance"] != self.maintenance.state()["generation"]:
                 raise EditorRejected("maintenance_changed")
-            if operation == "maintenance_on":
-                return await self.maintenance.start(now)
-            return await self.maintenance.stop(now)
+            scope = getattr(self.backend, "maintenance_session_scope", nullcontext)
+            async with scope():
+                if operation == "maintenance_on":
+                    return await self.maintenance.start(now)
+                return await self.maintenance.stop(now)
         if self.maintenance.state()["enabled"]:
             raise EditorRejected("maintenance_enabled")
         if operation == "pause":

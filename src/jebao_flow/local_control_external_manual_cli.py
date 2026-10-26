@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from jebao_flow.local_control.journal import (
     TransactionPhase,
 )
 from jebao_flow.local_control.lease import LocalControlLease, LocalControlLeaseBusyError
+from jebao_flow.local_control.maintenance_sessions import MaintenanceSessions
 from jebao_flow.local_control.models import LocalControlIntent, LocalDeviceBinding
 from jebao_flow.local_control.qualification import load_current_qualifications
 from jebao_flow.local_control.qualification_producer import load_current_install_manifest
@@ -139,7 +141,10 @@ class LiveBackend:
                 bind_address=config.observer.bind_address,
                 timeout_seconds=config.observer.discovery_timeout_seconds,
             )
-        normal_factory = configured_writer_factory(config)
+        self._maintenance_sessions = MaintenanceSessions(self.journal.install_blob)
+        base_factory = configured_writer_factory(config)
+        def normal_factory(endpoint):
+            return self._maintenance_sessions.wrap(endpoint, base_factory(endpoint))
         self.writer_factory = lambda endpoint: (
             _ReportAwareWriter(normal_factory(endpoint))
             if endpoint.target == self.slave
@@ -327,20 +332,37 @@ class LiveBackend:
             lambda: self._fresh_pair_once(preserve_raw=preserve_raw), stage="state_query"
         )
 
+    @asynccontextmanager
+    async def maintenance_session_scope(self):
+        sessions = getattr(self, "_maintenance_sessions", None)
+        if sessions is None:  # Offline adapters need no network ownership scope.
+            yield
+        else:
+            async with sessions.scope():
+                yield
+
     async def _fresh_pair_once(self, *, preserve_raw: bool = True) -> PairState:
         endpoints = await self._resolve_pair()
-        master_writer = self.writer_factory(endpoints[0])
-        slave_writer = self.writer_factory(endpoints[1])
+
+        async def capture(endpoint):
+            writer = self.writer_factory(endpoint)
+            try:
+                capture = await writer.connect_and_capture(
+                    accept_reports=endpoint.target == self.slave
+                )
+                return self._decode(capture, endpoint.target, preserve_raw=preserve_raw)
+            finally:
+                await writer.close()
+
+        tasks = [asyncio.create_task(capture(endpoint)) for endpoint in endpoints]
         try:
-            master_capture = await master_writer.connect_and_capture(accept_reports=False)
-            slave_capture = await slave_writer.connect_and_capture(accept_reports=True)
-            return PairState(
-                self._decode(master_capture, self.master, preserve_raw=preserve_raw),
-                self._decode(slave_capture, self.slave, preserve_raw=preserve_raw),
-            )
-        finally:
-            await slave_writer.close()
-            await master_writer.close()
+            master, slave = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return PairState(master, slave)
 
     async def execute(self, child: Child, request_id: str) -> tuple[bool, int, str]:
         target = {"master": self.master, "slave": self.slave,
